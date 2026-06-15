@@ -38,6 +38,14 @@ architecture, phasing, and the decisions already settled.
 - **Open-source friendly, simple to set up.** This will be public. Favor the standard
   library, keep dependencies minimal and justified, and keep install to one clear path with
   good defaults. Apply the test: *could a new user clone this and run it in ten minutes?*
+- **Cross-platform (Windows, macOS, Linux).** Orion must run on all three. Make **every**
+  change with cross-compatibility in mind — not one OS at a time. The core is mostly portable
+  already (stdlib, `pathlib`); keep it that way: no OS-specific path/shell assumptions, prefer
+  `pathlib` over string path-joins, no `shell=True`, and don't hardcode `.venv/bin/` in docs
+  (native Windows uses `.venv\Scripts\`). Where platforms genuinely diverge (e.g. scheduling:
+  cron / launchd / Task Scheduler), **delegate to the OS's native tool and document per-OS**
+  rather than embedding one platform's mechanism. A dedicated portability pass ("Phase 3.5")
+  precedes Phase 4.
 - **Local-first (current stage, not a permanent principle).** Collectors read local files;
   only delivery makes outbound calls. This fits the project now, but local-*only* as the
   *primary* grounding is a stage-appropriate choice — as complexity grows (multi-party

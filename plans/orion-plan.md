@@ -17,6 +17,7 @@
 | 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
 | 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
 | 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
+| 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | ⏳ Not started |
 | 4 | Scheduled digests (cadence) | ⏳ Not started |
 | 5 | Event-driven triggers (git hooks) | ⏳ Not started |
 | 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
@@ -311,6 +312,14 @@ They are recorded so that early choices do not quietly close these doors.
   choices already in the plan — stdlib `sqlite3`, `subprocess` for git, webhooks instead of
   an always-on bot — which are all easy to stand up. Treat "could a new user run this in ten
   minutes?" as a check on any future dependency or config decision.
+- **Cross-platform: Windows, macOS, Linux (a guiding principle, active now — confirmed
+  2026-06-15).** Every change is made with cross-compatibility in mind, not one OS at a time.
+  The core is already mostly portable (stdlib, `pathlib`, a platform-safe timestamp); keep it
+  so. Where platforms diverge — scheduling (cron / `launchd` / Task Scheduler), git hooks —
+  delegate to the OS's native tool and document per-OS rather than embedding one platform's
+  mechanism. A dedicated **Phase 3.5 portability pass** (audit + fixes + the scheduling stance)
+  precedes Phase 4, because Phases 4–5 are the most platform-divergent features. See
+  [`docs/phase-3.5-kickoff.md`](../docs/phase-3.5-kickoff.md).
 - **Modular signals and channels (a direction, not an MVP feature).** The signals (git,
   Claude Code sessions, to-dos, notes) and channels (Discord, Slack) should be **optional
   units a user turns on per project**, so one person can run to-dos + supervisor reporting

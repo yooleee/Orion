@@ -68,5 +68,5 @@ state so the next run only covers what is new.
   one feature that has to work live. *Fix:* send a descriptive `User-Agent` header
   (Discord's API requires one); pinned by a delivery test asserting a non-default agent.
 
-[Unreleased]: https://example.com/orion/compare/v0.1.0...HEAD
-[0.1.0]: https://example.com/orion/releases/tag/v0.1.0
+[Unreleased]: https://github.com/yooleee/Orion/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yooleee/Orion/releases/tag/v0.1.0

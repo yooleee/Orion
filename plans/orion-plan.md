@@ -12,7 +12,7 @@
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Implemented, live-tested (awaiting sign-off) |
+| 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
 | 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ⏳ Not started |
 | 3 | Slack delivery + recipient routing | ⏳ Not started |
 | 4 | Scheduled digests (cadence) | ⏳ Not started |
@@ -212,7 +212,10 @@ Phase 1 is **implemented** in `src/orion/` with a 52-test suite (`tests/`). Pipe
 `config → secrets → state → git collect → redact → summarize (Haiku) → redact → compose →
 preview/confirm → Discord (urllib) → advance state`. The conditional-LLM lane seam is built
 (only the raw lane is wired); leaf-module signatures are stable so Phase 2's structured lane
-is additive. Awaiting user sign-off that Phase 1 is complete before starting Phase 2.
+is additive. **Signed off 2026-06-15** — all release-gate criteria verified (52/52 tests,
+redaction corpus + denylist-path tests, seeded-fake-key clean end to end, share-level
+behavior). Orion now also tracks its own repo (`[projects.orion]`, `high_level`). The
+Phase 2 starting brief lives in [`docs/phase-2-kickoff.md`](../docs/phase-2-kickoff.md).
 
 **Live verification (2026-06-15):** ran the full path against a throwaway repo with a
 seeded fake key and a real Anthropic key + Discord webhook — preview clean, initial and

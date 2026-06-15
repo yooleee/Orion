@@ -22,13 +22,33 @@ repo_path = "/home/yoolee/orion"
 # secret-filtered diff as well. When in doubt, stay high_level.
 share_level = "high_level"
 
-# Which signals are collected. Phase 1 supports only "git". Later phases add
-# "tasks", "notes", etc. — each independently toggleable here.
+# Which signals are collected — each independently toggleable here. Supported:
+#   "git"   — raw git activity (summarized by Claude on the raw lane)
+#   "tasks" — newly-completed items from a Markdown checklist (structured, no LLM)
+#   "notes" — a hand-written update file (structured, no LLM)
+# A run reports every enabled signal as a titled section in one message.
 collectors = ["git"]
+
+# File paths for the structured collectors. Each is REQUIRED only when its
+# collector is listed above (a relative path resolves next to this config file).
+# Uncomment alongside enabling "tasks" / "notes" in `collectors`:
+#   collectors = ["git", "tasks", "notes"]
+# tasks_file = "TODO.md"    # a Markdown checklist; "- [x]" lines are reported when newly checked
+# notes_file = "NOTES.md"   # a hand-written "current update"; re-sent whenever its content changes
 
 # Named recipients of this project's reports. Listed explicitly (not an implicit
 # "me") so a shared multi-supervisor service can be added later without a rewrite.
+# A recipient names a DESTINATION (a channel + its webhook): several people watching
+# one channel = one recipient. List as many recipients as you like; each run reports
+# to all of them, formatted for and delivered to each one's channel.
 [[projects.orion.recipients]]
 name = "Alex (supervisor)"
-channel = "discord"                       # Phase 1: only "discord" is supported.
+channel = "discord"                       # "discord" or "slack".
 webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"   # names the .env key holding the URL.
+
+# A Slack recipient: same shape, channel = "slack", pointing at a Slack incoming
+# webhook in .env. Uncomment to also report to a Slack channel.
+# [[projects.orion.recipients]]
+# name = "Sam (supervisor)"
+# channel = "slack"
+# webhook_env_var = "ORION_SLACK_WEBHOOK_SAM"

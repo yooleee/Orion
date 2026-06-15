@@ -110,3 +110,61 @@ def test_compose_malformed_timestamp_degrades_gracefully():
     )
     message = compose(blob, "discord")
     assert "not-a-timestamp" in message  # degraded gracefully, no exception
+
+
+def _blob(body):
+    """Build a blob with the given body for channel-rendering tests."""
+    return build_report(
+        _project(),
+        body=body,
+        lane="structured",
+        source_marker="",
+        generated_at="2026-06-15T01:32:53+00:00",
+    )
+
+
+def test_slack_header_uses_single_asterisk_bold():
+    """The Slack message's header is *bold* (single asterisk), not **bold**.
+
+    Why this matters: Slack mrkdwn bold is one asterisk; Discord's `**…**` would
+    render literally in Slack, so the header must be in Slack's dialect.
+    """
+    message = compose(_blob("Body."), "slack")
+    assert "*Progress update — demo*" in message
+    assert "**Progress update" not in message  # not the Discord double-asterisk
+    assert "Body." in message
+
+
+def test_slack_translates_section_headers_to_bold_lines():
+    """`## Section` titles become `*Section*` and no `##` survives in Slack.
+
+    Why this matters: merge.py emits `## ` section titles for the report body;
+    Slack renders `##` literally, so they must be converted to bold lines.
+    """
+    message = compose(_blob("## Code activity\nDid the work."), "slack")
+    assert "*Code activity*" in message
+    assert "##" not in message  # the literal header marker must not leak through
+
+
+def test_slack_translates_inline_bold():
+    """`**bold**` in the body becomes `*bold*` for Slack.
+
+    Why this matters: the LLM summary may contain `**bold**`; left untranslated it
+    would show the asterisks literally in Slack.
+    """
+    message = compose(_blob("Shipped the **structured lane** today."), "slack")
+    assert "*structured lane*" in message
+    assert "**structured lane**" not in message
+
+
+def test_discord_rendering_is_unchanged_by_slack_support():
+    """Discord still gets `##` headers and `**bold**` — no cross-contamination.
+
+    Why this matters: adding the Slack branch must not alter Discord output; the
+    two dialects are kept fully separate.
+    """
+    body = "## Code activity\nShipped the **structured lane**."
+    message = compose(_blob(body), "discord")
+    assert "## Code activity" in message       # Discord renders ATX headers
+    assert "**structured lane**" in message     # Discord double-asterisk bold
+    assert "**Progress update — demo**" in message

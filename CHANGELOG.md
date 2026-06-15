@@ -13,7 +13,70 @@ cross-phase concerns, see [`docs/known-issues.md`](docs/known-issues.md).
 
 ## [Unreleased]
 
-_Nothing yet — Phase 2 (the structured, no-LLM lane) will land here._
+Phase 3 — **Slack delivery + recipient routing**: a project can now report to Discord *and*
+Slack in one run, with each recipient routed to their own channel and webhook.
+
+### Added
+
+- **Slack delivery** (`delivery/slack.py`) — a single `{"text": …}` mrkdwn POST via stdlib
+  `urllib`, a sibling of the Discord sender with the same `send(message, webhook_url)` shape
+  and shared `DeliveryError`. (Block Kit deferred — see `docs/known-issues.md` KI-9.)
+- **Slack message rendering** (`compose.py`) — a `slack` branch plus `_to_slack_mrkdwn`,
+  which translates the Markdown Orion emits to Slack's dialect (`## h` → `*h*` bold lines,
+  `**b**` → `*b*`). Discord rendering is unchanged. (Structural-only — KI-10.)
+- **Per-channel routing** (`cli.py`) — each run composes once per distinct recipient channel
+  and delivers each recipient their channel's rendering via `_sender_for(channel)`. The
+  preview shows one labeled block per channel with a single combined confirm; a single-channel
+  run is unchanged. Applies to both `report` and `intake`.
+- **Config/secrets** — `SUPPORTED_CHANNELS` now includes `"slack"`; a Slack recipient names a
+  `webhook_env_var` pointing at a Slack incoming-webhook URL in `.env` (no new mechanism).
+- **Tests** — 105 total (+15): the Slack sender, Slack compose rendering, and multi-channel
+  routing (each recipient gets the right format via the right webhook; combined preview;
+  decline aborts all; one channel failing doesn't block the other; intake fans out too).
+
+### Changed
+
+- **`_deliver` and `_preview_and_confirm` now take a per-channel `messages` dict** instead of
+  a single string, so one run serves multiple channels. Channel→sender dispatch is a small
+  `_sender_for` function (call-time name resolution, mirroring `_collect_for`), keeping the
+  senders monkeypatchable and avoiding an import-time capture bug.
+
+Phase 2 — the **structured lane**: report-ready signals that skip the LLM entirely (only
+raw git activity is ever summarized by Claude). A run now collects from every enabled
+signal, merges them into one sectioned message, and previews/sends it once.
+
+### Added
+
+- **Tasks collector** (`collectors/tasks.py`) — reports items newly checked off in a
+  Markdown checklist (`- [x]`) at a per-project `tasks_file`. Structured lane (no LLM).
+  Its marker is the full current completed set, so an already-reported item never repeats.
+  (Items are identified by text — see `docs/known-issues.md` KI-6.)
+- **Notes collector** (`collectors/notes.py`) — sends a hand-written `notes_file` when its
+  content changes (a content-hash "replace model"; see KI-7). Structured lane (no LLM).
+- **`orion intake <project>`** — sends a pushed/hand-written update (`--message` or stdin),
+  the same entry point the Phase-6 Claude session skill will use. No collector, no LLM, no
+  delta marker (a push, not a delta); still runs two-pass redaction + preview-before-send.
+- **Merge step** (`merge.py`) — combines per-collector bodies into one report with titled
+  `## ` sections, skipping empty ones. One preview, one delivered message per run.
+- **Per-collector state markers** (`state.py`) — a generic `collector_markers`
+  (project, collector) table replaces the single `last_commit`, so each signal tracks its
+  own delta independently. Pre-Phase-2 git markers are migrated automatically on open.
+- **Config** — `collectors` now accepts `"tasks"`/`"notes"`; each requires its file path
+  (`tasks_file`/`notes_file`) only when enabled, resolved relative to the config file.
+- **Tests** — 90 total (+38): the two collectors, the merge helper, per-collector markers
+  and backfill, the multi-collector orchestrator (incl. a test proving the structured lane
+  never calls the summarizer), and the `intake` command.
+
+### Changed
+
+- **`cmd_report` is now multi-collector** — it loops over the enabled signals, redacts each
+  (pass 1), summarizes only the raw lane, merges, redacts the merged body (pass 2), then
+  previews/sends once and advances each collector's marker only after a successful send.
+  The Anthropic client is built lazily, so a structured-only run needs no API key.
+- **Delivery extracted** into a shared `_deliver` helper used by both `report` and `intake`.
+- **`ReportBlob.source_marker` is vestigial** (always `""`) now that markers are
+  per-collector; the legacy `project_state.last_commit` column is kept only as the
+  migration source (see KI-8).
 
 ## [0.1.0] — 2026-06-15
 

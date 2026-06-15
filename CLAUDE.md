@@ -35,10 +35,15 @@ architecture, phasing, and the decisions already settled.
 - **Local-first.** Collectors read local files; only delivery makes outbound calls. Do not
   introduce a hosted/server component into the core without flagging it as a deliberate
   deviation (a web dashboard is a planned *future* phase, not part of the core).
-- **The LLM summarizer is conditional, not always-on.** Only raw activity (git diffs) goes
-  through Claude. Structured or already-written updates (to-dos, milestones, notes, pushed
-  session summaries) are formatted and passed through with **no** LLM call. Do not route
-  structured updates through the model.
+- **The LLM summarizer is conditional, not always-on.** The LLM is an *optional* step, not
+  imposed. Raw activity that needs narrating — git diffs now, likely Claude Code sessions
+  later — is summarized **by default**; structured or already-written updates (to-dos,
+  milestones, notes, pushed session summaries) are formatted and passed through with **no**
+  LLM call **by default**. The invariant is that structured/already-written content is **not
+  force-routed** through the model — *not* that git is the only thing the LLM may ever touch.
+  Why conditional: not every action is significant enough to warrant an LLM summary, and some
+  users would rather write their own. Leave room to opt in to LLM summarization elsewhere;
+  do not hardwire "git is the only possible LLM input."
 - **Modular by toggle, not by framework.** Each signal (git, sessions, to-dos, notes) and
   each channel (Discord, Slack) must be independently enable-able per project in config, and
   must not assume the others are present. Do **not** build a plugin/registry system yet —

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from orion.report import ReportBlob
@@ -21,21 +22,23 @@ def compose(blob: ReportBlob, channel: str) -> str:
 
     Args:
         blob: The report to render.
-        channel: The destination channel ("discord" in Phase 1).
+        channel: The destination channel ("discord" or "slack").
 
     Returns:
-        The composed message string.
+        The composed message string in that channel's flavor of Markdown.
 
     Why:
         A single entry point per channel keeps formatting decisions in one place.
-        For now every supported channel uses the same Markdown rendering (Discord
-        accepts Markdown); when Slack arrives it gets its own branch keyed on
-        `channel`, leaving this signature and the caller unchanged.
+        Discord and Slack both take a single text field but use *different*
+        Markdown dialects (Discord renders `## h` and `**b**`; Slack renders
+        `*b*` for bold and ignores `##`), so each gets its own branch keyed on
+        `channel`. The signature and the caller stay unchanged — the caller just
+        passes each recipient's channel.
     """
-    # Phase 1: Discord is the only channel, and Markdown renders natively there.
-    # The branch is explicit so the seam is visible even with one case.
     if channel == "discord":
         return _format_markdown(blob)
+    if channel == "slack":
+        return _format_slack(blob)
     # Defensive default: unknown channels still get a sane message rather than an
     # error, since config validation already restricts `channel` upstream.
     return _format_markdown(blob)
@@ -58,6 +61,67 @@ def _format_markdown(blob: ReportBlob) -> str:
     header = f"**Progress update — {blob.project}**"
     date_line = f"_{_format_timestamp(blob.generated_at)}_"
     return f"{header}\n{date_line}\n\n{blob.body}"
+
+
+def _format_slack(blob: ReportBlob) -> str:
+    """Render a ReportBlob as a Slack mrkdwn progress update.
+
+    Args:
+        blob: The report to render.
+
+    Returns:
+        A Slack-mrkdwn string: a bold header line, an italic date line, then the
+        body with its Markdown translated to Slack's dialect.
+
+    Why:
+        Slack's mrkdwn is not Discord's Markdown: bold is a single asterisk
+        (`*b*`, not `**b**`) and there are no `#`/`##` headers — Slack would show
+        those characters literally. The header/date here are built directly in
+        Slack form, and the body (which carries `## ` section titles from merge
+        and possibly `**bold**` from the LLM) is run through the translator so it
+        renders, rather than leaking raw `#`/`**` into the channel. The date line
+        uses single underscores, which mean italic in BOTH dialects, so it needs
+        no translation.
+    """
+    header = f"*Progress update — {blob.project}*"
+    date_line = f"_{_format_timestamp(blob.generated_at)}_"
+    body = _to_slack_mrkdwn(blob.body)
+    return f"{header}\n{date_line}\n\n{body}"
+
+
+# A Markdown ATX header line: 1–6 leading "#" then the title text. Matched per
+# line (MULTILINE) so each section header in the body becomes a Slack bold line.
+_MD_HEADER_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+# Markdown bold: a **double-asterisk** span. Non-greedy so adjacent bolds on one
+# line don't merge into a single match.
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _to_slack_mrkdwn(text: str) -> str:
+    """Translate the structural Markdown Orion emits into Slack mrkdwn.
+
+    Args:
+        text: The report body in Discord-flavored Markdown.
+
+    Returns:
+        The body with `# / ## …` header lines turned into Slack bold lines and
+        `**bold**` spans turned into Slack `*bold*`.
+
+    Why:
+        This is deliberately NOT a general Markdown→mrkdwn converter — it handles
+        exactly the two constructs Orion produces: the `## ` section titles that
+        merge.py emits, and the `**bold**` the LLM summary may contain (see
+        docs/known-issues.md KI for the scope limit). Headers are converted first
+        (a line-level rewrite), then inline bold; the order is safe because a
+        converted header becomes single-asterisk bold, which the double-asterisk
+        bold pattern no longer matches. Bullets (`- item`) are left as-is — Slack
+        renders them acceptably and there is no value in rewriting them.
+    """
+    # Header lines first: "## Code activity" -> "*Code activity*".
+    converted = _MD_HEADER_RE.sub(r"*\1*", text)
+    # Then inline bold: "**done**" -> "*done*".
+    converted = _MD_BOLD_RE.sub(r"*\1*", converted)
+    return converted
 
 
 def _format_timestamp(iso_timestamp: str) -> str:

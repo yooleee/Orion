@@ -27,11 +27,14 @@ class ReportBlob:
         participants: Names of the people who receive it (explicit, not an
             implicit "me") — keeps the door open for multi-supervisor delivery.
         share_level: The level the body was generated at ("high_level"/"detailed").
-        lane: "raw" (LLM-summarized) or "structured" (passthrough) — provenance.
+        lane: "raw" (an LLM summarized at least part of this run) or "structured"
+            (everything passed through) — provenance.
         body: The redacted, channel-agnostic report text.
-        source_marker: The git HEAD sha this report covers up to. State is
-            advanced to exactly this marker after a successful send, so what was
-            previewed is what gets recorded.
+        source_marker: VESTIGIAL since Phase 2 — always "". Phase 1 stored the
+            single git HEAD sha here, but delta markers are now per-collector and
+            live in the state store (collector_markers), so no single value is
+            meaningful when several signals run. Kept (frozen) for the portable
+            blob's shape; see docs/known-issues.md KI-8.
         generated_at: ISO 8601 UTC timestamp of when the report was built.
         orion_version: The Orion version that produced it (forward-compat).
 

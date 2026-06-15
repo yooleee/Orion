@@ -19,8 +19,17 @@ from pathlib import Path
 # Allowed values, kept as named constants so validation and error messages share
 # one source of truth (DRY) and adding a value later is a one-line change.
 SHARE_LEVELS = ("high_level", "detailed")  # "high_level" sends no code diff (safest).
-SUPPORTED_COLLECTORS = ("git",)            # Phase 1: git only. Phase 2 adds tasks/notes.
-SUPPORTED_CHANNELS = ("discord",)          # Phase 1: Discord only. Phase 3 adds slack.
+SUPPORTED_COLLECTORS = ("git", "tasks", "notes")  # Phase 2: structured lane added.
+SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
+
+# Each file-backed structured collector reads ONE local file, named per project by
+# this TOML key. The map keeps validation DRY: one loop adds a clear "you enabled
+# X but gave no X_file" check for every entry, so adding a future file collector
+# is a one-line change here rather than another bespoke validation block.
+COLLECTOR_FILE_KEYS = {
+    "tasks": "tasks_file",  # a Markdown checklist (- [x] / - [ ])
+    "notes": "notes_file",  # a hand-written "current note" file
+}
 
 DEFAULT_STATE_DB = "orion.sqlite3"
 
@@ -66,13 +75,20 @@ class ProjectConfig:
         name: The project key (what the user passes to `orion report <name>`).
         repo_path: Absolute, user-expanded path to the local git repo.
         share_level: One of SHARE_LEVELS; controls how much detail is exposed.
-        collectors: Enabled signal names (Phase 1: only "git").
+        collectors: Enabled signal names (e.g. "git", "tasks", "notes").
         recipients: Who receives the report.
+        tasks_file: Path to the Markdown checklist, or None when the "tasks"
+            collector is not enabled. Resolved absolute at load time.
+        notes_file: Path to the hand-written notes file, or None when the "notes"
+            collector is not enabled. Resolved absolute at load time.
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
         pipeline, so no downstream function has to re-parse raw TOML or guess at
-        defaults — they were all resolved and validated here, once.
+        defaults — they were all resolved and validated here, once. The file
+        paths are Optional because they only exist when their collector is on; a
+        downstream collector receiving None would be a config-validation bug, not
+        a runtime surprise (we guarantee the path is set whenever its collector is).
     """
 
     name: str
@@ -80,6 +96,8 @@ class ProjectConfig:
     share_level: str
     collectors: tuple[str, ...]
     recipients: tuple[Recipient, ...]
+    tasks_file: Path | None = None
+    notes_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -195,13 +213,75 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
 
     recipients = _parse_recipients(body.get("recipients"), where)
 
+    # Structured file-backed collectors each need their file path — but only when
+    # that collector is actually enabled. _parse_collector_file enforces exactly
+    # that pairing and resolves the path relative to the config file.
+    tasks_file = _parse_collector_file(
+        body, "tasks", collectors_raw, config_path, where
+    )
+    notes_file = _parse_collector_file(
+        body, "notes", collectors_raw, config_path, where
+    )
+
     return ProjectConfig(
         name=name,
         repo_path=repo_path,
         share_level=share_level,
         collectors=tuple(collectors_raw),
         recipients=recipients,
+        tasks_file=tasks_file,
+        notes_file=notes_file,
     )
+
+
+def _parse_collector_file(
+    body: dict,
+    collector: str,
+    enabled: list,
+    config_path: Path,
+    where: str,
+) -> Path | None:
+    """Resolve the file path for one file-backed collector, if it is enabled.
+
+    Args:
+        body: The raw [projects.<name>] table.
+        collector: The collector key (e.g. "tasks", "notes").
+        enabled: The project's list of enabled collector names.
+        config_path: Path to the config file, used to resolve relative paths and
+            to locate error messages.
+        where: A locating string for error messages.
+
+    Returns:
+        An absolute Path when the collector is enabled, or None when it is not.
+
+    Why:
+        Pairing "collector enabled" with "its file is configured" at load time
+        turns a would-be confusing run-time failure ("no file to read") into a
+        clear config error pointing at the exact key to add. We do NOT check that
+        the file exists here: the file may legitimately be created after config
+        (e.g. a TODO.md a user fills in next), and existence is the collector's
+        job to report clearly at run time. Relative paths resolve against the
+        config file's directory, mirroring state_db, so a user can write
+        `tasks_file = "TODO.md"` without worrying about the working directory.
+    """
+    key = COLLECTOR_FILE_KEYS[collector]
+
+    # If the collector is off, the path is irrelevant — ignore it (even if present)
+    # and return None so ProjectConfig records "no path" for this signal.
+    if collector not in enabled:
+        return None
+
+    raw = body.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(
+            f"{where} enables the {collector!r} collector but is missing a "
+            f"non-empty `{key}`."
+        )
+
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (config_path.parent / path).resolve()
+    return path
 
 
 def _parse_recipients(raw: object, where: str) -> tuple[Recipient, ...]:

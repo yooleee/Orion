@@ -1,8 +1,10 @@
 # Project Orion — Progress Tracker & Reporter (Design Plan)
 
-> **Status: Phase 1 implemented (2026-06-15), awaiting sign-off.** Architecture and phasing
-> agreed; the Phase 1 MVP is built, live-tested, and documented. This is task #7 on the
-> non-application to-do ("Build progress tracker (Project Orion)").
+> **Status: Phases 1–3 signed off (2026-06-15).** Architecture and phasing agreed; the
+> on-demand reporting core — git + structured signals + `intake`, redaction, preview, and
+> delivery to Discord **and** Slack with per-recipient routing — is built, live-tested, and
+> documented. Phase 4 (scheduled digests) is next. This is task #7 on the non-application
+> to-do ("Build progress tracker (Project Orion)").
 >
 > This file looks **forward** (design + phase plan). For what actually shipped, see
 > [`CHANGELOG.md`](../CHANGELOG.md); for open cross-phase concerns, see
@@ -13,8 +15,8 @@
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
-| 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ⏳ Not started |
-| 3 | Slack delivery + recipient routing | ⏳ Not started |
+| 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
+| 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
 | 4 | Scheduled digests (cadence) | ⏳ Not started |
 | 5 | Event-driven triggers (git hooks) | ⏳ Not started |
 | 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
@@ -44,11 +46,15 @@ Refinements (2026-06-13 follow-up):
   session signal from "Orion parses fragile JSONL" to "Orion receives a ready-made
   summary," which is cleaner, less fragile, and more privacy-safe.
 - **Not every report needs an LLM.** Structured/manual updates (a to-do or milestone
-  change, a hand-written note) are passed through and formatted directly. The Claude
-  summarizer is a *conditional* step that runs only for raw activity that needs
-  narrating (git diffs, or a session when the skill is not used). This keeps cost and
-  latency down and matches the "lightest adequate" principle at the level of the whole
-  pipeline, not just the model.
+  change, a hand-written note) are passed through and formatted directly by default. The
+  Claude summarizer is an *optional, conditional* step — not imposed — that by default runs
+  on raw activity that needs narrating (git diffs, or a session when the skill is not used)
+  and is skipped for already-written content. The point is that the LLM is available but not
+  forced: not every action is significant enough to warrant a summary, and some users would
+  rather write their own. This keeps cost and latency down and matches the "lightest
+  adequate" principle at the level of the whole pipeline, not just the model. (It is *not* a
+  rule that git is the only thing the LLM may ever touch — a user could opt in to LLM
+  summarization elsewhere.)
 - **Supervisor replies are a planned later phase**, with two possible paths: native
   Discord/Slack threads (works only if both user and supervisor are on that platform), or
   comments on a future web dashboard. Deferred, not designed in detail yet.
@@ -64,11 +70,12 @@ Refinements (2026-06-13 follow-up):
 2. **Reports are LLM-summarized *when they need to be*, with privacy guardrails.** Raw
    diffs and session transcripts can contain secrets and read as noise to a supervisor.
    For those, Orion redacts obvious secrets, then has Claude summarize activity into an
-   abstracted, audience-appropriate update. But structured or already-written updates (a
+   abstracted, audience-appropriate update. Structured or already-written updates (a
    to-do change, a milestone, a hand-written note, or a summary pushed in by the Claude
-   skill) do **not** go through the LLM at all. Orion routes each update down one of two
-   lanes (see Architecture), so the model only runs where it adds value. A
-   preview-before-send step guards against leaks on the first runs.
+   skill) are **not routed through the LLM by default** — they are already report-ready, so
+   forcing them through the model adds cost without value. Orion routes each update down one
+   of two lanes (see Architecture), so the model runs only where it adds value, and is opt-in
+   rather than imposed. A preview-before-send step guards against leaks on the first runs.
 3. **Session activity arrives as a pushed summary, not by Orion reading session files.**
    A Claude skill/plugin summarizes a coding session in place and sends that summary to
    Orion. Orion exposes a simple intake (a CLI command and/or a tiny local endpoint) that
@@ -138,9 +145,10 @@ summarization; the **structured lane** is already report-ready and skips the LLM
 - **Redactor** — strips obvious secrets (API keys, `.env` contents, tokens) before any raw
   text reaches the LLM or a channel. Runs on the raw lane; still applied as a safety net on
   the structured lane.
-- **Summarizer (conditional)** — Claude turns redacted *raw* activity into a concise
-  progress narrative at the project's configured share level. Skipped entirely for
-  structured/already-written updates.
+- **Summarizer (conditional, opt-in)** — Claude turns redacted *raw* activity into a concise
+  progress narrative at the project's configured share level. Skipped **by default** for
+  structured/already-written updates (the model is optional, not imposed — see the "Not every
+  report needs an LLM" decision above).
 - **Composer** — merges whatever this run produced (a summary and/or structured items) and
   formats it for each channel (Discord embed / Slack blocks, or plain markdown to start).
 - **Delivery** — POSTs to the configured Discord and/or Slack webhooks per recipient.
@@ -223,13 +231,68 @@ incremental sends delivered, state advanced, re-run a no-op, stored body redacte
 were found and fixed during this run (redaction hit-count double-counting; Discord 403 from
 a missing `User-Agent`) — see [`CHANGELOG.md`](../CHANGELOG.md) for the details and fixes.
 
+## Phase 2 status (2026-06-15)
+
+Phase 2 — the **structured lane** — is **implemented** in `src/orion/` with a 90-test suite
+(+38 over Phase 1). It was built in seven reviewed checkpoints: per-collector state markers
+(+ non-destructive migration of the Phase-1 git marker) → config `tasks_file`/`notes_file`
+→ tasks collector → notes collector → merge helper → multi-collector orchestrator rewrite →
+`intake` command. The three open decisions were resolved with the user (see above): merge =
+one sectioned body; task source = Markdown checklist; intake = CLI command.
+
+What shipped (details in [`CHANGELOG.md`](../CHANGELOG.md)): the **tasks** and **notes**
+structured collectors (no LLM), the **`orion intake`** push command (no collector / no LLM /
+no marker), a `merge.py` step that combines signals into one sectioned message, and a generic
+per-`(project, collector)` marker store so each signal tracks its own delta. The structured
+lane never reaches Claude — a test proves a structured-only run does not call the summarizer
+even when the summarizer is wired to raise. Frozen seams (`summarize_raw`, `redact`,
+`build_report`, `compose`, `delivery.send`) were not changed; net new runtime dependencies: 0.
+Two fields are now vestigial (`ReportBlob.source_marker`, `project_state.last_commit`) — see
+[`docs/known-issues.md`](../docs/known-issues.md) KI-8.
+
+**Signed off (2026-06-15).** Live check passed: the full structured-lane path ran against a
+throwaway project (git + tasks + notes merged into one sectioned report) plus an `intake`
+push to the real Discord webhook, with a seeded fake key redacted and an immediate re-run a
+no-op. `pytest`: 90/90 at Phase 2 close.
+
+## Phase 3 status (2026-06-15)
+
+Phase 3 — **Slack delivery + recipient routing** — is **implemented** in `src/orion/` with a
+105-test suite (+15 over Phase 2). Built in four reviewed checkpoints: Slack sender + channel
+config → Slack compose rendering → orchestrator routing → docs + live verification. Three
+decisions were settled with the user (see "Decisions settled" above-style notes in the session
+plan): Slack format = plain mrkdwn (Block Kit deferred, to be paired with richer Discord
+formatting later); preview = one block per channel + one combined confirm; routing scope =
+channel routing only (same content per recipient, routed by channel).
+
+What shipped (details in [`CHANGELOG.md`](../CHANGELOG.md)): `delivery/slack.py` (a `{"text":
+…}` mrkdwn POST mirroring Discord), a `slack` branch in `compose` with a structural
+`_to_slack_mrkdwn` translator, and per-channel routing in the orchestrator — each run composes
+once per distinct channel and delivers each recipient their channel's rendering via
+`_sender_for(channel)`, with one labeled preview block per channel and a single combined
+confirm. Both `report` and `intake` route. Frozen seams unchanged; net new runtime
+dependencies: 0. A `Recipient` is a delivery *destination* (channel + webhook); the eventual
+per-supervisor (per project/task/todo) routing model is deferred (see KI-11 and the session
+plan), with today's explicit recipient naming keeping that door open.
+
+**Signed off (2026-06-15).** Live dual-channel check passed: a project with a Discord and a
+Slack recipient delivered one report (and one `intake` push) to the real Discord webhook and
+the test Slack workspace, each correctly formatted (Discord `**`/`##`, Slack `*…*`), with a
+seeded fake AWS key redacted in both. `pytest`: 105/105.
+
 ## Open questions / to settle before/while building
 
-- The skill/plugin's exact push mechanism into Orion (a CLI shell-out vs a tiny local HTTP
-  endpoint Orion runs). Decide when Phase 2 intake is built; the endpoint is only needed if
-  a shell-out is awkward from inside a session.
-- Intake authentication if a local endpoint is used (even localhost-only deserves a token).
-- How structured items and a raw summary are merged in one report when both exist in a run.
+- **(Resolved, Phase 2, 2026-06-15) Push mechanism:** a **CLI command** (`orion intake
+  <project>`, body via `--message` or stdin). No local HTTP endpoint — no network surface,
+  no server process, no auth token needed now. An endpoint (with a token) remains a
+  documented future option only if shelling out proves awkward from inside a session.
+- **(Resolved by the above)** Intake authentication: not applicable while intake is a local
+  CLI command. Revisit only if/when a local endpoint is added.
+- **(Resolved, Phase 2, 2026-06-15) Merge semantics:** **one body, titled `##` sections**,
+  in config (collector) order, empty sections skipped — one preview, one delivered message.
+  Only the git section is LLM-summarized; structured sections pass through verbatim and are
+  never re-sent to Claude. Lives in `merge.py` (a pure function), called by the orchestrator
+  before the final redaction pass.
 
 ## Future direction & guiding principles (noted 2026-06-13, deliberately not built yet)
 

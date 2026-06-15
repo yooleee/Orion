@@ -1,0 +1,34 @@
+# =============================================================================
+# orion.toml.example — copy to `orion.toml` and edit. `orion.toml` is gitignored
+# (it holds machine-specific repo paths). Orion only READS this file.
+# -----------------------------------------------------------------------------
+# This is the project registry: which projects Orion tracks, how much to share,
+# and who receives the report. Secrets are NOT here — each recipient names an env
+# var (webhook_env_var) that holds its webhook URL in .env.
+# =============================================================================
+
+# Where the sqlite state store lives. A relative path is resolved next to this
+# config file. Tracks the last-reported commit per project + report history.
+state_db = "orion.sqlite3"
+
+# One [projects.<name>] table per tracked project. <name> is what you pass to
+# `orion report <name>`.
+[projects.orion]
+# Absolute path (or ~) to the local git repo to read activity from.
+repo_path = "/home/yoolee/orion"
+
+# How much detail leaves the machine. "high_level" (default, safest) sends only
+# commit messages + a diffstat — NO code diff. "detailed" sends a capped,
+# secret-filtered diff as well. When in doubt, stay high_level.
+share_level = "high_level"
+
+# Which signals are collected. Phase 1 supports only "git". Later phases add
+# "tasks", "notes", etc. — each independently toggleable here.
+collectors = ["git"]
+
+# Named recipients of this project's reports. Listed explicitly (not an implicit
+# "me") so a shared multi-supervisor service can be added later without a rewrite.
+[[projects.orion.recipients]]
+name = "Alex (supervisor)"
+channel = "discord"                       # Phase 1: only "discord" is supported.
+webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"   # names the .env key holding the URL.

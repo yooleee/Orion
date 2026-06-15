@@ -1,0 +1,26 @@
+# =============================================================================
+# .gitignore — safety-critical: keeps secrets and report data out of version control.
+# =============================================================================
+
+# Secrets: webhook URLs + Anthropic API key live here, never committed.
+.env
+
+# Local project registry: holds machine-specific repo paths (and is user-created
+# from orion.toml.example). The committed sample is orion.toml.example, not this.
+orion.toml
+
+# State store: contains report history (redacted bodies, but still local data).
+*.sqlite3
+*.sqlite3-journal
+
+# Virtual environments — never commit the local interpreter/site-packages.
+.venv/
+venv/
+
+# Python build / cache artifacts.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/

@@ -1,0 +1,38 @@
+# =============================================================================
+# pyproject.toml
+# -----------------------------------------------------------------------------
+# Responsible for: Packaging metadata and the single `orion` console command.
+# Role in project: Defines how Orion installs (`pip install -e .`) and the
+#                  runtime dependencies. Deliberately minimal — Phase 1 needs
+#                  only two third-party packages; config (tomllib), state
+#                  (sqlite3), git (subprocess), and HTTP (urllib) are all stdlib.
+# Assumptions: Python 3.11+ (for stdlib `tomllib`). src/ layout.
+# =============================================================================
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orion"
+version = "0.1.0"
+description = "Local-first progress tracker: turn git activity into supervisor-ready updates."
+requires-python = ">=3.11"
+dependencies = [
+    # Official Anthropic client for the Messages API — the summarizer (raw lane only).
+    "anthropic>=0.40",
+    # Loads secrets from a gitignored .env (webhook URLs, API key) into the environment.
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+# Test-only dependency. Kept out of the runtime install so a user who just wants
+# to run Orion still gets the two-dependency "clone and run in 10 minutes" path.
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+# Installs an `orion` command on PATH that calls orion.cli:main.
+orion = "orion.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

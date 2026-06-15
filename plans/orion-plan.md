@@ -61,12 +61,17 @@ Refinements (2026-06-13 follow-up):
 
 ## The shape of the problem (two conclusions that drive the design)
 
-1. **Local-first, not hosted.** The collectors must read local git repos and local Claude
-   Code session files, which live on Yousuf's machine. A Cloudflare Worker (his usual
-   hosting preference) cannot reach local files, so the **core runs locally**. Only the
-   delivery step makes outbound HTTPS calls to Discord/Slack. This is a deliberate
-   deviation from the Cloudflare preference, justified by where the data lives. A hosted
-   dashboard could be added later, but it is not the core.
+1. **Local-first, not hosted (at the current stage).** The collectors must read local git
+   repos and local Claude Code session files, which live on Yousuf's machine. A Cloudflare
+   Worker (his usual hosting preference) cannot reach local files, so the **core runs
+   locally**. Only the delivery step makes outbound HTTPS calls to Discord/Slack. This is a
+   deliberate deviation from the Cloudflare preference, justified by where the data lives.
+   *Local-first is a stage-appropriate choice, not a permanent principle:* as the project
+   grows (multi-party collaboration, a hosted dashboard, a shared service), the primary
+   grounding may shift toward hosted/hybrid — a deliberate decision to weigh when complexity
+   warrants, kept additive by the portable report/intake blob. A hosted dashboard could be
+   added later, but it is not the core today. (The privacy/safety guarantees are the part that
+   stays permanent through any such shift.)
 2. **Reports are LLM-summarized *when they need to be*, with privacy guardrails.** Raw
    diffs and session transcripts can contain secrets and read as noise to a supervisor.
    For those, Orion redacts obvious secrets, then has Claude summarize activity into an

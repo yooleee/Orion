@@ -51,7 +51,7 @@ class Recipient:
 
     Args:
         name: Human-readable recipient name (e.g. "Alex (supervisor)").
-        channel: Delivery channel; Phase 1 supports only "discord".
+        channel: Delivery channel — one of SUPPORTED_CHANNELS ("discord" or "slack").
         webhook_env_var: Name of the .env variable that holds this recipient's
             webhook URL. The URL itself is never stored in the config.
 

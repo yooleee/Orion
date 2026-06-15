@@ -17,7 +17,8 @@ from dataclasses import dataclass
 
 # The two lanes from the design. "raw" activity needs redaction + LLM
 # summarization; "structured" activity is already report-ready and skips the LLM.
-# Phase 1 only ever produces "raw"; the constant exists so the seam is explicit.
+# The git collector produces "raw"; the structured collectors (tasks, notes) and
+# intake produce "structured". Both lanes share this one result contract.
 LANE_RAW = "raw"
 LANE_STRUCTURED = "structured"
 

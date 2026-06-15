@@ -29,12 +29,23 @@ architecture, phasing, and the decisions already settled.
 
 ## Hard constraints (specific to Orion)
 
+> These are firm at the **current stage**, but several are *stage-appropriate choices, not
+> permanent principles* — local-first, modular-by-toggle, and the single-LLM/Haiku default are
+> all expected to be revisited as the project grows in depth and complexity. The
+> **Privacy & safety** rules in the next section are the exception: those are permanent and
+> non-negotiable, regardless of how the architecture evolves.
+
 - **Open-source friendly, simple to set up.** This will be public. Favor the standard
   library, keep dependencies minimal and justified, and keep install to one clear path with
   good defaults. Apply the test: *could a new user clone this and run it in ten minutes?*
-- **Local-first.** Collectors read local files; only delivery makes outbound calls. Do not
-  introduce a hosted/server component into the core without flagging it as a deliberate
-  deviation (a web dashboard is a planned *future* phase, not part of the core).
+- **Local-first (current stage, not a permanent principle).** Collectors read local files;
+  only delivery makes outbound calls. This fits the project now, but local-*only* as the
+  *primary* grounding is a stage-appropriate choice — as complexity grows (multi-party
+  collaboration, a hosted dashboard, a shared service), the primary architecture may shift
+  toward hosted/hybrid. So: keep it the default now, and treat a hosted/server component as a
+  deliberate decision to weigh when complexity warrants — not a forbidden move. Keep the seam
+  clean (report/intake as a portable summary+metadata blob) so such a shift stays additive.
+  (Privacy & safety guarantees below ride through any such shift unchanged.)
 - **The LLM summarizer is conditional, not always-on.** The LLM is an *optional* step, not
   imposed. Raw activity that needs narrating — git diffs now, likely Claude Code sessions
   later — is summarized **by default**; structured or already-written updates (to-dos,

@@ -2,19 +2,65 @@
 
 All notable changes to Orion are recorded here.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
-project aims to follow [Semantic Versioning](https://semver.org/). Entries are grouped
-under **Added / Changed / Fixed / Removed**, newest version first. Each entry is brief
-and, where it aids understanding, notes *why* the change was made.
+Orion is **pre-release and in active development** — it has no published version yet, so
+progress is tracked by **phase** (the project's natural units of progression) rather than by
+semantic version numbers. Formal [SemVer](https://semver.org/) versioning will begin once
+Orion reaches a genuinely usable, shareable state (for example, at open-sourcing). Within each
+phase, changes are grouped under **Added / Changed / Fixed / Removed** in the
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style, newest phase first, each
+noting *why* where it aids understanding.
 
-This file looks **backward** (what actually shipped). For the forward-looking design and
-phase plan, see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and
-cross-phase concerns, see [`docs/known-issues.md`](docs/known-issues.md).
+This file looks **backward** (what was built). For the forward-looking design and phase plan,
+see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
+see [`docs/known-issues.md`](docs/known-issues.md).
 
-## [Unreleased]
+## Phase 3.5 — Cross-platform portability pass (2026-06-15, in review)
 
-Phase 3 — **Slack delivery + recipient routing**: a project can now report to Discord *and*
-Slack in one run, with each recipient routed to their own channel and webhook.
+An audit plus targeted fixes so Orion runs natively on Windows, macOS, and Linux, and a
+recorded cross-platform scheduling stance that de-risks Phase 4. The audit confirmed the core
+was already highly portable (`pathlib` throughout, explicit `encoding="utf-8"` on every text
+read, `splitlines()`, no `shell=True`, a component-built timestamp), so this is fixes — not a
+rewrite. **No** collector, redaction, summarizer, compose, or delivery logic changed, and no
+new data path reaches the LLM or a channel.
+
+### Added
+
+- **`python -m orion` entry point** (`src/orion/__main__.py`) — the portable invocation that
+  works identically on every OS, regardless of where the venv puts the launcher
+  (`.venv/bin/` vs `.venv\Scripts\`). It delegates straight to `cli.main`, sharing one code
+  path with the installed `orion` console script. The docs now lead with this form.
+- **Console UTF-8 guard** (`cli._ensure_utf8_output`, called at the top of `main`) —
+  reconfigures stdout/stderr to UTF-8 so the status glyphs (`⚠`, `✗`) cannot raise
+  `UnicodeEncodeError` when output is redirected to a pipe/file on Windows (where Python
+  otherwise falls back to the cp1252 code page). A no-op where the stream is already UTF-8
+  (macOS/Linux, modern Windows terminals) and silently skipped on non-reconfigurable streams
+  (pytest capture, embedded interpreters), so it never breaks the CLI. The glyphs are kept.
+- **"Supported platforms" docs** — the README states native Linux/macOS/Windows 10/11
+  support, the Python 3.11+ / `git`-on-PATH requirements, and an honest "tested on" line;
+  setup now shows per-OS venv activation and OS-agnostic `python -m pip`/`python -m pytest`.
+- **Windows TOML-path guidance** (README + `orion.toml.example`) — write `repo_path` with
+  forward slashes or as a single-quoted literal, because a backslash is a TOML escape.
+- **Package classifiers** (`pyproject.toml`) — `Operating System :: OS Independent` and the
+  supported Python versions (3.11–3.13), backing the README's support matrix in metadata.
+- **Testing docs** — `docs/testing.md` (a living catalog: test categories, *why* each
+  matters, how to run, and intentional non-targets) and `docs/portability-smoke-test.md` (the
+  per-OS manual runbook for native Windows/macOS), linked from the README and the plan.
+- **Tests** — 115 total (+10): the `python -m orion --help` entry point (a subprocess test
+  exercising real `-m` module resolution) and the console UTF-8 guard (requests UTF-8 when
+  supported; no-op without `reconfigure`; swallows `ValueError`/`OSError`; covers both
+  streams); plus a suite audit that confirmed every test file is current and closed five
+  additive gaps (Slack-token redaction; git noise-glob, diff-cap, and subdir-sensitive
+  exclusion).
+
+### Changed
+
+- **Docs lead with `python -m orion`** instead of `.venv/bin/orion`, and the development
+  commands use `python -m pip`/`python -m pytest` — identical across all three OSes.
+
+## Phase 3 — Slack delivery + recipient routing (2026-06-15)
+
+A project can now report to Discord *and* Slack in one run, with each recipient routed to
+their own channel and webhook.
 
 ### Added
 
@@ -41,9 +87,11 @@ Slack in one run, with each recipient routed to their own channel and webhook.
   `_sender_for` function (call-time name resolution, mirroring `_collect_for`), keeping the
   senders monkeypatchable and avoiding an import-time capture bug.
 
-Phase 2 — the **structured lane**: report-ready signals that skip the LLM entirely (only
-raw git activity is ever summarized by Claude). A run now collects from every enabled
-signal, merges them into one sectioned message, and previews/sends it once.
+## Phase 2 — Structured lane (2026-06-15)
+
+Report-ready signals that skip the LLM entirely (only raw git activity is ever summarized by
+Claude). A run now collects from every enabled signal, merges them into one sectioned message,
+and previews/sends it once.
 
 ### Added
 
@@ -78,12 +126,12 @@ signal, merges them into one sectioned message, and previews/sends it once.
   per-collector; the legacy `project_state.last_commit` column is kept only as the
   migration source (see KI-8).
 
-## [0.1.0] — 2026-06-15
+## Phase 1 — MVP: git → summary → Discord (2026-06-15)
 
-First end-to-end slice (Phase 1 MVP): `orion report <project>` reads git activity since
-the last report, redacts secrets, conditionally summarizes with Claude, previews in the
-terminal, and on confirmation posts to a Discord webhook — then advances per-project
-state so the next run only covers what is new.
+First end-to-end slice: `orion report <project>` reads git activity since the last report,
+redacts secrets, conditionally summarizes with Claude, previews in the terminal, and on
+confirmation posts to a Discord webhook — then advances per-project state so the next run only
+covers what is new.
 
 ### Added
 
@@ -130,6 +178,3 @@ state so the next run only covers what is new.
   agent. *Why it mattered:* delivery is Phase 1's only outbound step, so this broke the
   one feature that has to work live. *Fix:* send a descriptive `User-Agent` header
   (Discord's API requires one); pinned by a delivery test asserting a non-default agent.
-
-[Unreleased]: https://github.com/yooleee/Orion/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yooleee/Orion/releases/tag/v0.1.0

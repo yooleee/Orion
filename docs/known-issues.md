@@ -155,3 +155,19 @@ Deferred).
   recipients, add dedupe-by-resolved-webhook then. Recorded so the modeling choice is explicit.
 - **Severity:** low
 - **Status:** Deferred (add with the per-supervisor routing model).
+
+## KI-12 — Unattended (scheduled) runs vs. the preview-before-send guarantee
+
+- **Detail:** Phase 3.5 settled that Orion ships **no scheduler of its own** — cadence is
+  delegated to each OS's native tool (cron / launchd / Task Scheduler), invoked as
+  `python -m orion report <project>`. But every report path today is gated by an interactive
+  preview-before-send confirm, which an unattended scheduled run cannot answer. Scheduled
+  digests (Phase 4) therefore need a non-interactive way to run without weakening the privacy
+  guarantee.
+- **Why it matters:** Preview-before-send is the human gate that backstops redaction (see
+  KI-3). Auto-sending on a schedule removes that gate, so it must be a deliberate, **explicit
+  per-project opt-in** — never a default — with all redaction passes still firm and ideally a
+  conservative share level. This is the central tension Phase 4 must resolve; the scheduling
+  *mechanism* (delegate to the OS) is settled, the *auto-send design* is the open part.
+- **Severity:** medium
+- **Status:** Deferred to Phase 4.

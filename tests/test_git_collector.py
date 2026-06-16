@@ -15,7 +15,10 @@ import subprocess
 
 import pytest
 
-from orion.collectors.git import GitError, collect
+# _DIFF_LINE_CAP is imported (a private constant) so the truncation test scales to
+# whatever the cap is set to, instead of hard-coding the number — if the cap
+# changes, the test still generates an over-cap diff.
+from orion.collectors.git import _DIFF_LINE_CAP, GitError, collect
 
 
 def _run(repo, *args):
@@ -209,3 +212,74 @@ def test_sensitive_file_content_excluded_even_at_detailed(tmp_path):
     assert "print('hello')" in result.raw_text
     # The omission is made visible, not silent.
     assert ".env" in result.raw_text
+
+
+def test_sensitive_file_in_subdirectory_is_excluded(tmp_path):
+    """A sensitive file one directory deep (config/prod/.env) is also excluded.
+
+    Why this matters: _is_sensitive matches the BASENAME as well as the full path,
+    so a secret file is filtered wherever it lives in the tree — not only at the
+    repo root. Without basename matching, a `.env` hidden in a subdirectory would
+    leak at detailed share level. This guards that path.
+    """
+    repo = _init_repo(tmp_path)
+    subdir = repo / "config" / "prod"
+    subdir.mkdir(parents=True)
+    (subdir / ".env").write_text("DB_PASSWORD=nested_secret_should_never_leak\n")
+    (repo / "app.py").write_text("print('hi')\n")
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-q", "-m", "Add nested .env and app")
+
+    result = collect(repo, since_sha=None, share_level="detailed")
+
+    # The nested secret's value never appears, even though it's not at the root.
+    assert "nested_secret_should_never_leak" not in result.raw_text
+    assert "print('hi')" in result.raw_text  # the normal file is still diffed
+
+
+def test_noise_file_content_excluded_at_detailed(tmp_path):
+    """A lockfile's CONTENT is omitted from the diff (noise filter), at detailed.
+
+    Why this matters: lockfiles / minified bundles add bulk and no narrative value.
+    The noise filter keeps them out of the diff for focus and token cost — a
+    DIFFERENT reason than the security denylist, and a separate code path. This
+    pins that a noise file is actually excluded from the diff content and surfaced
+    as an omission, not silently dropped (and not leaked either).
+    """
+    repo = _init_repo(tmp_path)
+    (repo / "package-lock.json").write_text(
+        '{"noise": "distinctive_lockfile_content_xyz"}\n'
+    )
+    (repo / "app.py").write_text("print('hi')\n")
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-q", "-m", "Add app and lockfile")
+
+    result = collect(repo, since_sha=None, share_level="detailed")
+
+    # The lockfile body is kept out of the diff excerpt...
+    assert "distinctive_lockfile_content_xyz" not in result.raw_text
+    # ...while normal code is still included...
+    assert "print('hi')" in result.raw_text
+    # ...and the exclusion is announced rather than silent.
+    assert "Omitted from diff" in result.raw_text
+
+
+def test_detailed_diff_is_truncated_at_the_line_cap(tmp_path):
+    """An over-cap diff is truncated to _DIFF_LINE_CAP with a visible marker.
+
+    Why this matters: the line cap bounds both token cost and how much raw code
+    can ever reach the LLM, regardless of how large a change is. This pins that an
+    over-cap diff is cut AND that the truncation is announced (no silent loss).
+    Generates twice the cap's worth of lines so the test holds if the cap changes.
+    """
+    repo = _init_repo(tmp_path)
+    # A new file whose added-line count is well over the cap, so the unified diff
+    # (added lines + a few headers) exceeds _DIFF_LINE_CAP.
+    big = "\n".join(f"line_{i} = {i}" for i in range(_DIFF_LINE_CAP * 2)) + "\n"
+    _commit(repo, "big.py", big, "Add a large file")
+
+    result = collect(repo, since_sha=None, share_level="detailed")
+
+    # The truncation marker built in _build_diff is present and named as such.
+    assert "diff truncated" in result.raw_text
+    assert "more lines omitted" in result.raw_text

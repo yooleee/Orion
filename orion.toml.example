@@ -15,6 +15,9 @@ state_db = "orion.sqlite3"
 # `orion report <name>`.
 [projects.orion]
 # Absolute path (or ~) to the local git repo to read activity from.
+# Windows: a backslash is a TOML escape, so use forward slashes
+# (repo_path = "C:/Users/you/orion") or a single-quoted literal
+# (repo_path = 'C:\Users\you\orion'). A double-quoted "C:\Users\..." is misread.
 repo_path = "/home/yoolee/orion"
 
 # How much detail leaves the machine. "high_level" (default, safest) sends only

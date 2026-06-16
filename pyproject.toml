@@ -15,9 +15,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orion"
-version = "0.1.0"
+# Pre-release placeholder: Orion is unversioned during development — progress is
+# tracked by phase, not SemVer (see CHANGELOG.md). 0.0.0 = "no release cut yet";
+# bump to a real version at the first published release.
+version = "0.0.0"
 description = "Local-first progress tracker: turn git activity into supervisor-ready updates."
 requires-python = ">=3.11"
+# Declarative metadata (for PyPI filtering / display) that backs the README's
+# support matrix. "OS Independent" reflects the stdlib-only, pathlib-based core;
+# the Python versions are the range allowed by requires-python above.
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     # Official Anthropic client for the Messages API — the summarizer (raw lane only).
     "anthropic>=0.40",

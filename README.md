@@ -14,23 +14,44 @@ anything is sent.
 > pushed or hand-written update. Scheduled digests, git-hook triggers, and the Claude-session
 > skill are later phases.
 
-## Setup
+## Supported platforms
 
-Requires **Python 3.11+** and **git**.
+Orion runs natively on **Linux, macOS, and Windows 10/11**. All OS-touching work uses only
+the Python standard library (`pathlib`, `subprocess`, `sqlite3`), so there is no per-platform
+build step and **WSL is not required** on Windows (though it works fine, as a Linux
+environment). You need:
+
+- **Python 3.11+** (for the stdlib `tomllib` TOML parser), and
+- **`git` available on your PATH**.
+
+> **Tested on:** Linux and Windows 11 + WSL2 (active development). macOS and native Windows
+> are supported by design and smoke-tested as hardware is available — please open an issue if
+> you hit a platform-specific quirk.
+
+## Setup
 
 ```bash
 git clone <your-fork-url> orion && cd orion
 
-# 1. Create a virtual environment and install (2 runtime deps: anthropic, python-dotenv)
-python3 -m venv .venv
-.venv/bin/pip install -e .
+# 1. Create a virtual environment (use python3 on macOS/Linux if `python` is missing/Python 2)
+python -m venv .venv
 
-# 2. Provide secrets (gitignored — never committed)
-cp .env.example .env          # then fill in ANTHROPIC_API_KEY and your webhook URL(s)
+# 2. Activate it — this is the one step that differs per OS
+source .venv/bin/activate       # macOS / Linux
+# .venv\Scripts\activate        # Windows (PowerShell or cmd)
 
-# 3. Configure which projects to track
+# 3. Install Orion (2 runtime deps: anthropic, python-dotenv)
+python -m pip install -e .
+
+# 4. Provide secrets (gitignored — never committed)
+cp .env.example .env            # then fill in ANTHROPIC_API_KEY and your webhook URL(s)
+
+# 5. Configure which projects to track
 cp orion.toml.example orion.toml   # then edit repo_path and recipients
 ```
+
+Everything after activation uses `python -m ...`, which is identical on every OS. (On Windows
+`cmd`, use `copy` instead of `cp` for steps 4–5.)
 
 Get a **Discord** webhook from a channel's **Settings → Integrations → Webhooks**, a **Slack**
 incoming webhook from <https://api.slack.com/messaging/webhooks>, and an Anthropic API key from
@@ -38,9 +59,16 @@ incoming webhook from <https://api.slack.com/messaging/webhooks>, and an Anthrop
 
 ## Usage
 
+With the virtual environment activated (see Setup), run:
+
 ```bash
-.venv/bin/orion report <project>
+python -m orion report <project>
 ```
+
+`python -m orion` is the portable invocation — it works identically on every OS, regardless
+of where the venv puts the launcher (`.venv/bin/` vs `.venv\Scripts\`). The bare `orion`
+console script works too once the venv is active; the docs use `python -m orion` because it's
+the same everywhere.
 
 This runs the full pipeline for the named project (from `orion.toml`):
 
@@ -63,7 +91,7 @@ To send a pushed or hand-written update (no collectors, no LLM — the same entr
 Claude-session skill will use), use `intake`:
 
 ```bash
-.venv/bin/orion intake <project> -m "Your update."   # or pipe the body on stdin
+python -m orion intake <project> -m "Your update."   # or pipe the body on stdin
 ```
 
 ## Configuration (`orion.toml`)
@@ -92,6 +120,11 @@ notes_file  = "NOTES.md"          # required when "notes" is enabled (a hand-wri
 The config never contains a secret: each recipient names an **environment variable** that
 holds its webhook URL, and the URL lives only in `.env`.
 
+> **Windows paths:** a backslash is an escape character in TOML, so write file paths either
+> with forward slashes — `repo_path = "C:/Users/you/orion"` (forward slashes work fine on
+> Windows) — or as a single-quoted *literal* string — `repo_path = 'C:\Users\you\orion'`.
+> A double-quoted `"C:\Users\..."` will be misread because `\U` starts an escape.
+
 ## Privacy & security
 
 Leak prevention is the top priority. Defense in depth:
@@ -110,7 +143,13 @@ No redactor is perfect — the terminal preview is the human gate that makes the
 
 ## Development
 
+With the virtual environment activated:
+
 ```bash
-.venv/bin/pip install -e ".[dev]"   # adds pytest
-.venv/bin/python -m pytest          # run the test suite
+python -m pip install -e ".[dev]"   # adds pytest
+python -m pytest                    # run the test suite
 ```
+
+What the suite covers and why — plus what's intentionally *not* covered — is documented in
+[`docs/testing.md`](docs/testing.md). The manual cross-OS checks (native Windows/macOS) live
+in [`docs/portability-smoke-test.md`](docs/portability-smoke-test.md).

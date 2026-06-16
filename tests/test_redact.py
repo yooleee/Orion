@@ -81,6 +81,23 @@ def test_sk_style_key_is_redacted():
     assert result.hit_count >= 1
 
 
+def test_slack_token_is_redacted():
+    """A Slack token (xoxb-/xoxp-/xoxa-/xoxr-/xoxs-) is removed.
+
+    Why this matters: Slack bot/user tokens grant workspace access and have a
+    fixed 'xox?-' prefix. Phase 3 added Slack delivery, so a Slack token is now a
+    plausible secret to encounter — and every other secret shape here has a test,
+    so leaving this redaction pattern uncovered risks a silent regression in a
+    SECURITY control. Uses a non-secret-ish context so it isolates the Slack
+    pattern itself rather than the generic NAME=value catch-all.
+    """
+    token = "xoxb-1234567890-1234567890123-AbCdEfGhIjKlMnOpQrStUv"
+    result = redact(f"posted to Slack with {token} just now")
+    assert token not in result.text
+    assert "[REDACTED_SLACK_TOKEN]" in result.text  # the precise token was used
+    assert result.hit_count >= 1
+
+
 def test_jwt_is_redacted():
     """A JSON Web Token (three base64url segments) is removed.
 

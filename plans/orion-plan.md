@@ -17,7 +17,7 @@
 | 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
 | 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
 | 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
-| 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | ⏳ Not started |
+| 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | 🔄 Implemented; in review (2026-06-15) |
 | 4 | Scheduled digests (cadence) | ⏳ Not started |
 | 5 | Event-driven triggers (git hooks) | ⏳ Not started |
 | 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
@@ -286,6 +286,39 @@ Slack recipient delivered one report (and one `intake` push) to the real Discord
 the test Slack workspace, each correctly formatted (Discord `**`/`##`, Slack `*…*`), with a
 seeded fake AWS key redacted in both. `pytest`: 105/105.
 
+## Phase 3.5 status (2026-06-15)
+
+Phase 3.5 — the **cross-platform portability pass** — is **implemented** in `src/orion/` and
+the docs, with a 110-test suite (+5 over Phase 3). An audit (paths, the venv entry point,
+`subprocess` git calls, console encoding, file I/O encoding, line endings) confirmed the core
+was already highly portable — `pathlib` throughout, explicit `encoding="utf-8"` on every text
+read, `splitlines()` for line endings, no `shell=True`, and a component-built timestamp that
+already avoids `%-I`/`%#I`. This pass therefore made only targeted fixes, not a rewrite.
+
+What shipped (details in [`CHANGELOG.md`](../CHANGELOG.md)): a `python -m orion` entry point
+(`__main__.py`) as the OS-neutral canonical invocation; a console UTF-8 guard
+(`cli._ensure_utf8_output`) that keeps the `⚠`/`✗` glyphs but prevents a `UnicodeEncodeError`
+on redirected Windows output; a "Supported platforms" + per-OS setup rewrite of the README
+(leading with `python -m orion`, OS-agnostic `python -m pip`/`python -m pytest`); and Windows
+TOML-path guidance in the README and `orion.toml.example`. No collector/redaction/summarizer/
+compose/delivery logic changed; net new runtime dependencies: 0.
+
+Four decisions were settled with the user (rationale in "Cross-platform & future-direction
+rationale" below): support matrix = **native Windows + macOS + Linux** (WSL counts as Linux);
+canonical invocation = **`python -m orion`**; console Unicode = **keep glyphs + a guarded
+`reconfigure("utf-8")`**; and the **scheduling stance** = Orion ships **no scheduler of its
+own**, delegating cadence to each OS's native tool (cron / launchd / Task Scheduler),
+documented per-OS — the key input to Phase 4 (see KI-12 for the carried auto-send tension).
+
+The test suite is catalogued (categories + why each matters + known gaps) in
+[`docs/testing.md`](../docs/testing.md); the manual cross-OS runbook is
+[`docs/portability-smoke-test.md`](../docs/portability-smoke-test.md). A post-3.5 audit
+confirmed all test files are current (nothing stale/removable) and closed five additive
+coverage gaps (Slack-token redaction, git noise-glob/diff-cap/subdir-sensitive, the encoding
+guard's `OSError` arm).
+
+**Pending sign-off** (review in progress). `pytest`: 115/115.
+
 ## Open questions / to settle before/while building
 
 - **(Resolved, Phase 2, 2026-06-15) Push mechanism:** a **CLI command** (`orion intake
@@ -340,6 +373,56 @@ They are recorded so that early choices do not quietly close these doors.
   single implicit "me," and (2) the report and intake formats stay portable (a summary +
   metadata blob), so they could later be sent to a shared service instead of straight to a
   webhook. No multi-tenant machinery now — just avoid hardwiring "one user, one supervisor."
+
+### Cross-platform & future-direction rationale (recorded Phase 3.5, 2026-06-15)
+
+Reasoned through while settling the Phase 3.5 scheduling stance; recorded so the *why*
+survives. **None of this is built yet** — it shapes future phases and the seams to protect.
+
+- **Why Orion delegates scheduling to the OS (no built-in scheduler).** Orion is a one-shot
+  CLI; to fire at time T something must be alive at T, and Orion can't wake itself. Building a
+  scheduler means either a long-running daemon (which *still* needs the OS service manager to
+  survive reboot/sleep — so it adds a daemon *on top of* the OS layer, a bigger always-on
+  surface, the same reason webhooks beat an always-on bot) or an in-process scheduler library
+  (a dependency that only runs while the process runs). The OS schedulers (cron / launchd /
+  Task Scheduler) already own reboot-persistence, missed-run policy, and run-as-user. So Orion
+  delegates and documents per-OS. Accepted cost: per-OS setup divergence, no unified
+  `orion status`, per-OS missed-run semantics, and minimal-environment gotchas (stripped PATH,
+  no venv) — all documentation-shaped, cheaper than cross-platform service management.
+- **When a built-in scheduling *layer* becomes right.** The test is whether cadence needs
+  Orion's own state. While cadence = "run a command at T," the OS tool wins. Once it needs
+  activity-gating ("only send if something changed"), backoff, quiet hours, per-recipient
+  cadence, or a unified next-run/last-error view, that logic must live in Orion — likely a
+  **hybrid** (OS provides the wake-up; Orion owns the decision). Because `orion report` is
+  already a clean non-interactive entry point, that shift is **additive — no rewrite**.
+- **Bidirectional interaction (supervisors acting back) moves this.** "Destination → origin"
+  forces an always-on **listener** into existence (a bot/gateway connection or a public
+  inbound endpoint). Once that process exists, an in-process scheduler becomes nearly free —
+  so the listener and the "cadence needs state" moments likely arrive together (reinforcing
+  "don't build a scheduler before the process that would host it"). Bidirectional is also what
+  tips **local-first → hosted/hybrid** (a NAT'd, sleeping laptop is a poor inbound host); the
+  architecture then **splits** — collection stays local (it must read local files), delivery +
+  interaction move to a hosted relay — along the existing **portable report/intake blob seam**
+  (built for exactly this). New disciplines it brings: inbound = *untrusted input +
+  authorization* (the security story, until now purely outbound redaction, gains an inbound
+  validate/authorize side); state grows from an append-only log into a correlated conversation
+  (per-platform thread/message IDs); platform coupling deepens (receiving needs
+  platform-specific frameworks/signatures), which argues for the platform-neutral **dashboard
+  (Phase 7b)** as the primary interaction surface, with native-thread replies (7a) as a richer
+  add-on.
+- **Multi-OS at once + multi-user × multi-supervisor.** Two distinct guarantees:
+  *portability* (Orion runs on each OS — the active principle) and *interoperability* (a
+  Windows producer and a macOS consumer agree on shared formats). The supervisor's OS is a
+  non-issue today — the chat platform abstracts it — and only matters for **artifacts that
+  cross machines** (the blob, future relay payloads), where the discipline is UTF-8 /
+  UTC-ISO-8601 timestamps / canonical `\n` and, the one invariant to state explicitly, **no
+  machine-local filesystem paths or locale-dependent formatting in any cross-machine
+  artifact** (the blob carries names and IDs, not paths). Many-to-many **converges on the same
+  hosted component** as bidirectional (multiple producers' data must meet in a shared place),
+  and promotes identity/addressing (a participant graph, not an implicit "me"), authorization
+  (who may see/act on which project), and routing → *subscriptions* to first-class concerns.
+  Seeds already in this plan: explicit participants, the portable blob, per-subscription
+  routing.
 
 ## Verification (per phase)
 

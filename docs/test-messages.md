@@ -17,6 +17,27 @@ a log of what has been exercised end to end.
 
 ## Discord
 
+### 2026-06-16 · orion · Phase B1 sign-off report (secrets fix, from a foreign CWD)
+
+- **When:** 2026-06-16 07:08 UTC
+- **Project:** orion (the real repo, tracking itself)
+- **Scenario:** `report orion` run from `/tmp` (a directory with no `.env`) with
+  `--config /home/yoolee/orion/orion.toml` and **no** exported secrets. This validates the B1
+  `load_secrets` fix end to end — the central `.env` was found purely via `--config` — *and*
+  dual-channel delivery in one shot. Reported the Phase 4 sign-off + roadmap-restructure + B1
+  commits to both recipients.
+- **Share level:** high_level
+- **Secrets redacted:** 0
+- **Result:** Delivered to **both** channels (`Sent to: Alex (supervisor), Sam (supervisor)`).
+
+```text
+**Progress update — orion**
+_June 16, 2026 · 7:08 AM UTC_
+
+## Code activity
+Yousuf completed Phase B1, implementing event-driven triggers through git hooks to extend Orion's automation capabilities. The work includes new hook management functionality in the CLI, comprehensive hook execution logic, and extensive documentation covering usage patterns and known limitations. Phase 4 has been signed off, and the roadmap was restructured into horizons with updated living documentation to reflect progress and next priorities.
+```
+
 ### 2026-06-16 · b1demo · Phase B1 git-hook delivery (fired by `git push`)
 
 - **When:** 2026-06-16 05:25 UTC

@@ -4,9 +4,9 @@
 > (2026-06-15)** — `report` over git + structured signals + `intake`, two-pass redaction,
 > preview-before-send, dual-channel (Discord **and** Slack) delivery with routing,
 > cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
-> **Horizon B (local automation, ingestion & polish) is next, beginning with B1: event-driven
-> git-hook triggers.** This is task #7 on the non-application to-do ("Build progress tracker
-> (Project Orion)").
+> **Horizon B (local automation, ingestion & polish) is underway — B1 (event-driven git-hook
+> triggers) is signed off (2026-06-16); B2 (the Claude Code session skill) is next.** This is
+> task #7 on the non-application to-do ("Build progress tracker (Project Orion)").
 >
 > The **Roadmap** below is organized into **horizons** (A shipped · B next · C the
 > multi-party/hosted pivot, kept coarse). This file looks **forward** (design + phase plan).
@@ -38,7 +38,7 @@
 
 | Phase | Scope | Status |
 |---|---|---|
-| B1 | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Implemented (2026-06-16) — awaiting sign-off |
+| B1 | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Signed off (2026-06-16) |
 | B2 | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal) | ⏳ Planned |
 | B3 | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections | ⏳ Planned |
 | B4 | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model") | ⏳ Planned |
@@ -434,9 +434,14 @@ KI-14. One small supporting change landed in `secrets.py`: `load_secrets` now al
 finds Orion's central secrets via the config path it already passes — fixing secret discovery for
 both unattended paths, with unchanged `override=False` precedence.
 
-> **Awaiting sign-off.** Implementation, the automated suite, and a live check (install on a
-> throwaway repo, push, the hook fired `report --yes`, delivered, and did not block git; a
-> non-`auto_send` project's hook fired but skipped) are complete. `pytest`: 137/137.
+**Signed off (2026-06-16).** Live verification passed: on a throwaway repo, an installed
+**pre-push** hook fired on `git push` (push returned in ~19 ms — never blocked), ran
+`report --yes` in the background, and delivered to Discord; the hook log showed
+`Auto-sending … / Sent to: …`. The **secrets fix** was confirmed separately: from a foreign
+working directory with no exported env, `load_secrets(.../orion.toml)` loaded the central `.env`
+purely via `--config`, and a `report orion` run from `/tmp` (no sourced env) delivered to **both
+Discord and Slack** — proving unattended secret discovery and dual-channel delivery together.
+`pytest`: 139/139.
 
 ## Open questions / to settle before/while building
 

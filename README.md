@@ -100,6 +100,13 @@ Claude-session skill will use), use `intake`:
 python -m orion intake <project> -m "Your update."   # or pipe the body on stdin
 ```
 
+To have a project report itself **automatically when you commit or push**, install a git hook
+(see [Event-driven reports](#event-driven-reports-git-hooks)):
+
+```bash
+python -m orion install-hook <project>               # default: a pre-push hook
+```
+
 ## Configuration (`orion.toml`)
 
 ```toml
@@ -158,6 +165,25 @@ secret-scrubbing — it only skips the *human* preview, for opted-in projects.
 Per-OS setup (cron / systemd timer / launchd / Task Scheduler), the **WSL2 caveat** (cron runs
 only while WSL is running), and the minimal-environment gotchas (use absolute paths, the venv's
 own Python, and ensure `git` is on PATH) are in [`docs/scheduling.md`](docs/scheduling.md).
+
+## Event-driven reports (git hooks)
+
+Orion doesn't watch your repo — but you can have git run it for you on a commit or push:
+
+```bash
+python -m orion install-hook <project>          # default: pre-push (fires on `git push`)
+python -m orion install-hook <project> --hook post-commit   # or fire on every commit
+python -m orion install-hook <project> --print  # review the hook script without installing
+```
+
+This installs a small `#!/bin/sh` hook that runs `report <project> --yes` in the background and
+**always exits 0**, so it never delays or blocks your `git commit`/`git push`. Like scheduled
+runs, it only delivers projects with **`auto_send = true`** (others are skipped) — so a hook can
+never send a project you didn't opt in. Output goes to `<repo>/.git/orion-hook.log`. One portable
+hook works on all three OSes (git runs hooks under `sh`, which Git for Windows bundles).
+
+Full details — `pre-push` vs `post-commit`, reviewing/replacing/removing a hook, coexistence with
+hook managers — are in [`docs/git-hooks.md`](docs/git-hooks.md).
 
 ## Privacy & security
 

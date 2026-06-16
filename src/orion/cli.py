@@ -38,6 +38,7 @@ from orion.config import ConfigError, ProjectConfig, get_project, load_config
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
 from orion.delivery.slack import send as slack_send
+from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
 from orion.report import build_report
@@ -199,11 +200,46 @@ def main(argv: list[str] | None = None) -> int:
         help="The update body. If omitted, the body is read from stdin.",
     )
 
+    hook_parser = subparsers.add_parser(
+        "install-hook",
+        help="Install a git hook that auto-reports a project on commit/push.",
+    )
+    hook_parser.add_argument("project", help="Project name as defined in orion.toml.")
+    hook_parser.add_argument(
+        "--hook",
+        choices=SUPPORTED_HOOKS,
+        default="pre-push",
+        help=(
+            "Which git hook to install (default: pre-push, which fires when you "
+            "push — less noisy than post-commit, which fires on every commit)."
+        ),
+    )
+    hook_parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+    )
+    hook_parser.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="Print the hook script to stdout instead of installing it (review first).",
+    )
+    hook_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing hook of the same name.",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "report":
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
     if args.command == "intake":
         return cmd_intake(args.project, Path(args.config), args.message)
+    if args.command == "install-hook":
+        return cmd_install_hook(
+            args.project, Path(args.config), args.hook, args.print_only, args.force
+        )
     return 1  # Unreachable: subparsers are required.
 
 
@@ -255,7 +291,7 @@ def cmd_report(
 
     try:
         config = load_config(config_path)
-        load_secrets()
+        load_secrets(config_path)
         conn = open_state(config.state_db)
         # Resolve the target project list up front. For a single project this also
         # turns an unknown name into a clean setup error (get_project raises
@@ -500,7 +536,7 @@ def cmd_intake(project_name: str, config_path: Path, message: str | None) -> int
     try:
         config = load_config(config_path)
         project = get_project(config, project_name)
-        load_secrets()
+        load_secrets(config_path)
         conn = open_state(config.state_db)
 
         # The body comes from --message, or from stdin when that is omitted (so a
@@ -554,6 +590,91 @@ def cmd_intake(project_name: str, config_path: Path, message: str | None) -> int
         # collectors, no LLM), so only config/secrets setup errors are expected.
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def cmd_install_hook(
+    project_name: str,
+    config_path: Path,
+    hook_type: str,
+    print_only: bool,
+    force: bool,
+) -> int:
+    """Install (or print) a git hook that auto-reports a project on a git event.
+
+    Args:
+        project_name: The project the hook should report on.
+        config_path: Path to orion.toml.
+        hook_type: Which hook to install (one of hooks.SUPPORTED_HOOKS).
+        print_only: When True, print the script to stdout and write nothing.
+        force: When True, overwrite an existing hook of the same name.
+
+    Returns:
+        Exit code: 0 on success (or a clean --print), 1 on a setup error or a
+        refused overwrite.
+
+    Why:
+        This is the only command that writes into the user's repository, so it is
+        deliberately careful: it refuses to clobber an existing hook unless --force
+        (a repo may already use husky/pre-commit), offers --print to review the
+        exact script before installing, and never changes the report pipeline — the
+        installed hook just calls `report --yes`, so all redaction/auto_send
+        guarantees carry over unchanged. The actual report runs in the background
+        and always exits 0 (see hooks.build_hook_script), so the hook can never
+        delay or block a commit/push.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+        # Ask git where hooks live (correct for worktrees / core.hooksPath), which
+        # also validates repo_path is a real repo — both as a clean ConfigError /
+        # GitError rather than a later surprise.
+        hooks_dir = resolve_hooks_dir(project.repo_path)
+    except (ConfigError, GitError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # Embed ABSOLUTE paths so the hook works from git's minimal environment no
+    # matter the cwd: the venv's own python (sys.executable), the resolved config,
+    # and a log alongside the git dir (hooks_dir's parent).
+    config_abs = config_path.resolve()
+    log_path = hooks_dir.parent / "orion-hook.log"
+    script = build_hook_script(
+        sys.executable, project.name, config_abs, log_path, hook_type
+    )
+
+    # --print: show the exact script, write nothing (review-before-install).
+    if print_only:
+        print(script, end="")
+        return 0
+
+    hook_file = hooks_dir / hook_type
+    if hook_file.exists() and not force:
+        print(
+            f"Refusing to overwrite existing hook: {hook_file}\n"
+            f"Re-run with --force to replace it, or with --print to view the script.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # git creates .git/hooks on init, but mkdir(exist_ok) is cheap insurance for an
+    # unusual layout (e.g. a custom core.hooksPath directory that doesn't exist yet).
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    # newline="\n": never let Windows text mode turn the script into CRLF — a CRLF
+    # after the shebang ("#!/bin/sh\r") breaks the interpreter lookup under sh.
+    hook_file.write_text(script, encoding="utf-8", newline="\n")
+    # Make it executable for git on POSIX; harmless on Windows (git runs hooks via
+    # its bundled sh regardless of the exec bit), so no platform branch is needed.
+    hook_file.chmod(0o755)
+
+    print(f"Installed {hook_type} hook: {hook_file}")
+    print(f"  It runs `report {project.name!r} --yes` and logs to {log_path}.")
+    if not project.auto_send:
+        print(
+            f"  Note: {project.name!r} has auto_send=false, so the hook will run but "
+            f"SKIP sending (nothing is delivered) until you set auto_send=true in "
+            f"{config_path}."
+        )
+    return 0
 
 
 def _channels(project: ProjectConfig) -> list[str]:

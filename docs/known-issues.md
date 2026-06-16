@@ -173,3 +173,20 @@ Deferred).
 - **Severity:** low
 - **Status:** Deferred (enhancement; build when per-project cadence or activity-gating is
   actually wanted).
+
+## KI-14 — `install-hook` installs one standalone hook per project; no chaining
+
+- **Detail:** `orion install-hook` (B1) writes a single standalone hook file (e.g.
+  `.git/hooks/pre-push`) that reports **one** project. It refuses to overwrite an existing hook
+  without `--force`. Consequences: (a) a repo already using a **hook manager** (husky, the
+  `pre-commit` framework, a custom `core.hooksPath`) needs manual integration — let the manager
+  call the one `report --yes` line (see `--print`), since Orion deliberately doesn't try to chain
+  or wrap an existing hook; (b) a single repo mapped to **multiple** Orion projects needs the hook
+  edited by hand to report each.
+- **Why it matters:** The single-file model is the simplest thing that works and is safe (no
+  fragile hook-chaining logic, no silent clobbering). Chaining/awareness of hook managers is
+  speculative complexity until a real user needs it. Recorded so the limitation is a conscious
+  choice, and documented for users in [`git-hooks.md`](git-hooks.md).
+- **Severity:** low
+- **Status:** By-design (revisit if hook-manager coexistence or multi-project-per-repo is actually
+  wanted).

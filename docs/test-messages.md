@@ -17,6 +17,23 @@ a log of what has been exercised end to end.
 
 ## Discord
 
+### 2026-06-16 · b1demo · Phase B1 git-hook delivery (fired by `git push`)
+
+- **When:** 2026-06-16 05:25 UTC
+- **Project:** b1demo (throwaway Phase-B1 test project, `auto_send = true`)
+- **Scenario:** An installed **pre-push** hook fired automatically on `git push` and ran
+  `report b1demo --yes` in the background — the first delivery triggered by a git event rather
+  than a manual/scheduled run. The push returned in ~19 ms (the hook never blocks git); the hook
+  log showed `Auto-sending 'b1demo' … / Sent to: Alex (supervisor).`
+- **Share level:** high_level
+- **Secrets redacted:** 0
+- **Result:** Delivered (exit 0), event-driven.
+
+```text
+## Code activity
+The developer set up the initial structure for B1 hook testing by creating a configuration file and application entry point. This establishes the foundation needed to begin testing webhook functionality.
+```
+
 ### 2026-06-16 · orion · Phase 4 milestone report (preview + confirm)
 
 - **When:** 2026-06-16 03:16 UTC

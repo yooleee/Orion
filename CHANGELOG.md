@@ -14,6 +14,47 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase B1 — Event-driven triggers / git hooks (2026-06-16)
+
+Opens **Horizon B** (local automation). Orion can now report **automatically on a git event**: a
+git hook fires `report <project> --yes` when you commit or push. Orion still does not watch the
+repo and ships no daemon — the hook is what runs it. The report pipeline is **unchanged**: the
+hook only calls the existing `report --yes`, so every Horizon-A guarantee (two-pass redaction,
+the `--yes` + `auto_send` gate, exit-0-on-skip) carries over. Net new runtime dependencies: 0.
+
+### Added
+
+- **`orion install-hook <project>` command** (`cli.py`) — installs a portable git hook that
+  auto-reports the project. `--hook {pre-push,post-commit}` (default **pre-push**, which batches
+  the commits you push and is less noisy than per-commit); `--print` shows the script without
+  writing; `--force` replaces an existing hook (it refuses to clobber one otherwise — this is the
+  only place Orion writes into your repo). Warns when the target project isn't `auto_send`-opted
+  (the hook would run but skip sending).
+- **`src/orion/hooks.py`** — `build_hook_script` (pure builder for the `#!/bin/sh` hook:
+  backgrounded `report --yes`, always `exit 0`, forward-slash paths so it's valid under the `sh`
+  git uses on Windows, output to `<git-dir>/orion-hook.log`) and `resolve_hooks_dir`
+  (`git rev-parse --git-path hooks`, so it's correct for worktrees / `core.hooksPath`, not a
+  hardcoded `.git/hooks`).
+- **`docs/git-hooks.md`** — the runbook (pre-push vs post-commit, the background/exit-0/never-
+  block-git design, the `auto_send` requirement, the log file, per-OS notes, review/replace/
+  remove, and hook-manager coexistence). README gains an "Event-driven reports" section.
+- **Tests** — 139 total (+13): `tests/test_hooks.py` pins the generated script's safety
+  properties (delegates to `report --yes`, backgrounded, always `exit 0`, forward-slash-only
+  paths, self-describing), `resolve_hooks_dir` against a real repo (and `GitError` on a non-repo),
+  and the command end to end (writes an executable hook, honors `--hook`, refuses to clobber
+  without `--force`, `--print` writes nothing, unknown-project error, non-`auto_send` warning);
+  plus two `test_secrets.py` cases for the config-relative `.env` discovery below.
+
+### Changed
+
+- **`load_secrets` now also reads the `.env` beside the `--config` file** (`secrets.py`), in
+  addition to the working-directory search. A git hook or scheduled job starts in some *other*
+  directory, so the default CWD-based `.env` lookup couldn't find Orion's central secrets; now,
+  passing `--config` (which hooks and the scheduling runbook already do) is enough to locate the
+  `.env` next to `orion.toml`. Precedence is unchanged (`override=False`): an exported environment
+  variable still wins, and the config-relative `.env` wins over a CWD one. This fixes secret
+  discovery for **both** event-driven and scheduled unattended runs.
+
 ## Phase 4 — Scheduled digests / unattended send (2026-06-15)
 
 Orion can now run **unattended** on a cadence, so an OS scheduler can deliver digests without a

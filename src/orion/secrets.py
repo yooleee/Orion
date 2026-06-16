@@ -27,26 +27,37 @@ class SecretsError(Exception):
     """
 
 
-def load_secrets(dotenv_path: Path | None = None) -> None:
-    """Load variables from a .env file into the process environment.
+def load_secrets(config_path: Path | None = None) -> None:
+    """Load variables from .env file(s) into the process environment.
 
     Args:
-        dotenv_path: Optional explicit path to a .env file. If None,
-            python-dotenv searches upward from the current directory.
+        config_path: Path to the config file (orion.toml), when known. Its
+            sibling `.env` (`config_path.parent / ".env"`) is loaded first. Pass
+            None to rely only on the working-directory search.
 
     Returns:
         None. Side effect: populates os.environ with any keys found.
 
     Why:
-        Centralizing the load means callers just ask for secrets by name after
-        this runs. We pass override=False (python-dotenv's default) so a value
-        already set in the real environment wins over the .env file — useful in
-        CI or when a user exports a key directly.
+        Secrets live next to the config, as Orion's *central* `.env` — but they
+        are discovered by working directory by default, and a git hook or a
+        scheduled job starts in some *other* directory (the tracked repo, or
+        wherever the scheduler runs). So when we know the config path we load the
+        `.env` beside it FIRST, which makes those non-interactive runs find the
+        central secrets regardless of where they were invoked from. We then fall
+        back to python-dotenv's default upward-from-CWD search, which covers
+        running Orion from its own directory.
+
+        Precedence: override=False (python-dotenv's default) means neither `.env`
+        ever overwrites a value already present in the real environment (so an
+        exported key still wins — useful in CI), and, because it is loaded first,
+        the config-relative `.env` wins over a CWD one for any key both define.
+        Loading a missing path is a harmless no-op, so passing a config whose
+        directory has no `.env` is safe.
     """
-    if dotenv_path is not None:
-        load_dotenv(dotenv_path=dotenv_path)
-    else:
-        load_dotenv()
+    if config_path is not None:
+        load_dotenv(dotenv_path=config_path.parent / ".env")
+    load_dotenv()
 
 
 def get_required(env_var: str) -> str:

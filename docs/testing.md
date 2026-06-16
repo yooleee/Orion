@@ -18,7 +18,7 @@ guarantees — secrets never leak, the right model runs on the right lane, state
 after a real send, and the tool runs the same on every OS. This doc is the map: the
 **categories** of tests, **why each is necessary**, and how to run them.
 
-As of this writing: **126 tests across 17 files**, all passing. The only test dependency is
+As of this writing: **139 tests across 18 files**, all passing. The only test dependency is
 **pytest** (the lone `[dev]` extra) — everything else is the standard library, matching
 Orion's minimal-dependency principle. Shared end-to-end setup for the CLI tests (the real-repo
 builder, the config writer, the mock fixture, and the scripted-`input` helper) lives in
@@ -65,6 +65,7 @@ passed in) rather than monkeypatching, mirroring how `cli.py` builds the client 
 | **Delivery** (network-mocked) | `test_delivery.py`, `test_slack_delivery.py` | The per-channel POST contract — Discord `content`/204 vs Slack `text`/200, the User-Agent that fixes Discord's 403, and length truncation. |
 | **End-to-end pipeline** | `test_cli.py`, `test_intake.py` | The orchestration: multi-collector loop, lane separation (structured signals never call the LLM), per-recipient routing, fail-closed state advancement. |
 | **Unattended send** (Phase 4) | `test_schedule.py` | The scheduled-run safety contract: the preview is bypassed only with `--yes` **and** `auto_send` (config alone never sends); `--all` is fail-soft and exits non-zero only on a real failure; redaction still fires on the auto-send path. |
+| **Event-driven hooks** (B1) | `test_hooks.py` | The generated hook's safety properties (delegates to `report --yes`, backgrounded, always `exit 0`, forward-slash paths) without executing a real hook; `resolve_hooks_dir` against a real repo; and the `install-hook` command (writes an executable hook, honors `--hook`, refuses to clobber without `--force`, `--print` writes nothing, warns when not opted in). |
 | **Portability** (Phase 3.5) | `test_cli_entry.py`, `test_console_encoding.py` | The `python -m orion` entry point resolves on every OS, and the console UTF-8 guard never crashes on a redirected/odd stream. |
 | **Manual / hardware** | `portability-smoke-test.md` (not pytest) | Native Windows / macOS validation that can't run in CI on one machine. |
 
@@ -99,9 +100,12 @@ never bypass the preview.
 
 Tracked honestly so "green" doesn't read as "everything is covered":
 
-- **`load_secrets` is intentionally not unit-tested.** It is a one-line wrapper over
-  `dotenv.load_dotenv`; a test would exercise the library, not Orion. The accessor it feeds
-  (`get_required`) *is* fully tested.
+- **`load_secrets`'s Orion-specific logic *is* tested; the dotenv plumbing is not.** Its
+  config-relative `.env` discovery (find the `.env` beside `--config` from any working directory)
+  and its override=False precedence (a real env var beats the file) are pinned in
+  `test_secrets.py`, because that behavior is what makes git-hook/scheduled runs find secrets. We
+  do not separately test that `dotenv.load_dotenv` reads a file — that would exercise the library,
+  not Orion. The accessor it feeds (`get_required`) *is* fully tested.
 - **`compose()`'s unknown-channel fall-through (KI-5) is not pinned in `test_report_compose.py`** —
   by design. Config validation (`test_config.py::test_unknown_channel_is_rejected`) makes that
   branch unreachable, so the guard lives upstream. If a third channel is ever added to config

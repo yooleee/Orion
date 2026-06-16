@@ -38,7 +38,7 @@
 
 | Phase | Scope | Status |
 |---|---|---|
-| B1 | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ⏳ Next |
+| B1 | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Implemented (2026-06-16) — awaiting sign-off |
 | B2 | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal) | ⏳ Planned |
 | B3 | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections | ⏳ Planned |
 | B4 | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model") | ⏳ Planned |
@@ -409,6 +409,34 @@ and the real Phase 4 commit was reported live to both channels via `report orion
 126/126. A native Windows/macOS scheduler smoke (per [`docs/scheduling.md`](../docs/scheduling.md)
 + [`docs/portability-smoke-test.md`](../docs/portability-smoke-test.md)) remains a hardware-gated
 follow-up, not a blocker.
+
+## Phase B1 status (2026-06-16) — opens Horizon B
+
+Phase B1 — **event-driven triggers (git hooks)** — is **implemented** in `src/orion/` and the
+docs, with a 137-test suite (+11 over A4). Built in four reviewed checkpoints: a pure
+`hooks.py` (`build_hook_script` + `resolve_hooks_dir`) → the `cli.py` `install-hook` command →
+docs (`docs/git-hooks.md` + README) → these living-doc updates. Decisions settled with the user
+(2026-06-16): deliver as a **command + runbook**; default trigger **pre-push** (post-commit also
+supported via `--hook`).
+
+What shipped (details in [`CHANGELOG.md`](../CHANGELOG.md)): `orion install-hook <project>`
+installs a portable `#!/bin/sh` hook that runs `report <project> --yes` in the background and
+**always exits 0**, so it never delays or blocks a commit/push; it embeds absolute paths (the
+venv's python, the config, a `<git-dir>/orion-hook.log`), uses forward-slash paths so it's valid
+under the `sh` git uses on Windows, refuses to clobber an existing hook without `--force`, offers
+`--print` to review, and warns when the project isn't `auto_send`-opted. **The report pipeline is
+untouched** — the hook only calls the existing `report --yes`, so all Horizon-A safety guarantees
+carry over. No new config field; net new runtime dependencies: 0. Git has no client-side
+`post-push` hook, so the local options are `post-commit`/`pre-push` (documented). The
+single-file-hook model's limits (hook-manager coexistence, one-project-per-hook) are recorded as
+KI-14. One small supporting change landed in `secrets.py`: `load_secrets` now also reads the
+`.env` **beside the `--config` file**, so a hook/scheduled run (which starts in another directory)
+finds Orion's central secrets via the config path it already passes — fixing secret discovery for
+both unattended paths, with unchanged `override=False` precedence.
+
+> **Awaiting sign-off.** Implementation, the automated suite, and a live check (install on a
+> throwaway repo, push, the hook fired `report --yes`, delivered, and did not block git; a
+> non-`auto_send` project's hook fired but skipped) are complete. `pytest`: 137/137.
 
 ## Open questions / to settle before/while building
 

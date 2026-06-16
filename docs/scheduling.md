@@ -51,10 +51,13 @@ is one of these. Address all three and the per-OS setup below is mechanical.
    - macOS / Linux: `/abs/path/to/orion/.venv/bin/python`
    - Windows: `C:\abs\path\to\orion\.venv\Scripts\python.exe`
 
-2. **The working directory is not your repo.** Orion resolves `state_db` and the collectors'
-   relative paths against the **config file's** location, so pass the config by **absolute
-   path** and you don't have to care what directory the scheduler starts in:
-   `... -m orion report --all --yes --config /abs/path/to/orion/orion.toml`
+2. **The working directory is not your repo.** Orion resolves `state_db`, the collectors'
+   relative paths, **and your `.env` secrets** against the **config file's** location, so pass
+   the config by **absolute path** and you don't have to care what directory the scheduler
+   starts in: `... -m orion report --all --yes --config /abs/path/to/orion/orion.toml`. Keep
+   `.env` (webhook URLs + the Anthropic key) beside `orion.toml`, its normal home, and a
+   scheduled run finds it with no extra setup. (Exported environment variables also work and
+   take precedence, if you'd rather not rely on a file.)
 
 3. **A stripped `PATH` (so `git` may be missing).** The git collector shells out to `git`; a
    scheduler's `PATH` is often minimal and may not include it. Make sure `git` is reachable —

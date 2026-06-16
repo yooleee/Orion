@@ -1,28 +1,70 @@
 # Project Orion — Progress Tracker & Reporter (Design Plan)
 
-> **Status: Phases 1–4 signed off (2026-06-15).** Architecture and phasing agreed; the
-> on-demand reporting core — git + structured signals + `intake`, redaction, preview, and
-> delivery to Discord **and** Slack with per-recipient routing — is built, live-tested, and
-> documented, and Phase 4 adds safe **unattended scheduled digests** (`report --all --yes`).
-> Phase 5 (event-driven git-hook triggers) is next. This is task #7 on the non-application
-> to-do ("Build progress tracker (Project Orion)").
+> **Status: Horizon A (the local single-user reporting core) is complete and signed off
+> (2026-06-15)** — `report` over git + structured signals + `intake`, two-pass redaction,
+> preview-before-send, dual-channel (Discord **and** Slack) delivery with routing,
+> cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
+> **Horizon B (local automation, ingestion & polish) is next, beginning with B1: event-driven
+> git-hook triggers.** This is task #7 on the non-application to-do ("Build progress tracker
+> (Project Orion)").
 >
-> This file looks **forward** (design + phase plan). For what actually shipped, see
-> [`CHANGELOG.md`](../CHANGELOG.md); for open cross-phase concerns, see
-> [`docs/known-issues.md`](../docs/known-issues.md).
+> The **Roadmap** below is organized into **horizons** (A shipped · B next · C the
+> multi-party/hosted pivot, kept coarse). This file looks **forward** (design + phase plan).
+> For what actually shipped, see [`CHANGELOG.md`](../CHANGELOG.md); for open cross-phase
+> concerns, see [`docs/known-issues.md`](../docs/known-issues.md).
 
-## Phase status
+## Roadmap (horizons & phases)
+
+> **Numbering.** Phases are grouped into **horizons** (A, B, C, … and future D, …); numbering
+> is **horizon-scoped and restarts each horizon**, so a phase number never grows into unwieldy
+> double digits as the project runs on. **Horizon A keeps the original phase numbers unchanged,
+> just prefixed** (A1 = the former "Phase 1", … A3.5 = "Phase 3.5", A4 = "Phase 4"), so every
+> existing reference in [`CHANGELOG.md`](../CHANGELOG.md), commits, and the kickoff docs still
+> maps by inspection. From Horizon B onward, numbering is fresh (B1, B2, …). The detailed
+> per-phase "status" sections further down keep their legacy "Phase N" headings (N == A-N) as
+> the historical shipping record.
+
+**Horizon A — Local single-user reporting core** *(shipped ✅)*
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
-| 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
-| 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
-| 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | ✅ Signed off (2026-06-15) |
-| 4 | Scheduled digests (cadence) | ✅ Signed off (2026-06-15) |
-| 5 | Event-driven triggers (git hooks) | ⏳ Not started |
-| 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
-| 7 | Supervisor replies / web dashboard | ⏳ Not started |
+| A1 (was 1) | `report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
+| A2 (was 2) | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
+| A3 (was 3) | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
+| A3.5 (was 3.5) | Cross-platform portability pass (audit + fixes + scheduling stance) | ✅ Signed off (2026-06-15) |
+| A4 (was 4) | Scheduled digests — unattended `report --all --yes` | ✅ Signed off (2026-06-15) |
+
+**Horizon B — Local automation, ingestion & polish** *(next; local-first preserved)*
+
+| Phase | Scope | Status |
+|---|---|---|
+| B1 | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ⏳ Next |
+| B2 | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal) | ⏳ Planned |
+| B3 | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections | ⏳ Planned |
+| B4 | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model") | ⏳ Planned |
+| B5 | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary | ⏳ Conditional |
+
+**Horizon C — Multi-party & hosted** *(the architectural pivot; coarse — sequenced by dependency, detail to firm up as it nears)*
+
+These converge into one horizon: bidirectional interaction (supervisors acting back) forces an
+always-on **listener**, which is what tips local-first → **hosted/hybrid**, which is where
+**multi-party** data must meet. So they are dependency-ordered, not finely pre-phased:
+
+| Phase | Scope | Status |
+|---|---|---|
+| C1 | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam | 🔭 Later (coarse) |
+| C2 | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization | 🔭 Later (coarse) |
+| C3 | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Later (coarse) |
+
+Beyond Horizon C (a Horizon D, …) is deliberately not sketched yet — the discipline is to keep
+the **seams** clean (the portable summary+metadata blob, explicitly-named participants, the
+provider-agnostic summarizer) so the next horizon stays additive rather than a rewrite.
+
+**Cross-cutting through every horizon:** security & privacy (redaction + preview, gaining an
+inbound validate/authorize side in C), open-source-friendly simple setup, cross-platform
+portability, and cross-machine interoperability (UTF-8 / UTC-ISO-8601 / canonical `\n`, no
+machine-local paths in any cross-machine artifact). The rationale behind Horizon C lives in
+"Future direction & guiding principles" and "Cross-platform & future-direction rationale" below.
 
 ## Context
 
@@ -162,6 +204,13 @@ summarization; the **structured lane** is already report-ready and skips the LLM
 - **State store** — records what was reported so the next run covers only the delta.
 
 ## Phasing (front-load value; defer the fragile parts)
+
+> **Historical (the original MVP sequencing rationale).** The forward-looking phase plan now
+> lives in the **Roadmap** section above (horizons A/B/C). This numbered list reflects the
+> *original* 7-phase plan and is kept for *why* value was front-loaded the way it was — it has
+> since been expanded and re-grouped into horizons. Where the two differ, the Roadmap wins:
+> original Phases 1–4 are Horizon A (A1–A4); original 5 → B1; original 6 → B2; original 7
+> (supervisor replies / dashboard) is expanded across Horizon C (C1–C3).
 
 1. **MVP — git → summary → one channel, on-demand.** `orion report <project>` reads git
    activity since the last report, redacts, summarizes with Claude, **previews** the

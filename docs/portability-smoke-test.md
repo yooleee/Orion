@@ -34,7 +34,7 @@ git --version               # must be on PATH
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-python -m pytest            # expect all green (115 at time of writing)
+python -m pytest            # expect all green (126 at time of writing)
 python -m orion --help      # prints usage, exits 0
 ```
 

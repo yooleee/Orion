@@ -17,6 +17,44 @@ a log of what has been exercised end to end.
 
 ## Discord
 
+### 2026-06-16 · orion · Phase 4 milestone report (preview + confirm)
+
+- **When:** 2026-06-16 03:16 UTC
+- **Project:** orion (the real repo, tracking itself)
+- **Scenario:** `report orion` reporting the Phase 3.5 → Phase 4 delta to the real Discord
+  **and** Slack recipients. Normal preview path (this project has `auto_send` off), confirmed
+  at the prompt — i.e. the human gate, not the unattended path.
+- **Share level:** high_level
+- **Secrets redacted:** 0
+- **Result:** Delivered to both channels (`Sent to: Alex (supervisor), Sam (supervisor)`).
+- **Note:** Haiku under-called the status ("kickoff of Phase 4") — a summary-quality nuance
+  (KI-4), not a pipeline fault.
+
+```text
+**Progress update — orion**
+_June 16, 2026 · 3:16 AM UTC_
+
+## Code activity
+Orion has completed a significant milestone with the delivery of Phase 3.5 (cross-platform portability improvements) and the kickoff of Phase 4 (scheduled digests and unattended sending). The work includes comprehensive portability testing across platforms, expanded test coverage for CLI entry points and scheduling logic, and detailed documentation for both the completed phase and upcoming features. Configuration and documentation have been synchronized with the shipped state, establishing a clear foundation for the next development phase.
+```
+
+### 2026-06-16 · demo-auto · Phase 4 unattended auto-send (`--yes`, no preview)
+
+- **When:** 2026-06-16 03:05 UTC
+- **Project:** demo-auto (throwaway Phase-4 test project)
+- **Scenario:** `report demo-auto --yes` with `auto_send = true` — the **preview is skipped**
+  (the unattended/scheduled path), yet **both redaction passes still run**. A fake AWS key
+  seeded into a normal source file reached the `detailed` diff and was scrubbed before send.
+- **Share level:** detailed
+- **Secrets redacted:** 1 (the `AKIA…` key — verified absent from the stored/sent body).
+- **Result:** Auto-sent with no prompt (exit 0). Body below is the redacted body recorded in
+  `report_history` (the standard header/date wraps it on delivery).
+
+```text
+## Code activity
+The developer added a new service module with a demo request handler and integration configuration for the live auto-send test. The changes include a basic HTTP handler function that returns a status response, along with placeholder integration setup. This appears to be foundational work to enable testing of the live tester functionality with actual code artifacts.
+```
+
 ### 2026-06-15 · demo · Phase 2 intake push
 
 - **When:** 2026-06-15 20:05 UTC
@@ -125,6 +163,25 @@ Orion delivery test (custom UA)
 ---
 
 ## Slack
+
+### 2026-06-16 · orion · Phase 4 milestone report (Slack rendering)
+
+- **When:** 2026-06-16 03:16 UTC
+- **Project:** orion (the real repo, tracking itself)
+- **Scenario:** The Slack half of the `report orion` Phase 4 send above — same content, routed
+  to the Slack recipient and rendered in mrkdwn (`*bold*` header + `*Code activity*` section
+  title, no literal `##`). Confirms the Phase 3.5 → Phase 4 milestone reached Slack live.
+- **Share level:** high_level
+- **Secrets redacted:** 0
+- **Result:** Delivered to both channels (`Sent to: Alex (supervisor), Sam (supervisor)`).
+
+```text
+*Progress update — orion*
+_June 16, 2026 · 3:16 AM UTC_
+
+*Code activity*
+Orion has completed a significant milestone with the delivery of Phase 3.5 (cross-platform portability improvements) and the kickoff of Phase 4 (scheduled digests and unattended sending). The work includes comprehensive portability testing across platforms, expanded test coverage for CLI entry points and scheduling logic, and detailed documentation for both the completed phase and upcoming features. Configuration and documentation have been synchronized with the shipped state, establishing a clear foundation for the next development phase.
+```
 
 ### 2026-06-15 · demo · Phase 3 intake push (redacted, Slack rendering)
 

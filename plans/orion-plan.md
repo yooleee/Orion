@@ -4,10 +4,11 @@
 > (2026-06-15)** — `report` over git + structured signals + `intake`, two-pass redaction,
 > preview-before-send, dual-channel (Discord **and** Slack) delivery with routing,
 > cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
-> **Horizon B (local automation, ingestion & polish) is underway — B1 (event-driven git-hook
-> triggers) and B2 (the Claude Code session skill) are signed off (2026-06-16); B3 (richer
-> rendering) is next.** All four ingestion signals (git, tasks, notes, sessions) now feed Orion.
-> This is task #7 on the non-application to-do ("Build progress tracker (Project Orion)").
+> **Horizon B (local automation, ingestion & polish) is underway — B1 (git-hook triggers),
+> B2 (the Claude Code session skill), and B6 (read-only config-inspect commands) are signed off
+> (2026-06-16); B3 (richer rendering) is next.** All four ingestion signals (git, tasks, notes,
+> sessions) now feed Orion. This is task #7 on the non-application to-do ("Build progress tracker
+> (Project Orion)").
 >
 > The **Roadmap** below is organized into **horizons** (A shipped · B next · C the
 > multi-party/hosted pivot, kept coarse). This file looks **forward** (design + phase plan).
@@ -47,7 +48,7 @@
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ⏳ Planned                 |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model")                                                                                             | ⏳ Planned                 |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
-| B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Implemented (2026-06-16) — awaiting sign-off |
+| B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
 
 **Horizon C — Multi-party & hosted** *(the architectural pivot; coarse — sequenced by dependency, detail to firm up as it nears)*
@@ -494,9 +495,10 @@ writes it, and a `config set` style command was deliberately excluded (it would 
 decision and need a comment-preserving TOML writer dependency). No secret value is ever printed.
 No new runtime dependencies; `config.py`/`secrets.py` reused unchanged. **Resolves KI-15.**
 
-> **Awaiting sign-off.** Implementation and the automated suite (`pytest`: 148/148, +7 for the
-> inspect commands) are complete, plus a live check against the real config (`projects`/`show`/
-> `check` all correct; `check` even caught a real missing repo path; zero secret values printed).
+**Signed off (2026-06-16).** Implementation and the automated suite (`pytest`: 148/148, +7 for the
+inspect commands) are complete, plus a live check against the real config: `projects`/`show`/
+`check` all correct, `check` even caught a genuine missing repo path (a cleaned-up throwaway) and
+exited non-zero, and zero secret values were printed by any command.
 
 ## Open questions / to settle before/while building
 

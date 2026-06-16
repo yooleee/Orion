@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,17 @@ _COLLECTOR_TITLES = {
 
 
 DEFAULT_CONFIG = "orion.toml"
+
+# Per-project run outcomes. cmd_report maps these to an exit code; `report --all`
+# (CP3) tallies them into a summary. Plain string constants mirroring the
+# LANE_RAW / LANE_STRUCTURED idiom in collectors — explicit, greppable, and
+# directly printable. Deliberately NOT an Enum: the set is tiny and only ever
+# compared and counted, so strings keep the call sites readable with no import.
+STATUS_SENT = "SENT"                          # delivered to >=1 recipient
+STATUS_NO_ACTIVITY = "NO_ACTIVITY"            # nothing new since last report
+STATUS_SKIPPED_NOT_OPTED = "SKIPPED_NOT_OPTED"  # --yes but auto_send not enabled
+STATUS_ABORTED = "ABORTED"                     # human declined at the preview
+STATUS_FAILED = "FAILED"                       # a real failure (alert-worthy)
 
 
 def _reconfigure_stream_utf8(stream) -> None:
@@ -139,11 +151,35 @@ def main(argv: list[str] | None = None) -> int:
     report_parser = subparsers.add_parser(
         "report", help="Generate and (after preview) send a progress report."
     )
-    report_parser.add_argument("project", help="Project name as defined in orion.toml.")
+    # project is optional because --all reports on every configured project. main
+    # validates that EXACTLY ONE of {project, --all} is given (argparse can't
+    # express "a positional XOR a flag, exactly one required" cleanly).
+    report_parser.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        help="Project name as defined in orion.toml (omit when using --all).",
+    )
+    report_parser.add_argument(
+        "--all",
+        dest="all_projects",
+        action="store_true",
+        help="Report on every project in the config (for scheduled --all --yes runs).",
+    )
     report_parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG,
         help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+    )
+    report_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=(
+            "Non-interactive: skip the preview for projects with auto_send=true "
+            "(for unattended/scheduled runs). Projects without auto_send are "
+            "skipped, never sent. Without --yes, every run previews as usual."
+        ),
     )
 
     intake_parser = subparsers.add_parser(
@@ -165,35 +201,166 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "report":
-        return cmd_report(args.project, Path(args.config))
+        return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
     if args.command == "intake":
         return cmd_intake(args.project, Path(args.config), args.message)
     return 1  # Unreachable: subparsers are required.
 
 
-def cmd_report(project_name: str, config_path: Path) -> int:
-    """Run the full report pipeline for one project.
+def cmd_report(
+    project_name: str | None,
+    config_path: Path,
+    assume_yes: bool,
+    all_projects: bool,
+) -> int:
+    """Set up shared state, then run the report pipeline for one or all projects.
 
     Args:
-        project_name: The project to report on.
+        project_name: The project to report on, or None when --all is used.
         config_path: Path to orion.toml.
+        assume_yes: True for a non-interactive run (the `--yes` flag). Passed
+            through to _run_report, which combines it with each project's
+            auto_send to decide whether the human preview is bypassed.
+        all_projects: True for `--all` (report on every configured project).
 
     Returns:
-        Exit code: 0 if a report was sent or there was nothing to report; 1 on
-        any error or if no delivery succeeded.
+        Exit code: 2 for a usage error (neither or both of project / --all); 1 if
+        ANY project genuinely FAILED; otherwise 0. No-activity, skipped, and
+        human-aborted projects are all clean exit 0 — so a scheduler alerts only
+        on a real failure, not on the routine "nothing to send" cases.
 
     Why:
-        This function encodes the pipeline order and the safety rules (two-pass
-        redaction, preview-before-send, advance-only-after-success). Known,
-        user-fixable errors are caught and printed cleanly instead of dumping a
-        traceback.
+        Setup (config/secrets/state) is split from the per-project pipeline: those
+        errors are GLOBAL (a bad config breaks every project), so they belong here
+        and fail the whole command, while per-project pipeline errors are handled
+        inside _run_report so that `report --all` can fail-soft. Single-project and
+        --all share ONE loop over a resolved project list (DRY): the only
+        difference is that --all prints a tally afterward. Exit code is driven by
+        the collected statuses, not by which mode was used.
     """
+    # Exactly one of {project, --all} must be given. argparse can't express this
+    # XOR for a positional vs. a flag, so validate it here with a clear message.
+    if all_projects and project_name is not None:
+        print(
+            "Error: give either a project name or --all, not both.",
+            file=sys.stderr,
+        )
+        return 2
+    if not all_projects and project_name is None:
+        print(
+            "Error: give a project name, or --all to report on every project.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         config = load_config(config_path)
-        project = get_project(config, project_name)
         load_secrets()
         conn = open_state(config.state_db)
+        # Resolve the target project list up front. For a single project this also
+        # turns an unknown name into a clean setup error (get_project raises
+        # ConfigError), preserving the pre-Phase-4 behavior.
+        projects = (
+            list(config.projects.values())
+            if all_projects
+            else [get_project(config, project_name)]
+        )
+    except (ConfigError, SecretsError) as exc:
+        # Setup errors are global and user-fixable (a config typo, a missing .env):
+        # print cleanly and fail closed before any project work begins.
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
+    # Fail-soft loop: _run_report catches its own per-project errors and returns
+    # STATUS_FAILED, so one bad project never stops the rest of an --all run.
+    statuses = [_run_report(project, conn, assume_yes) for project in projects]
+
+    if all_projects:
+        _print_all_summary(statuses)
+
+    # Only a real FAILED is a non-zero exit; NO_ACTIVITY / SKIPPED / ABORTED are
+    # all routine, intended outcomes that should not look like an error to cron.
+    return 1 if any(status == STATUS_FAILED for status in statuses) else 0
+
+
+def _print_all_summary(statuses: list[str]) -> None:
+    """Print a one-line tally of per-project outcomes after a `report --all` run.
+
+    Args:
+        statuses: One STATUS_* value per project, in the order they ran.
+
+    Returns:
+        None. Prints a single summary line to stdout.
+
+    Why:
+        An --all run can touch many projects; a human (or a cron log) needs a
+        single glance to see what happened. Every category is shown — including
+        aborted — so the numbers always reconcile to the project count, which
+        makes a surprising result (e.g. an unexpected "failed") obvious instead of
+        hidden by omission.
+    """
+    counts = {
+        STATUS_SENT: 0,
+        STATUS_NO_ACTIVITY: 0,
+        STATUS_SKIPPED_NOT_OPTED: 0,
+        STATUS_ABORTED: 0,
+        STATUS_FAILED: 0,
+    }
+    for status in statuses:
+        counts[status] += 1
+
+    print(
+        f"\n{len(statuses)} project(s): "
+        f"{counts[STATUS_SENT]} sent, "
+        f"{counts[STATUS_NO_ACTIVITY]} no activity, "
+        f"{counts[STATUS_SKIPPED_NOT_OPTED]} skipped, "
+        f"{counts[STATUS_ABORTED]} aborted, "
+        f"{counts[STATUS_FAILED]} failed."
+    )
+
+
+def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bool) -> str:
+    """Run the full report pipeline for ONE already-loaded project.
+
+    Args:
+        project: The validated project config to report on.
+        conn: An open state-store connection (from open_state).
+        assume_yes: True for an unattended run (the `--yes` flag). Combined with
+            project.auto_send, it decides whether the human preview is bypassed.
+
+    Returns:
+        One of the STATUS_* constants describing the outcome, so the caller can
+        set an exit code and (for `report --all`) tally a summary.
+
+    Why:
+        Phase 4 needs the per-project pipeline callable both for a single project
+        and in a loop (`report --all`), so it is extracted here. It owns its own
+        error handling — returning STATUS_FAILED instead of raising — so one
+        project's failure never aborts an --all run, mirroring the per-recipient
+        fail-soft in _deliver. It also encodes the pipeline order and the safety
+        rules: two-pass redaction, advance-only-after-success, and the
+        preview gate.
+
+        Preview gate (the security-critical part): the human preview is skipped
+        ONLY when assume_yes AND project.auto_send are BOTH true. --yes on a
+        project that has not opted in is skipped outright (short-circuited before
+        any collection or LLM call); auto_send without --yes still previews
+        (a human is present, so config alone never bypasses the gate). Redaction
+        is unchanged on every path.
+    """
+    # Defense-in-depth gate, checked before ANY work: an unattended run for a
+    # project that has not opted in to preview-less delivery is skipped here, so
+    # we never collect, never call the LLM, and never send for it. This enforces
+    # "--yes alone never sends; config alone never sends" — both are required.
+    if assume_yes and not project.auto_send:
+        print(
+            f"Skipping {project.name!r}: --yes was given but auto_send is not "
+            f"enabled, so a preview is required and no human is present. "
+            f"Nothing sent; state unchanged."
+        )
+        return STATUS_SKIPPED_NOT_OPTED
+
+    try:
         # --- Collect from each enabled signal, in config order ---
         # Each collector becomes one titled section; each tracks its own delta
         # marker independently (advancing git must not disturb tasks/notes).
@@ -233,7 +400,7 @@ def cmd_report(project_name: str, config_path: Path) -> int:
 
         if not sections:
             print(f"No new activity for {project.name!r} since the last report.")
-            return 0
+            return STATUS_NO_ACTIVITY
 
         # --- Merge per-collector bodies into one report body ---
         merged = merge_sections(sections)
@@ -244,10 +411,11 @@ def cmd_report(project_name: str, config_path: Path) -> int:
         redaction_hits += pass2.hit_count
         if not safe_body.strip():
             print(
-                "Refusing to send: the report body is empty after redaction.",
+                f"Refusing to send {project.name!r}: the report body is empty "
+                f"after redaction.",
                 file=sys.stderr,
             )
-            return 1
+            return STATUS_FAILED
 
         # --- Build the portable report blob ---
         # lane is provenance: RAW if the LLM touched any part of this run, else
@@ -257,19 +425,33 @@ def cmd_report(project_name: str, config_path: Path) -> int:
         lane = LANE_RAW if any_raw_lane else LANE_STRUCTURED
         blob = build_report(project, safe_body, lane, "", generated_at)
 
-        # --- Compose once per distinct channel, then preview all + one confirm ---
+        # --- Compose once per distinct channel ---
         # Same body, formatted for each channel's Markdown dialect; recipients are
         # routed to their channel's rendering in _deliver.
         messages = {ch: compose(blob, ch) for ch in _channels(project)}
-        if not _preview_and_confirm(messages, redaction_hits):
+
+        # --- Preview gate ---
+        # By construction, if assume_yes is True here then project.auto_send is
+        # also True (the not-opted case returned above), so this branch is the
+        # BOTH-required bypass. Otherwise we always show the human preview — which
+        # is why auto_send alone (no --yes) can never skip it.
+        if assume_yes:
+            print(
+                f"Auto-sending {project.name!r} "
+                f"(preview skipped: --yes and auto_send=true)."
+            )
+        elif not _preview_and_confirm(messages, redaction_hits):
             print("Aborted. Nothing was sent; state unchanged.")
-            return 0
+            return STATUS_ABORTED
 
         # --- Deliver to each recipient's webhook (per their channel) ---
         sent_to, failed = _deliver(messages, project)
         if not sent_to:
-            print("No deliveries succeeded; state not advanced.", file=sys.stderr)
-            return 1
+            print(
+                f"No deliveries succeeded for {project.name!r}; state not advanced.",
+                file=sys.stderr,
+            )
+            return STATUS_FAILED
 
         # --- Advance markers ONLY after at least one successful send, and ONLY
         # for the collectors that had activity this run. ---
@@ -283,13 +465,15 @@ def cmd_report(project_name: str, config_path: Path) -> int:
                 f"(Note: {len(failed)} recipient(s) failed; state advanced because "
                 f"at least one delivery succeeded.)"
             )
-        return 0
+        return STATUS_SENT
 
-    except (ConfigError, SecretsError, GitError, SummarizerError, TasksError, NotesError) as exc:
-        # All of these are user-fixable setup/operational problems. Print a clean
-        # message and fail closed (nothing sent, state untouched).
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    except (GitError, SummarizerError, TasksError, NotesError, SecretsError) as exc:
+        # Per-project, fail-soft: print a clean message and report FAILED so an
+        # --all run can continue with the next project. SecretsError here is the
+        # ANTHROPIC key fetch on the raw lane (the webhook fetch is handled inside
+        # _deliver); setup-time config/secrets errors are caught by the caller.
+        print(f"Error reporting {project.name!r}: {exc}", file=sys.stderr)
+        return STATUS_FAILED
 
 
 def cmd_intake(project_name: str, config_path: Path, message: str | None) -> int:

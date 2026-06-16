@@ -18,7 +18,7 @@
 | 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
 | 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
 | 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | ✅ Signed off (2026-06-15) |
-| 4 | Scheduled digests (cadence) | ⏳ Not started |
+| 4 | Scheduled digests (cadence) | ✅ Implemented (2026-06-15) — awaiting sign-off |
 | 5 | Event-driven triggers (git hooks) | ⏳ Not started |
 | 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
 | 7 | Supervisor replies / web dashboard | ⏳ Not started |
@@ -308,7 +308,8 @@ rationale" below): support matrix = **native Windows + macOS + Linux** (WSL coun
 canonical invocation = **`python -m orion`**; console Unicode = **keep glyphs + a guarded
 `reconfigure("utf-8")`**; and the **scheduling stance** = Orion ships **no scheduler of its
 own**, delegating cadence to each OS's native tool (cron / launchd / Task Scheduler),
-documented per-OS — the key input to Phase 4 (see KI-12 for the carried auto-send tension).
+documented per-OS — the key input to Phase 4 (the carried auto-send tension, then tracked as
+KI-12, was resolved in Phase 4 — see the Phase 4 status above and `CHANGELOG.md`).
 
 The test suite is catalogued (categories + why each matters + known gaps) in
 [`docs/testing.md`](../docs/testing.md); the manual cross-OS runbook is
@@ -318,6 +319,40 @@ coverage gaps (Slack-token redaction, git noise-glob/diff-cap/subdir-sensitive, 
 guard's `OSError` arm).
 
 **Signed off (2026-06-15).** `pytest`: 115/115.
+
+## Phase 4 status (2026-06-15)
+
+Phase 4 — **scheduled digests / unattended send** — is **implemented** in `src/orion/` and the
+docs, with a 126-test suite (+11 over Phase 3.5). It was built in five reviewed checkpoints:
+the `config.py` `auto_send` field → the `cli.py` `--yes` + `_run_report` refactor (with the
+security-critical tests) → `report --all` (fail-soft + summary) → docs (`auto_send`/`--all`/
+`--yes` in README + `orion.toml.example`, new `docs/scheduling.md`) → these living-doc updates.
+The design was settled with the user up front (see [`docs/phase-4-kickoff.md`](../docs/phase-4-kickoff.md));
+this phase was a build, not a re-plan.
+
+What shipped (details in [`CHANGELOG.md`](../CHANGELOG.md)): the **`auto_send`** per-project
+opt-in, the **`--yes`** non-interactive flag, and **`--all`** for every-project runs. The
+load-bearing rule is that the human preview is bypassed **only** when `--yes` **and**
+`auto_send=true` are both present — `--yes` alone never sends (a non-opted project is skipped and
+logged), and `auto_send` alone never sends (without `--yes` the preview always shows). Redaction
+is untouched: both passes still run on every path, so unattended delivery relaxes no
+secret-scrubbing — it bypasses only the *human* preview, for opted-in projects. `--all` is
+fail-soft (one project's error doesn't stop the rest) and exits non-zero **only on a real
+failure**, so a scheduler alerts on genuine problems, not on routine no-activity/skipped runs.
+Orion still ships **no scheduler of its own**: cadence is delegated to the OS, documented per-OS
+in [`docs/scheduling.md`](../docs/scheduling.md) (with the WSL2 caveat and minimal-environment
+gotchas). Frozen seams (`redact`, `summarize_raw`, `build_report`, `compose`, `delivery.send`,
+the state store) were not changed; net new runtime dependencies: 0.
+
+The security contract is pinned by `tests/test_schedule.py`, including the load-bearing test
+that `auto_send` **without** `--yes` still previews, and that a seeded fake key is still redacted
+on the auto-send path. **`pytest`: 126/126.** Resolves KI-12; the deferred cadence-aware
+`report --all --due` filter is recorded as KI-13.
+
+> **Awaiting sign-off.** Implementation and the automated suite are complete. A live/cross-OS
+> scheduling smoke pass (wiring a real scheduler entry per `docs/scheduling.md`, pairing with
+> [`docs/portability-smoke-test.md`](../docs/portability-smoke-test.md)) is the natural
+> pre-sign-off check, as hardware allows.
 
 ## Open questions / to settle before/while building
 

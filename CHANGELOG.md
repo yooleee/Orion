@@ -14,6 +14,52 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase 4 — Scheduled digests / unattended send (2026-06-15)
+
+Orion can now run **unattended** on a cadence, so an OS scheduler can deliver digests without a
+human at the keyboard — **without weakening preview-before-send**. No scheduler is built: Orion
+delegates timing to the OS's native tool (the Phase 3.5 stance), and this phase adds only the
+non-interactive, opt-in send path that makes that safe. Each run already reports only the delta
+since the last report, so a daily job is naturally a daily digest. Redaction is unchanged on
+every path. This resolves the Phase-4 tension recorded as KI-12.
+
+### Added
+
+- **`auto_send` project field** (`config.py`) — a per-project boolean (default `false`) that
+  opts a project in to preview-less delivery. Type-validated like `share_level` (a non-boolean
+  is a clear `ConfigError`, so a privacy switch can't be truthy-by-accident).
+- **`report --yes`** (`cli.py`) — the non-interactive flag for scheduled runs. The human
+  preview is skipped **only** when `--yes` **and** `auto_send=true` are *both* present (defense
+  in depth): `--yes` on a project without `auto_send` is **skipped and logged, never sent**, and
+  without `--yes` every run previews as before (config alone never bypasses the gate).
+- **`report --all`** (`cli.py`) — report on every configured project in one run, **fail-soft**
+  (one project's error doesn't stop the rest), with a one-line outcome tally. Exits non-zero
+  **only on a real failure**, so a scheduler alerts on genuine problems, not on routine
+  "nothing to send" runs. Exactly one of `{project, --all}` is required.
+- **`docs/scheduling.md`** — a per-OS runbook (cron / systemd timer / launchd / Task Scheduler)
+  for wiring `python -m orion report --all --yes`, including the **WSL2 caveat** (cron runs only
+  while WSL is up → drive it from Windows Task Scheduler, or run native) and the
+  minimal-environment gotchas (absolute paths, the venv's Python, `git` on PATH). The README
+  gains a "Scheduling" section pointing to it; `orion.toml.example` documents `auto_send`.
+- **Tests** — 126 total (+11): a new `tests/test_schedule.py` for the unattended-send safety
+  contract (auto-send skips the preview yet still redacts a seeded key; `--yes` without
+  `auto_send` sends nothing; `auto_send` **without** `--yes` still previews — the load-bearing
+  test; `--all` is fail-soft and only opted-in projects deliver; the `project`/`--all` usage
+  errors), plus the `auto_send` config-parsing/validation tests. The preview-gate tests use an
+  `input()` *tripwire* that fails if the prompt is ever reached on an unattended path.
+
+### Changed
+
+- **`cmd_report` split into a thin setup wrapper + `_run_report(project, conn, assume_yes)`**
+  (`cli.py`) — setup (config/secrets/state) and its global errors stay in `cmd_report`, while
+  the per-project pipeline moves into `_run_report`, which owns its own fail-soft error handling
+  and returns a `STATUS_*` outcome. This is what lets single-project and `--all` share one loop
+  (DRY) and report a meaningful exit code. No collector, redaction, summarizer, compose, or
+  delivery logic changed.
+- **Shared CLI test setup extracted to `tests/conftest.py`** — the real-repo builder, the
+  config writer (now with an optional `auto_send`), the mock fixture, and the scripted-`input`
+  helper now live in one place, reused by `test_cli.py` and `test_schedule.py` (DRY).
+
 ## Phase 3.5 — Cross-platform portability pass (2026-06-15)
 
 An audit plus targeted fixes so Orion runs natively on Windows, macOS, and Linux, and a

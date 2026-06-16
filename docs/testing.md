@@ -18,9 +18,11 @@ guarantees — secrets never leak, the right model runs on the right lane, state
 after a real send, and the tool runs the same on every OS. This doc is the map: the
 **categories** of tests, **why each is necessary**, and how to run them.
 
-As of this writing: **115 tests across 16 files**, all passing. The only test dependency is
+As of this writing: **126 tests across 17 files**, all passing. The only test dependency is
 **pytest** (the lone `[dev]` extra) — everything else is the standard library, matching
-Orion's minimal-dependency principle.
+Orion's minimal-dependency principle. Shared end-to-end setup for the CLI tests (the real-repo
+builder, the config writer, the mock fixture, and the scripted-`input` helper) lives in
+`tests/conftest.py`, so `test_cli.py` and `test_schedule.py` reuse one copy.
 
 ## Running the suite
 
@@ -56,12 +58,13 @@ passed in) rather than monkeypatching, mirroring how `cli.py` builds the client 
 
 | Category | Files | What it protects / why it's necessary |
 |---|---|---|
-| **Security gate** | `test_redact.py`; the `.env`/subdir/noise exclusion in `test_git_collector.py`; the pass-2 redaction cases in `test_cli.py` / `test_intake.py` | The #1 principle: secrets never reach the LLM or a channel. If these fail, Orion is not shippable. |
+| **Security gate** | `test_redact.py`; the `.env`/subdir/noise exclusion in `test_git_collector.py`; the pass-2 redaction cases in `test_cli.py` / `test_intake.py`; the redaction-under-auto-send case in `test_schedule.py` | The #1 principle: secrets never reach the LLM or a channel. If these fail, Orion is not shippable. |
 | **Pure-logic units** | `test_merge.py`, `test_report_compose.py`, `test_secrets.py`, `test_summarize.py`, `test_console_encoding.py` | Leaf-module correctness with no I/O — fast, exact-output assertions. |
 | **File-I/O collectors & store** | `test_tasks_collector.py`, `test_notes_collector.py`, `test_config.py`, `test_state.py` | Parsing local files (TOML, checklists, notes) and persisting per-`(project, collector)` deltas, including the Phase-1→2 marker migration. |
 | **Real-git integration** | `test_git_collector.py` | The actual `subprocess` git behavior against real temp repos — delta detection, share-level gating, and the collection-time secret/noise filters. |
 | **Delivery** (network-mocked) | `test_delivery.py`, `test_slack_delivery.py` | The per-channel POST contract — Discord `content`/204 vs Slack `text`/200, the User-Agent that fixes Discord's 403, and length truncation. |
 | **End-to-end pipeline** | `test_cli.py`, `test_intake.py` | The orchestration: multi-collector loop, lane separation (structured signals never call the LLM), per-recipient routing, fail-closed state advancement. |
+| **Unattended send** (Phase 4) | `test_schedule.py` | The scheduled-run safety contract: the preview is bypassed only with `--yes` **and** `auto_send` (config alone never sends); `--all` is fail-soft and exits non-zero only on a real failure; redaction still fires on the auto-send path. |
 | **Portability** (Phase 3.5) | `test_cli_entry.py`, `test_console_encoding.py` | The `python -m orion` entry point resolves on every OS, and the console UTF-8 guard never crashes on a redirected/odd stream. |
 | **Manual / hardware** | `portability-smoke-test.md` (not pytest) | Native Windows / macOS validation that can't run in CI on one machine. |
 
@@ -82,8 +85,15 @@ subdirectory, even at `share_level = "detailed"`.
 Defense in depth is only real if it's tested at the seams. `test_cli.py` seeds a fake key into
 the *mocked model's reply* and asserts the **pass-2** redaction (the net before send) scrubs
 it — proving a leak introduced *after* collection is still caught. `test_intake.py` does the
-same for a pushed body. These pin that redaction runs on the exact bytes that leave the
-machine, not just on collected input.
+same for a pushed body. `test_schedule.py` repeats it on the **auto-send** path, proving that
+skipping the *human* preview does not skip *redaction*. These pin that redaction runs on the
+exact bytes that leave the machine, not just on collected input.
+
+The unattended path also needs the *opposite* proof — that the human gate is **not** silently
+removed. `test_schedule.py` uses an `input()` **tripwire** (a fake that raises if called) to
+prove `--yes`+`auto_send` runs never prompt, and a recording spy to prove that `auto_send`
+**without** `--yes` *does* still prompt. The second is the load-bearing test: config alone must
+never bypass the preview.
 
 ## Known coverage gaps & intentional non-targets
 

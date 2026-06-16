@@ -81,6 +81,10 @@ class ProjectConfig:
             collector is not enabled. Resolved absolute at load time.
         notes_file: Path to the hand-written notes file, or None when the "notes"
             collector is not enabled. Resolved absolute at load time.
+        auto_send: Whether this project may be delivered WITHOUT the human preview
+            during an unattended run. Defaults to False (opt-in). It only takes
+            effect when the `report` command is also given `--yes`; on its own it
+            never bypasses the preview (see cli._run_report). Defense in depth.
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
@@ -98,6 +102,7 @@ class ProjectConfig:
     recipients: tuple[Recipient, ...]
     tasks_file: Path | None = None
     notes_file: Path | None = None
+    auto_send: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,6 +216,15 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
                 f"Supported now: {SUPPORTED_COLLECTORS}."
             )
 
+    # auto_send defaults to False (opt-in, safest) and must be a real boolean.
+    # isinstance(x, bool) rejects ints and strings, so TOML `auto_send = 1` or
+    # `auto_send = "yes"` is caught here rather than silently treated as truthy.
+    auto_send = body.get("auto_send", False)
+    if not isinstance(auto_send, bool):
+        raise ConfigError(
+            f"{where} has invalid auto_send={auto_send!r}. Expected true or false."
+        )
+
     recipients = _parse_recipients(body.get("recipients"), where)
 
     # Structured file-backed collectors each need their file path — but only when
@@ -231,6 +245,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         recipients=recipients,
         tasks_file=tasks_file,
         notes_file=notes_file,
+        auto_send=auto_send,
     )
 
 

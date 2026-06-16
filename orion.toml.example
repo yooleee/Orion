@@ -25,6 +25,16 @@ repo_path = "/home/yoolee/orion"
 # secret-filtered diff as well. When in doubt, stay high_level.
 share_level = "high_level"
 
+# Unattended-delivery opt-in. Default false: every run previews in your terminal
+# before anything is sent. Set true ONLY for a project you want a scheduler to
+# deliver without a human watching — and even then it takes effect ONLY when the
+# run also passes `--yes` (e.g. `orion report --all --yes`). Without `--yes` the
+# preview always shows (a human is present); `--yes` on a project with
+# auto_send=false skips it and sends nothing. BOTH are required — defense in
+# depth. For unattended projects, prefer share_level = "high_level".
+# See docs/scheduling.md for the per-OS scheduler setup.
+# auto_send = false
+
 # Which signals are collected — each independently toggleable here. Supported:
 #   "git"   — raw git activity (summarized by Claude on the raw lane)
 #   "tasks" — newly-completed items from a Markdown checklist (structured, no LLM)

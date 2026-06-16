@@ -61,6 +61,9 @@ def test_valid_config_resolves_defaults(tmp_path):
     # Defaults: safest share level and the git collector.
     assert project.share_level == "high_level"
     assert project.collectors == ("git",)
+    # auto_send defaults to False: a project is opt-in for unattended delivery,
+    # so an omitted field can never silently enable a preview-less send.
+    assert project.auto_send is False
     assert project.recipients[0].name == "Alex"
     # state_db default is resolved next to the config file, as an absolute path.
     assert config.state_db == (tmp_path / "orion.sqlite3").resolve()
@@ -127,6 +130,80 @@ def test_invalid_share_level_raises(tmp_path):
         """,
     )
     with pytest.raises(ConfigError, match="share_level"):
+        load_config(path)
+
+
+def test_auto_send_true_parses(tmp_path):
+    """`auto_send = true` is parsed as a real boolean True.
+
+    Why this matters: this is the opt-in that (together with `--yes`) allows an
+    unattended run to skip the human preview. If it didn't parse to True, the
+    unattended path could never engage; if it parsed loosely, the privacy gate
+    would rest on a fuzzy value. We pin the exact boolean.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        auto_send = true
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.auto_send is True
+
+
+def test_auto_send_false_parses(tmp_path):
+    """`auto_send = false` is parsed as a real boolean False.
+
+    Why this matters: the explicit opt-OUT must read back as False, distinct from
+    the omitted-field default (which is also False) — a user writing it out should
+    get exactly what they wrote, not a coincidental default.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        auto_send = false
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.auto_send is False
+
+
+def test_auto_send_invalid_type_raises(tmp_path):
+    """A non-boolean auto_send is rejected rather than coerced.
+
+    Why this matters: a privacy-relevant switch must not be truthy-by-accident. A
+    string like "yes" or an int like 1 would be "truthy" in Python and could
+    quietly authorize a preview-less send; isinstance(x, bool) catches that here,
+    at load time, with a message that names the fix.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        auto_send = "yes"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="auto_send"):
         load_config(path)
 
 

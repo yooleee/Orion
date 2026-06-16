@@ -156,18 +156,20 @@ Deferred).
 - **Severity:** low
 - **Status:** Deferred (add with the per-supervisor routing model).
 
-## KI-12 — Unattended (scheduled) runs vs. the preview-before-send guarantee
+## KI-13 — Cadence-aware `report --all --due` filter deferred
 
-- **Detail:** Phase 3.5 settled that Orion ships **no scheduler of its own** — cadence is
-  delegated to each OS's native tool (cron / launchd / Task Scheduler), invoked as
-  `python -m orion report <project>`. But every report path today is gated by an interactive
-  preview-before-send confirm, which an unattended scheduled run cannot answer. Scheduled
-  digests (Phase 4) therefore need a non-interactive way to run without weakening the privacy
-  guarantee.
-- **Why it matters:** Preview-before-send is the human gate that backstops redaction (see
-  KI-3). Auto-sending on a schedule removes that gate, so it must be a deliberate, **explicit
-  per-project opt-in** — never a default — with all redaction passes still firm and ideally a
-  conservative share level. This is the central tension Phase 4 must resolve; the scheduling
-  *mechanism* (delegate to the OS) is settled, the *auto-send design* is the open part.
-- **Severity:** medium
-- **Status:** Deferred to Phase 4.
+- **Detail:** Phase 4 delegates *timing* to the OS scheduler: `report --all --yes` reports
+  **every** project whenever the scheduler fires. There is no Orion-side notion of per-project
+  cadence (e.g. "this project weekly, that one daily"). A `--due` filter — Orion reading a
+  per-project schedule plus the last-report time and reporting only the projects due *now* — was
+  considered for Phase 4 and deliberately deferred.
+- **Why it matters:** Today, mixed cadences are expressed with multiple scheduler entries (one
+  per cadence group), which works and keeps Orion stateless about timing. A `--due` filter would
+  let a single scheduler entry serve mixed cadences, but it is the first piece of "cadence needs
+  Orion's *own* state" — the exact point at which a built-in scheduling *layer* becomes the right
+  call (see the plan's "When a built-in scheduling layer becomes right"). It needs a `schedule`
+  config field and last-report-time gating, which is scope beyond Phase 4's goal of making
+  unattended runs *safe*. Recorded so the deferral is a conscious choice, not an omission.
+- **Severity:** low
+- **Status:** Deferred (enhancement; build when per-project cadence or activity-gating is
+  actually wanted).

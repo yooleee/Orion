@@ -16,50 +16,12 @@
 # Everything else (config, state, git collection, redaction) runs for real.
 # =============================================================================
 
-import subprocess
-
-import pytest
-
 from orion import cli
 
-
-def _run(repo, *args):
-    """Run a git command in a test repo, raising on failure."""
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-
-
-def _make_repo(tmp_path):
-    """Create a git repo with one commit and return its path."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _run(repo, "init", "-q")
-    _run(repo, "config", "user.email", "t@example.com")
-    _run(repo, "config", "user.name", "Tester")
-    (repo / "feature.py").write_text("def f():\n    return 1\n")
-    _run(repo, "add", "-A")
-    _run(repo, "commit", "-q", "-m", "Add feature")
-    return repo
-
-
-def _write_config(tmp_path, repo):
-    """Write an orion.toml in tmp_path pointing at the repo. Returns its path."""
-    toml = tmp_path / "orion.toml"
-    toml.write_text(
-        f"""
-        state_db = "state.sqlite3"
-
-        [projects.demo]
-        repo_path = "{repo}"
-        share_level = "high_level"
-        collectors = ["git"]
-
-          [[projects.demo.recipients]]
-          name = "Alex"
-          channel = "discord"
-          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
-        """
-    )
-    return toml
+# The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
+# so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
+# fixture by name; the plain helper functions are imported explicitly.
+from conftest import _answer, _make_repo, _write_config
 
 
 def _write_config_collectors(tmp_path, repo, collectors, *, tasks_file=None, notes_file=None):
@@ -128,35 +90,6 @@ def _write_dual_channel_config(tmp_path, repo):
         """
     )
     return toml
-
-
-@pytest.fixture
-def env_and_mocks(monkeypatch):
-    """Set required env vars and capture mocked LLM + delivery.
-
-    Returns:
-        A dict with a `sent` list that records (message, url) tuples that the
-        (mocked) Discord sender was asked to deliver.
-
-    Why:
-        Centralizes the three mocks every CLI test needs so each test only scripts
-        the input answer and asserts on outcomes (DRY).
-    """
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
-
-    sent: list[tuple[str, str]] = []
-
-    # Default summary echoes nothing sensitive; individual tests can override.
-    monkeypatch.setattr(cli, "summarize_raw", lambda text, level, *, client: "Made progress.")
-    monkeypatch.setattr(cli, "discord_send", lambda message, url: sent.append((message, url)))
-
-    return {"sent": sent, "monkeypatch": monkeypatch}
-
-
-def _answer(monkeypatch, value):
-    """Script the preview confirm prompt to return `value`."""
-    monkeypatch.setattr("builtins.input", lambda prompt="": value)
 
 
 def test_full_run_sends_and_advances_state(tmp_path, env_and_mocks):

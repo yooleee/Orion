@@ -6,13 +6,14 @@ delivers them to designated "supervisors" over Discord and Slack. Collectors rea
 files; only delivery makes an outbound call. Reports are previewed in your terminal before
 anything is sent.
 
-> **Status: Phases 1–3 (the on-demand reporting core).** `orion report <project>` collects
-> from each enabled signal (git, tasks, notes), redacts secrets, summarizes only the raw git
-> activity with Claude (structured signals skip the LLM), previews the message, and on your
-> confirmation delivers it to each recipient's Discord **and/or** Slack webhook — then records
-> what was sent so the next run only covers what's new. `orion intake <project>` sends a
-> pushed or hand-written update. Scheduled digests, git-hook triggers, and the Claude-session
-> skill are later phases.
+> **Status: Phases 1–4.** `orion report <project>` collects from each enabled signal (git,
+> tasks, notes), redacts secrets, summarizes only the raw git activity with Claude (structured
+> signals skip the LLM), previews the message, and on your confirmation delivers it to each
+> recipient's Discord **and/or** Slack webhook — then records what was sent so the next run only
+> covers what's new. `orion intake <project>` sends a pushed or hand-written update. Phase 4
+> adds **unattended scheduled digests**: `orion report --all --yes`, run from your OS scheduler,
+> delivers opted-in projects without the preview (see [Scheduling](#scheduling)). Git-hook
+> triggers and the Claude-session skill are later phases.
 
 ## Supported platforms
 
@@ -87,6 +88,11 @@ This runs the full pipeline for the named project (from `orion.toml`):
 If there's nothing new, it says so and sends nothing. If you decline the preview, nothing is
 sent and state is left unchanged, so the same activity is still reportable.
 
+To report on **every** project in one go, use `--all` instead of a project name:
+`python -m orion report --all`. For running Orion **unattended** on a schedule (where no one is
+present to confirm the preview), add `--yes` — but a project is only ever sent without the
+preview if it has also opted in with `auto_send = true`. See [Scheduling](#scheduling).
+
 To send a pushed or hand-written update (no collectors, no LLM — the same entry point a future
 Claude-session skill will use), use `intake`:
 
@@ -102,6 +108,7 @@ state_db = "orion.sqlite3"        # relative paths resolve next to this file
 [projects.orion]
 repo_path   = "/home/you/orion"   # local git repo to read
 share_level = "high_level"        # "high_level" (no code diff) | "detailed" (capped diff)
+auto_send   = false               # unattended-send opt-in; needs `--yes` too (see Scheduling)
 collectors  = ["git", "tasks", "notes"]   # any of: git, tasks, notes
 tasks_file  = "TODO.md"           # required when "tasks" is enabled (a Markdown checklist)
 notes_file  = "NOTES.md"          # required when "notes" is enabled (a hand-written update)
@@ -124,6 +131,33 @@ holds its webhook URL, and the URL lives only in `.env`.
 > with forward slashes — `repo_path = "C:/Users/you/orion"` (forward slashes work fine on
 > Windows) — or as a single-quoted *literal* string — `repo_path = 'C:\Users\you\orion'`.
 > A double-quoted `"C:\Users\..."` will be misread because `\U` starts an escape.
+
+## Scheduling
+
+Orion has **no built-in scheduler** — to deliver digests on a cadence, hand the one-shot
+command to your OS's own scheduler (cron, a systemd timer, launchd, or Task Scheduler). The
+unattended command is:
+
+```bash
+python -m orion report --all --yes
+```
+
+- `--all` reports on every project in the config.
+- `--yes` allows the terminal preview to be skipped — but **only** for projects with
+  `auto_send = true`. A project without `auto_send` is **skipped and logged, never sent**, even
+  under `--yes`; and **without** `--yes` every run previews as usual. Both are required, so a
+  scheduled run can never deliver a project you didn't explicitly opt in (defense in depth).
+- Each run already reports only what's new, so a project with no activity sends nothing — a
+  daily job is naturally a daily digest.
+- The run exits non-zero **only on a real failure**, so your scheduler alerts on genuine
+  problems, not on routine "nothing to send" runs.
+
+Redaction is unchanged on this path: both passes still run, so unattended delivery relaxes no
+secret-scrubbing — it only skips the *human* preview, for opted-in projects.
+
+Per-OS setup (cron / systemd timer / launchd / Task Scheduler), the **WSL2 caveat** (cron runs
+only while WSL is running), and the minimal-environment gotchas (use absolute paths, the venv's
+own Python, and ensure `git` is on PATH) are in [`docs/scheduling.md`](docs/scheduling.md).
 
 ## Privacy & security
 

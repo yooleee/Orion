@@ -14,6 +14,35 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase B6 — CLI config-inspect commands (2026-06-16)
+
+Read-only visibility into the config, closing the gap surfaced while using `install-hook` (there
+was no way to *see* what's configured or confirm a flag like `auto_send`). Net new runtime
+dependencies: 0; `config.py`/`secrets.py` reused unchanged.
+
+### Added
+
+- **`orion projects`** (`cli.py`) — list every configured project with its key facts:
+  `auto_send`, `share_level`, collectors, and recipients (name + channel).
+- **`orion show <project>`** — one project's fully-resolved config: paths, flags, collectors,
+  and each recipient's channel + webhook env-var **name** (never the URL).
+- **`orion check`** — validate the config (reusing `load_config`), then report per-project
+  send-**readiness**: the git repo path exists, each recipient's webhook secret is present, and
+  `ANTHROPIC_API_KEY` is present when the git (raw) lane is in use. Secrets are reported by NAME
+  as `set`/`MISSING`, **never by value**; exits non-zero if the config is invalid or any required
+  item is missing, so it works as a pre-flight gate. (Soft items like a not-yet-created collector
+  file warn but don't fail.)
+- **Tests** — 148 total (+7): `tests/test_inspect.py` covers `projects`/`show` (right facts, no
+  URL leak, unknown-project error) and `check` (ready → exit 0; missing webhook → flagged by name
+  + exit 1, with a seeded secret value confirmed absent from output; invalid config → exit 1).
+
+### Notes
+
+- **Read-only by design.** These commands never write `orion.toml`. A `config set`-style writer
+  was deliberately **excluded**: it would break the settled "Orion never writes its config"
+  decision (the reason for TOML + read-only `tomllib`) and need a comment-preserving TOML-writer
+  dependency. Config stays a hand-edited, declarative file. (Resolves KI-15.)
+
 ## Phase B2 — Claude Code session skill (2026-06-16)
 
 Adds the fourth (and final) ingestion signal — **coding sessions** — as a *pushed summary*, not by

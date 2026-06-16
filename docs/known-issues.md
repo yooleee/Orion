@@ -190,19 +190,3 @@ Deferred).
 - **Severity:** low
 - **Status:** By-design (revisit if hook-manager coexistence or multi-project-per-repo is actually
   wanted).
-
-## KI-15 — No CLI for inspecting config; config is hand-edited only
-
-- **Detail:** The CLI has no way to view what's configured or change a setting — e.g. after
-  `install-hook` you can't confirm/flip `auto_send` from the command line, you edit `orion.toml`
-  directly (surfaced 2026-06-16 when a hook was installed before the project was opted in). The
-  intended fix is **read-only** inspect commands (`projects` / `show` / `check`), tracked as
-  roadmap item **B6**.
-- **Why it matters:** The real gap is *visibility/discoverability*, which read-only commands
-  solve cleanly. A *write* command (`config set …`) is deliberately **out of scope**: it would
-  break the settled "Orion never writes its config" decision (the reason TOML + read-only
-  `tomllib` was chosen) and force a comment-preserving TOML writer dependency
-  (`tomlkit`/`tomli-w`) against the minimal-dependency principle. Config is a declarative,
-  human-authored file; hand-editing it is the intended workflow.
-- **Severity:** low
-- **Status:** Planned (read-only inspect commands = B6; config-writing intentionally excluded).

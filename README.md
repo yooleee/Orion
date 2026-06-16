@@ -146,6 +146,23 @@ holds its webhook URL, and the URL lives only in `.env`.
 > Windows) — or as a single-quoted *literal* string — `repo_path = 'C:\Users\you\orion'`.
 > A double-quoted `"C:\Users\..."` will be misread because `\U` starts an escape.
 
+### Inspecting your config
+
+Three **read-only** commands let you see what's configured (Orion never *writes* the config —
+you change it by editing `orion.toml`):
+
+```bash
+python -m orion projects          # list every project: auto_send, share level, channels
+python -m orion show <project>    # one project's resolved config (paths, flags, recipients)
+python -m orion check             # validate the config and report send-readiness
+```
+
+`check` is a pre-flight gate: it validates the config, then reports whether each project is
+actually ready to send — the git repo path exists, each recipient's webhook secret is present,
+and the Anthropic key is set when the git lane is in use. It reports secrets **by name** as
+`set`/`MISSING`, never by value, and exits non-zero if anything required is missing. None of these
+commands print a secret value (the config holds env-var *names* and paths, not secrets).
+
 ## Scheduling
 
 Orion has **no built-in scheduler** — to deliver digests on a cadence, hand the one-shot

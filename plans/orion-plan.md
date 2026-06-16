@@ -47,7 +47,7 @@
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ⏳ Planned                 |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model")                                                                                             | ⏳ Planned                 |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
-| B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Small polish; KI-15                 | ⏳ Planned (small)         |
+| B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Implemented (2026-06-16) — awaiting sign-off |
 
 
 **Horizon C — Multi-party & hosted** *(the architectural pivot; coarse — sequenced by dependency, detail to firm up as it nears)*
@@ -475,6 +475,28 @@ to `[REDACTED_AWS_KEY]`), and then the **skill run fully end-to-end** — the `o
 was installed into `~/.claude/skills/`, invoked in a real session, drafted a summary, showed it
 for in-session approval, and on approval delivered it to both channels via `intake --yes`.
 `pytest`: 141/141 (+2 for `intake --yes`).
+
+## Phase B6 status (2026-06-16)
+
+Phase B6 — **read-only config-inspect commands** — is **implemented**, closing the
+visibility/discoverability gap surfaced while using `install-hook` (KI-15). Built in three
+reviewed checkpoints: `projects` + `show` → `check` (validity + readiness) → docs + living docs.
+Decisions settled with the user (2026-06-16): build **all three** commands; `check` does
+**validity + readiness**; plain-text output.
+
+What shipped (details in [`CHANGELOG.md`](../CHANGELOG.md)): `orion projects` (list every project
+with `auto_send`/share level/collectors/channels), `orion show <project>` (one project's resolved
+config), and `orion check` (validate the config, then report per-project send-readiness — repo
+path exists, each webhook secret present, Anthropic key present for the git lane — by NAME as
+set/MISSING, and a non-zero exit if anything required is missing, so it works as a pre-flight
+gate). The load-bearing constraint holds: these commands **only read** config — Orion still never
+writes it, and a `config set` style command was deliberately excluded (it would break that
+decision and need a comment-preserving TOML writer dependency). No secret value is ever printed.
+No new runtime dependencies; `config.py`/`secrets.py` reused unchanged. **Resolves KI-15.**
+
+> **Awaiting sign-off.** Implementation and the automated suite (`pytest`: 148/148, +7 for the
+> inspect commands) are complete, plus a live check against the real config (`projects`/`show`/
+> `check` all correct; `check` even caught a real missing repo path; zero secret values printed).
 
 ## Open questions / to settle before/while building
 

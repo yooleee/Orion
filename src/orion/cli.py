@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -34,7 +35,7 @@ from orion.collectors.notes import collect as collect_notes
 from orion.collectors.tasks import TasksError
 from orion.collectors.tasks import collect as collect_tasks
 from orion.compose import compose
-from orion.config import ConfigError, ProjectConfig, get_project, load_config
+from orion.config import ConfigError, ProjectConfig, Recipient, get_project, load_config
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
 from orion.delivery.slack import send as slack_send
@@ -241,6 +242,38 @@ def main(argv: list[str] | None = None) -> int:
         help="Overwrite an existing hook of the same name.",
     )
 
+    # Read-only inspect commands (B6). They print config; they never write it.
+    projects_parser = subparsers.add_parser(
+        "projects",
+        help="List the projects defined in the config (read-only).",
+    )
+    projects_parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+    )
+
+    show_parser = subparsers.add_parser(
+        "show",
+        help="Show one project's resolved config (read-only).",
+    )
+    show_parser.add_argument("project", help="Project name as defined in orion.toml.")
+    show_parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+    )
+
+    check_parser = subparsers.add_parser(
+        "check",
+        help="Validate the config and report send-readiness (read-only).",
+    )
+    check_parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "report":
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
@@ -250,6 +283,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_install_hook(
             args.project, Path(args.config), args.hook, args.print_only, args.force
         )
+    if args.command == "projects":
+        return cmd_projects(Path(args.config))
+    if args.command == "show":
+        return cmd_show(args.project, Path(args.config))
+    if args.command == "check":
+        return cmd_check(Path(args.config))
     return 1  # Unreachable: subparsers are required.
 
 
@@ -700,6 +739,206 @@ def cmd_install_hook(
             f"{config_path}."
         )
     return 0
+
+
+def cmd_projects(config_path: Path) -> int:
+    """List every configured project with its key facts (read-only).
+
+    Args:
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 if the config can't be loaded/validated.
+
+    Why:
+        The "what's configured / did I set auto_send?" command — the visibility
+        the CLI lacked (KI-15). It only READS the config (Orion never writes it),
+        so it is safe and side-effect-free, and it surfaces the few facts you most
+        want at a glance: the opt-in flag, share level, signals, and who receives
+        the report.
+    """
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{len(config.projects)} project(s) in {config_path}:")
+    for project in config.projects.values():
+        print()
+        print(f"  {project.name}")
+        print(f"    auto_send:   {_fmt_bool(project.auto_send)}")
+        print(f"    share_level: {project.share_level}")
+        print(f"    collectors:  {', '.join(project.collectors)}")
+        print(f"    recipients:  {_format_recipients(project.recipients)}")
+    return 0
+
+
+def cmd_show(project_name: str, config_path: Path) -> int:
+    """Show one project's fully-resolved config (read-only).
+
+    Args:
+        project_name: The project to show.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config error or unknown project.
+
+    Why:
+        The per-project detail view. It prints only non-secret fields — paths,
+        flags, and each recipient's channel and webhook ENV-VAR NAME (never the
+        URL, which lives in .env and never enters the config). So there is nothing
+        sensitive to leak here; the config holds names and paths, not secrets.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Project {project.name!r} (from {config_path}):")
+    print(f"  repo_path:    {project.repo_path}")
+    print(f"  share_level:  {project.share_level}")
+    print(f"  auto_send:    {_fmt_bool(project.auto_send)}")
+    print(f"  collectors:   {', '.join(project.collectors)}")
+    if project.tasks_file is not None:
+        print(f"  tasks_file:   {project.tasks_file}")
+    if project.notes_file is not None:
+        print(f"  notes_file:   {project.notes_file}")
+    print(f"  state_db:     {config.state_db}")
+    print("  recipients:")
+    for recipient in project.recipients:
+        # webhook_env_var is the NAME of the .env key, not the URL — safe to show.
+        print(
+            f"    - {recipient.name} — channel={recipient.channel}, "
+            f"webhook_env_var={recipient.webhook_env_var}"
+        )
+    return 0
+
+
+def cmd_check(config_path: Path) -> int:
+    """Validate the config and report per-project send-readiness (read-only).
+
+    Args:
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 if the config is valid AND every required piece is in place;
+        1 if the config is invalid or any required readiness item is missing.
+
+    Why:
+        A pre-flight check — "is my config valid, and am I actually set up to
+        send?" Validity reuses load_config (the same validation every command
+        runs). Readiness then checks the things a real run needs but config can't
+        guarantee: that an enabled git repo path exists, that each recipient's
+        webhook secret is present, and that the Anthropic key is present when the
+        git (raw) lane is in play. Secrets are loaded exactly as a real run loads
+        them (load_secrets — which finds the .env beside the config) and reported
+        by NAME as set/MISSING, never by value. Soft items (a collector file not
+        created yet) are flagged with a warning but do not fail the check, so the
+        exit code is a trustworthy "ready to send" gate.
+    """
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Config valid: {len(config.projects)} project(s) in {config_path}.")
+
+    # Load secrets the same way a real run does, so "set" reflects what a run sees.
+    load_secrets(config_path)
+
+    problems = 0  # required-but-missing items -> non-zero exit
+    warnings = 0  # soft items (may be resolved before the next run)
+
+    for project in config.projects.values():
+        print(f"\n  {project.name}")
+
+        # repo_path is only read by the git collector; a missing path would fail
+        # that collector at runtime, so it's a problem only when git is enabled.
+        if "git" in project.collectors:
+            if project.repo_path.exists():
+                print(f"    OK  repo_path exists: {project.repo_path}")
+            else:
+                print(f"    ✗   repo_path MISSING: {project.repo_path}")
+                problems += 1
+
+        # Collector files are soft: they may be created before the next run.
+        for collector, path in (("tasks", project.tasks_file), ("notes", project.notes_file)):
+            if collector in project.collectors and path is not None and not path.exists():
+                print(f"    ⚠   {collector}_file not found yet: {path}")
+                warnings += 1
+
+        # Each recipient needs its webhook secret present to deliver. Report the
+        # variable NAME and whether it's set — never the value.
+        for recipient in project.recipients:
+            if os.environ.get(recipient.webhook_env_var, "").strip():
+                print(f"    OK  {recipient.webhook_env_var} is set ({recipient.name})")
+            else:
+                print(f"    ✗   {recipient.webhook_env_var} is MISSING ({recipient.name})")
+                problems += 1
+
+    # The Anthropic key is needed whenever any project summarizes the git (raw) lane.
+    if any("git" in p.collectors for p in config.projects.values()):
+        print()
+        if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            print("  OK  ANTHROPIC_API_KEY is set (for the git/raw lane).")
+        else:
+            print("  ✗   ANTHROPIC_API_KEY is MISSING (for the git/raw lane).")
+            problems += 1
+
+    print()
+    if problems:
+        suffix = f", {warnings} warning(s)" if warnings else ""
+        # Flush the stdout detail first so the stderr verdict can't jump ahead of
+        # it when the two streams are combined (e.g. `orion check >> log 2>&1`).
+        sys.stdout.flush()
+        print(
+            f"Not ready: {problems} required item(s) missing{suffix}.",
+            file=sys.stderr,
+        )
+        return 1
+    if warnings:
+        print(f"Ready to send ({warnings} warning(s) above).")
+    else:
+        print("Ready to send.")
+    return 0
+
+
+def _fmt_bool(value: bool) -> str:
+    """Render a bool the way it's written in TOML (lowercase true/false).
+
+    Args:
+        value: The boolean to render.
+
+    Returns:
+        "true" or "false".
+
+    Why:
+        The inspect output should read back the way the user would type it in
+        orion.toml, so `auto_send` shows as `true`/`false`, not Python's
+        `True`/`False`.
+    """
+    return "true" if value else "false"
+
+
+def _format_recipients(recipients: tuple[Recipient, ...]) -> str:
+    """Render recipients as 'Name (channel), Name (channel)' for a one-line listing.
+
+    Args:
+        recipients: The project's recipients.
+
+    Returns:
+        A comma-joined "name (channel)" string.
+
+    Why:
+        A compact, scannable form for `projects`, where each project is a short
+        block — the full per-recipient detail (incl. the webhook env-var name)
+        lives in `show`.
+    """
+    return ", ".join(f"{r.name} ({r.channel})" for r in recipients)
 
 
 def _channels(project: ProjectConfig) -> list[str]:

@@ -5,8 +5,9 @@
 > preview-before-send, dual-channel (Discord **and** Slack) delivery with routing,
 > cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
 > **Horizon B (local automation, ingestion & polish) is underway — B1 (event-driven git-hook
-> triggers) is signed off (2026-06-16); B2 (the Claude Code session skill) is next.** This is
-> task #7 on the non-application to-do ("Build progress tracker (Project Orion)").
+> triggers) and B2 (the Claude Code session skill) are signed off (2026-06-16); B3 (richer
+> rendering) is next.** All four ingestion signals (git, tasks, notes, sessions) now feed Orion.
+> This is task #7 on the non-application to-do ("Build progress tracker (Project Orion)").
 >
 > The **Roadmap** below is organized into **horizons** (A shipped · B next · C the
 > multi-party/hosted pivot, kept coarse). This file looks **forward** (design + phase plan).
@@ -42,7 +43,7 @@
 | Phase | Scope                                                                                                                                                                                                                                   | Status                    |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | B1    | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Signed off (2026-06-16) |
-| B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Implemented (2026-06-16) — awaiting sign-off |
+| B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ⏳ Planned                 |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model")                                                                                             | ⏳ Planned                 |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
@@ -468,11 +469,12 @@ skips the terminal preview for the (non-interactive) skill send; unlike `report 
 unchanged. The skill is a separable artifact outside the Python package (no packaging change);
 net new runtime dependencies: 0.
 
-> **Awaiting sign-off.** Implementation and the automated suite (`pytest`: 141/141, +2 for
-> `intake --yes`) are complete, plus a live check of the skill's send mechanism (a sample summary
-> piped through `intake --yes` from a foreign CWD delivered to Discord + Slack with a seeded key
-> redacted). The fully end-to-end check — invoking the skill *inside* a real Claude Code session
-> so it summarizes that session — is a natural user-run confirmation.
+**Signed off (2026-06-16).** Verified two ways: the send mechanism (a sample summary piped
+through `intake --yes` from a foreign CWD delivered to Discord + Slack with a seeded key redacted
+to `[REDACTED_AWS_KEY]`), and then the **skill run fully end-to-end** — the `orion-session` skill
+was installed into `~/.claude/skills/`, invoked in a real session, drafted a summary, showed it
+for in-session approval, and on approval delivered it to both channels via `intake --yes`.
+`pytest`: 141/141 (+2 for `intake --yes`).
 
 ## Open questions / to settle before/while building
 

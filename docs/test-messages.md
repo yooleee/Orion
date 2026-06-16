@@ -17,6 +17,30 @@ a log of what has been exercised end to end.
 
 ## Discord
 
+### 2026-06-16 · orion · Phase B2 session skill, end-to-end (first real skill run)
+
+- **When:** 2026-06-16 (B2 sign-off)
+- **Project:** orion (the real repo)
+- **Scenario:** The `orion-session` skill run for real — installed into `~/.claude/skills/`,
+  invoked in a session; Claude drafted a session summary, showed it for in-session approval, and
+  on the user's OK sent it via `intake --yes`. The full session signal, end to end.
+- **Secrets redacted:** 0 (summary written secret-free, as the skill instructs).
+- **Result:** Delivered to **both** channels (`Sent to: Alex (supervisor), Sam (supervisor)`).
+
+```text
+**Progress update — orion**
+_<date line>_
+
+This session moved Orion from on-demand reporting toward automated, hands-off operation:
+
+- **Scheduled digests (Phase 4):** Orion can now run unattended on a schedule and deliver progress automatically — with a strict, explicit opt-in so nothing is ever sent without being configured for it.
+- **Event-driven triggers (B1):** a git hook can now fire a report automatically when you commit or push, without ever blocking your git workflow.
+- **Session skill (B2):** a Claude Code skill now turns a coding session into a supervisor-ready progress update and sends it via Orion — including this update.
+- Also: restructured the roadmap into clearer phases ("horizons") and hardened secret handling so automated runs reliably find their configuration.
+
+All work is covered by the automated test suite (141 tests passing). Scheduled digests and the git-hook triggers are committed and live; the session skill is implemented and verified, pending final sign-off.
+```
+
 ### 2026-06-16 · orion · Phase B2 `intake --yes` send-path check (the session skill's mechanism)
 
 - **When:** 2026-06-16 (B2 verification)

@@ -14,6 +14,32 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase B2 — Claude Code session skill (2026-06-16)
+
+Adds the fourth (and final) ingestion signal — **coding sessions** — as a *pushed summary*, not by
+Orion parsing session files. A bundled Claude Code skill summarizes the session and sends it via
+the existing `intake`. Orion does **not** re-summarize: the skill's summary is what's delivered
+(after redaction), on the structured lane. Net new runtime dependencies: 0.
+
+### Added
+
+- **`skills/orion-session/` skill** (`SKILL.md` + `skills/README.md`) — a separable Claude Code
+  skill (outside the Python package). It drafts an outcome-focused, secret-free session summary,
+  **shows it for approval in the session**, then sends it with `intake --yes`. Install by copying
+  into `~/.claude/skills/`. README gains a "Claude Code session skill" section.
+- **Tests** — 141 total (+2): `tests/test_intake.py` pins `intake --yes` (delivers with no
+  `input()` prompt via a tripwire, and a seeded fake key is still redacted) and that plain
+  `intake` still previews (the load-bearing "`--yes` is the only bypass").
+
+### Changed
+
+- **`intake` gains `--yes`** (`cli.py`) — skips the terminal preview and sends non-interactively,
+  for the session skill (which runs `intake` through a non-interactive shell, where the preview
+  would EOF-abort). The human gate moves into the session (the skill shows the summary first).
+  Both redaction passes still run. Unlike `report --yes`, there is **no `auto_send`-style gate**:
+  `report` can run unattended (cron), but `intake` is always an explicit push, so a deliberate
+  `--yes` is sufficient. Without `--yes`, `intake` previews exactly as before.
+
 ## Phase B1 — Event-driven triggers / git hooks (2026-06-16)
 
 Opens **Horizon B** (local automation). Orion can now report **automatically on a git event**: a

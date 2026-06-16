@@ -17,6 +17,25 @@ a log of what has been exercised end to end.
 
 ## Discord
 
+### 2026-06-16 · orion · Phase B2 `intake --yes` send-path check (the session skill's mechanism)
+
+- **When:** 2026-06-16 (B2 verification)
+- **Project:** orion (the real repo)
+- **Scenario:** Exercising the exact send the `orion-session` skill performs — a summary piped to
+  `intake … --yes` from `/tmp` (foreign CWD, no exported env). Confirms three things at once:
+  `intake --yes` sends with **no terminal preview**, the **secrets fix** finds `.env` via
+  `--config`, and **redaction still runs** under `--yes` (a seeded fake AWS key was scrubbed to
+  `[REDACTED_AWS_KEY]`).
+- **Secrets redacted:** 1 (the `AKIA…` key).
+- **Result:** Delivered to **both** channels (`Sent to: Alex (supervisor), Sam (supervisor)`).
+
+```text
+**Progress update — orion**
+_<date line>_
+
+B2 live check: the orion-session skill's send path via intake --yes. Seeded fake key [REDACTED_AWS_KEY] must be scrubbed before delivery.
+```
+
 ### 2026-06-16 · orion · Phase B1 sign-off report (secrets fix, from a foreign CWD)
 
 - **When:** 2026-06-16 07:08 UTC

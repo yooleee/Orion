@@ -56,6 +56,36 @@ def _answer(monkeypatch, value):
     monkeypatch.setattr("builtins.input", lambda prompt="": value)
 
 
+def _input_tripwire(monkeypatch):
+    """Make input() fail the test if it is ever called.
+
+    Why: for `intake --yes` we need positive proof the preview prompt never
+    happens — stronger than "nothing was sent". The skill calls intake from a
+    non-interactive shell, so any code path reaching input() must fail loudly here.
+    """
+
+    def boom(prompt=""):
+        raise AssertionError("input() was called despite --yes")
+
+    monkeypatch.setattr("builtins.input", boom)
+
+
+def _input_spy(monkeypatch, answer="y"):
+    """Replace input() with a spy that records calls and returns `answer`.
+
+    Why: the mirror of the tripwire — to prove the preview IS shown when --yes is
+    absent (config alone never bypasses the gate).
+    """
+    calls: list[str] = []
+
+    def fake_input(prompt=""):
+        calls.append(prompt)
+        return answer
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return calls
+
+
 def test_message_flag_sends(tmp_path, env_and_mocks):
     """An update passed via --message is previewed and sent.
 
@@ -204,3 +234,45 @@ def test_intake_does_not_touch_markers(tmp_path, env_and_mocks):
     assert get_marker(conn, "demo", "git") is None
     assert get_marker(conn, "demo", "tasks") is None
     assert get_marker(conn, "demo", "notes") is None
+
+
+# --- B2: the `intake --yes` non-interactive send (for the session skill) ------
+
+
+def test_yes_skips_preview_and_still_redacts(tmp_path, env_and_mocks):
+    """`intake --yes` sends with NO preview prompt, and still redacts the body.
+
+    Why this matters: this is what lets the Claude session skill complete a send
+    (it runs intake non-interactively, where the preview would EOF-abort). The
+    safety contract: skipping the *preview* must not skip *redaction* — a seeded
+    fake key must still be scrubbed before delivery, and input() must never be
+    reached (proven by the tripwire).
+    """
+    mp = env_and_mocks["monkeypatch"]
+    toml = _write_config(tmp_path)
+    _input_tripwire(mp)
+
+    body = "Shipped the session skill. Oops: AKIAIOSFODNN7EXAMPLE slipped in."
+    code = cli.main(["intake", "demo", "--config", str(toml), "-m", body, "--yes"])
+    assert code == 0
+
+    sent = env_and_mocks["sent"]
+    assert len(sent) == 1                                   # delivered, no prompt
+    assert "AKIAIOSFODNN7EXAMPLE" not in sent[0][0]         # redaction held
+
+
+def test_intake_without_yes_still_previews(tmp_path, env_and_mocks):
+    """Without `--yes`, intake still shows the preview (input() IS called).
+
+    Why this matters: the load-bearing guarantee that `--yes` is the *only* way to
+    skip the preview — a plain intake never auto-sends. We confirm the prompt was
+    reached, then (answering 'y') that the confirmed send went out.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    toml = _write_config(tmp_path)
+    calls = _input_spy(mp, "y")
+
+    code = cli.main(["intake", "demo", "--config", str(toml), "-m", "An update."])
+    assert code == 0
+    assert len(calls) >= 1                                  # preview was shown
+    assert len(env_and_mocks["sent"]) == 1                  # then sent on 'y'

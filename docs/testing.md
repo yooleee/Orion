@@ -18,7 +18,7 @@ guarantees — secrets never leak, the right model runs on the right lane, state
 after a real send, and the tool runs the same on every OS. This doc is the map: the
 **categories** of tests, **why each is necessary**, and how to run them.
 
-As of this writing: **139 tests across 18 files**, all passing. The only test dependency is
+As of this writing: **141 tests across 18 files**, all passing. The only test dependency is
 **pytest** (the lone `[dev]` extra) — everything else is the standard library, matching
 Orion's minimal-dependency principle. Shared end-to-end setup for the CLI tests (the real-repo
 builder, the config writer, the mock fixture, and the scripted-`input` helper) lives in
@@ -86,9 +86,15 @@ subdirectory, even at `share_level = "detailed"`.
 Defense in depth is only real if it's tested at the seams. `test_cli.py` seeds a fake key into
 the *mocked model's reply* and asserts the **pass-2** redaction (the net before send) scrubs
 it — proving a leak introduced *after* collection is still caught. `test_intake.py` does the
-same for a pushed body. `test_schedule.py` repeats it on the **auto-send** path, proving that
-skipping the *human* preview does not skip *redaction*. These pin that redaction runs on the
+same for a pushed body — including on the **`intake --yes`** path (the session skill's
+non-interactive send), proving that skipping the preview there does not skip redaction either.
+`test_schedule.py` repeats it on the **auto-send** path. These pin that redaction runs on the
 exact bytes that leave the machine, not just on collected input.
+
+Both preview-skip flags also carry the *opposite* proof — that the human gate isn't silently
+removed. `test_schedule.py` (report) and `test_intake.py` (intake) each use an `input()`
+**tripwire** to show `--yes` runs never prompt, and a spy to show that **without** `--yes` the
+preview *is* shown. The flag is the only bypass on either command.
 
 The unattended path also needs the *opposite* proof — that the human gate is **not** silently
 removed. `test_schedule.py` uses an `input()` **tripwire** (a fake that raises if called) to

@@ -199,6 +199,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="The update body. If omitted, the body is read from stdin.",
     )
+    intake_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=(
+            "Non-interactive: skip the preview and send (for the Claude session "
+            "skill, which shows the summary for approval in-session first). "
+            "Redaction still runs; without --yes the preview shows as usual."
+        ),
+    )
 
     hook_parser = subparsers.add_parser(
         "install-hook",
@@ -235,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "report":
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
     if args.command == "intake":
-        return cmd_intake(args.project, Path(args.config), args.message)
+        return cmd_intake(args.project, Path(args.config), args.message, args.yes)
     if args.command == "install-hook":
         return cmd_install_hook(
             args.project, Path(args.config), args.hook, args.print_only, args.force
@@ -512,13 +522,17 @@ def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bo
         return STATUS_FAILED
 
 
-def cmd_intake(project_name: str, config_path: Path, message: str | None) -> int:
+def cmd_intake(
+    project_name: str, config_path: Path, message: str | None, assume_yes: bool
+) -> int:
     """Send a pushed/hand-written update for a project, skipping collectors.
 
     Args:
         project_name: The project to send the update for.
         config_path: Path to orion.toml.
         message: The update body, or None to read it from stdin.
+        assume_yes: True for a non-interactive send (the `--yes` flag). When set,
+            the terminal preview is skipped; otherwise it shows as usual.
 
     Returns:
         Exit code: 0 if the update was sent or the user declined; 1 on any error
@@ -528,10 +542,17 @@ def cmd_intake(project_name: str, config_path: Path, message: str | None) -> int
         Intake is the structured lane in its purest form: the body IS the update,
         already audience-ready, so there is NO collector, NO LLM, and NO delta
         marker (running intake twice deliberately sends twice — it is a push, not
-        a delta). This is the same entry point the Phase-6 Claude session skill
-        will use, so building it now unblocks that. It still runs the full safety
-        path — two redaction passes and preview-before-send — because a pushed
+        a delta). This is the entry point the Claude session skill (B2) uses. It
+        still runs the full safety path — two redaction passes — because a pushed
         body can contain a secret just as easily as a git diff can.
+
+        The `--yes` preview skip exists for that skill: a skill runs intake through
+        a non-interactive shell, where the terminal preview would get EOF and
+        fail-close to "Aborted" — so it could never send. With --yes the human gate
+        moves into the session (the skill shows the summary for approval before
+        invoking this). Unlike `report --yes`, there is NO auto_send-style gate:
+        report can run unattended (cron), but intake is ALWAYS an explicit push,
+        so a deliberate --yes is sufficient. Redaction is unchanged either way.
     """
     try:
         config = load_config(config_path)
@@ -567,7 +588,11 @@ def cmd_intake(project_name: str, config_path: Path, message: str | None) -> int
         # Compose per distinct channel and route each recipient accordingly —
         # identical delivery path to cmd_report (just no markers afterward).
         messages = {ch: compose(blob, ch) for ch in _channels(project)}
-        if not _preview_and_confirm(messages, redaction_hits):
+        # --yes skips the terminal preview (the skill already showed the summary
+        # for in-session approval); otherwise preview-before-send as usual.
+        if assume_yes:
+            print(f"Sending {project.name!r} (preview skipped: --yes).")
+        elif not _preview_and_confirm(messages, redaction_hits):
             print("Aborted. Nothing was sent.")
             return 0
 

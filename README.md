@@ -6,14 +6,16 @@ delivers them to designated "supervisors" over Discord and Slack. Collectors rea
 files; only delivery makes an outbound call. Reports are previewed in your terminal before
 anything is sent.
 
-> **Status: Phases 1–4.** `orion report <project>` collects from each enabled signal (git,
-> tasks, notes), redacts secrets, summarizes only the raw git activity with Claude (structured
-> signals skip the LLM), previews the message, and on your confirmation delivers it to each
-> recipient's Discord **and/or** Slack webhook — then records what was sent so the next run only
-> covers what's new. `orion intake <project>` sends a pushed or hand-written update. Phase 4
-> adds **unattended scheduled digests**: `orion report --all --yes`, run from your OS scheduler,
-> delivers opted-in projects without the preview (see [Scheduling](#scheduling)). Git-hook
-> triggers and the Claude-session skill are later phases.
+> **Status: Horizon A shipped; Horizon B underway.** `orion report <project>` collects from each
+> enabled signal (git, tasks, notes), redacts secrets, summarizes only the raw git activity with
+> Claude (structured signals skip the LLM), previews the message, and on your confirmation
+> delivers it to each recipient's Discord **and/or** Slack webhook — then records what was sent so
+> the next run only covers what's new. `orion intake <project>` sends a pushed or hand-written
+> update. **Unattended scheduled digests** (`orion report --all --yes` from your OS scheduler;
+> see [Scheduling](#scheduling)), **event-driven git-hook triggers**
+> (see [Event-driven reports](#event-driven-reports-git-hooks)), and a **Claude Code session
+> skill** (see [below](#claude-code-session-skill)) are all available. Richer message formatting
+> and a multi-party/hosted dashboard are later horizons.
 
 ## Supported platforms
 
@@ -93,12 +95,17 @@ To report on **every** project in one go, use `--all` instead of a project name:
 present to confirm the preview), add `--yes` — but a project is only ever sent without the
 preview if it has also opted in with `auto_send = true`. See [Scheduling](#scheduling).
 
-To send a pushed or hand-written update (no collectors, no LLM — the same entry point a future
-Claude-session skill will use), use `intake`:
+To send a pushed or hand-written update (no collectors, no LLM — the same entry point the Claude
+Code session skill uses), use `intake`:
 
 ```bash
 python -m orion intake <project> -m "Your update."   # or pipe the body on stdin
 ```
+
+`intake` previews before sending like `report` does. Add `--yes` to skip that preview and send
+non-interactively (used by the session skill below, which shows the summary for approval in the
+session first); redaction still runs either way. See
+[Claude Code session skill](#claude-code-session-skill).
 
 To have a project report itself **automatically when you commit or push**, install a git hook
 (see [Event-driven reports](#event-driven-reports-git-hooks)):
@@ -184,6 +191,23 @@ hook works on all three OSes (git runs hooks under `sh`, which Git for Windows b
 
 Full details — `pre-push` vs `post-commit`, reviewing/replacing/removing a hook, coexistence with
 hook managers — are in [`docs/git-hooks.md`](docs/git-hooks.md).
+
+## Claude Code session skill
+
+Orion's fourth signal — your **coding sessions** — arrives as a *pushed summary*, not by Orion
+parsing session files. A bundled [Claude Code skill](skills/orion-session/SKILL.md) summarizes
+the current session and sends it to a project's supervisor(s) via `intake`:
+
+```sh
+cp -r skills/orion-session ~/.claude/skills/    # install once (per-user)
+```
+
+Then, in any coding session, ask Claude to "send a progress update to Orion for `<project>`."
+Claude writes an outcome-focused, secret-free summary, **shows it to you for approval in the
+session**, and on your OK sends it with `intake --yes`. That in-session review is the human gate
+(which is why the send is non-interactive); Orion still redacts before delivering, and **Orion
+does not re-summarize** — the summary you approve is what's sent. Setup and details are in
+[`skills/README.md`](skills/README.md).
 
 ## Privacy & security
 

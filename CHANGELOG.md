@@ -14,7 +14,7 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
-## Phase 3.5 — Cross-platform portability pass (2026-06-15, in review)
+## Phase 3.5 — Cross-platform portability pass (2026-06-15)
 
 An audit plus targeted fixes so Orion runs natively on Windows, macOS, and Linux, and a
 recorded cross-platform scheduling stance that de-risks Phase 4. The audit confirmed the core

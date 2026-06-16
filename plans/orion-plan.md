@@ -17,7 +17,7 @@
 | 1 | `orion report`: git → redact → conditional Haiku summary → preview → Discord | ✅ Signed off (2026-06-15) |
 | 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
 | 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
-| 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | 🔄 Implemented; in review (2026-06-15) |
+| 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | ✅ Signed off (2026-06-15) |
 | 4 | Scheduled digests (cadence) | ⏳ Not started |
 | 5 | Event-driven triggers (git hooks) | ⏳ Not started |
 | 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
@@ -317,7 +317,7 @@ confirmed all test files are current (nothing stale/removable) and closed five a
 coverage gaps (Slack-token redaction, git noise-glob/diff-cap/subdir-sensitive, the encoding
 guard's `OSError` arm).
 
-**Pending sign-off** (review in progress). `pytest`: 115/115.
+**Signed off (2026-06-15).** `pytest`: 115/115.
 
 ## Open questions / to settle before/while building
 

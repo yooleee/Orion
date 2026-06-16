@@ -1,9 +1,10 @@
 # Project Orion — Progress Tracker & Reporter (Design Plan)
 
-> **Status: Phases 1–3 signed off (2026-06-15).** Architecture and phasing agreed; the
+> **Status: Phases 1–4 signed off (2026-06-15).** Architecture and phasing agreed; the
 > on-demand reporting core — git + structured signals + `intake`, redaction, preview, and
 > delivery to Discord **and** Slack with per-recipient routing — is built, live-tested, and
-> documented. Phase 4 (scheduled digests) is next. This is task #7 on the non-application
+> documented, and Phase 4 adds safe **unattended scheduled digests** (`report --all --yes`).
+> Phase 5 (event-driven git-hook triggers) is next. This is task #7 on the non-application
 > to-do ("Build progress tracker (Project Orion)").
 >
 > This file looks **forward** (design + phase plan). For what actually shipped, see
@@ -18,7 +19,7 @@
 | 2 | Structured lane: intake, to-dos, notes (no-LLM passthrough) | ✅ Signed off (2026-06-15) |
 | 3 | Slack delivery + recipient routing | ✅ Signed off (2026-06-15) |
 | 3.5 | Cross-platform portability pass (audit + fixes + scheduling stance) | ✅ Signed off (2026-06-15) |
-| 4 | Scheduled digests (cadence) | ✅ Implemented (2026-06-15) — awaiting sign-off |
+| 4 | Scheduled digests (cadence) | ✅ Signed off (2026-06-15) |
 | 5 | Event-driven triggers (git hooks) | ⏳ Not started |
 | 6 | Claude Code session skill (pushes summaries to Orion) | ⏳ Not started |
 | 7 | Supervisor replies / web dashboard | ⏳ Not started |
@@ -349,10 +350,16 @@ that `auto_send` **without** `--yes` still previews, and that a seeded fake key 
 on the auto-send path. **`pytest`: 126/126.** Resolves KI-12; the deferred cadence-aware
 `report --all --due` filter is recorded as KI-13.
 
-> **Awaiting sign-off.** Implementation and the automated suite are complete. A live/cross-OS
-> scheduling smoke pass (wiring a real scheduler entry per `docs/scheduling.md`, pairing with
-> [`docs/portability-smoke-test.md`](../docs/portability-smoke-test.md)) is the natural
-> pre-sign-off check, as hardware allows.
+**Signed off (2026-06-15).** Live verification passed: against a throwaway repo with a real
+Anthropic key + the real Discord/Slack webhooks, an `auto_send` project run with `--yes`
+auto-sent without a preview and the delivered body had a seeded fake key redacted; the same
+project **without** `--yes` still previewed; a `--yes` run of a non-opted project was skipped;
+and `report --all --yes` auto-sent the opted-in project, skipped the rest, and a no-activity
+re-run sent nothing (all exit 0). A dual-channel run delivered to Discord **and** Slack together,
+and the real Phase 4 commit was reported live to both channels via `report orion`. `pytest`:
+126/126. A native Windows/macOS scheduler smoke (per [`docs/scheduling.md`](../docs/scheduling.md)
++ [`docs/portability-smoke-test.md`](../docs/portability-smoke-test.md)) remains a hardware-gated
+follow-up, not a blocker.
 
 ## Open questions / to settle before/while building
 

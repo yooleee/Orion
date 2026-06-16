@@ -43,6 +43,7 @@
 | B3 | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections | ⏳ Planned |
 | B4 | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model") | ⏳ Planned |
 | B5 | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary | ⏳ Conditional |
+| B6 | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Small polish; KI-15 | ⏳ Planned (small) |
 
 **Horizon C — Multi-party & hosted** *(the architectural pivot; coarse — sequenced by dependency, detail to firm up as it nears)*
 

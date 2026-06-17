@@ -27,9 +27,10 @@ environment). You need:
 - **Python 3.11+** (for the stdlib `tomllib` TOML parser), and
 - **`git` available on your PATH**.
 
-> **Tested on:** Linux and Windows 11 + WSL2 (active development). macOS and native Windows
-> are supported by design and smoke-tested as hardware is available — please open an issue if
-> you hit a platform-specific quirk.
+> **Tested on:** Linux, Windows 11 + WSL2, and **native macOS** (Apple Silicon, 2026-06-16 —
+> full test suite plus a live end-to-end report delivered to Discord and Slack). Native Windows
+> is supported by design and smoke-tested as hardware is available — please open an issue if you
+> hit a platform-specific quirk.
 
 ## Setup
 

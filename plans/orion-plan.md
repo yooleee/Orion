@@ -46,7 +46,7 @@
 | B1    | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Signed off (2026-06-16) |
 | B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ✅ Signed off (2026-06-17) |
-| B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model (OpenAI-compatible). Per-step model choice **deferred** (one LLM step today; seam keeps it additive). Keeps the "lightest adequate model" default (Haiku) | 🔬 Awaiting sign-off (2026-06-17) |
+| B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model (OpenAI-compatible). Per-step model choice **deferred** (one LLM step today; seam keeps it additive). Keeps the "lightest adequate model" default (Haiku) | ✅ Signed off (2026-06-17) |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
@@ -543,8 +543,8 @@ a later horizon (Horizon C or beyond), per the user.
 ## Phase B4 status (2026-06-17)
 
 Phase B4 — **summarizer flexibility (provider-agnostic seam + optional local model)** — is
-**implemented** in `src/orion/` with a 172-test suite (+18 net over B3), **awaiting sign-off**.
-Built in four reviewed checkpoints: the global `[summarizer]` config + validation (CP1) → the
+**implemented** in `src/orion/` with a 172-test suite (+18 net over B3). Built in four reviewed
+checkpoints: the global `[summarizer]` config + validation (CP1) → the
 `Summarizer` Protocol with the Anthropic backend refactored behind it, default behavior unchanged
 (CP2) → the `LocalSummarizer` (OpenAI-compatible endpoint over stdlib `urllib`) + backend-aware
 `check` (CP3) → docs + living docs (CP4). The open decisions from
@@ -568,6 +568,13 @@ outbound summarization call). The local backend targets the **OpenAI-compatible*
 completions` shape (one path for Ollama / llama.cpp / LM Studio / vLLM) rather than a runtime's
 native API — a deliberate "engineered enough" call, tracked with its tradeoff and
 change-conditions as **KI-16**.
+
+**Signed off (2026-06-17)** on the strength of the 172-test suite. `pytest`: 172/172. One
+deliberate carry-over: the optional **live/manual verification** — a real Anthropic-backed
+`report` confirming the default path is unchanged end to end, plus a local-model run against an
+OpenAI-compatible endpoint (e.g. Ollama) — was **deferred to the next session** rather than run
+here (it needs an API key / a running local server and sends to real channels). It is carried
+into the B5 kickoff as a pre-task; see `[docs/phase-b5-kickoff.md](../docs/phase-b5-kickoff.md)`.
 
 ## Open questions / to settle before/while building
 

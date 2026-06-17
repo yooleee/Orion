@@ -16,7 +16,7 @@ import urllib.error
 import pytest
 
 from orion.delivery import DeliveryError
-from orion.delivery.discord import _DISCORD_CONTENT_LIMIT, send
+from orion.delivery.discord import send
 
 
 class _FakeResponse:
@@ -38,10 +38,11 @@ class _FakeResponse:
 
 
 def test_successful_post_sends_content_json(monkeypatch):
-    """A 204 response counts as success and the body is the message as JSON.
+    """A 204 response counts as success and the payload is POSTed as JSON as-is.
 
     Why this matters: Discord returns 204 on success and expects a JSON body with
-    a `content` field; getting either wrong means messages silently never arrive.
+    a `content` field; delivery is pure transport, so it must POST exactly the
+    payload compose handed it without reshaping.
     """
     captured = {}
 
@@ -56,7 +57,7 @@ def test_successful_post_sends_content_json(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    send("Hello supervisor", "https://discord.test/webhook")
+    send({"content": "Hello supervisor"}, "https://discord.test/webhook")
 
     assert captured["url"] == "https://discord.test/webhook"
     assert captured["body"] == {"content": "Hello supervisor"}
@@ -84,7 +85,7 @@ def test_http_error_becomes_delivery_error(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(DeliveryError):
-        send("msg", "https://discord.test/webhook")
+        send({"content": "msg"}, "https://discord.test/webhook")
 
 
 def test_connection_error_becomes_delivery_error(monkeypatch):
@@ -99,23 +100,4 @@ def test_connection_error_becomes_delivery_error(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(DeliveryError):
-        send("msg", "https://discord.test/webhook")
-
-
-def test_long_message_is_truncated(monkeypatch):
-    """A message over Discord's limit is truncated before sending.
-
-    Why this matters: Discord rejects content over 2000 chars; truncating avoids a
-    hard failure on a long (but already-redacted) report.
-    """
-    captured = {}
-
-    def fake_urlopen(request, timeout=None):
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return _FakeResponse(204)
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-    send("A" * 5000, "https://discord.test/webhook")
-
-    assert len(captured["body"]["content"]) <= _DISCORD_CONTENT_LIMIT
+        send({"content": "msg"}, "https://discord.test/webhook")

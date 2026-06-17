@@ -34,7 +34,7 @@ from orion.collectors.notes import NotesError
 from orion.collectors.notes import collect as collect_notes
 from orion.collectors.tasks import TasksError
 from orion.collectors.tasks import collect as collect_tasks
-from orion.compose import compose
+from orion.compose import ComposedMessage, compose
 from orion.config import ConfigError, ProjectConfig, Recipient, get_project, load_config
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
@@ -487,13 +487,27 @@ def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bo
             print(f"No new activity for {project.name!r} since the last report.")
             return STATUS_NO_ACTIVITY
 
-        # --- Merge per-collector bodies into one report body ---
-        merged = merge_sections(sections)
+        # --- Redaction pass 2 per section (safety net), then merge ---
+        # The second redaction pass runs on EACH section body before assembly, so
+        # every piece of text that will later land in a Block Kit / embed field
+        # (B3) is twice-redacted at the source. The flat `body` is then the merge
+        # of these already-twice-redacted sections, which stays byte-identical to
+        # the old "merge then redact" output for normal content: section titles
+        # are Orion constants (no secrets), and a secret never straddles a section
+        # boundary. Sections that are empty after redaction are dropped here, the
+        # same rule merge_sections applies, so the carried sections and the flat
+        # body always agree.
+        redacted_sections: list[tuple[str, str]] = []
+        for title, section_body in sections:
+            pass2 = redact(section_body)
+            redaction_hits += pass2.hit_count
+            safe_section = pass2.text.strip()
+            if not safe_section:
+                continue
+            redacted_sections.append((title, safe_section))
 
-        # --- Redaction pass 2: safety net on the final merged body before send ---
-        pass2 = redact(merged)
-        safe_body = pass2.text
-        redaction_hits += pass2.hit_count
+        merged = merge_sections(redacted_sections)
+        safe_body = merged
         if not safe_body.strip():
             print(
                 f"Refusing to send {project.name!r}: the report body is empty "
@@ -505,10 +519,13 @@ def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bo
         # --- Build the portable report blob ---
         # lane is provenance: RAW if the LLM touched any part of this run, else
         # STRUCTURED. source_marker is now per-collector (in state), so the blob's
-        # single field is no longer meaningful — pass "" (see KI-8).
+        # single field is no longer meaningful — pass "" (see KI-8). The
+        # twice-redacted sections ride along for B3's structured rendering.
         generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         lane = LANE_RAW if any_raw_lane else LANE_STRUCTURED
-        blob = build_report(project, safe_body, lane, "", generated_at)
+        blob = build_report(
+            project, safe_body, lane, "", generated_at, sections=tuple(redacted_sections)
+        )
 
         # --- Compose once per distinct channel ---
         # Same body, formatted for each channel's Markdown dialect; recipients are
@@ -961,12 +978,12 @@ def _channels(project: ProjectConfig) -> list[str]:
 
 
 def _deliver(
-    messages: dict[str, str], project: ProjectConfig
+    messages: dict[str, ComposedMessage], project: ProjectConfig
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Send each recipient the message composed for that recipient's channel.
 
     Args:
-        messages: Map of channel name -> composed message for that channel.
+        messages: Map of channel name -> ComposedMessage for that channel.
         project: The project whose recipients receive it.
 
     Returns:
@@ -990,7 +1007,7 @@ def _deliver(
             # Route to the right channel's message + sender. config validation
             # guarantees recipient.channel is supported, so both lookups hit.
             send = _sender_for(recipient.channel)
-            send(messages[recipient.channel], url)
+            send(messages[recipient.channel].payload, url)
             sent_to.append(recipient.name)
         except (SecretsError, DeliveryError) as exc:
             # A per-recipient failure shouldn't abort the others.
@@ -1055,7 +1072,7 @@ def _collect_for(project: ProjectConfig, collector: str, prior: str | None):
     raise ConfigError(f"Unknown collector {collector!r}.")
 
 
-def _preview_and_confirm(messages: dict[str, str], redaction_hits: int) -> bool:
+def _preview_and_confirm(messages: dict[str, ComposedMessage], redaction_hits: int) -> bool:
     """Show the composed message(s) and ask the user to confirm sending.
 
     Args:
@@ -1085,7 +1102,9 @@ def _preview_and_confirm(messages: dict[str, str], redaction_hits: int) -> bool:
         print(bar)
         print(f"PREVIEW{label} — this report has NOT been sent yet")
         print(bar)
-        print(message)
+        # .preview is the faithful text rendering of the exact payload that will
+        # be POSTed — the human approves what actually leaves the machine.
+        print(message.preview)
     print(bar)
     if redaction_hits > 0:
         print(f"⚠  {redaction_hits} potential secret(s) were redacted from this report.")

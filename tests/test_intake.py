@@ -14,6 +14,7 @@
 
 import pytest
 
+from conftest import _payload_text
 from orion import cli
 from orion.state import get_marker, open_state
 
@@ -47,7 +48,9 @@ def env_and_mocks(monkeypatch):
     """
     monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(cli, "discord_send", lambda message, url: sent.append((message, url)))
+    monkeypatch.setattr(
+        cli, "discord_send", lambda payload, url: sent.append((_payload_text(payload), url))
+    )
     return {"sent": sent, "monkeypatch": monkeypatch}
 
 
@@ -201,7 +204,9 @@ def test_intake_routes_to_both_channels(tmp_path, env_and_mocks):
     )
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     slack_sent: list[tuple[str, str]] = []
-    mp.setattr(cli, "slack_send", lambda message, url: slack_sent.append((message, url)))
+    mp.setattr(
+        cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
+    )
 
     _answer(mp, "y")
     code = cli.main(["intake", "demo", "--config", str(toml), "-m", "Pushed update."])

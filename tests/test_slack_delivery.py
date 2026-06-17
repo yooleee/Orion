@@ -17,7 +17,7 @@ import urllib.error
 import pytest
 
 from orion.delivery import DeliveryError
-from orion.delivery.slack import _SLACK_TEXT_LIMIT, send
+from orion.delivery.slack import send
 
 
 class _FakeResponse:
@@ -39,11 +39,11 @@ class _FakeResponse:
 
 
 def test_successful_post_sends_text_json(monkeypatch):
-    """A 200 response counts as success and the body is the message as {"text": …}.
+    """A 200 response counts as success and the payload is POSTed as-is.
 
     Why this matters: Slack returns 200 on success and expects a JSON body with a
-    `text` field (NOT Discord's `content`); getting either wrong means messages
-    silently never arrive in the Slack channel.
+    `text` field (NOT Discord's `content`); delivery is pure transport, so it must
+    POST exactly the payload compose built, unreshaped.
     """
     captured = {}
 
@@ -55,7 +55,7 @@ def test_successful_post_sends_text_json(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    send("Hello supervisor", "https://hooks.slack.test/services/X")
+    send({"text": "Hello supervisor"}, "https://hooks.slack.test/services/X")
 
     assert captured["url"] == "https://hooks.slack.test/services/X"
     # The field is `text`, the Slack-specific difference from Discord's `content`.
@@ -77,7 +77,7 @@ def test_http_error_becomes_delivery_error(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(DeliveryError):
-        send("msg", "https://hooks.slack.test/services/X")
+        send({"text": "msg"}, "https://hooks.slack.test/services/X")
 
 
 def test_connection_error_becomes_delivery_error(monkeypatch):
@@ -92,23 +92,4 @@ def test_connection_error_becomes_delivery_error(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(DeliveryError):
-        send("msg", "https://hooks.slack.test/services/X")
-
-
-def test_long_message_is_truncated(monkeypatch):
-    """A message over Slack's text limit is truncated before sending.
-
-    Why this matters: a pathologically long (but already-redacted) report should
-    degrade to a truncated message, not a hard failure.
-    """
-    captured = {}
-
-    def fake_urlopen(request, timeout=None):
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return _FakeResponse(200)
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-    send("A" * (_SLACK_TEXT_LIMIT + 1000), "https://hooks.slack.test/services/X")
-
-    assert len(captured["body"]["text"]) <= _SLACK_TEXT_LIMIT
+        send({"text": "msg"}, "https://hooks.slack.test/services/X")

@@ -19,6 +19,7 @@ import subprocess
 import pytest
 
 from orion import cli
+from orion.compose import _render_preview
 
 
 def _run(repo, *args):
@@ -106,6 +107,26 @@ def _write_config(tmp_path, repo, *, auto_send=None):
     return toml
 
 
+def _payload_text(payload):
+    """Extract the human-readable text from a delivery payload.
+
+    Args:
+        payload: The JSON body compose handed to a sender — a Discord embed, a
+            Slack Block Kit message, or a plain {"content"/"text": …} fallback.
+
+    Returns:
+        The text content of the payload as one string.
+
+    Why:
+        Delivery POSTs a dict payload, not a bare string. The integration tests
+        care about WHAT TEXT reached WHICH webhook, not the JSON envelope (the
+        envelope shape is pinned in test_delivery / test_slack_delivery and
+        test_report_compose). We reuse the production preview renderer so the test
+        view of "what was sent" matches exactly what the user is shown at preview.
+    """
+    return _render_preview(payload)
+
+
 def _answer(monkeypatch, value):
     """Script the preview confirm prompt to return `value`.
 
@@ -148,6 +169,10 @@ def env_and_mocks(monkeypatch):
 
     # Default summary echoes nothing sensitive; individual tests can override.
     monkeypatch.setattr(cli, "summarize_raw", lambda text, level, *, client: "Made progress.")
-    monkeypatch.setattr(cli, "discord_send", lambda message, url: sent.append((message, url)))
+    # Record the delivered text (extracted from the payload dict) keyed to its
+    # webhook, so tests assert on the message string as before.
+    monkeypatch.setattr(
+        cli, "discord_send", lambda payload, url: sent.append((_payload_text(payload), url))
+    )
 
     return {"sent": sent, "monkeypatch": monkeypatch}

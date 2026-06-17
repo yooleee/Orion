@@ -18,13 +18,6 @@ import urllib.request
 from orion import __version__
 from orion.delivery import DeliveryError
 
-# Discord rejects message `content` longer than 2000 characters. We truncate with
-# a visible marker rather than letting the API 400 — the body is already redacted,
-# so truncation is safe, just lossy. (Splitting into multiple messages is a
-# possible future improvement; truncation is the simplest correct behavior now.)
-_DISCORD_CONTENT_LIMIT = 2000
-_TRUNCATION_MARKER = "\n… [truncated]"
-
 # Discord's edge (Cloudflare) returns 403 Forbidden to requests sent with the
 # default `Python-urllib/x.y` User-Agent, and the Discord API explicitly asks
 # clients to send a descriptive User-Agent. Without this header, delivery fails
@@ -33,11 +26,13 @@ _TRUNCATION_MARKER = "\n… [truncated]"
 _USER_AGENT = f"Orion/{__version__} (progress-report webhook delivery)"
 
 
-def send(message: str, webhook_url: str, *, timeout: float = 10.0) -> None:
-    """POST a message to a Discord incoming webhook.
+def send(payload: dict, webhook_url: str, *, timeout: float = 10.0) -> None:
+    """POST a pre-built JSON payload to a Discord incoming webhook.
 
     Args:
-        message: The composed message text to send.
+        payload: The exact JSON body to send, built by compose (today
+            {"content": …}; later {"embeds": …, "content": fallback}). Delivery
+            POSTs it as-is — it does not reshape or size it.
         webhook_url: The full Discord webhook URL (from .env via the recipient's
             webhook_env_var).
         timeout: Seconds to wait for the request before failing.
@@ -46,15 +41,13 @@ def send(message: str, webhook_url: str, *, timeout: float = 10.0) -> None:
         None. Raises DeliveryError on any non-2xx response or network failure.
 
     Why:
-        Discord's incoming-webhook API takes a JSON body with a `content` field
-        and returns 204 No Content on success. We build the request with stdlib
-        urllib, enforce Discord's length limit up front, and translate every
-        failure mode (HTTP error, connection error, timeout) into DeliveryError
-        so the caller can report the failed recipient and decide on state.
+        Delivery is pure transport: compose owns what the payload looks like
+        (including any truncation / size limits), so this function just serializes
+        and POSTs. Discord returns 204 No Content on success; we translate every
+        failure mode (HTTP error, connection error, timeout) into DeliveryError so
+        the caller can report the failed recipient and decide on state.
     """
-    content = _truncate(message)
-    # Discord expects a JSON body; "content" is the message text field.
-    data = json.dumps({"content": content}).encode("utf-8")
+    data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
         data=data,
@@ -76,24 +69,3 @@ def send(message: str, webhook_url: str, *, timeout: float = 10.0) -> None:
     except urllib.error.URLError as exc:
         # Connection refused, DNS failure, timeout, etc.
         raise DeliveryError(f"Could not reach Discord webhook: {exc.reason}") from exc
-
-
-def _truncate(message: str) -> str:
-    """Shorten a message to fit Discord's content limit, with a marker.
-
-    Args:
-        message: The full message text.
-
-    Returns:
-        The message unchanged if within the limit, otherwise truncated with a
-        visible marker appended.
-
-    Why:
-        Keeping the truncation in one place (and reserving room for the marker)
-        means the limit logic is testable and the caller never has to think about
-        Discord's quirks.
-    """
-    if len(message) <= _DISCORD_CONTENT_LIMIT:
-        return message
-    keep = _DISCORD_CONTENT_LIMIT - len(_TRUNCATION_MARKER)
-    return message[:keep] + _TRUNCATION_MARKER

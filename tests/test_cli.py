@@ -21,7 +21,7 @@ from orion import cli
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
 # fixture by name; the plain helper functions are imported explicitly.
-from conftest import _answer, _make_repo, _write_config
+from conftest import _answer, _make_repo, _payload_text, _write_config
 
 
 def _write_config_collectors(tmp_path, repo, collectors, *, tasks_file=None, notes_file=None):
@@ -166,6 +166,53 @@ def test_secret_in_body_is_redacted_before_send(tmp_path, env_and_mocks):
     assert "AKIAIOSFODNN7EXAMPLE" not in message  # the secret was redacted before send
 
 
+def test_report_blob_carries_twice_redacted_sections(tmp_path, env_and_mocks):
+    """A real run carries each signal as a section on the blob, already redacted.
+
+    Why this matters: B3 builds Block Kit / embeds from blob.sections, so two
+    guarantees must hold from CP1 on: (1) the sections are carried in config order
+    with their titles, and (2) redaction pass 2 runs on EACH section body, so a
+    secret that reaches a section is scrubbed there too — a structured payload must
+    never become a redaction bypass. We capture the blob by wrapping cli.compose.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    repo = _make_repo(tmp_path)
+    tasks = tmp_path / "TODO.md"
+    tasks.write_text("- [x] Ship the structured lane\n")
+    toml = _write_config_collectors(
+        tmp_path, repo, ["git", "tasks"], tasks_file="TODO.md"
+    )
+
+    # The model leaks an AWS key into the git (raw-lane) summary.
+    leak = "Made progress; key AKIAIOSFODNN7EXAMPLE slipped in."
+    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: leak)
+
+    # Capture the blob handed to compose without changing what compose returns.
+    captured = {}
+    real_compose = cli.compose
+
+    def _capturing_compose(blob, channel):
+        captured["blob"] = blob
+        return real_compose(blob, channel)
+
+    mp.setattr(cli, "compose", _capturing_compose)
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+
+    blob = captured["blob"]
+    # Two sections, in config order (git first, then tasks), with their titles.
+    titles = [title for title, _ in blob.sections]
+    assert titles == ["Code activity", "Completed tasks"]
+    # The secret is scrubbed in the carried section body (pass 2 reached it)...
+    git_body = blob.sections[0][1]
+    assert "AKIAIOSFODNN7EXAMPLE" not in git_body
+    # ...and in the flat fallback body, which is the merge of those sections.
+    assert "AKIAIOSFODNN7EXAMPLE" not in blob.body
+    assert "Ship the structured lane" in blob.sections[1][1]
+
+
 def test_unknown_project_errors(tmp_path, env_and_mocks):
     """Reporting an unknown project fails cleanly with a non-zero exit.
 
@@ -204,7 +251,7 @@ def test_structured_only_run_never_calls_the_llm(tmp_path, env_and_mocks):
     assert code == 0
 
     message, _ = env_and_mocks["sent"][0]
-    assert "## Completed tasks" in message
+    assert "Completed tasks" in message
     assert "Ship the structured lane" in message
 
 
@@ -231,8 +278,8 @@ def test_git_and_tasks_merge_into_one_send(tmp_path, env_and_mocks):
     sent = env_and_mocks["sent"]
     assert len(sent) == 1  # one merged message, not one per collector
     message, _ = sent[0]
-    assert "## Code activity" in message and "Refactored things." in message
-    assert "## Completed tasks" in message and "Wire the structured lane" in message
+    assert "Code activity" in message and "Refactored things." in message
+    assert "Completed tasks" in message and "Wire the structured lane" in message
 
 
 def test_per_collector_markers_advance_independently(tmp_path, env_and_mocks):
@@ -255,7 +302,7 @@ def test_per_collector_markers_advance_independently(tmp_path, env_and_mocks):
     _answer(mp, "y")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
     first_message, _ = env_and_mocks["sent"][0]
-    assert "## Code activity" in first_message and "## Completed tasks" in first_message
+    assert "Code activity" in first_message and "Completed tasks" in first_message
 
     # Now change ONLY the checklist — no new commit.
     env_and_mocks["sent"].clear()
@@ -267,8 +314,8 @@ def test_per_collector_markers_advance_independently(tmp_path, env_and_mocks):
     assert len(sent) == 1
     second_message, _ = sent[0]
     # Only the new task is reported; git is silent (its marker did not regress).
-    assert "## Completed tasks" in second_message and "Second task" in second_message
-    assert "## Code activity" not in second_message
+    assert "Completed tasks" in second_message and "Second task" in second_message
+    assert "Code activity" not in second_message
 
 
 def test_routes_each_recipient_to_its_channel(tmp_path, env_and_mocks):
@@ -284,7 +331,9 @@ def test_routes_each_recipient_to_its_channel(tmp_path, env_and_mocks):
 
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     slack_sent: list[tuple[str, str]] = []
-    mp.setattr(cli, "slack_send", lambda message, url: slack_sent.append((message, url)))
+    mp.setattr(
+        cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
+    )
     mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
 
     _answer(mp, "y")
@@ -294,7 +343,7 @@ def test_routes_each_recipient_to_its_channel(tmp_path, env_and_mocks):
     discord_sent = env_and_mocks["sent"]
     assert len(discord_sent) == 1
     dmsg, durl = discord_sent[0]
-    assert "## Code activity" in dmsg
+    assert "Code activity" in dmsg
     assert durl == "https://discord.test/webhook"
 
     # Slack recipient: Slack mrkdwn (bold headers, no `##`) via the Slack webhook.
@@ -315,7 +364,7 @@ def test_dual_channel_preview_shows_both_blocks(tmp_path, env_and_mocks, capsys)
     repo = _make_repo(tmp_path)
     toml = _write_dual_channel_config(tmp_path, repo)
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
-    mp.setattr(cli, "slack_send", lambda message, url: None)
+    mp.setattr(cli, "slack_send", lambda payload, url: None)
     mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
 
     _answer(mp, "y")
@@ -340,7 +389,9 @@ def test_decline_aborts_every_channel(tmp_path, env_and_mocks):
     toml = _write_dual_channel_config(tmp_path, repo)
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     slack_sent: list[tuple[str, str]] = []
-    mp.setattr(cli, "slack_send", lambda message, url: slack_sent.append((message, url)))
+    mp.setattr(
+        cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
+    )
     mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
 
     _answer(mp, "n")

@@ -10,7 +10,12 @@
 from pathlib import Path
 
 from orion import __version__
-from orion.compose import compose
+from orion.compose import (
+    _DISCORD_CONTENT_LIMIT,
+    _SLACK_TEXT_LIMIT,
+    ComposedMessage,
+    compose,
+)
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report
 
@@ -56,6 +61,43 @@ def test_build_report_populates_metadata():
     assert blob.orion_version == __version__
 
 
+def test_build_report_defaults_sections_to_empty():
+    """A build_report call without sections leaves blob.sections empty.
+
+    Why this matters: `intake` and every pre-B3 call site builds a report from a
+    single body with no per-signal sections. The field must default to an empty
+    tuple so those callers keep working unchanged and compose can treat "no
+    sections" as "render the flat body as one section."
+    """
+    blob = build_report(
+        _project(),
+        body="A pushed update.",
+        lane="structured",
+        source_marker="",
+        generated_at="2026-06-14T00:00:00+00:00",
+    )
+    assert blob.sections == ()
+
+
+def test_build_report_carries_sections_in_order():
+    """build_report carries the (title, body) sections it is given, in order.
+
+    Why this matters: B3's richer rendering builds Slack Block Kit / Discord
+    embeds from these sections, so they must survive assembly verbatim and in
+    display order rather than being flattened away into the body string.
+    """
+    sections = (("Code activity", "Shipped the seam."), ("Completed tasks", "Did X."))
+    blob = build_report(
+        _project(),
+        body="## Code activity\nShipped the seam.\n\n## Completed tasks\nDid X.",
+        lane="raw",
+        source_marker="",
+        generated_at="2026-06-14T00:00:00+00:00",
+        sections=sections,
+    )
+    assert blob.sections == sections
+
+
 def test_compose_includes_project_and_body():
     """The composed Discord message contains the project name and the body.
 
@@ -69,7 +111,7 @@ def test_compose_includes_project_and_body():
         source_marker="abc123",
         generated_at="2026-06-14T00:00:00+00:00",
     )
-    message = compose(blob, "discord")
+    message = compose(blob, "discord").preview
     assert "demo" in message
     assert "Wired the pipeline end to end." in message
 
@@ -89,7 +131,7 @@ def test_compose_renders_friendly_timestamp():
         source_marker="abc123",
         generated_at="2026-06-15T01:32:53+00:00",
     )
-    message = compose(blob, "discord")
+    message = compose(blob, "discord").preview
     assert "June 15, 2026" in message            # spelled-out date
     assert "1:32 AM UTC" in message              # 12-hour, no leading zero, UTC label
     assert "2026-06-15T01:32:53" not in message  # raw ISO must NOT appear
@@ -108,63 +150,155 @@ def test_compose_malformed_timestamp_degrades_gracefully():
         source_marker="abc123",
         generated_at="not-a-timestamp",
     )
-    message = compose(blob, "discord")
+    message = compose(blob, "discord").preview
     assert "not-a-timestamp" in message  # degraded gracefully, no exception
 
 
-def _blob(body):
-    """Build a blob with the given body for channel-rendering tests."""
+def _blob(body, sections=()):
+    """Build a blob with the given body (and optional sections) for rendering tests.
+
+    Why: B3 renders from the blob's per-signal `sections`; passing them lets a test
+    exercise multi-section embeds/blocks. Omitting them (the intake case) leaves the
+    flat `body` to be rendered as one section.
+    """
     return build_report(
         _project(),
         body=body,
         lane="structured",
         source_marker="",
         generated_at="2026-06-15T01:32:53+00:00",
+        sections=sections,
     )
 
 
-def test_slack_header_uses_single_asterisk_bold():
-    """The Slack message's header is *bold* (single asterisk), not **bold**.
+def test_compose_returns_rich_payload_per_channel():
+    """compose returns an embed for Discord and Block Kit + text fallback for Slack.
 
-    Why this matters: Slack mrkdwn bold is one asterisk; Discord's `**…**` would
-    render literally in Slack, so the header must be in Slack's dialect.
+    Why this matters: B3's whole point — each channel gets its native structured
+    payload, not a plain string. The preview, built FROM that payload, still
+    surfaces the project and body so the human sees what will be sent.
     """
-    message = compose(_blob("Body."), "slack")
-    assert "*Progress update — demo*" in message
-    assert "**Progress update" not in message  # not the Discord double-asterisk
-    assert "Body." in message
+    discord = compose(_blob("Body."), "discord")
+    slack = compose(_blob("Body."), "slack")
+    assert isinstance(discord, ComposedMessage)
+    assert "embeds" in discord.payload
+    assert "blocks" in slack.payload and "text" in slack.payload  # blocks + fallback
+    assert "demo" in discord.preview and "Body." in discord.preview
+    assert "demo" in slack.preview and "Body." in slack.preview
 
 
-def test_slack_translates_section_headers_to_bold_lines():
-    """`## Section` titles become `*Section*` and no `##` survives in Slack.
+def test_discord_payload_has_one_field_per_section():
+    """A Discord embed carries one field per signal section, no plain `content`.
 
-    Why this matters: merge.py emits `## ` section titles for the report body;
-    Slack renders `##` literally, so they must be converted to bold lines.
+    Why this matters: the structured look is one titled field per signal; and we
+    must NOT also send `content` (Discord would render both, duplicating the
+    report).
     """
-    message = compose(_blob("## Code activity\nDid the work."), "slack")
-    assert "*Code activity*" in message
-    assert "##" not in message  # the literal header marker must not leak through
+    composed = compose(
+        _blob("ignored", sections=(("Code activity", "Did X."), ("Completed tasks", "Did Y."))),
+        "discord",
+    )
+    embed = composed.payload["embeds"][0]
+    assert [f["name"] for f in embed["fields"]] == ["Code activity", "Completed tasks"]
+    assert embed["title"] == "Progress update — demo"
+    assert "content" not in composed.payload
 
 
-def test_slack_translates_inline_bold():
-    """`**bold**` in the body becomes `*bold*` for Slack.
+def test_discord_embed_keeps_markdown_in_field_values():
+    """A section body's `**bold**` is preserved in the embed field value.
+
+    Why this matters: Discord renders Markdown inside embed field values, so the
+    body's bold must survive verbatim (unlike Slack, which needs translation).
+    """
+    composed = compose(
+        _blob("ignored", sections=(("Code activity", "Shipped the **structured lane**."),)),
+        "discord",
+    )
+    field = composed.payload["embeds"][0]["fields"][0]
+    assert field["name"] == "Code activity"
+    assert "**structured lane**" in field["value"]
+
+
+def test_slack_payload_has_header_context_and_section_blocks():
+    """Slack Block Kit has a header, a context date line, and a section per signal.
+
+    Why this matters: this is the structured Slack rendering — a header block for
+    the project, a context line for the date, and one section block per signal with
+    a divider between them; plus the `text` notification fallback.
+    """
+    composed = compose(
+        _blob("ignored", sections=(("Code activity", "Did X."), ("Completed tasks", "Did Y."))),
+        "slack",
+    )
+    types = [b["type"] for b in composed.payload["blocks"]]
+    assert types[0] == "header"          # project header (plain_text)
+    assert "context" in types            # the date line
+    assert types.count("section") == 2   # one section per signal
+    assert "divider" in types            # separating the two sections
+    assert "text" in composed.payload    # notification fallback
+
+
+def test_slack_section_title_is_single_asterisk_bold():
+    """A Slack section title is `*bold*` (single asterisk), not Discord's `**`.
+
+    Why this matters: Slack mrkdwn bold is one asterisk; the section title must be
+    in Slack's dialect, and the header block (plain_text) carries no asterisks.
+    """
+    composed = compose(_blob("Body.", sections=(("Code activity", "Body."),)), "slack")
+    assert "Progress update — demo" in composed.preview  # header (plain_text)
+    assert "*Code activity*" in composed.preview
+    assert "**Code activity**" not in composed.preview
+    assert "Body." in composed.preview
+
+
+def test_slack_translates_inline_bold_in_section_body():
+    """`**bold**` in a section body becomes `*bold*` for Slack.
 
     Why this matters: the LLM summary may contain `**bold**`; left untranslated it
-    would show the asterisks literally in Slack.
+    would show the asterisks literally in Slack, so the body is run through the
+    mrkdwn translator before going into a section block.
     """
-    message = compose(_blob("Shipped the **structured lane** today."), "slack")
-    assert "*structured lane*" in message
-    assert "**structured lane**" not in message
+    composed = compose(
+        _blob("ignored", sections=(("Code activity", "Shipped the **structured lane**."),)),
+        "slack",
+    )
+    assert "*structured lane*" in composed.preview
+    assert "**structured lane**" not in composed.preview
 
 
-def test_discord_rendering_is_unchanged_by_slack_support():
-    """Discord still gets `##` headers and `**bold**` — no cross-contamination.
+def test_intake_blob_renders_single_update_section():
+    """A blob with no sections renders its flat body as one "Update" section.
 
-    Why this matters: adding the Slack branch must not alter Discord output; the
-    two dialects are kept fully separate.
+    Why this matters: `intake` pushes a single body and carries no sections; it
+    must still render richly — one section/field labeled "Update" — through the same
+    path as a multi-section report.
     """
-    body = "## Code activity\nShipped the **structured lane**."
-    message = compose(_blob(body), "discord")
-    assert "## Code activity" in message       # Discord renders ATX headers
-    assert "**structured lane**" in message     # Discord double-asterisk bold
-    assert "**Progress update — demo**" in message
+    composed = compose(_blob("A pushed update."), "discord")
+    fields = composed.payload["embeds"][0]["fields"]
+    assert [f["name"] for f in fields] == ["Update"]
+    assert fields[0]["value"] == "A pushed update."
+
+
+def test_discord_overflow_falls_back_to_plain_content():
+    """A section too big for an embed falls back to a plain, truncated `content`.
+
+    Why this matters: Discord rejects an oversized embed; rather than fail, compose
+    degrades to today's plain message (truncated to the limit) — a complete report
+    beats a rejected one. The preview reflects whatever was actually built.
+    """
+    composed = compose(_blob("A" * 5000), "discord")
+    assert "embeds" not in composed.payload                     # too big -> fallback
+    assert len(composed.payload["content"]) <= _DISCORD_CONTENT_LIMIT
+    assert composed.preview == composed.payload["content"]
+
+
+def test_slack_overflow_falls_back_to_plain_text():
+    """A section too big for Block Kit falls back to a plain, truncated `text`.
+
+    Why this matters: same graceful degradation for Slack's per-section limit — the
+    POSTed `text` must fit, and the preview must equal what is sent.
+    """
+    composed = compose(_blob("A" * (_SLACK_TEXT_LIMIT + 1000)), "slack")
+    assert "blocks" not in composed.payload                     # too big -> fallback
+    assert len(composed.payload["text"]) <= _SLACK_TEXT_LIMIT
+    assert composed.preview == composed.payload["text"]

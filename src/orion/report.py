@@ -37,6 +37,14 @@ class ReportBlob:
             blob's shape; see docs/known-issues.md KI-8.
         generated_at: ISO 8601 UTC timestamp of when the report was built.
         orion_version: The Orion version that produced it (forward-compat).
+        sections: The ordered (title, body) sections this report is composed of,
+            each already twice-redacted, in display order. Carried so the composer
+            can build Slack Block Kit / Discord embeds directly instead of
+            re-parsing the flattened `body` (B3). Empty for an `intake` push (a
+            single pushed body with no per-signal sections), in which case the
+            composer renders `body` as one section. `body` stays the canonical
+            redacted text and the plain-text fallback, so anything that only needs
+            a string keeps working.
 
     Why:
         Bundling everything needed to send AND to advance state into one frozen
@@ -53,6 +61,9 @@ class ReportBlob:
     source_marker: str
     generated_at: str
     orion_version: str
+    # Defaulted last so existing positional construction stays valid; () is an
+    # immutable default, safe on a frozen dataclass.
+    sections: tuple[tuple[str, str], ...] = ()
 
 
 def build_report(
@@ -61,6 +72,7 @@ def build_report(
     lane: str,
     source_marker: str,
     generated_at: str,
+    sections: tuple[tuple[str, str], ...] = (),
 ) -> ReportBlob:
     """Assemble a ReportBlob from a project and a finished body.
 
@@ -70,6 +82,9 @@ def build_report(
         lane: The lane that produced the body ("raw" or "structured").
         source_marker: The git HEAD sha covered by this report.
         generated_at: ISO 8601 UTC timestamp.
+        sections: The ordered (title, body) sections the body was assembled from,
+            each already twice-redacted. Defaults to empty for callers (like
+            `intake`) that have only a single body and no per-signal sections.
 
     Returns:
         A populated ReportBlob.
@@ -78,7 +93,8 @@ def build_report(
         This is intentionally lane-agnostic: Phase 2's structured collectors call
         it with the same signature, passing their already-formatted text as body.
         Centralizing assembly means participant extraction and version stamping
-        happen in exactly one place.
+        happen in exactly one place. `sections` is additive (defaulted) so every
+        existing call site keeps working unchanged.
     """
     participants = tuple(r.name for r in project.recipients)
     return ReportBlob(
@@ -90,4 +106,5 @@ def build_report(
         source_marker=source_marker,
         generated_at=generated_at,
         orion_version=__version__,
+        sections=sections,
     )

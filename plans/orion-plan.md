@@ -6,7 +6,7 @@
 > cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
 > **Horizon B (local automation, ingestion & polish) is underway — B1 (git-hook triggers),
 > B2 (the Claude Code session skill), and B6 (read-only config-inspect commands) are signed off
-> (2026-06-16); B3 (richer rendering) is implemented and awaiting sign-off (2026-06-17).** All four ingestion signals (git, tasks, notes,
+> (2026-06-16), and B3 (richer rendering) is signed off (2026-06-17).** All four ingestion signals (git, tasks, notes,
 > sessions) now feed Orion. This is task #7 on the non-application to-do ("Build progress tracker
 > (Project Orion)").
 >
@@ -45,7 +45,7 @@
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | B1    | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Signed off (2026-06-16) |
 | B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
-| B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | 🔧 Implemented; awaiting sign-off (2026-06-17) |
+| B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ✅ Signed off (2026-06-17) |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model")                                                                                             | ⏳ Planned                 |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
@@ -500,7 +500,7 @@ inspect commands) are complete, plus a live check against the real config: `proj
 `check` all correct, `check` even caught a genuine missing repo path (a cleaned-up throwaway) and
 exited non-zero, and zero secret values were printed by any command.
 
-## Phase B3 status (2026-06-17) — awaiting sign-off
+## Phase B3 status (2026-06-17)
 
 Phase B3 — **richer rendering (Slack Block Kit + Discord embeds)** — is **implemented** in
 `src/orion/` with a 154-test suite (+6 net over B6). Built in four reviewed checkpoints: carry
@@ -530,8 +530,11 @@ real Discord + Slack channels — Discord rendered the embed card, Slack rendere
 single-section `orion` case differs only subtly from plain, confirmed against a Block Kit probe);
 a separate throwaway multi-signal project then delivered an unmistakable multi-section embed /
 Block Kit (stacked section blocks + dividers) to both channels, with state advancing and the
-re-run a no-op. **Awaiting sign-off** (a separate "Sign off Phase B3" commit will flip the
-roadmap row to ✅).
+re-run a no-op.
+
+**Signed off (2026-06-17).** `pytest`: 154/154. Future rendering polish (e.g. splitting an
+oversized report across multiple embeds/messages instead of falling back to plain) is deferred to
+a later horizon (Horizon C or beyond), per the user.
 
 ## Open questions / to settle before/while building
 

@@ -145,6 +145,48 @@ def _answer(monkeypatch, value):
     monkeypatch.setattr("builtins.input", lambda prompt="": value)
 
 
+class _FakeSummarizer:
+    """A stand-in Summarizer (B4): summarize() returns a canned body.
+
+    Args:
+        body: The summary string to return for any input.
+
+    Why:
+        B4 moved the summarizer behind a Summarizer Protocol that
+        cli._build_summarizer constructs from config. Tests patch that builder to
+        return this fake, so no Anthropic client or API key is built and the test
+        controls the report body — the same role the old cli.summarize_raw
+        monkeypatch played, just one level up at the seam.
+    """
+
+    def __init__(self, body: str = "Made progress."):
+        self._body = body
+
+    def summarize(self, text: str, share_level: str) -> str:
+        return self._body
+
+
+def use_summary(monkeypatch, body: str = "Made progress.") -> None:
+    """Patch cli._build_summarizer to return a _FakeSummarizer(body).
+
+    Args:
+        monkeypatch: pytest's monkeypatch fixture.
+        body: The canned summary the fake returns (a test can inject a string
+            with a secret to prove redaction still runs on the LLM output).
+
+    Returns:
+        None. Side effect: the CLI builds the fake summarizer on the raw lane.
+
+    Why:
+        Keeps the summarizer patch target in ONE place (DRY): every CLI test that
+        used to do `mp.setattr(cli, "summarize_raw", lambda ...)` now calls this,
+        so a future seam change touches conftest, not a dozen tests.
+    """
+    monkeypatch.setattr(
+        cli, "_build_summarizer", lambda cfg, secret_getter: _FakeSummarizer(body)
+    )
+
+
 @pytest.fixture
 def env_and_mocks(monkeypatch):
     """Set required env vars and capture mocked LLM + delivery.
@@ -167,8 +209,10 @@ def env_and_mocks(monkeypatch):
 
     sent: list[tuple[str, str]] = []
 
-    # Default summary echoes nothing sensitive; individual tests can override.
-    monkeypatch.setattr(cli, "summarize_raw", lambda text, level, *, client: "Made progress.")
+    # Default summary echoes nothing sensitive; individual tests can override via
+    # use_summary(). Patches the seam (cli._build_summarizer), so no Anthropic
+    # client/key is built and the canned body is returned on the raw lane.
+    use_summary(monkeypatch)
     # Record the delivered text (extracted from the payload dict) keyed to its
     # webhook, so tests assert on the message string as before.
     monkeypatch.setattr(

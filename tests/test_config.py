@@ -391,6 +391,201 @@ def test_unknown_channel_is_rejected(tmp_path):
         load_config(path)
 
 
+def test_summarizer_defaults_to_anthropic_haiku(tmp_path):
+    """A config with no [summarizer] table resolves to Anthropic/Haiku.
+
+    Why this matters: B4 must be backward-compatible — every existing orion.toml
+    has no [summarizer] table, and those configs must keep summarizing the git
+    lane with the lightest adequate model exactly as before. If the default
+    drifted, an upgrade would silently change behavior.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    config = load_config(path)
+    assert config.summarizer.provider == "anthropic"
+    assert config.summarizer.model == "claude-haiku-4-5"
+    # The local-only fields stay None for the Anthropic backend.
+    assert config.summarizer.base_url is None
+    assert config.summarizer.api_key_env is None
+
+
+def test_summarizer_anthropic_model_override(tmp_path):
+    """An explicit Anthropic model (e.g. stepping up to Sonnet) is honored.
+
+    Why this matters: the "lightest adequate model" default can be overridden when
+    Haiku misses nuance on real diffs — the whole point of B4's flexibility. We
+    pin that a provided model replaces the default.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "anthropic"
+        model = "claude-sonnet-4-6"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    config = load_config(path)
+    assert config.summarizer.provider == "anthropic"
+    assert config.summarizer.model == "claude-sonnet-4-6"
+
+
+def test_summarizer_local_backend_parses(tmp_path):
+    """A valid local backend (base_url + model + optional key) loads.
+
+    Why this matters: the local backend is the proof the seam is real and the
+    local-first privacy payoff. We pin that base_url, model, and the optional
+    api_key_env all resolve onto the SummarizerConfig the CLI will build from.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "local"
+        base_url = "http://localhost:11434/v1"
+        model = "llama3.1"
+        api_key_env = "LOCAL_LLM_KEY"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    config = load_config(path)
+    assert config.summarizer.provider == "local"
+    assert config.summarizer.base_url == "http://localhost:11434/v1"
+    assert config.summarizer.model == "llama3.1"
+    assert config.summarizer.api_key_env == "LOCAL_LLM_KEY"
+
+
+def test_summarizer_local_without_api_key_is_fine(tmp_path):
+    """A local backend with no api_key_env loads (most local servers need none).
+
+    Why this matters: requiring a key for a local model would defeat the privacy
+    point and block the common Ollama/llama.cpp case. The absence must be valid,
+    leaving api_key_env None so the CLI knows no key is required.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "local"
+        base_url = "http://localhost:11434/v1"
+        model = "llama3.1"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    config = load_config(path)
+    assert config.summarizer.api_key_env is None
+
+
+def test_summarizer_unknown_provider_rejected(tmp_path):
+    """An unsupported provider name fails loudly with the allowed set.
+
+    Why this matters: a typo'd provider ("anthropc") should be a five-second fix
+    at load time, not a confusing failure when the summarizer is built mid-run.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "openai"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="provider"):
+        load_config(path)
+
+
+def test_summarizer_local_without_base_url_rejected(tmp_path):
+    """provider='local' without a base_url is rejected.
+
+    Why this matters: the local backend has nothing to POST to without an
+    endpoint URL; catching it here names the exact key to add instead of failing
+    with a confusing connection error at send time.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "local"
+        model = "llama3.1"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="base_url"):
+        load_config(path)
+
+
+def test_summarizer_local_without_model_rejected(tmp_path):
+    """provider='local' without a model is rejected (no universal default).
+
+    Why this matters: unlike Anthropic (which defaults to Haiku), there is no
+    sensible default local model name, so we require an explicit one rather than
+    guess — a wrong guess would fail confusingly at the endpoint.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "local"
+        base_url = "http://localhost:11434/v1"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="model"):
+        load_config(path)
+
+
 def test_unknown_project_lists_known(tmp_path):
     """Requesting a missing project lists the ones that exist.
 

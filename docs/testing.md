@@ -42,31 +42,34 @@ The end-to-end tests run **almost the whole real pipeline** — real config pars
 state, real git collection against real temporary repos, real redaction, real compose/merge.
 Only three things are ever mocked, each for a specific reason:
 
-- **The LLM call** (`summarize_raw`) — so the suite needs no Anthropic API key and makes no
-  network call, and so the test controls the exact "model output" (useful for the pass-2
-  redaction test, which seeds a leaked key *into* the model's reply).
+- **The summarizer** (the B4 seam — `cli._build_summarizer`, via the `use_summary` helper in
+  `conftest.py`) — so the suite needs no Anthropic API key and makes no network call, and so the
+  test controls the exact "model output" (useful for the pass-2 redaction test, which seeds a
+  leaked key *into* the model's reply).
 - **The network POST** (`discord_send` / `slack_send`) — so no real webhook is hit; the fake
   records what *would* have been sent, which is what we assert on.
 - **`input()`** — so the preview/confirm gate is scripted (`y` / `n`) without a human.
 
 Everything else runs for real, because the bugs that matter (a secret surviving redaction, a
 marker advancing on a failed send, a path that breaks on Windows) live in the real code paths,
-not in mocks. The summarizer's own unit test uses **dependency injection** (a fake client
-passed in) rather than monkeypatching, mirroring how `cli.py` builds the client lazily.
+not in mocks. The summarizer backends' own unit tests use **dependency injection** rather than
+monkeypatching the seam: the Anthropic backend takes a fake client, and the local backend runs
+against a patched `urllib.request.urlopen` (a fake HTTP response) — both mirroring how `cli.py`
+builds the configured backend lazily, with no network and no key.
 
 ## Categories
 
 | Category | Files | What it protects / why it's necessary |
 |---|---|---|
 | **Security gate** | `test_redact.py`; the `.env`/subdir/noise exclusion in `test_git_collector.py`; the pass-2 redaction cases in `test_cli.py` / `test_intake.py`; the redaction-under-auto-send case in `test_schedule.py` | The #1 principle: secrets never reach the LLM or a channel. If these fail, Orion is not shippable. |
-| **Pure-logic units** | `test_merge.py`, `test_report_compose.py`, `test_secrets.py`, `test_summarize.py`, `test_console_encoding.py` | Leaf-module correctness with no I/O — fast, exact-output assertions. Includes the B3 rich rendering (`test_report_compose.py`: Discord embed / Slack Block Kit structure, the payload + faithful-preview pairing, per-channel bold dialect, and both overflow→plain fallbacks). |
+| **Pure-logic units** | `test_merge.py`, `test_report_compose.py`, `test_secrets.py`, `test_summarize.py`, `test_console_encoding.py` | Leaf-module correctness with no I/O — fast, exact-output assertions. Includes the B3 rich rendering (`test_report_compose.py`: Discord embed / Slack Block Kit structure, the payload + faithful-preview pairing, per-channel bold dialect, and both overflow→plain fallbacks) and the B4 summarizer seam (`test_summarize.py`: both backends behind the `Summarizer` Protocol — the Anthropic backend uses the configured model and wraps API errors; the local backend POSTs the OpenAI-compatible shape with the shared security prompt, sends Bearer auth only when keyed, and fails closed on every transport/shape error). |
 | **File-I/O collectors & store** | `test_tasks_collector.py`, `test_notes_collector.py`, `test_config.py`, `test_state.py` | Parsing local files (TOML, checklists, notes) and persisting per-`(project, collector)` deltas, including the Phase-1→2 marker migration. |
 | **Real-git integration** | `test_git_collector.py` | The actual `subprocess` git behavior against real temp repos — delta detection, share-level gating, and the collection-time secret/noise filters. |
 | **Delivery** (network-mocked) | `test_delivery.py`, `test_slack_delivery.py` | The per-channel POST contract — Discord 204 vs Slack 200, the User-Agent that fixes Discord's 403, and that delivery is **pure transport**: it POSTs the compose-built payload dict as-is (rendering + truncation now live in `compose`, B3). |
 | **End-to-end pipeline** | `test_cli.py`, `test_intake.py` | The orchestration: multi-collector loop, lane separation (structured signals never call the LLM), per-recipient routing, fail-closed state advancement. |
 | **Unattended send** (Phase 4) | `test_schedule.py` | The scheduled-run safety contract: the preview is bypassed only with `--yes` **and** `auto_send` (config alone never sends); `--all` is fail-soft and exits non-zero only on a real failure; redaction still fires on the auto-send path. |
 | **Event-driven hooks** (B1) | `test_hooks.py` | The generated hook's safety properties (delegates to `report --yes`, backgrounded, always `exit 0`, forward-slash paths) without executing a real hook; `resolve_hooks_dir` against a real repo; and the `install-hook` command (writes an executable hook, honors `--hook`, refuses to clobber without `--force`, `--print` writes nothing, warns when not opted in). |
-| **Config inspect** (B6) | `test_inspect.py` | The read-only `projects`/`show`/`check` commands: they print the right facts, fail cleanly on a bad config / unknown project, and **never print a secret value** (`check` reports webhook/API vars by name as set/MISSING, with a non-zero exit when a required one is missing). |
+| **Config inspect** (B6) | `test_inspect.py` | The read-only `projects`/`show`/`check` commands: they print the right facts, fail cleanly on a bad config / unknown project, and **never print a secret value** (`check` reports webhook/API vars by name as set/MISSING, with a non-zero exit when a required one is missing). B4 adds the backend-aware key check: a keyless local summarizer is ready with no Anthropic key, while a keyed local endpoint's named var is flagged MISSING when unset. |
 | **Portability** (Phase 3.5) | `test_cli_entry.py`, `test_console_encoding.py` | The `python -m orion` entry point resolves on every OS, and the console UTF-8 guard never crashes on a redirected/odd stream. |
 | **Manual / hardware** | `portability-smoke-test.md` (not pytest) | Native Windows / macOS validation that can't run in CI on one machine. |
 

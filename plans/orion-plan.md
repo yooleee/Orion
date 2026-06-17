@@ -46,7 +46,7 @@
 | B1    | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Signed off (2026-06-16) |
 | B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ✅ Signed off (2026-06-17) |
-| B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model")                                                                                             | ⏳ Planned                 |
+| B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model (OpenAI-compatible). Per-step model choice **deferred** (one LLM step today; seam keeps it additive). Keeps the "lightest adequate model" default (Haiku) | 🔬 Awaiting sign-off (2026-06-17) |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
@@ -205,8 +205,9 @@ they travel the structured lane.
 - **Redactor** — strips obvious secrets (API keys, `.env` contents, tokens) before any raw
 text reaches the LLM or a channel. Runs on the raw lane; still applied as a safety net on
 the structured lane.
-- **Summarizer (conditional, opt-in)** — Claude turns redacted *raw* activity into a concise
-progress narrative at the project's configured share level. Skipped **by default** for
+- **Summarizer (conditional, opt-in)** — an LLM (Claude Haiku by default; config-selectable
+behind a provider-agnostic seam since B4, including a local model) turns redacted *raw* activity
+into a concise progress narrative at the project's configured share level. Skipped **by default** for
 structured/already-written updates (the model is optional, not imposed — see the "Not every
 report needs an LLM" decision above).
 - **Composer** — merges whatever this run produced (a summary and/or structured items) and
@@ -271,7 +272,10 @@ not parsed by Orion. Resolved — so Orion no longer needs the raw session file 
 - **Supervisor replies:** wanted eventually; planned as Phase 7 with two paths (native
 threads via a bot, or a web dashboard). Resolved as "later, leave room for it."
 - **Model:** Haiku 4.5 is acceptable for the summarizer; still confirm quality on real
-diffs in Phase 1, and remember the summarizer only runs on the raw lane.
+diffs in Phase 1, and remember the summarizer only runs on the raw lane. *(B4, 2026-06-17:
+the model/provider is now config-selectable behind a provider-agnostic `Summarizer` seam —
+Anthropic by default, or a local OpenAI-compatible model — with Haiku still the default;
+see the Phase B4 status section.)*
 - **Git payload to the LLM (Phase 1, 2026-06-14):** a **hybrid** — commit messages (intent)
   - diffstat (scope) + a line-capped, secret-filtered code diff (detail). The diff is sent
   only at `share_level = "detailed"`; `high_level` sends messages + diffstat only. Sensitive
@@ -535,6 +539,35 @@ re-run a no-op.
 **Signed off (2026-06-17).** `pytest`: 154/154. Future rendering polish (e.g. splitting an
 oversized report across multiple embeds/messages instead of falling back to plain) is deferred to
 a later horizon (Horizon C or beyond), per the user.
+
+## Phase B4 status (2026-06-17)
+
+Phase B4 — **summarizer flexibility (provider-agnostic seam + optional local model)** — is
+**implemented** in `src/orion/` with a 172-test suite (+18 net over B3), **awaiting sign-off**.
+Built in four reviewed checkpoints: the global `[summarizer]` config + validation (CP1) → the
+`Summarizer` Protocol with the Anthropic backend refactored behind it, default behavior unchanged
+(CP2) → the `LocalSummarizer` (OpenAI-compatible endpoint over stdlib `urllib`) + backend-aware
+`check` (CP3) → docs + living docs (CP4). The open decisions from
+`[docs/phase-b4-kickoff.md](../docs/phase-b4-kickoff.md)` were settled with the user (2026-06-17):
+**(1)** the seam is a one-method `Summarizer` Protocol, with `cli._build_summarizer` constructing
+the configured backend via explicit provider dispatch (not a registry); **(2)** config is a
+single **global** `[summarizer]` table (per-project override left as a clean, additive seam);
+**(3)** ship the seam + the Anthropic refactor **and** one real local backend (a single
+implementation would be a "fake seam"); **(4)** per-step model choice **deferred** — one LLM step
+exists today, so the seam keeps it additive; **(5)** Anthropic keeps `ANTHROPIC_API_KEY`, a local
+endpoint needs no key unless `api_key_env` names one; **(6)** every backend fails closed into
+`SummarizerError`, and the local backend adds **0** runtime dependencies.
+
+What shipped (details in `[CHANGELOG.md](../CHANGELOG.md)`): the module-level `MODEL` constant and
+the standalone `summarize_raw` are gone, replaced by `AnthropicSummarizer` (now using the
+configured model) and `LocalSummarizer` behind the `Summarizer` Protocol; both share the one
+security-relevant system prompt and the empty-result guard. The default — a config with no
+`[summarizer]` table — still routes the git lane through Anthropic/Haiku unchanged. Redaction and
+preview-before-send are identical for every backend; a local model is simply more private (no
+outbound summarization call). The local backend targets the **OpenAI-compatible** `/chat/
+completions` shape (one path for Ollama / llama.cpp / LM Studio / vLLM) rather than a runtime's
+native API — a deliberate "engineered enough" call, tracked with its tradeoff and
+change-conditions as **KI-16**.
 
 ## Open questions / to settle before/while building
 

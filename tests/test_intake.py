@@ -8,8 +8,8 @@
 #                  These tests pin that it sends, redacts, gates on preview, and
 #                  never touches the markers table.
 # What's mocked: discord_send (no network) and input() (scripted preview). Config,
-#                  secrets, state, redaction all run for real. summarize_raw is
-#                  not mocked because intake must never call it.
+#                  secrets, state, redaction all run for real. The summarizer is
+#                  not mocked because intake must never build or call it.
 # =============================================================================
 
 import pytest

@@ -199,3 +199,68 @@ def test_check_invalid_config_exits_one(tmp_path, capsys):
     code = cli.main(["check", "--config", str(toml)])
     assert code == 1
     assert "Error" in capsys.readouterr().err
+
+
+def _local_summarizer_config(tmp_path, *, api_key_env: str | None = None):
+    """A valid config whose summarizer is the local backend (git lane enabled)."""
+    api_key_line = f'api_key_env = "{api_key_env}"' if api_key_env else ""
+    return _write(
+        tmp_path,
+        f"""
+        state_db = "state.sqlite3"
+
+        [summarizer]
+        provider = "local"
+        base_url = "http://localhost:11434/v1"
+        model = "llama3.1"
+        {api_key_line}
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+
+
+def test_check_local_backend_needs_no_api_key(tmp_path, monkeypatch, capsys):
+    """A local-backend project is ready WITHOUT any Anthropic key (B4).
+
+    Why this matters: this is the local-first payoff made visible in pre-flight —
+    with provider='local' and no api_key_env, no API key is required, so check must
+    confirm readiness (exit 0) even with ANTHROPIC_API_KEY entirely unset, and say
+    so explicitly rather than flag a missing key.
+    """
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # deliberately absent
+    toml = _local_summarizer_config(tmp_path)
+
+    code = cli.main(["check", "--config", str(toml)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "needs no API key" in out
+    assert "Ready to send" in out
+
+
+def test_check_local_backend_with_missing_named_key_is_flagged(tmp_path, monkeypatch, capsys):
+    """A local backend that names an api_key_env flags it MISSING when unset.
+
+    Why this matters: the rare keyed endpoint must be held to the same readiness
+    bar — the user-named variable is reported MISSING by NAME and fails the check,
+    just like a webhook secret.
+    """
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
+    monkeypatch.delenv("LOCAL_LLM_KEY", raising=False)  # the named-but-unset key
+    toml = _local_summarizer_config(tmp_path, api_key_env="LOCAL_LLM_KEY")
+
+    code = cli.main(["check", "--config", str(toml)])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "LOCAL_LLM_KEY" in captured.out  # named...
+    assert "MISSING" in captured.out         # ...and flagged
+    assert "Not ready" in captured.err

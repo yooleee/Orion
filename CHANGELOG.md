@@ -14,6 +14,60 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase B4 — Summarizer flexibility: provider-agnostic seam + local model (2026-06-17)
+
+The summarizer step is no longer hardwired to one Anthropic model. A small **provider-agnostic
+seam** lets the model — and the provider, including an optional **local** model — be chosen by
+config, while the default stays the lightest adequate one (Claude Haiku 4.5) and existing
+`orion.toml` files keep working unchanged. Internal flexibility only: no new signal, no new
+channel, and redaction + preview-before-send are identical for every backend. Net new runtime
+dependencies: **0** (the local backend uses stdlib `urllib`).
+
+### Added
+
+- **Optional global `[summarizer]` table** (`config.py`) — `provider` (`anthropic` default, or
+  `local`) and `model`, plus `base_url`/`api_key_env` for the local backend. Validated like the
+  existing `share_level`/`collectors` checks (`SUMMARIZER_PROVIDERS`; an explicit `model` and
+  `base_url` are required for `local`, since there is no universal default for either). Absent
+  table → Anthropic/Haiku, so the common case needs no config and upgrades change nothing.
+- **`Summarizer` seam** (`summarize.py`) — a one-method `Summarizer` Protocol
+  (`summarize(text, share_level) -> str`) with two backends: **`AnthropicSummarizer`** (the
+  former single call, now taking the configured model) and **`LocalSummarizer`**, which POSTs
+  the OpenAI-compatible `/chat/completions` shape to any local endpoint (Ollama / llama.cpp /
+  LM Studio / vLLM) over stdlib `urllib`. Both share the one security-relevant system prompt and
+  the empty-result guard; every backend translates its failures into `SummarizerError` (fail
+  closed). `SummarizerError` still wraps each provider so the rest of the codebase never imports
+  a provider SDK.
+- **Backend-aware `check`** (`cli.py`) — readiness now reports the *configured* summarizer's
+  required secret: `ANTHROPIC_API_KEY` for Anthropic, the named `api_key_env` for a keyed local
+  endpoint, or prints that **no API key is required** for a keyless local one.
+- **Tests** — 172 total (+18): the local backend (OpenAI-shape POST, configured model + shared
+  security prompt, Bearer auth only when keyed, fail-closed on unreachable/HTTP-error/bad-shape/
+  empty), the Anthropic backend behind the seam (configured model flows through; API errors
+  wrap), `_build_summarizer` dispatch + the per-provider key-fetch policy, the `[summarizer]`
+  config validation, and `check` for a keyless / keyed local backend.
+
+### Changed
+
+- **`summarize.py` generalized behind the seam** — the module-level `MODEL` constant and the
+  standalone `summarize_raw(text, share_level, *, client)` are **removed**; the call lives in
+  `AnthropicSummarizer.summarize`, and `cli._build_summarizer(summarizer_cfg, get_required)`
+  constructs the configured backend (explicit provider dispatch, mirroring `_sender_for` /
+  `_collect_for` — not a registry). The lazy "build only when a raw collector has activity"
+  behavior is preserved, so a structured-only run still needs no key or client. The shared CLI
+  test fixture patches the seam (`cli._build_summarizer` via `conftest.use_summary`) instead of
+  the old `cli.summarize_raw`.
+
+### Notes
+
+- **Per-step model choice deferred.** The roadmap lists it, but there is currently **one** LLM
+  step (the git summary), so per-step selection would be premature; the seam keeps it an additive
+  change when a second LLM step appears (build seams, not futures).
+- **OpenAI-compatible shape, not a runtime's native API.** The local backend targets
+  `/chat/completions` (the common denominator across local runtimes) rather than, e.g., Ollama's
+  native `/api/chat` — one code path for all of them. Tradeoff and the conditions under which it
+  might change are tracked as **KI-16**.
+
 ## Phase B3 — Richer rendering: Slack Block Kit + Discord embeds (2026-06-17)
 
 Reports now render as each channel's **native structured format** — a Discord **embed** and a

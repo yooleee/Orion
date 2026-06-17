@@ -22,6 +22,19 @@ SHARE_LEVELS = ("high_level", "detailed")  # "high_level" sends no code diff (sa
 SUPPORTED_COLLECTORS = ("git", "tasks", "notes")  # Phase 2: structured lane added.
 SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
 
+# Which summarizer backends Orion can drive (B4). "anthropic" is the default and
+# uses the Anthropic Messages API; "local" targets any OpenAI-compatible chat
+# endpoint (Ollama / llama.cpp / LM Studio) over stdlib urllib. Kept as a named
+# constant so validation and messages share one source of truth, mirroring
+# SHARE_LEVELS / SUPPORTED_CHANNELS, and adding a backend later is a one-line edit.
+SUMMARIZER_PROVIDERS = ("anthropic", "local")
+
+# The default model for the default (anthropic) provider — the lightest model
+# adequate for summarization, per the project's "lightest adequate model" rule.
+# A config with no [summarizer] table resolves to exactly this, so existing
+# configs keep their current behavior unchanged.
+DEFAULT_SUMMARIZER_MODEL = "claude-haiku-4-5"
+
 # Each file-backed structured collector reads ONE local file, named per project by
 # this TOML key. The map keeps validation DRY: one loop adds a clear "you enabled
 # X but gave no X_file" check for every entry, so adding a future file collector
@@ -106,19 +119,54 @@ class ProjectConfig:
 
 
 @dataclass(frozen=True)
+class SummarizerConfig:
+    """Which LLM backend summarizes the raw (git) lane, chosen by config (B4).
+
+    Args:
+        provider: One of SUMMARIZER_PROVIDERS ("anthropic" or "local").
+        model: The model id to request (e.g. "claude-haiku-4-5" for Anthropic, or
+            a local model name like "llama3.1" for the local backend).
+        base_url: For the "local" provider only: the base URL of an
+            OpenAI-compatible chat endpoint (e.g. "http://localhost:11434/v1").
+            None for the "anthropic" provider.
+        api_key_env: For the "local" provider only: the NAME of an optional .env
+            variable holding an API key, when the endpoint requires one. Most
+            local servers need none, so this is None unless explicitly set. The
+            "anthropic" provider always uses ANTHROPIC_API_KEY (not this field).
+
+    Why:
+        This is the provider-agnostic seam B4 introduces: the summarizer step is
+        no longer hardwired to one Anthropic model. A frozen, validated bundle
+        lets cli.py build the configured backend without re-parsing TOML or
+        guessing defaults. It is GLOBAL (one [summarizer] table) for now — the
+        smallest surface that lets the model/provider vary; a per-project override
+        stays an additive change later (build seams, not futures).
+    """
+
+    provider: str
+    model: str
+    base_url: str | None = None
+    api_key_env: str | None = None
+
+
+@dataclass(frozen=True)
 class Config:
-    """The whole registry: the state-DB location plus every tracked project.
+    """The whole registry: state-DB location, summarizer backend, every project.
 
     Args:
         state_db: Absolute path to the sqlite state store.
+        summarizer: The configured summarizer backend (B4). Defaults to
+            Anthropic/Haiku when no [summarizer] table is present.
         projects: Map of project name -> ProjectConfig.
 
     Why:
-        Bundling the global state_db path with the projects means the CLI loads
-        config once and has everything it needs to open state and pick a project.
+        Bundling the global state_db path and summarizer config with the projects
+        means the CLI loads config once and has everything it needs to open state,
+        build the summarizer, and pick a project.
     """
 
     state_db: Path
+    summarizer: SummarizerConfig
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
 
@@ -167,7 +215,88 @@ def load_config(path: Path) -> Config:
     for name, body in projects_table.items():
         projects[name] = _parse_project(name, body, path)
 
-    return Config(state_db=state_db, projects=projects)
+    # The summarizer backend is global (one [summarizer] table). An absent table
+    # resolves to the Anthropic/Haiku default, so existing configs are unchanged.
+    summarizer = _parse_summarizer(raw.get("summarizer"), path)
+
+    return Config(state_db=state_db, summarizer=summarizer, projects=projects)
+
+
+def _parse_summarizer(raw: object, config_path: Path) -> SummarizerConfig:
+    """Validate the optional [summarizer] table into a SummarizerConfig (B4).
+
+    Args:
+        raw: The raw value under the top-level `summarizer` key, or None when the
+            table is absent.
+        config_path: Path to the config, used to locate error messages.
+
+    Returns:
+        A validated SummarizerConfig. When the table is absent, the default
+        Anthropic/Haiku backend (so a config with no [summarizer] keeps its
+        current behavior exactly).
+
+    Why:
+        Centralizing this here means cli.py can trust the backend choice without
+        re-checking it, and a typo (unknown provider, a local backend with no
+        base_url) fails loudly at load time with a message naming the fix —
+        mirroring how share_level and collectors are validated. We require an
+        explicit `model` for the local backend because there is no universal
+        default local model name, but default the Anthropic model to the lightest
+        adequate one so the common case needs no model line.
+    """
+    where = f"[summarizer] in {config_path}"
+
+    # Absent table -> the default backend. This is the backward-compatible path.
+    if raw is None:
+        return SummarizerConfig(provider="anthropic", model=DEFAULT_SUMMARIZER_MODEL)
+
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table.")
+
+    provider = raw.get("provider", "anthropic")
+    if provider not in SUMMARIZER_PROVIDERS:
+        raise ConfigError(
+            f"{where} has invalid provider={provider!r}. "
+            f"Expected one of {SUMMARIZER_PROVIDERS}."
+        )
+
+    if provider == "anthropic":
+        # Anthropic: model defaults to the lightest adequate one; base_url and
+        # api_key_env do not apply (the key is always ANTHROPIC_API_KEY).
+        model = raw.get("model", DEFAULT_SUMMARIZER_MODEL)
+        if not isinstance(model, str) or not model.strip():
+            raise ConfigError(f"{where} has an invalid `model` (must be a non-empty string).")
+        return SummarizerConfig(provider="anthropic", model=model.strip())
+
+    # provider == "local": an OpenAI-compatible endpoint. base_url and an explicit
+    # model are both required (no sensible universal default for either); an API
+    # key is optional and named by api_key_env only when the endpoint needs one.
+    base_url = raw.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ConfigError(
+            f"{where} uses provider='local' but is missing a non-empty `base_url` "
+            f"(e.g. base_url = \"http://localhost:11434/v1\")."
+        )
+
+    model = raw.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ConfigError(
+            f"{where} uses provider='local' but is missing a non-empty `model` "
+            f"(the local model name, e.g. model = \"llama3.1\")."
+        )
+
+    api_key_env = raw.get("api_key_env")
+    if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env.strip()):
+        raise ConfigError(
+            f"{where} has an invalid `api_key_env` (must be a non-empty string when set)."
+        )
+
+    return SummarizerConfig(
+        provider="local",
+        model=model.strip(),
+        base_url=base_url.strip(),
+        api_key_env=api_key_env.strip() if isinstance(api_key_env, str) else None,
+    )
 
 
 def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:

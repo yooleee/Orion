@@ -25,8 +25,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
-
 from orion.collectors import LANE_RAW, LANE_STRUCTURED
 from orion.collectors.git import GitError
 from orion.collectors.git import collect as collect_git
@@ -35,7 +33,14 @@ from orion.collectors.notes import collect as collect_notes
 from orion.collectors.tasks import TasksError
 from orion.collectors.tasks import collect as collect_tasks
 from orion.compose import ComposedMessage, compose
-from orion.config import ConfigError, ProjectConfig, Recipient, get_project, load_config
+from orion.config import (
+    ConfigError,
+    ProjectConfig,
+    Recipient,
+    SummarizerConfig,
+    get_project,
+    load_config,
+)
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
 from orion.delivery.slack import send as slack_send
@@ -45,7 +50,7 @@ from orion.redact import redact
 from orion.report import build_report
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import get_marker, open_state, record_report, set_marker
-from orion.summarize import SummarizerError, summarize_raw
+from orion.summarize import AnthropicSummarizer, LocalSummarizer, Summarizer, SummarizerError
 
 # Section title shown in the report for each collector. Kept as an explicit table
 # (NOT a registry) so the orchestrator stays a plain dict lookup and adding a
@@ -358,7 +363,9 @@ def cmd_report(
 
     # Fail-soft loop: _run_report catches its own per-project errors and returns
     # STATUS_FAILED, so one bad project never stops the rest of an --all run.
-    statuses = [_run_report(project, conn, assume_yes) for project in projects]
+    statuses = [
+        _run_report(project, conn, assume_yes, config.summarizer) for project in projects
+    ]
 
     if all_projects:
         _print_all_summary(statuses)
@@ -404,7 +411,12 @@ def _print_all_summary(statuses: list[str]) -> None:
     )
 
 
-def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bool) -> str:
+def _run_report(
+    project: ProjectConfig,
+    conn: sqlite3.Connection,
+    assume_yes: bool,
+    summarizer_cfg: SummarizerConfig,
+) -> str:
     """Run the full report pipeline for ONE already-loaded project.
 
     Args:
@@ -412,6 +424,8 @@ def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bo
         conn: An open state-store connection (from open_state).
         assume_yes: True for an unattended run (the `--yes` flag). Combined with
             project.auto_send, it decides whether the human preview is bypassed.
+        summarizer_cfg: The global summarizer backend config (B4). Used only on
+            the raw lane, to build the configured summarizer lazily.
 
     Returns:
         One of the STATUS_* constants describing the outcome, so the caller can
@@ -454,9 +468,9 @@ def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bo
         redaction_hits = 0
         any_raw_lane = False
         # Built lazily, and only if a RAW collector actually has activity, so a
-        # structured-only run never needs the Anthropic key. Local construction
-        # keeps secret handling in the CLI (not in summarize.py).
-        client = None
+        # structured-only run never needs an API key (or any summarizer at all).
+        # _build_summarizer keeps secret handling in the CLI (not in summarize.py).
+        summarizer: Summarizer | None = None
 
         for collector_name in project.collectors:
             prior = get_marker(conn, project.name, collector_name)
@@ -471,9 +485,9 @@ def _run_report(project: ProjectConfig, conn: sqlite3.Connection, assume_yes: bo
             redaction_hits += pass1.hit_count
 
             if result.lane == LANE_RAW:
-                if client is None:
-                    client = anthropic.Anthropic(api_key=get_required("ANTHROPIC_API_KEY"))
-                body = summarize_raw(pass1.text, project.share_level, client=client)
+                if summarizer is None:
+                    summarizer = _build_summarizer(summarizer_cfg, get_required)
+                body = summarizer.summarize(pass1.text, project.share_level)
                 any_raw_lane = True
             else:
                 # Structured lane: pass through, NO LLM. This is the seam Phase 1
@@ -897,13 +911,22 @@ def cmd_check(config_path: Path) -> int:
                 print(f"    ✗   {recipient.webhook_env_var} is MISSING ({recipient.name})")
                 problems += 1
 
-    # The Anthropic key is needed whenever any project summarizes the git (raw) lane.
+    # The summarizer secret is needed whenever some project summarizes the git
+    # (raw) lane. WHICH secret (or whether one is needed at all) depends on the
+    # configured backend: Anthropic needs ANTHROPIC_API_KEY; a local backend needs
+    # a key only if api_key_env was set, and otherwise needs none.
     if any("git" in p.collectors for p in config.projects.values()):
         print()
-        if os.environ.get("ANTHROPIC_API_KEY", "").strip():
-            print("  OK  ANTHROPIC_API_KEY is set (for the git/raw lane).")
+        key_env = _summarizer_key_env(config.summarizer)
+        if key_env is None:
+            print(
+                f"  OK  summarizer provider {config.summarizer.provider!r} needs no "
+                f"API key (local endpoint: {config.summarizer.base_url})."
+            )
+        elif os.environ.get(key_env, "").strip():
+            print(f"  OK  {key_env} is set (for the git/raw lane summarizer).")
         else:
-            print("  ✗   ANTHROPIC_API_KEY is MISSING (for the git/raw lane).")
+            print(f"  ✗   {key_env} is MISSING (for the git/raw lane summarizer).")
             problems += 1
 
     print()
@@ -1041,6 +1064,67 @@ def _sender_for(channel: str):
     if channel == "slack":
         return slack_send
     raise ConfigError(f"Unknown channel {channel!r}.")
+
+
+def _build_summarizer(cfg: SummarizerConfig, secret_getter) -> Summarizer:
+    """Construct the configured summarizer backend (B4).
+
+    Args:
+        cfg: The global SummarizerConfig (provider + model + local-only fields).
+        secret_getter: A callable mapping an env-var NAME to its value (the
+            module's get_required). Injected so the secret READING stays in the
+            CLI and only a provider that needs a key ever calls it — a local
+            backend with no api_key_env never touches it.
+
+    Returns:
+        A Summarizer for the configured provider.
+
+    Why:
+        Mirrors the call-time dispatch of _sender_for / _collect_for — an explicit
+        if/elif table, deliberately NOT a plugin registry — so the orchestrator
+        stays a plain lookup and adding a backend is a localized change. The
+        anthropic SDK is imported inside its branch so building the client (which
+        holds the API key) lives in the CLI, not in summarize.py. config
+        validation guarantees the provider is supported, so the final raise is a
+        defensive guard, not an expected path.
+    """
+    if cfg.provider == "anthropic":
+        # The key always lives in ANTHROPIC_API_KEY for the Anthropic backend
+        # (unchanged from Phase 1); api_key_env does not apply here.
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=secret_getter("ANTHROPIC_API_KEY"))
+        return AnthropicSummarizer(client, cfg.model)
+    if cfg.provider == "local":
+        # A local endpoint usually needs no key; fetch one only if the config
+        # named an api_key_env. config validation guarantees base_url and model.
+        api_key = secret_getter(cfg.api_key_env) if cfg.api_key_env else None
+        return LocalSummarizer(cfg.base_url, cfg.model, api_key=api_key)
+    raise ConfigError(f"Unknown summarizer provider {cfg.provider!r}.")
+
+
+def _summarizer_key_env(cfg: SummarizerConfig) -> str | None:
+    """Return the .env variable name the configured summarizer needs, or None.
+
+    Args:
+        cfg: The global summarizer config.
+
+    Returns:
+        The env-var NAME the backend requires, or None when it needs no key
+        (a local endpoint with no api_key_env).
+
+    Why:
+        `check` reports send-readiness WITHOUT building anything, so it needs to
+        know which secret (if any) the summarizer requires. Anthropic always uses
+        ANTHROPIC_API_KEY; a local endpoint needs a key only when api_key_env was
+        set (many need none). Keeping this beside _build_summarizer means the two
+        agree on the per-provider key convention (DRY).
+    """
+    if cfg.provider == "anthropic":
+        return "ANTHROPIC_API_KEY"
+    if cfg.provider == "local":
+        return cfg.api_key_env  # None when the endpoint needs no key
+    return None
 
 
 def _collect_for(project: ProjectConfig, collector: str, prior: str | None):

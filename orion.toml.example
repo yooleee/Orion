@@ -11,6 +11,30 @@
 # config file. Tracks the last-reported commit per project + report history.
 state_db = "orion.sqlite3"
 
+# Which LLM summarizes the raw git lane (the one step that calls an LLM). This
+# whole table is OPTIONAL — omit it and Orion uses Anthropic's Claude Haiku 4.5,
+# the lightest model adequate for summarization. The choice is GLOBAL (one
+# summarizer for every project). Structured signals (tasks, notes, intake) never
+# call an LLM regardless of this setting.
+#
+# To step up to a stronger Anthropic model (only if Haiku misses nuance on real
+# diffs — confirm empirically first):
+# [summarizer]
+# provider = "anthropic"
+# model    = "claude-sonnet-4-6"
+#
+# To summarize with a LOCAL model instead (keeps activity on your machine — only
+# delivery makes an outbound call). `base_url` must point at any OpenAI-compatible
+# chat endpoint (Ollama, llama.cpp server, LM Studio, vLLM — Ollama exposes one at
+# http://localhost:11434/v1). `model` is the local model name and is required.
+# Most local servers need no key; set `api_key_env` (naming a .env variable) only
+# for an endpoint that requires one.
+# [summarizer]
+# provider    = "local"
+# base_url    = "http://localhost:11434/v1"
+# model       = "llama3.1"
+# api_key_env = "LOCAL_LLM_KEY"   # optional; omit when the endpoint needs no key
+
 # One [projects.<name>] table per tracked project. <name> is what you pass to
 # `orion report <name>`.
 [projects.orion]

@@ -19,7 +19,7 @@ from orion import cli
 # writer (here exercised with its auto_send option), and the env_and_mocks fixture
 # that mocks the LLM + delivery and captures what WOULD be sent. The fixture is
 # auto-discovered by pytest; the plain helpers are imported explicitly.
-from conftest import _make_repo, _write_config
+from conftest import _make_repo, _write_config, use_summary
 
 
 def _write_multi_config(tmp_path, specs):
@@ -124,7 +124,7 @@ def test_yes_and_auto_send_delivers_without_prompt_and_still_redacts(tmp_path, e
 
     # Simulate the model leaking an AWS key into its summary on the auto-send path.
     leak = "Progress, and oops the key AKIAIOSFODNN7EXAMPLE slipped in."
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: leak)
+    use_summary(mp, leak)
 
     # Tripwire: if the preview prompt is reached at all, the test fails.
     _input_must_not_be_called(mp)

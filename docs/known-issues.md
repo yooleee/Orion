@@ -179,3 +179,27 @@ Deferred).
 - **Severity:** low
 - **Status:** By-design (revisit if hook-manager coexistence or multi-project-per-repo is actually
   wanted).
+
+## KI-16 — Local summarizer targets the OpenAI-compatible shape, not a runtime's native API
+
+- **Detail:** The B4 local backend (`summarize.LocalSummarizer`) speaks the OpenAI-compatible
+  `POST {base_url}/chat/completions` shape rather than any runtime's native protocol (e.g.
+  Ollama's own `/api/chat`, or llama.cpp's bespoke endpoints). The user points `base_url` at the
+  OpenAI-compatible endpoint their server exposes (Ollama: `http://localhost:11434/v1`).
+- **Why it matters:** This was a deliberate "engineered enough" call. The OpenAI chat shape is
+  the common denominator across the popular local runtimes (Ollama, llama.cpp server, LM Studio,
+  vLLM), so **one** stdlib-`urllib` code path serves all of them with **zero** new dependencies —
+  versus building and maintaining a per-runtime adapter set, which would be speculative complexity
+  for a single LLM step. The tradeoffs accepted: (a) a user whose server speaks *only* a native
+  API (no OpenAI-compatible endpoint) can't use it as-is; (b) features exposed only through a
+  native API (model pull/management, runtime-specific options) aren't reachable; (c) Orion sends
+  `max_tokens` and a system message and reads `choices[0].message.content` — fields a
+  non-conforming "compatible" endpoint could omit (handled by failing closed with a clear
+  `SummarizerError`, not by guessing).
+- **When this might change:** add a native-API backend (a new `provider` value behind the same
+  `Summarizer` seam — additive, no rewrite) **only if** a real user runs a server with no
+  OpenAI-compatible endpoint, or needs a native-only capability for summarization. Until then the
+  single shape is the simplest thing that works. Recorded so the scope is a conscious choice, not
+  an oversight.
+- **Severity:** low
+- **Status:** By-design (extend with a native-API backend only when a real case needs it).

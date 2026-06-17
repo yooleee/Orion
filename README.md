@@ -81,8 +81,10 @@ This runs the full pipeline for the named project (from `orion.toml`):
    + diffstat, plus a capped code diff if `share_level = "detailed"`), newly-completed
    checklist items, and changed notes.
 2. **Redact** obvious secrets from the collected text.
-3. **Summarize** only the raw git activity with Claude Haiku 4.5 (the one step that calls out);
-   structured signals (tasks, notes) are already report-ready and skip the LLM.
+3. **Summarize** only the raw git activity with an LLM (the one step that calls out) — Claude
+   Haiku 4.5 by default, or a model/provider of your choice including a local model (see
+   [Summarizer backend](#summarizer-backend)); structured signals (tasks, notes) are already
+   report-ready and skip the LLM.
 4. **Merge** the signals into one report, **redact again** as a safety net, then **preview** it
    in your terminal (one block per channel when you have both Discord and Slack recipients).
 5. On your `y` confirmation, **deliver** to each recipient — rendered for their channel (a
@@ -150,6 +152,41 @@ holds its webhook URL, and the URL lives only in `.env`.
 > Windows) — or as a single-quoted *literal* string — `repo_path = 'C:\Users\you\orion'`.
 > A double-quoted `"C:\Users\..."` will be misread because `\U` starts an escape.
 
+### Summarizer backend
+
+The one step that calls an LLM — summarizing raw git activity — is configurable, but the
+default needs no setup. With **no `[summarizer]` table**, Orion uses Anthropic's **Claude
+Haiku 4.5** (the lightest model adequate for the job). The choice is **global** (one
+summarizer for all projects); structured signals (tasks, notes, intake) never call an LLM
+either way.
+
+To step up to a stronger Anthropic model (only if Haiku misses nuance on your real diffs):
+
+```toml
+[summarizer]
+provider = "anthropic"
+model    = "claude-sonnet-4-6"
+```
+
+To summarize with a **local model** — so the activity never leaves your machine (only
+delivery makes an outbound call) — point `base_url` at any **OpenAI-compatible** chat
+endpoint and name the local model:
+
+```toml
+[summarizer]
+provider = "local"
+base_url = "http://localhost:11434/v1"   # e.g. Ollama; also llama.cpp / LM Studio / vLLM
+model    = "llama3.1"
+# api_key_env = "LOCAL_LLM_KEY"           # only if the endpoint requires a key (most don't)
+```
+
+Orion targets the OpenAI-compatible `/chat/completions` shape because it is the common
+denominator across local runtimes (Ollama exposes it at `/v1`), so one code path serves all
+of them — you just point `base_url` at the right endpoint. Redaction and preview-before-send
+are identical for every backend; a local model is simply more private. (Why this shape and
+not a runtime's native API, and when that might change: see
+[`docs/known-issues.md`](docs/known-issues.md) KI-16.)
+
 ### Inspecting your config
 
 Three **read-only** commands let you see what's configured (Orion never *writes* the config —
@@ -163,9 +200,11 @@ python -m orion check             # validate the config and report send-readines
 
 `check` is a pre-flight gate: it validates the config, then reports whether each project is
 actually ready to send — the git repo path exists, each recipient's webhook secret is present,
-and the Anthropic key is set when the git lane is in use. It reports secrets **by name** as
-`set`/`MISSING`, never by value, and exits non-zero if anything required is missing. None of these
-commands print a secret value (the config holds env-var *names* and paths, not secrets).
+and the summarizer's key is set when the git lane is in use (which key depends on the backend:
+`ANTHROPIC_API_KEY` for Anthropic, the named `api_key_env` for a keyed local endpoint, or none
+at all for a keyless local one). It reports secrets **by name** as `set`/`MISSING`, never by
+value, and exits non-zero if anything required is missing. None of these commands print a secret
+value (the config holds env-var *names* and paths, not secrets).
 
 ## Scheduling
 

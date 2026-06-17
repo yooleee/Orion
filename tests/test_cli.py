@@ -10,7 +10,8 @@
 #                  somehow reaches the body is still redacted before sending
 #                  (defense in depth at the pipeline level).
 # What's mocked and why:
-#   - summarize_raw: so no Anthropic API call / key is needed; we control the body.
+#   - the summarizer seam (cli._build_summarizer via conftest.use_summary): so no
+#     Anthropic API call / key is needed; we control the body.
 #   - discord_send: so no network call; we record what would have been sent.
 #   - input(): so the preview confirm is scripted (y / n).
 # Everything else (config, state, git collection, redaction) runs for real.
@@ -21,7 +22,7 @@ from orion import cli
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
 # fixture by name; the plain helper functions are imported explicitly.
-from conftest import _answer, _make_repo, _payload_text, _write_config
+from conftest import _answer, _make_repo, _payload_text, _write_config, use_summary
 
 
 def _write_config_collectors(tmp_path, repo, collectors, *, tasks_file=None, notes_file=None):
@@ -156,7 +157,7 @@ def test_secret_in_body_is_redacted_before_send(tmp_path, env_and_mocks):
 
     # Simulate the model leaking an AWS key into its summary.
     leak = "Progress, and oops the key AKIAIOSFODNN7EXAMPLE slipped in."
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: leak)
+    use_summary(mp, leak)
 
     _answer(mp, "y")
     code = cli.main(["report", "demo", "--config", str(toml)])
@@ -185,7 +186,7 @@ def test_report_blob_carries_twice_redacted_sections(tmp_path, env_and_mocks):
 
     # The model leaks an AWS key into the git (raw-lane) summary.
     leak = "Made progress; key AKIAIOSFODNN7EXAMPLE slipped in."
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: leak)
+    use_summary(mp, leak)
 
     # Capture the blob handed to compose without changing what compose returns.
     captured = {}
@@ -230,9 +231,10 @@ def test_structured_only_run_never_calls_the_llm(tmp_path, env_and_mocks):
     """A tasks-only project sends a report without ever invoking the summarizer.
 
     Why this matters: this is THE Phase-2 guarantee — structured signals skip the
-    LLM entirely. We prove it by making summarize_raw raise: if the orchestrator
-    routed the structured lane through the model, the run would error instead of
-    sending. (No git collector is enabled, so nothing should reach the LLM.)
+    LLM entirely. We prove it by making the summarizer seam raise on construction:
+    the builder is only invoked on the raw lane, so if the orchestrator routed the
+    structured lane through the model, the run would error instead of sending. (No
+    git collector is enabled, so the summarizer should never even be built.)
     """
     mp = env_and_mocks["monkeypatch"]
     repo = _make_repo(tmp_path)  # exists but git collector is not enabled
@@ -240,11 +242,12 @@ def test_structured_only_run_never_calls_the_llm(tmp_path, env_and_mocks):
     tasks.write_text("- [x] Ship the structured lane\n- [ ] Slack next\n")
     toml = _write_config_collectors(tmp_path, repo, ["tasks"], tasks_file="TODO.md")
 
-    # Any call to the summarizer is a bug on this path.
-    def _boom(text, level, *, client):
-        raise AssertionError("summarize_raw must not be called on the structured lane")
+    # Building (or calling) the summarizer at all is a bug on this path: the seam
+    # is constructed lazily and only when a raw collector has activity.
+    def _boom(cfg, secret_getter):
+        raise AssertionError("the summarizer must not be built on the structured lane")
 
-    mp.setattr(cli, "summarize_raw", _boom)
+    mp.setattr(cli, "_build_summarizer", _boom)
 
     _answer(mp, "y")
     code = cli.main(["report", "demo", "--config", str(toml)])
@@ -269,7 +272,7 @@ def test_git_and_tasks_merge_into_one_send(tmp_path, env_and_mocks):
         tmp_path, repo, ["git", "tasks"], tasks_file="TODO.md"
     )
 
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Refactored things.")
+    use_summary(mp, "Refactored things.")
 
     _answer(mp, "y")
     code = cli.main(["report", "demo", "--config", str(toml)])
@@ -296,7 +299,7 @@ def test_per_collector_markers_advance_independently(tmp_path, env_and_mocks):
     toml = _write_config_collectors(
         tmp_path, repo, ["git", "tasks"], tasks_file="TODO.md"
     )
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Git work.")
+    use_summary(mp, "Git work.")
 
     # First run: both signals fire.
     _answer(mp, "y")
@@ -334,7 +337,7 @@ def test_routes_each_recipient_to_its_channel(tmp_path, env_and_mocks):
     mp.setattr(
         cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
     )
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
+    use_summary(mp, "Did the work.")
 
     _answer(mp, "y")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
@@ -365,7 +368,7 @@ def test_dual_channel_preview_shows_both_blocks(tmp_path, env_and_mocks, capsys)
     toml = _write_dual_channel_config(tmp_path, repo)
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     mp.setattr(cli, "slack_send", lambda payload, url: None)
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
+    use_summary(mp, "Did the work.")
 
     _answer(mp, "y")
     cli.main(["report", "demo", "--config", str(toml)])
@@ -392,7 +395,7 @@ def test_decline_aborts_every_channel(tmp_path, env_and_mocks):
     mp.setattr(
         cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
     )
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
+    use_summary(mp, "Did the work.")
 
     _answer(mp, "n")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
@@ -417,7 +420,7 @@ def test_one_channel_failure_does_not_block_the_other(tmp_path, env_and_mocks):
         raise DeliveryError("slack webhook down")
 
     mp.setattr(cli, "slack_send", slack_boom)
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Did the work.")
+    use_summary(mp, "Did the work.")
 
     _answer(mp, "y")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
@@ -443,7 +446,7 @@ def test_no_activity_across_all_collectors_sends_nothing(tmp_path, env_and_mocks
     toml = _write_config_collectors(
         tmp_path, repo, ["git", "tasks"], tasks_file="TODO.md"
     )
-    mp.setattr(cli, "summarize_raw", lambda text, level, *, client: "Git work.")
+    use_summary(mp, "Git work.")
 
     _answer(mp, "y")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
@@ -453,3 +456,71 @@ def test_no_activity_across_all_collectors_sends_nothing(tmp_path, env_and_mocks
     env_and_mocks["sent"].clear()
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
     assert env_and_mocks["sent"] == []
+
+
+# --- _build_summarizer dispatch (B4) ------------------------------------------
+#
+# These pin the provider -> backend wiring directly (no full pipeline needed). The
+# secret_getter is a stand-in for get_required, so we also prove the key-fetch
+# policy: Anthropic always reads ANTHROPIC_API_KEY; a local backend reads a key
+# ONLY when api_key_env is set, and otherwise never touches the getter.
+
+
+def test_build_summarizer_anthropic_reads_the_anthropic_key():
+    """The anthropic provider builds an AnthropicSummarizer using ANTHROPIC_API_KEY.
+
+    Why this matters: the default backend must keep reading exactly the env var
+    existing setups already use — an upgrade must not silently change the key name.
+    """
+    from orion.config import SummarizerConfig
+    from orion.summarize import AnthropicSummarizer
+
+    fetched = []
+    summarizer = cli._build_summarizer(
+        SummarizerConfig(provider="anthropic", model="claude-haiku-4-5"),
+        lambda name: fetched.append(name) or "test-key",
+    )
+    assert isinstance(summarizer, AnthropicSummarizer)
+    assert fetched == ["ANTHROPIC_API_KEY"]
+
+
+def test_build_summarizer_local_without_key_never_fetches_a_secret():
+    """A local backend with no api_key_env builds without touching the getter.
+
+    Why this matters: most local servers need no key; the build path must not
+    demand one (which would defeat the privacy point and block the common case).
+    """
+    from orion.config import SummarizerConfig
+    from orion.summarize import LocalSummarizer
+
+    def _must_not_be_called(name):
+        raise AssertionError(f"no secret should be fetched, got {name!r}")
+
+    summarizer = cli._build_summarizer(
+        SummarizerConfig(
+            provider="local", model="llama3.1", base_url="http://localhost:11434/v1"
+        ),
+        _must_not_be_called,
+    )
+    assert isinstance(summarizer, LocalSummarizer)
+
+
+def test_build_summarizer_local_with_key_fetches_named_var():
+    """A local backend WITH api_key_env fetches exactly that named variable.
+
+    Why this matters: the rare keyed endpoint must read the user-named var (not a
+    hardcoded one), proving the per-provider secret convention is honored.
+    """
+    from orion.config import SummarizerConfig
+
+    fetched = []
+    cli._build_summarizer(
+        SummarizerConfig(
+            provider="local",
+            model="m",
+            base_url="http://x/v1",
+            api_key_env="LOCAL_LLM_KEY",
+        ),
+        lambda name: fetched.append(name) or "tok",
+    )
+    assert fetched == ["LOCAL_LLM_KEY"]

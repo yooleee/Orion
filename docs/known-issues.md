@@ -116,30 +116,19 @@ Deferred).
 - **Severity:** low
 - **Status:** Deferred (remove in a dedicated state-schema migration).
 
-## KI-9 — Slack/Discord use plain text; Block Kit + richer Discord formatting deferred
-
-- **Detail:** Phase 3 delivers Slack as a single `{"text": …}` mrkdwn POST (mirroring the
-  Discord `{"content": …}` Markdown POST). Slack's Block Kit (structured header/section/
-  divider blocks) was deliberately *not* used: it breaks the "message is one string"
-  pipeline (`compose -> str`, string preview, string send), would re-derive structure that
-  `merge.py` flattens, and adds block-size limits.
-- **Why it matters:** Block Kit (and the equivalent richer Discord formatting — embeds) is a
-  nicer *look*, but it is orthogonal to the Phase-3 goal of getting both channels routing
-  live. When it is built it should be done deliberately — likely with a small `ReportBlob`/
-  `compose` change to carry structured sections so blocks build naturally — and **paired**:
-  do Block Kit and richer Discord formatting together as one "structured rendering" upgrade.
-- **Severity:** low
-- **Status:** Deferred (a future formatting-upgrade phase, not a Phase-3 change).
-
 ## KI-10 — `_to_slack_mrkdwn` is a structural translator, not a full converter
 
 - **Detail:** `compose._to_slack_mrkdwn` converts only the two Markdown constructs Orion
   emits — `#`/`##` header lines → `*bold*` lines, and `**bold**` → `*bold*`. It does not
-  handle arbitrary Markdown (links, nested emphasis, code fences, tables, etc.).
-- **Why it matters:** Orion controls what reaches it (merge's `## ` titles and the LLM
-  summary's occasional `**bold**`), so a full converter would be speculative complexity. If a
-  future source introduces other Markdown that must render in Slack, extend the translator
-  then. Flagged so the scope is a conscious choice, not an oversight.
+  handle arbitrary Markdown (links, nested emphasis, code fences, tables, etc.). Since B3 it is
+  applied to each **section body** before it goes into a Slack Block Kit `section` block (and to
+  the plain `text` fallback), rather than to one flattened report string — same scope, same two
+  constructs, just per section.
+- **Why it matters:** Orion controls what reaches it (a section body is an LLM summary that may
+  contain `**bold**`, or already-structured passthrough text), so a full converter would be
+  speculative complexity. If a future source introduces other Markdown that must render in
+  Slack, extend the translator then. Flagged so the scope is a conscious choice, not an
+  oversight.
 - **Severity:** low
 - **Status:** By-design (extend only when a real case needs it).
 

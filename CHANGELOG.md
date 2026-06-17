@@ -14,6 +14,56 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase B3 — Richer rendering: Slack Block Kit + Discord embeds (2026-06-17)
+
+Reports now render as each channel's **native structured format** — a Discord **embed** and a
+Slack **Block Kit** message — instead of a single plain string, done as one paired upgrade. This
+is presentation-only: no new signal, no new cadence, and every privacy guarantee is unchanged
+(both redaction passes still run; preview-before-send still shows exactly what is sent). Net new
+runtime dependencies: 0. Resolves KI-9; KI-10 updated (still scoped, now applied per section).
+
+### Added
+
+- **Discord embeds** (`compose.py`) — a titled, colored embed card with one **field per signal
+  section** (Markdown preserved in field values for Discord to render). No `content` is sent
+  alongside the embed (Discord would render both, duplicating the report).
+- **Slack Block Kit** (`compose.py`) — a `header` block, a `context` line for the date, and one
+  `section` block per signal with dividers between them, plus a `text` field as the notification/
+  accessibility fallback (Slack does not show it in place of the blocks).
+- **Faithful preview from the payload** — `ComposedMessage.preview` is rendered from the actual
+  payload's text fields, so the preview-before-send gate shows exactly the text that will leave
+  the machine even though the payload is now JSON.
+- **Graceful overflow fallback** — if a report exceeds a channel's structured limits (Discord
+  embed: ≤25 fields, ≤1024 chars/field, ≤6000 total; Slack: ≤50 blocks, ≤3000 chars/section), it
+  falls back to the plain `{content}`/`{text}` message (truncated) rather than send an invalid
+  payload. A complete report beats a rejected one.
+- **Tests** — 154 total (+6 net): `tests/test_report_compose.py` now pins the embed/Block Kit
+  structure, the per-channel bold dialect, inline-bold translation in section bodies, the intake
+  single-section case, and **both** overflow→plain fallbacks; `tests/test_cli.py` asserts a real
+  run carries twice-redacted sections on the blob.
+
+### Changed
+
+- **`ReportBlob` carries structured sections** (`report.py`) — a new defaulted
+  `sections: tuple[(title, body), …]` field (additive; `body` stays the canonical redacted text
+  and plain-text fallback). `intake` (one body, no sections) renders as a single "Update" section.
+- **Redaction pass 2 runs per section** (`cli.py`) — the second redaction pass now scrubs each
+  section body before the blob is built, so every block/embed text field is twice-redacted; the
+  flat `body` is the merge of those already-twice-redacted sections (byte-identical to the old
+  "merge then redact" for normal content). A structured payload can never become a redaction
+  bypass.
+- **`compose()` returns a `ComposedMessage(payload: dict, preview: str)`** instead of a string,
+  and **owns truncation/size limits**. **Delivery is now pure transport**: `send(payload, url)`
+  serializes and POSTs the payload as-is (`delivery/discord.py`, `delivery/slack.py`), with the
+  `DeliveryError` contract and Discord User-Agent unchanged.
+
+### Notes
+
+- **Always-on, no config toggle.** Rich rendering is the default with a built-in plain fallback;
+  a per-project `rich = false` toggle was deliberately deferred (the compose seam is kept clean so
+  it stays an additive change). Splitting an oversized report across multiple embeds/messages
+  (instead of falling back to plain) is a possible future enhancement.
+
 ## Phase B6 — CLI config-inspect commands (2026-06-16)
 
 Read-only visibility into the config, closing the gap surfaced while using `install-hook` (there

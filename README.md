@@ -14,8 +14,9 @@ anything is sent.
 > update. **Unattended scheduled digests** (`orion report --all --yes` from your OS scheduler;
 > see [Scheduling](#scheduling)), **event-driven git-hook triggers**
 > (see [Event-driven reports](#event-driven-reports-git-hooks)), and a **Claude Code session
-> skill** (see [below](#claude-code-session-skill)) are all available. Richer message formatting
-> and a multi-party/hosted dashboard are later horizons.
+> skill** (see [below](#claude-code-session-skill)) are all available. Reports render as
+> **Discord embeds and Slack Block Kit** (with a plain-text fallback). A multi-party/hosted
+> dashboard is a later horizon.
 
 ## Supported platforms
 
@@ -84,7 +85,9 @@ This runs the full pipeline for the named project (from `orion.toml`):
    structured signals (tasks, notes) are already report-ready and skip the LLM.
 4. **Merge** the signals into one report, **redact again** as a safety net, then **preview** it
    in your terminal (one block per channel when you have both Discord and Slack recipients).
-5. On your `y` confirmation, **deliver** to each recipient — formatted for their channel and
+5. On your `y` confirmation, **deliver** to each recipient — rendered for their channel (a
+   Discord **embed** or a Slack **Block Kit** message, each with a plain-text fallback, falling
+   back to a plain message if a report is too large for the channel's structured limits) and
    POSTed to their webhook.
 6. **Record** the report so the next run only covers what's new.
 

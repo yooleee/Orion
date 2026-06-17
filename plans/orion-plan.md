@@ -6,7 +6,7 @@
 > cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
 > **Horizon B (local automation, ingestion & polish) is underway — B1 (git-hook triggers),
 > B2 (the Claude Code session skill), and B6 (read-only config-inspect commands) are signed off
-> (2026-06-16); B3 (richer rendering) is next.** All four ingestion signals (git, tasks, notes,
+> (2026-06-16); B3 (richer rendering) is implemented and awaiting sign-off (2026-06-17).** All four ingestion signals (git, tasks, notes,
 > sessions) now feed Orion. This is task #7 on the non-application to-do ("Build progress tracker
 > (Project Orion)").
 >
@@ -45,7 +45,7 @@
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | B1    | Event-driven triggers — git `post-commit` (and/or `pre-push`) hook delegating to `report` (fire-on-commit); opt-in, cross-platform. *(Note: git has no client-side `post-push` hook — `post-commit`/`pre-push` are the local options.)* | ✅ Signed off (2026-06-16) |
 | B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
-| B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ⏳ Planned                 |
+| B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | 🔧 Implemented; awaiting sign-off (2026-06-17) |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model + per-step model choice (keeps "lightest adequate model")                                                                                             | ⏳ Planned                 |
 | B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
@@ -499,6 +499,39 @@ No new runtime dependencies; `config.py`/`secrets.py` reused unchanged. **Resolv
 inspect commands) are complete, plus a live check against the real config: `projects`/`show`/
 `check` all correct, `check` even caught a genuine missing repo path (a cleaned-up throwaway) and
 exited non-zero, and zero secret values were printed by any command.
+
+## Phase B3 status (2026-06-17) — awaiting sign-off
+
+Phase B3 — **richer rendering (Slack Block Kit + Discord embeds)** — is **implemented** in
+`src/orion/` with a 154-test suite (+6 net over B6). Built in four reviewed checkpoints: carry
+structured sections on `ReportBlob` + per-section redaction (CP1) → the `ComposedMessage`
+payload seam with delivery as pure transport, no look change (CP2) → the rich per-channel
+renderers + faithful preview + overflow fallback (CP3) → docs + living docs (CP4). The five open
+decisions from `[docs/phase-b3-kickoff.md](../docs/phase-b3-kickoff.md)` were settled with the
+user (2026-06-17): **(D1)** carry `(title, body)` sections on the blob, `body` stays canonical +
+fallback; **(D3)** redaction pass 2 runs per section before the blob is built; **(D2)** the
+preview is rendered from the actual payload's text fields; **(D5)** `compose` returns a
+`ComposedMessage(payload, preview)` and `send` takes the payload dict; **(D4)** rich rendering is
+always-on with a built-in plain fallback (no config toggle; deferred as a clean seam) and a
+graceful fallback to the plain message on size overflow.
+
+What shipped (details in `[CHANGELOG.md](../CHANGELOG.md)`): Discord embeds (one field per
+signal) and Slack Block Kit (header / context / per-signal section blocks + `text` fallback),
+both built from the blob's sections; `compose` now owns rendering + truncation while delivery is
+pure transport (`send(payload, url)`); the second redaction pass runs per section so no
+block/embed field can bypass it; and a faithful preview rendered from the payload. Frozen seams
+held except the deliberate, KI-9-sanctioned change to `compose`'s return type and `send`'s input
+(the "message is one string" model). Net new runtime dependencies: 0. **Resolves KI-9**; **KI-10
+updated** (the `_to_slack_mrkdwn` translator is still scoped to the two constructs Orion emits,
+now applied to each section body rather than the flattened report).
+
+**Live verification (2026-06-17):** the real B3 commit was reported via `report orion` to the
+real Discord + Slack channels — Discord rendered the embed card, Slack rendered Block Kit (the
+single-section `orion` case differs only subtly from plain, confirmed against a Block Kit probe);
+a separate throwaway multi-signal project then delivered an unmistakable multi-section embed /
+Block Kit (stacked section blocks + dividers) to both channels, with state advancing and the
+re-run a no-op. **Awaiting sign-off** (a separate "Sign off Phase B3" commit will flip the
+roadmap row to ✅).
 
 ## Open questions / to settle before/while building
 

@@ -18,7 +18,7 @@ guarantees — secrets never leak, the right model runs on the right lane, state
 after a real send, and the tool runs the same on every OS. This doc is the map: the
 **categories** of tests, **why each is necessary**, and how to run them.
 
-As of this writing: **148 tests across 19 files**, all passing. The only test dependency is
+As of this writing: **154 tests across 19 files**, all passing. The only test dependency is
 **pytest** (the lone `[dev]` extra) — everything else is the standard library, matching
 Orion's minimal-dependency principle. Shared end-to-end setup for the CLI tests (the real-repo
 builder, the config writer, the mock fixture, and the scripted-`input` helper) lives in
@@ -59,10 +59,10 @@ passed in) rather than monkeypatching, mirroring how `cli.py` builds the client 
 | Category | Files | What it protects / why it's necessary |
 |---|---|---|
 | **Security gate** | `test_redact.py`; the `.env`/subdir/noise exclusion in `test_git_collector.py`; the pass-2 redaction cases in `test_cli.py` / `test_intake.py`; the redaction-under-auto-send case in `test_schedule.py` | The #1 principle: secrets never reach the LLM or a channel. If these fail, Orion is not shippable. |
-| **Pure-logic units** | `test_merge.py`, `test_report_compose.py`, `test_secrets.py`, `test_summarize.py`, `test_console_encoding.py` | Leaf-module correctness with no I/O — fast, exact-output assertions. |
+| **Pure-logic units** | `test_merge.py`, `test_report_compose.py`, `test_secrets.py`, `test_summarize.py`, `test_console_encoding.py` | Leaf-module correctness with no I/O — fast, exact-output assertions. Includes the B3 rich rendering (`test_report_compose.py`: Discord embed / Slack Block Kit structure, the payload + faithful-preview pairing, per-channel bold dialect, and both overflow→plain fallbacks). |
 | **File-I/O collectors & store** | `test_tasks_collector.py`, `test_notes_collector.py`, `test_config.py`, `test_state.py` | Parsing local files (TOML, checklists, notes) and persisting per-`(project, collector)` deltas, including the Phase-1→2 marker migration. |
 | **Real-git integration** | `test_git_collector.py` | The actual `subprocess` git behavior against real temp repos — delta detection, share-level gating, and the collection-time secret/noise filters. |
-| **Delivery** (network-mocked) | `test_delivery.py`, `test_slack_delivery.py` | The per-channel POST contract — Discord `content`/204 vs Slack `text`/200, the User-Agent that fixes Discord's 403, and length truncation. |
+| **Delivery** (network-mocked) | `test_delivery.py`, `test_slack_delivery.py` | The per-channel POST contract — Discord 204 vs Slack 200, the User-Agent that fixes Discord's 403, and that delivery is **pure transport**: it POSTs the compose-built payload dict as-is (rendering + truncation now live in `compose`, B3). |
 | **End-to-end pipeline** | `test_cli.py`, `test_intake.py` | The orchestration: multi-collector loop, lane separation (structured signals never call the LLM), per-recipient routing, fail-closed state advancement. |
 | **Unattended send** (Phase 4) | `test_schedule.py` | The scheduled-run safety contract: the preview is bypassed only with `--yes` **and** `auto_send` (config alone never sends); `--all` is fail-soft and exits non-zero only on a real failure; redaction still fires on the auto-send path. |
 | **Event-driven hooks** (B1) | `test_hooks.py` | The generated hook's safety properties (delegates to `report --yes`, backgrounded, always `exit 0`, forward-slash paths) without executing a real hook; `resolve_hooks_dir` against a real repo; and the `install-hook` command (writes an executable hook, honors `--hook`, refuses to clobber without `--force`, `--print` writes nothing, warns when not opted in). |

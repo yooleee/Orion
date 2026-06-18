@@ -80,7 +80,11 @@ def test_show_prints_resolved_fields_without_secret_values(tmp_path, capsys):
     assert code == 0
 
     out = capsys.readouterr().out
-    assert "repo_path:" in out and "/tmp/alpha" in out
+    # `show` prints Path(repo_path), which renders with OS-NATIVE separators — on
+    # Windows "/tmp/alpha" becomes "\tmp\alpha". Compare against that rendering, not
+    # the POSIX literal, so the assertion holds on every OS (caught by CI on Windows).
+    expected_repo = str(Path("/tmp/alpha"))
+    assert "repo_path:" in out and expected_repo in out
     assert "auto_send:    true" in out
     assert "git, tasks" in out                        # collectors
     assert "webhook_env_var=ORION_DISCORD_WEBHOOK_ALEX" in out  # the NAME

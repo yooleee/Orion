@@ -668,7 +668,9 @@ limits, platform review). Two mitigations, already latent in the design and made
 **On-ramp (sketch only, not a design):** the gentlest first C step is a **read-only dashboard fed
 by the portable blob** — collection stays local, presentation moves hosted — which aligns with
 the Cloudflare hosting preference. Bidirectional + bots follow later (C2), behind the dashboard,
-at a slot to be decided in detailed planning. Detailed C1–C3 design remains deferred.
+at a slot to be decided in detailed planning. Detailed C1–C3 design remains deferred — C1 is
+framed (open decisions surfaced, not settled) in
+[`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md).
 
 ## Open questions / to settle before/while building
 

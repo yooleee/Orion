@@ -713,7 +713,11 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
   those content features (multi-party identity, C3) reshape the design — so designing it now would
   be premature. (Recorded from the 2026-06-18 dashboard dogfood: drill-down navigation validated;
   content/design flagged as future.)
-- **C2/C3 sequencing** (bidirectional, multi-party) — firmed up at the same juncture.
+- **C2/C3 sequencing** (bidirectional, multi-party) — firmed up at the same juncture. The
+  post-C1 OSS-readiness pass is now complete, so this **horizon-planning juncture is teed up** in
+  [`docs/horizon-planning-kickoff.md`](../docs/horizon-planning-kickoff.md) (north-star + C2/C3 +
+  hosted-deploy + E2E sequencing), to be run **informed by the 2026-06-20/21 hackathon dogfood
+  read**.
 
 Detail on the slice's settled decisions (D1–D7) is in
 [`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md) and the approved checkpoint plan.

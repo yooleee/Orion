@@ -61,7 +61,7 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | 🚧 First slice built (vendor-neutral relay + Path-B reference; loopback-only) — awaiting sign-off; hosting decision deferred to post-C1 juncture |
+| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | 🚧 First slice shipped (vendor-neutral relay + Path-B reference; loopback-only). Hosting **settled: Path B (self-host)**; managed/Cloudflare deferred behind the seam, with E2E encryption as the privacy bridge |
 | C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🔭 Later (coarse) |
 | C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Later (coarse) |
 
@@ -698,9 +698,10 @@ the dashboard, until hosting lands.
 slice* and are slated for a **next-phase planning/decision juncture right after C1 sign-off**
 (sooner than later, per Yousuf):
 
-- **The hosting decision (Path A Cloudflare vs Path B self-host)** — this slice defers *and informs*
-  it; decide it at the post-C1 juncture, grounded by the dogfooding feedback + the Path-B reference
-  now in hand. Receiver stays loopback-only until then.
+- **The hosting decision (Path A Cloudflare vs Path B self-host)** — **RESOLVED 2026-06-18 →
+  Path B** (self-host). See the "Hosting decision (settled 2026-06-18)" section just below for the
+  rationale and the E2E bridge to a future managed option. Receiver stays loopback-only until an
+  actual hosted deployment is built.
 - **OSS-readiness polish pass — alongside that next-phases discussion (Yousuf's explicit call):**
   CI, CONTRIBUTING, SECURITY, issue/PR templates, README/docs polish (WSL2-cron caveat, a "you're
   ready" checkpoint), **plus** the friction items — KI-1 dual-channel partial-failure policy, a
@@ -716,6 +717,54 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
 
 Detail on the slice's settled decisions (D1–D7) is in
 [`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md) and the approved checkpoint plan.
+
+## Hosting decision (settled 2026-06-18) — Path B (self-host), with E2E as the bridge to managed hosting
+
+**Decision: Path B — a portable, self-hostable Python relay (the C1 reference). NOT all-Cloudflare
+(Path A), NOT the hybrid.** Settled with Yousuf after re-verifying current (mid-2026) platform facts.
+
+**Why Path B (verified, not assumed — checked 2026-06-18):**
+
+- **Path A would be a stack-divergent rewrite, not "deploy what we built."** Cloudflare Python
+  Workers are **still in open beta** and require Cloudflare's `WorkerEntrypoint`/`fetch` handler
+  model, storage via **D1 bindings** (not the `sqlite3` stdlib), and the `pywrangler` toolchain. Our
+  `http.server` relay + `sqlite3` store don't port — "it's Python too" doesn't save the rewrite.
+- **D1 exposes no external connection** to the raw data, locking the redacted-but-sensitive data
+  inside Cloudflare's ecosystem — against own-your-data.
+- **Path B deploys the code we already wrote** (same language/ecosystem), is vendor-neutral, runs
+  anywhere (Fly ~$2/mo, Render free-with-sleep or $7 warm, a VPS, or **free on a Pi/home box**), and
+  keeps the data on infrastructure the user controls — the cleanest "anyone can run it" story. Its
+  only cost vs A is a few $/mo (or a box) + keeping a process alive; **zero if self-hosted**.
+- **The hybrid is rejected for now:** it means building AND maintaining *two* implementations (the
+  Python relay + a Cloudflare rewrite) in lockstep — a standing maintenance tax for one upside (free
+  personal hosting), unjustified at this stage.
+
+**Path A is NOT foreclosed.** Because C1 locked the vendor-neutral contract, a Cloudflare ingress
+(a Worker speaking the same blob+token contract, writing D1) can be added **later as an additional
+deploy target** without touching local Orion — a documented future managed-deploy *option behind the
+seam*, not a parallel build we maintain.
+
+**The privacy bridge — using managed hosting WITHOUT degrading own-your-data: end-to-end (client-
+side) encryption.** Own-your-data has two routes: (1) hold the bytes yourself (self-host = Path B),
+or (2) hold the *keys* yourself — let a host store **ciphertext it cannot read** ("zero-knowledge"),
+decrypting in the viewer's browser with a key the host never sees (how password managers use
+untrusted cloud). Path A *naive* (plaintext in D1) fails because it does neither. The future path to
+privacy-preserving managed hosting is therefore:
+
+- an **encrypt-before-push** step — local, *additive* to the existing seam; authenticated symmetric
+  crypto (adds a `cryptography`/`pynacl` dependency, the one real cost against minimal-deps);
+- the dashboard shifts **server-rendered → client-decrypting** (static page + ciphertext + in-browser
+  decrypt — where Cloudflare **Pages** would finally fit);
+- **key management** — single-user is one key; multi-supervisor needs key distribution / envelope
+  encryption, so this is **entangled with C3** (multi-party identity *is* key distribution);
+- **metadata** decisions (encrypted bodies still leak cleartext project/timestamps unless those are
+  encrypted too).
+
+This is **a future horizon (intertwined with C3), not now** — but the C1 seam doesn't block it
+(encryption slots in additively before the push; the blob is `orion_version`-stamped). Mental model
+to carry: **self-host = trust by ownership; managed + E2E = trust by cryptography** — both satisfy
+own-your-data; Path A naive satisfies neither. **Near-term: Path B, plaintext, self-host;** E2E is
+the documented bridge to a managed option later.
 
 ## Open questions / to settle before/while building
 

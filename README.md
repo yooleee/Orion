@@ -176,9 +176,15 @@ endpoint and name the local model:
 [summarizer]
 provider = "local"
 base_url = "http://localhost:11434/v1"   # e.g. Ollama; also llama.cpp / LM Studio / vLLM
-model    = "llama3.1"
+model    = "llama3.1:8b"                  # pick a CAPABLE model — see note below
 # api_key_env = "LOCAL_LLM_KEY"           # only if the endpoint requires a key (most don't)
 ```
+
+**Choosing a local model:** summarizing real diffs needs a reasonably capable model — treat the
+cloud default, **Haiku 4.5**, as the quality bar. Very small models degrade noticeably (a 0.5B
+model in testing produced rough, partly hallucinated summaries), so prefer a capable instruct
+model (≈7–8B or better). This is "lightest **adequate**": small and fast is good, but
+adequate-for-quality comes first.
 
 Orion targets the OpenAI-compatible `/chat/completions` shape because it is the common
 denominator across local runtimes (Ollama exposes it at `/v1`), so one code path serves all

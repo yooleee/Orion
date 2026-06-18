@@ -4,10 +4,11 @@
 > (2026-06-15)** — `report` over git + structured signals + `intake`, two-pass redaction,
 > preview-before-send, dual-channel (Discord **and** Slack) delivery with routing,
 > cross-platform support, and safe **unattended scheduled digests** (`report --all --yes`).
-> **Horizon B (local automation, ingestion & polish) is underway — B1 (git-hook triggers),
-> B2 (the Claude Code session skill), and B6 (read-only config-inspect commands) are signed off
-> (2026-06-16), and B3 (richer rendering) is signed off (2026-06-17).** All four ingestion signals (git, tasks, notes,
-> sessions) now feed Orion. This is task #7 on the non-application to-do ("Build progress tracker
+> **Horizon B (local automation, ingestion & polish) is complete — B1 (git-hook triggers),
+> B2 (the Claude Code session skill), B3 (richer rendering), B4 (summarizer flexibility), and
+> B6 (read-only config-inspect commands) are all signed off; B5 (a scheduling *layer*) was
+> evaluated at its gate and deliberately deferred into Horizon C (2026-06-17).** All four
+> ingestion signals (git, tasks, notes, sessions) now feed Orion. This is task #7 on the non-application to-do ("Build progress tracker
 > (Project Orion)").
 >
 > The **Roadmap** below is organized into **horizons** (A shipped · B next · C the
@@ -47,7 +48,7 @@
 | B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ✅ Signed off (2026-06-17) |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model (OpenAI-compatible). Per-step model choice **deferred** (one LLM step today; seam keeps it additive). Keeps the "lightest adequate model" default (Haiku) | ✅ Signed off (2026-06-17) |
-| B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary                                                           | ⏳ Conditional             |
+| B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary. **Gate evaluated 2026-06-17 → defer.**                       | ⏭️ Deferred → Horizon C    |
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
 
@@ -569,12 +570,105 @@ completions` shape (one path for Ollama / llama.cpp / LM Studio / vLLM) rather t
 native API — a deliberate "engineered enough" call, tracked with its tradeoff and
 change-conditions as **KI-16**.
 
-**Signed off (2026-06-17)** on the strength of the 172-test suite. `pytest`: 172/172. One
-deliberate carry-over: the optional **live/manual verification** — a real Anthropic-backed
-`report` confirming the default path is unchanged end to end, plus a local-model run against an
-OpenAI-compatible endpoint (e.g. Ollama) — was **deferred to the next session** rather than run
-here (it needs an API key / a running local server and sends to real channels). It is carried
-into the B5 kickoff as a pre-task; see `[docs/phase-b5-kickoff.md](../docs/phase-b5-kickoff.md)`.
+**Signed off (2026-06-17)** on the strength of the 172-test suite. `pytest`: 172/172. The
+optional **live/manual verification** carried over from this sign-off was **completed at the
+start of the B5 session (2026-06-17)**, against a throwaway git repo delivering to the real
+Discord + Slack channels: (1) the **default Anthropic/Haiku** path (no `[summarizer]` table)
+rendered a summary and delivered end to end, with a seeded fake AWS key redacted from the
+detailed diff; (2) a **local** backend (`provider = "local"`, Ollama at
+`http://localhost:11434/v1`, `model = "qwen2.5:0.5b"` — a tiny model, because the check is of
+backend *wiring*, not summary quality) rendered a local-model summary and delivered; and (3) the
+local backend **failed closed** — an unreachable endpoint surfaced a clean `SummarizerError`
+(exit 1), sent nothing, and did **not** advance state (the same delta re-reported on the next
+successful run). No B4 follow-up fixes were needed.
+
+## Phase B5 status (2026-06-17) — gate evaluated: deferred into Horizon C
+
+Phase B5 (a scheduling *layer* inside Orion — `report --all --due`, activity-gating, quiet
+hours, per-recipient cadence, a unified status view) was always marked **⏳ Conditional**: the
+first question is *whether* to build it at all, not *how*. That gate was evaluated this session
+and the decision (with Yousuf, 2026-06-17) is to **defer B5 and fold it into Horizon C** — no
+B5 code now.
+
+**Why defer:**
+
+- **No concrete need yet.** Mixed per-project cadences are already expressible with multiple
+  OS-scheduler entries (one per cadence group), and activity-gating already exists implicitly —
+  every run is a no-op when there is no delta. The one named candidate, the cadence-aware
+  `--due` filter (KI-13), is a convenience over the multiple-entries approach, not a need anyone
+  has hit.
+- **Sequencing.** The plan's own analysis ("When a built-in scheduling *layer* becomes right" /
+  "Bidirectional interaction moves this") notes that the Horizon-C bidirectional **listener** and
+  the "cadence needs Orion's *own* state" moment likely arrive together: once an always-on
+  process exists to host a listener, an in-process scheduler is nearly free. Building B5
+  standalone now would be "building the future" before the process that should host it exists.
+- **The seam is already clean.** Picking B5 up in Horizon C is additive, not a rewrite: a
+  per-project `schedule` field would mirror the existing `share_level` / `auto_send` validation
+  in `config.py`, and "last successful report time per project" is **derivable from the existing
+  `report_history` table** (`SELECT MAX(sent_at) ... WHERE project = ?`) — no new schema needed.
+  `report --all` is the layering point for a future `--due` filter.
+
+**What this means for the roadmap:** with B1–B4 and B6 signed off and B5 deferred, **Horizon B's
+local-automation scope is complete.** The security invariants are untouched — the `--yes` +
+`auto_send` preview-bypass gate and both redaction passes carry forward unchanged into whenever
+B5's logic is eventually built. KI-13 records the deferral and the no-new-schema implementation
+note for whoever builds it.
+
+Also completed this session: the carried-over **B4 live/manual verification** (see the Phase B4
+status block above) — the default Anthropic path, a local Ollama backend, and local fail-closed
+all verified end to end against real channels.
+
+## Horizon B → C boundary review (2026-06-17)
+
+With Horizon B complete (B1–B4, B6 signed off; B5 deferred), this is a deliberate **consolidation
+pass at the B→C boundary** — *not* detailed Horizon-C planning, which stays deferred until C
+nears (designing C1–C3 in detail now would be "building the future"). Its job is to lock in two
+strategic insights from this session and confirm the seams C will lean on are clean.
+
+**Insight 1 — the summarizer has a capability floor (≈Haiku-4.5).** The B4 local-backend
+verification ran a very small model (`qwen2.5:0.5b`) and it was noticeably worse — rough, partly
+hallucinated summaries — confirming the long-suspected point that the summarizer needs roughly
+Haiku-level capability to be *usable*. Implication for the B4 local-model option: "lightest
+**adequate** model" means a mid-capability model, not the tiniest; sub-adequate models produce
+poor output. A **model-tier comparison** (cloud vs local; where the cost/adequacy sweet spot
+sits) would be useful but is **non-foundational** — a future experiment, not a phase. Tracked in
+KI-4; the local-model docs (`README`, `orion.toml.example`) were reconciled to this framing.
+
+**Insight 2 — webhooks are an inbound dead-end, so bidirectionality means bots (a build *and
+maintain* cost).** An incoming webhook is outbound-only by construction; there is no upgrade path
+to *receive*. Reading a supervisor's reply requires a registered **bot** per platform — Discord
+(Gateway WebSocket + `MESSAGE_CONTENT` intent, or an Interactions endpoint) or Slack (Events API
+public endpoint, or Socket Mode) — i.e. a new **always-on listener** that tips local-first →
+hosted, plus ongoing maintenance (OAuth scopes/intents, request signing, reconnect/dedup, rate
+limits, platform review). Two mitigations, already latent in the design and made explicit here:
+
+- **Delivery and interaction are separable.** A bot for *inbound* need not replace webhooks for
+  *outbound*; and because delivery is already behind a per-channel seam (`delivery.send(payload,
+  url)` + `_sender_for(channel)` + the portable blob), a bot *sender* — or a hosted relay — can be
+  added **additively**, without touching the report pipeline.
+- **Dashboard-first defers bots.** C1 (a read-only web dashboard + hosted relay) provides a
+  comment surface and the hosted shift **without any bot**; native in-platform replies become a
+  *richer add-on* (C2), not a foundation.
+- **Decision (with Yousuf, 2026-06-17):** native in-platform Discord/Slack discussion **is a
+  wanted feature**, but it does **not** need to precede the existing Horizon C content (the web
+  dashboard, etc.). Its exact slot is left to detailed Horizon-C planning. The C2 gate to settle
+  then: is native in-platform reply a *must-have*, or is the dashboard sufficient as the primary
+  interaction surface (bots as the add-on)?
+
+**Seams Horizon C depends on — confirmed clean (invariants to protect):**
+
+- **Delivery transport is swappable (webhook → bot → hosted relay).** Per-channel sender dispatch
+  plus the payload/blob seam keep an outbound bot sender or a hosted relay additive. *(Stated
+  explicitly here as an invariant for the first time.)*
+- **Portable report/intake blob** (summary + metadata; no machine-local paths) — the seam for
+  moving delivery/presentation hosted.
+- **Named recipients / participant model** (KI-11) — recipients are named destinations today; the
+  per-supervisor participant graph (C3) is additive on top.
+
+**On-ramp (sketch only, not a design):** the gentlest first C step is a **read-only dashboard fed
+by the portable blob** — collection stays local, presentation moves hosted — which aligns with
+the Cloudflare hosting preference. Bidirectional + bots follow later (C2), behind the dashboard,
+at a slot to be decided in detailed planning. Detailed C1–C3 design remains deferred.
 
 ## Open questions / to settle before/while building
 

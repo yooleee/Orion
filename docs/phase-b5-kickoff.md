@@ -1,5 +1,14 @@
 # Phase B5 Kickoff — Scheduling *layer* (conditional; only if OS-delegation is outgrown)
 
+> **Outcome (2026-06-17): gate settled — B5 DEFERRED, folded into Horizon C; the carried-over
+> B4 live verification COMPLETED.** The build-or-defer gate below was evaluated with Yousuf and
+> the decision is to **not build B5 now** (no concrete mixed-cadence need; the real need likely
+> arrives with the Horizon-C listener that would host an in-process scheduler). See the **Phase
+> B5 status** section in [`plans/orion-plan.md`](../plans/orion-plan.md) and **KI-13** in
+> [`known-issues.md`](known-issues.md). The B4 live/manual verification (next section) was run
+> end to end and passed — default Anthropic path, a local Ollama backend (`qwen2.5:0.5b`), and
+> local fail-closed. The rest of this doc is preserved as the record of the gate analysis.
+
 > **Read this, then [`plans/orion-plan.md`](../plans/orion-plan.md) in full, before doing
 > anything** — especially the **roadmap B5 row**, the **Phase 4 status** block, **KI-13**, and
 > **"When a built-in scheduling *layer* becomes right"** in the Future-direction section. Like B3
@@ -20,7 +29,8 @@ running local server and sends to real channels). Do this **first**, before any 
    works end to end exactly as before B4.
 2. **Local backend works** — add a `[summarizer]` table with `provider = "local"` pointing at a
    running OpenAI-compatible endpoint (e.g. Ollama at `http://localhost:11434/v1`, `model =
-   "llama3.1"`), then run a real `report` and confirm the preview shows a local-model summary.
+   "qwen2.5:0.5b"` — a small model is plenty; this checks wiring, not quality), then run a real
+   `report` and confirm the preview shows a local-model summary.
 3. **Local backend fails closed** — with the local server **stopped**, confirm the run surfaces a
    clean `SummarizerError`, sends nothing, and does **not** advance state (a re-run re-reports the
    same delta).

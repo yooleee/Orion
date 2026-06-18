@@ -56,8 +56,15 @@ Deferred).
   messy real-world diffs.
 - **Why it matters:** The plan commits to stepping up to Sonnet 4.6 *only if* Haiku
   visibly misses nuance. That decision should be made from real evidence, not assumed.
+- **Capability floor (observed 2026-06-17):** the B4 local-backend verification ran a very small
+  model (`qwen2.5:0.5b`) and produced noticeably worse, partly hallucinated summaries — confirming
+  the working assumption that the summarizer needs roughly **Haiku-4.5-level capability** to be
+  usable. Implication for the B4 local-model option: "lightest **adequate**" means a mid-capability
+  model, not the tiniest (the `README` / `orion.toml.example` local-model guidance was reconciled
+  to this). A **model-tier comparison** — cloud vs local, finding the cost/adequacy sweet spot — is
+  worthwhile but **non-foundational**: a future experiment, not a phase.
 - **Severity:** low
-- **Status:** Open (evaluate on real projects during Phase 1 use).
+- **Status:** Open (evaluate on real projects during use; Haiku is the working quality bar).
 
 ## KI-5 — `compose()` silently falls through for unknown channels
 
@@ -159,9 +166,19 @@ Deferred).
   call (see the plan's "When a built-in scheduling layer becomes right"). It needs a `schedule`
   config field and last-report-time gating, which is scope beyond Phase 4's goal of making
   unattended runs *safe*. Recorded so the deferral is a conscious choice, not an omission.
+- **Gate decision (B5, 2026-06-17):** the B5 "build a scheduling *layer*?" gate was explicitly
+  evaluated and the decision is to **defer and fold this into Horizon C**. While cadence = "run a
+  command at time T," the OS scheduler (plus one entry per cadence group) still wins; the real
+  need for in-Orion scheduling state likely arrives *with* the Horizon-C bidirectional listener
+  that would host an always-on process, at which point an in-process scheduler is nearly free.
+  **Implementation note for whoever builds it:** "last successful report time per project" is
+  **derivable from the existing `report_history` table** (`SELECT MAX(sent_at) FROM report_history
+  WHERE project = ?`), so **no new schema is needed**; a `schedule` field mirrors the
+  `share_level` / `auto_send` validation in `config.py`, and `report --all` is the layering point
+  for `--due`.
 - **Severity:** low
-- **Status:** Deferred (enhancement; build when per-project cadence or activity-gating is
-  actually wanted).
+- **Status:** Deferred → Horizon C (gate evaluated 2026-06-17; build when per-project cadence or
+  activity-gating is actually wanted, most likely alongside the Horizon-C listener).
 
 ## KI-14 — `install-hook` installs one standalone hook per project; no chaining
 

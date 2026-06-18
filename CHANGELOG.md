@@ -14,6 +14,41 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase B5 — Scheduling layer: gate evaluated, deferred into Horizon C (2026-06-17)
+
+Phase B5 was **⏳ Conditional** — a scheduling *layer* (`report --all --due`, activity-gating,
+quiet hours, per-recipient cadence) to be built **only if** OS-delegation had been outgrown. The
+gate was evaluated this session and the decision is to **defer B5 and fold it into Horizon C**
+(no B5 code). Mixed cadences are already expressible with multiple OS-scheduler entries,
+activity-gating already exists implicitly (a no-delta run is already a no-op), and the plan's own
+sequencing analysis puts the real need for in-Orion scheduling state alongside the Horizon-C
+bidirectional listener that would host it. The seam stays clean (KI-13: no new schema needed —
+last-report time is derivable from `report_history`), so a later build is additive. With B1–B4
+and B6 signed off and B5 deferred, **Horizon B's local-automation scope is complete.** Details in
+[`plans/orion-plan.md`](plans/orion-plan.md) (Phase B5 status) and
+[`docs/known-issues.md`](docs/known-issues.md) (KI-13). No code changed; `pytest`: **172/172**.
+
+### Verified
+
+- **Carried-over B4 live/manual verification completed.** The optional end-to-end checks deferred
+  at B4 sign-off were run against a throwaway git repo delivering to the real Discord + Slack
+  channels: (1) the **default Anthropic/Haiku** path rendered a summary and delivered, with a
+  seeded fake AWS key redacted from the detailed diff; (2) a **local** backend (Ollama,
+  `qwen2.5:0.5b`) rendered a local-model summary and delivered; (3) the local backend **failed
+  closed** on an unreachable endpoint — clean `SummarizerError` (exit 1), nothing sent, state not
+  advanced (same delta re-reported on the next successful run). No follow-up fixes needed; this
+  confirms the B4 provider seam end to end.
+
+### Changed
+
+- **Docs: local-model guidance clarified to "lightest *adequate*".** `README.md` and
+  `orion.toml.example` now frame the local `[summarizer]` model choice around quality-adequacy —
+  Haiku 4.5 as the bar, with a note that very small models degrade noticeably (observed at 0.5B
+  during B4 verification) — rather than implying either that a large model is *required* or that
+  the tiniest model suffices. KI-4 records the capability floor and a possible (non-foundational)
+  model-tier comparison; the `plans/orion-plan.md` "Horizon B → C boundary review" captures it
+  alongside the webhook→bot / dashboard-first direction notes.
+
 ## Phase B4 — Summarizer flexibility: provider-agnostic seam + local model (2026-06-17)
 
 The summarizer step is no longer hardwired to one Anthropic model. A small **provider-agnostic

@@ -29,10 +29,16 @@ state_db = "orion.sqlite3"
 # http://localhost:11434/v1). `model` is the local model name and is required.
 # Most local servers need no key; set `api_key_env` (naming a .env variable) only
 # for an endpoint that requires one.
+#
+# Pick a model that is "lightest ADEQUATE" — adequate-for-quality comes first.
+# Summarizing real diffs needs a reasonably capable model; treat the cloud default
+# (Haiku 4.5) as the quality bar. Very small models degrade noticeably (a 0.5B
+# model in testing produced rough, partly hallucinated summaries), so prefer a
+# capable instruct model (~7-8B or better) for the local backend.
 # [summarizer]
 # provider    = "local"
 # base_url    = "http://localhost:11434/v1"
-# model       = "llama3.1"
+# model       = "llama3.1:8b"
 # api_key_env = "LOCAL_LLM_KEY"   # optional; omit when the endpoint needs no key
 
 # One [projects.<name>] table per tracked project. <name> is what you pass to

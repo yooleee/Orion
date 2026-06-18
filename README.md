@@ -1,5 +1,7 @@
 # Orion
 
+[![CI](https://github.com/yooleee/Orion/actions/workflows/ci.yml/badge.svg)](https://github.com/yooleee/Orion/actions/workflows/ci.yml)
+
 A **local-first** tool that turns your project activity — git commits, a to-do/milestone
 checklist, hand-written notes, and pushed updates — into readable progress updates and
 delivers them to designated "supervisors" over Discord and Slack. Collectors read your local
@@ -63,6 +65,23 @@ Everything after activation uses `python -m ...`, which is identical on every OS
 Get a **Discord** webhook from a channel's **Settings → Integrations → Webhooks**, a **Slack**
 incoming webhook from <https://api.slack.com/messaging/webhooks>, and an Anthropic API key from
 <https://console.anthropic.com>. You only need webhooks for the channels you actually use.
+
+### Confirm it works
+
+Two commands tell you the setup is good — a pre-flight check, then a first real report:
+
+```bash
+python -m orion check                 # validate config + report send-readiness
+python -m orion report <project>      # collect, preview, and (on your y) deliver
+```
+
+`check` exits **non-zero** and lists anything missing (it reports each secret **by name** as
+`set`/`MISSING`, never by value); fix those and re-run until it's clean. Then `report` shows a
+**terminal preview** of exactly what will be sent — confirm with `y` to deliver to your
+recipients, or `n` to send nothing (state is left unchanged, so the same activity stays
+reportable). Re-running immediately reports "no new activity" — that round-trip is your
+confirmation the pipeline works end to end. For a clone-to-first-report walkthrough (including
+the optional web dashboard), see [**docs/new-project-setup.md**](docs/new-project-setup.md).
 
 ## Usage
 
@@ -257,9 +276,11 @@ python -m orion report --all --yes
 Redaction is unchanged on this path: both passes still run, so unattended delivery relaxes no
 secret-scrubbing — it only skips the *human* preview, for opted-in projects.
 
-Per-OS setup (cron / systemd timer / launchd / Task Scheduler), the **WSL2 caveat** (cron runs
-only while WSL is running), and the minimal-environment gotchas (use absolute paths, the venv's
-own Python, and ensure `git` is on PATH) are in [`docs/scheduling.md`](docs/scheduling.md).
+Per-OS setup (cron / systemd timer / launchd / Task Scheduler), the **WSL2 caveat** (cron inside
+WSL2 fires only while a WSL session is open — for reliable scheduling on Windows, prefer the
+**native Task Scheduler** path, which Orion documents), and the minimal-environment gotchas (use
+absolute paths, the venv's own Python, and ensure `git` is on PATH) are in
+[`docs/scheduling.md`](docs/scheduling.md).
 
 ## Event-driven reports (git hooks)
 
@@ -325,3 +346,15 @@ python -m pytest                    # run the test suite
 What the suite covers and why — plus what's intentionally *not* covered — is documented in
 [`docs/testing.md`](docs/testing.md). The manual cross-OS checks (native Windows/macOS) live
 in [`docs/portability-smoke-test.md`](docs/portability-smoke-test.md).
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to set up a dev
+environment, run the test suite, and the conventions to follow (cross-platform, minimal
+dependencies, secret-safe).
+
+## Security
+
+Orion is built around leak prevention (see [Privacy & security](#privacy--security)). If you
+find a vulnerability, please **do not** open a public issue — follow the private disclosure
+process in [`SECURITY.md`](SECURITY.md).

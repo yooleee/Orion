@@ -1,0 +1,10 @@
+# Disable the "open a blank issue" escape hatch so reports use a template
+# (bug or feature) and security reports are routed to private disclosure.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/yooleee/Orion/security/advisories/new
+    # Repo: github.com/yooleee/Orion — Security tab → "Report a vulnerability"
+    about: >-
+      Please do NOT open a public issue for a vulnerability. Report it privately
+      via the Security tab ("Report a vulnerability"). See SECURITY.md for details.

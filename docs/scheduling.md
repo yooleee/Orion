@@ -203,9 +203,12 @@ Notes for native Windows:
 
 ## WSL2 caveat (important if you develop in WSL on Windows)
 
-Cron and systemd **inside WSL2 only run while a WSL session is open.** WSL has no persistent
-background lifecycle by default, so a crontab you add inside Ubuntu-on-WSL will *not* fire when
-no WSL terminal is running — including overnight. Two ways to get reliable cadence:
+Cron and systemd **inside WSL2 only run while a WSL session is open.** WSL2 has no persistent
+init/cron daemon by default — the cron service is not auto-started, and the WSL VM is torn down
+once the last session closes, *unless* you've explicitly configured it to stay up (systemd via
+`/etc/wsl.conf`'s `[boot] systemd=true`, or a `[boot] command =` line that starts `cron`). So a
+crontab you add inside Ubuntu-on-WSL will *not* fire when no WSL terminal is running — including
+overnight — unless you've set up that persistence yourself. Two ways to get reliable cadence:
 
 1. **Schedule from the Windows side (recommended).** Use **Windows Task Scheduler** to invoke
    the command *inside* WSL, so Windows owns the wake-up:
@@ -220,8 +223,10 @@ no WSL terminal is running — including overnight. Two ways to get reliable cad
 2. **Run Orion natively on Windows instead** (see the Windows section above) — Orion is fully
    native, so WSL is not required at all.
 
-If you keep a WSL session open continuously, the Linux cron/systemd options work as written —
-just know the cadence stops whenever WSL shuts down.
+If you keep a WSL session open continuously — or you've set up persistent cron yourself (e.g.
+`systemd=true` in `/etc/wsl.conf`) — the Linux cron/systemd options work as written. Just know
+that without that, the cadence stops whenever WSL shuts down, which is why Task Scheduler
+(options 1 or 2 above) is the reliable default on Windows.
 
 ---
 

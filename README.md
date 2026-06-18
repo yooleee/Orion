@@ -6,7 +6,7 @@ delivers them to designated "supervisors" over Discord and Slack. Collectors rea
 files; only delivery makes an outbound call. Reports are previewed in your terminal before
 anything is sent.
 
-> **Status: Horizon A shipped; Horizon B underway.** `orion report <project>` collects from each
+> **Status: Horizons A & B shipped; Horizon C (hosted) underway.** `orion report <project>` collects from each
 > enabled signal (git, tasks, notes), redacts secrets, summarizes only the raw git activity with
 > Claude (structured signals skip the LLM), previews the message, and on your confirmation
 > delivers it to each recipient's Discord **and/or** Slack webhook — then records what was sent so
@@ -15,8 +15,10 @@ anything is sent.
 > see [Scheduling](#scheduling)), **event-driven git-hook triggers**
 > (see [Event-driven reports](#event-driven-reports-git-hooks)), and a **Claude Code session
 > skill** (see [below](#claude-code-session-skill)) are all available. Reports render as
-> **Discord embeds and Slack Block Kit** (with a plain-text fallback). A multi-party/hosted
-> dashboard is a later horizon.
+> **Discord embeds and Slack Block Kit** (with a plain-text fallback). An **optional local relay**
+> can additionally store reports and serve a **read-only web dashboard**
+> (see [Web dashboard](#web-dashboard-optional-local-relay)); a *hosted, shareable* dashboard is a
+> later horizon.
 
 ## Supported platforms
 
@@ -211,6 +213,26 @@ and the summarizer's key is set when the git lane is in use (which key depends o
 at all for a keyless local one). It reports secrets **by name** as `set`/`MISSING`, never by
 value, and exits non-zero if anything required is missing. None of these commands print a secret
 value (the config holds env-var *names* and paths, not secrets).
+
+## Web dashboard (optional local relay)
+
+Orion can **also** push each report to a small local **relay** that stores it and serves a
+**read-only web dashboard** — *in addition to* your Discord/Slack delivery, which is unchanged.
+It is **opt-in and additive**: with no `[relay]` table in your config, nothing changes.
+
+Enable it by adding a `[relay]` table (an ingest URL + the name of an `.env` variable holding a
+shared Bearer token), then run the relay in its own terminal:
+
+```bash
+orion relay-serve                 # serves ingest + dashboard at http://127.0.0.1:8787
+```
+
+A subsequent `orion report` / `orion intake` delivers as usual **and** pushes the report to the
+relay, which you can browse at `http://127.0.0.1:8787` (projects → history → one report). The
+push is **fail-soft** — a relay that is down or misconfigured never blocks or fails a delivered
+report. At this stage the relay binds **loopback only** (`127.0.0.1`), so the dashboard is for
+your own machine; your supervisors still see the Discord/Slack delivery. See
+[**docs/new-project-setup.md**](docs/new-project-setup.md) for a full walkthrough.
 
 ## Scheduling
 

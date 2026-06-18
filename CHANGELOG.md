@@ -14,6 +14,56 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Phase C1 (first slice) — Hosting-agnostic relay + read-only dashboard (2026-06-18)
+
+Opens **Horizon C** (local-first → hosted/hybrid) with the part buildable *without* settling the
+hosting decision (Path A Cloudflare vs Path B self-host stays deferred, and is *informed* by this
+slice). Local Orion gains one **opt-in, fail-soft** outbound seam — "serialize the portable blob +
+a Bearer token → POST to a configured URL" — and a **Path-B reference implementation** of the
+hosted half (a small stdlib Python relay + read-only dashboard) lands in a new, separately-
+deployable top-level `relay/` package. **Zero new dependencies**, **no core-pipeline changes**.
+`pytest`: **226** (was 172 at B-close; +54). Awaiting sign-off.
+
+### Added
+
+- **Portable blob contract, `serialize_blob` (`report.py`).** A single, explicit,
+  `orion_version`-stamped JSON serialization of the report blob (tuples → arrays) — the documented
+  contract the relay seam rests on.
+- **`[relay]` config (`RelayConfig` + `_parse_relay`).** A global, opt-in table (`enabled`, `url`,
+  `token_env_var`), validated like `[summarizer]`; absent/disabled is a pure no-op, so every
+  existing config is unchanged. Token lives in `.env` (named by `token_env_var`), never in config.
+- **Relay push target (`delivery/relay.py`).** A `push(blob_json, url, token)` sender mirroring the
+  Discord/Slack pattern (stdlib `urllib`), sending the serialized blob **verbatim** with an
+  `Authorization: Bearer` header.
+- **Wired, fail-soft, into `report` and `intake`.** After a successful delivery, the blob is also
+  pushed to the relay (once per run). A relay error is reported but **never** fails the run or
+  blocks state advancement. `check` now also reports relay-token readiness (a missing token is a
+  *warning*, not a failure — the report still sends).
+- **`relay/` package (the hosted half, separately deployable; not part of the `orion` wheel):**
+  - **`store.py`** — its own SQLite store mirroring the `report_history` shape (no dependency on
+    `orion.state`).
+  - **`server.py`** — `ThreadingHTTPServer` with `POST /ingest` (**Bearer auth** via
+    `hmac.compare_digest`, payload **shape/version validation**, store → **201**) and the read-only
+    dashboard GET routes (`/`, `/project/<name>`, `/report/<id>`, 404 otherwise).
+  - **`render.py`** — server-rendered HTML (stdlib f-strings, inline CSS, no JS/template engine)
+    with `html.escape` on **every** dynamic value (XSS-safe).
+- **`orion relay-serve`** — launches the local reference relay (`--host` default `127.0.0.1`,
+  `--port` 8787, `--db`, `--token-env`); reads the ingest token from `.env` with a clean
+  `SecretsError` when missing.
+- **`docs/new-project-setup.md`** — a hands-off clone-to-first-report recipe, including the relay
+  dashboard quickstart.
+
+### Security
+
+- The relay ingest is **authenticated** (Bearer token, constant-time compared, never echoed) and
+  **validated** (shape + version) before storage — Orion's first inbound surface, handled per the
+  "authenticate + validate" must-hold. A 401 distinguishes a missing header from a wrong token
+  (no secret is leaked: a single shared token has no identity to enumerate) and advertises
+  `WWW-Authenticate: Bearer`.
+- The dashboard renders **redacted** content only (the blob is twice-redacted before it leaves the
+  machine) and **escapes every dynamic value**. Its access boundary at this stage is **loopback
+  binding**; real read-auth rides with the deferred hosting decision.
+
 ## Phase B5 — Scheduling layer: gate evaluated, deferred into Horizon C (2026-06-17)
 
 Phase B5 was **⏳ Conditional** — a scheduling *layer* (`report --all --due`, activity-gating,

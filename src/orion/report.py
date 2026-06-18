@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from orion import __version__
@@ -108,3 +109,44 @@ def build_report(
         orion_version=__version__,
         sections=sections,
     )
+
+
+def serialize_blob(blob: ReportBlob) -> str:
+    """Serialize a ReportBlob to the portable JSON string that crosses the relay seam.
+
+    Args:
+        blob: The ReportBlob to serialize. Its tuple fields (`participants` and the
+            ordered `sections` pairs) are converted to JSON arrays.
+
+    Returns:
+        A JSON string carrying all eight blob fields. Keys are sorted so the same
+        blob always serializes to the same bytes (deterministic wire format).
+
+    Why:
+        This is the single, explicit definition of Orion's portable report contract
+        — the exact shape that local Orion POSTs to a relay and that the receiver
+        stores and renders. JSON has no tuple type, so `participants` becomes a list
+        and each `(title, body)` section becomes a `[title, body]` list; doing that
+        by hand (rather than leaning on json's silent tuple→array coercion) keeps
+        the wire shape visible and intentional in one place. `orion_version` rides
+        along so a receiver can reject or adapt to a payload from a different
+        version. We build the dict field-by-field instead of `dataclasses.asdict`
+        precisely so this contract reads as a deliberate interface, not a dump of
+        whatever fields the dataclass happens to have.
+    """
+    payload = {
+        "project": blob.project,
+        "participants": list(blob.participants),
+        "share_level": blob.share_level,
+        "lane": blob.lane,
+        "body": blob.body,
+        "source_marker": blob.source_marker,
+        "generated_at": blob.generated_at,
+        "orion_version": blob.orion_version,
+        # Each section is an ordered (title, body) pair; JSON has no tuple, so emit
+        # a two-element list and preserve section order (the list itself is ordered).
+        "sections": [[title, body] for title, body in blob.sections],
+    }
+    # sort_keys → byte-stable output for a given blob; the seam needs a predictable
+    # wire format more than it needs human-friendly field order.
+    return json.dumps(payload, sort_keys=True)

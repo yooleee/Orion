@@ -264,3 +264,92 @@ def test_check_local_backend_with_missing_named_key_is_flagged(tmp_path, monkeyp
     assert "LOCAL_LLM_KEY" in captured.out  # named...
     assert "MISSING" in captured.out         # ...and flagged
     assert "Not ready" in captured.err
+
+
+# --- C1 (CP4): `check` reports relay readiness --------------------------------
+
+
+def _relay_config(tmp_path, *, enabled=True):
+    """A valid config with an enabled [relay] table (git lane + a webhook)."""
+    return _write(
+        tmp_path,
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = {str(enabled).lower()}
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+
+
+def test_check_relay_token_present_is_ok(tmp_path, monkeypatch, capsys):
+    """With the relay enabled and its token set, check reports it OK and exits 0.
+
+    Why this matters: when everything is wired, the relay token should show as set
+    (by NAME) alongside the other readiness lines, confirming the dashboard push
+    will work — without weakening the green verdict.
+    """
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret-value")  # set, must not print
+    toml = _relay_config(tmp_path)
+
+    code = cli.main(["check", "--config", str(toml)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "ORION_RELAY_TOKEN" in captured.out  # named and shown OK
+    assert "Ready to send" in captured.out
+    # The token VALUE is never printed — only its name and set/MISSING.
+    assert "relay-secret-value" not in captured.out
+
+
+def test_check_relay_token_missing_is_a_warning_not_a_failure(tmp_path, monkeypatch, capsys):
+    """An enabled relay with a missing token WARNS but does not fail the check.
+
+    Why this matters: the relay is fail-soft and additive — a report still sends
+    fine without it. So a missing relay token must be a warning (exit 0, "ready to
+    send"), NOT a hard failure, keeping check's exit code a faithful "core delivery
+    ready?" gate. The gap is still surfaced by NAME so the user can fix it.
+    """
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.delenv("ORION_RELAY_TOKEN", raising=False)  # the gap
+    toml = _relay_config(tmp_path)
+
+    code = cli.main(["check", "--config", str(toml)])
+    captured = capsys.readouterr()
+    assert code == 0                                # warning, not a failure
+    assert "ORION_RELAY_TOKEN" in captured.out      # named...
+    assert "MISSING" in captured.out                 # ...and flagged
+    assert "Ready to send" in captured.out           # but still ready
+    assert "warning" in captured.out                 # surfaced as a warning
+
+
+def test_check_relay_disabled_is_silent(tmp_path, monkeypatch, capsys):
+    """A disabled relay produces no relay line in check output.
+
+    Why this matters: check should stay focused on what a run actually needs; an
+    opt-out relay isn't a readiness concern, so it shouldn't add noise or mention a
+    token var the user never configured.
+    """
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    toml = _relay_config(tmp_path, enabled=False)
+
+    code = cli.main(["check", "--config", str(toml)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "ORION_RELAY_TOKEN" not in out  # disabled -> not mentioned at all

@@ -61,7 +61,7 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | 🔭 Later (coarse) |
+| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | 🚧 First slice built (vendor-neutral relay + Path-B reference; loopback-only) — awaiting sign-off; hosting decision deferred to post-C1 juncture |
 | C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🔭 Later (coarse) |
 | C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Later (coarse) |
 
@@ -671,6 +671,51 @@ the Cloudflare hosting preference. Bidirectional + bots follow later (C2), behin
 at a slot to be decided in detailed planning. Detailed C1–C3 design remains deferred — C1 is
 framed (open decisions surfaced, not settled) in
 [`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md).
+
+## Phase C1 status (2026-06-18) — first slice: hosting-agnostic relay + read-only dashboard
+
+**Opens Horizon C.** Built the part of C1 that needs **no** hosting decision: a **vendor-neutral
+outbound relay seam** on the local side, and a **Path-B reference implementation** of the hosted
+half (a small stdlib Python relay + read-only dashboard) in a new, separately-deployable top-level
+`relay/` package. **Zero new dependencies, no core-pipeline changes.** Implemented across eight
+checkpoints (CP1 `serialize_blob` → CP2 `[relay]` config → CP3 `delivery/relay.py` → CP4 fail-soft
+wiring into `report`/`intake` + `check` readiness → CP5 `relay/store.py` → CP6 `relay/server.py`
+ingest → CP7 `relay/render.py` + dashboard routes → CP8 `orion relay-serve` + docs). `pytest`:
+**226** (172 at B-close). Verified end to end by a local dogfood: `relay-serve` + a real `intake` →
+delivery → relay push → store → dashboard (index → history → report). **Awaiting sign-off.**
+
+**The vendor-neutral invariant (treat as PERMANENT):** local Orion knows *only* "serialize the
+portable blob (JSON) + a Bearer token → POST to a configured URL," `orion_version`-stamped. That
+single seam decouples the local core from any hosting choice, so the **same** outbound push works
+unchanged against a future Cloudflare ingress — the hosting choice stays genuinely open and is now
+*informed* by a working Path-B reference.
+
+**Accepted caveat (this slice):** the local relay is **loopback-only** (`127.0.0.1`), so the
+dashboard is for the user's own machine; informal supervisors still see Discord/Slack delivery, not
+the dashboard, until hosting lands.
+
+**Deferred — with a near-term revisit point (NOT indefinite).** These were scoped out of *this
+slice* and are slated for a **next-phase planning/decision juncture right after C1 sign-off**
+(sooner than later, per Yousuf):
+
+- **The hosting decision (Path A Cloudflare vs Path B self-host)** — this slice defers *and informs*
+  it; decide it at the post-C1 juncture, grounded by the dogfooding feedback + the Path-B reference
+  now in hand. Receiver stays loopback-only until then.
+- **OSS-readiness polish pass — alongside that next-phases discussion (Yousuf's explicit call):**
+  CI, CONTRIBUTING, SECURITY, issue/PR templates, README/docs polish (WSL2-cron caveat, a "you're
+  ready" checkpoint), **plus** the friction items — KI-1 dual-channel partial-failure policy, a
+  new-repo blob baseline / `--init`, and the `orion-session` abs-path ergonomics.
+- **Dashboard maturation (rides with the hosting decision):** the C1 dashboard is deliberately
+  minimal (loopback-only, plain server-rendered HTML) — right for a "does it work" pass, not a
+  finished surface. A proper **visual design** *and* richer **report content** (e.g. submitter/
+  author accountability — **KI-17**) land when the dashboard becomes **supervisor-facing**, because
+  those content features (multi-party identity, C3) reshape the design — so designing it now would
+  be premature. (Recorded from the 2026-06-18 dashboard dogfood: drill-down navigation validated;
+  content/design flagged as future.)
+- **C2/C3 sequencing** (bidirectional, multi-party) — firmed up at the same juncture.
+
+Detail on the slice's settled decisions (D1–D7) is in
+[`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md) and the approved checkpoint plan.
 
 ## Open questions / to settle before/while building
 

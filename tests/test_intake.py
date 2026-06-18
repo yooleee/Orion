@@ -281,3 +281,50 @@ def test_intake_without_yes_still_previews(tmp_path, env_and_mocks):
     assert code == 0
     assert len(calls) >= 1                                  # preview was shown
     assert len(env_and_mocks["sent"]) == 1                  # then sent on 'y'
+
+
+# --- C1 (CP4): the relay push also fires on the intake path -------------------
+
+
+def test_intake_pushes_to_relay_on_success(tmp_path, env_and_mocks):
+    """A successful intake also pushes the serialized blob to an enabled relay.
+
+    Why this matters: intake and report share the same blob + delivery path, so the
+    relay must feed off BOTH — a pushed update should reach the dashboard just like
+    a collected report does, with the same fail-soft once-per-run push.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes: list[tuple[str, str, str]] = []
+    mp.setattr(cli, "relay_push", lambda blob_json, url, token: pushes.append((blob_json, url, token)))
+
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        """
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "/tmp/unused-by-intake"
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    _answer(mp, "y")
+    code = cli.main(["intake", "demo", "--config", str(toml), "-m", "A pushed update."])
+    assert code == 0
+
+    assert len(env_and_mocks["sent"]) == 1   # delivered to the channel as usual
+    assert len(pushes) == 1                  # and pushed once to the relay
+    blob_json, url, token = pushes[0]
+    assert url == "https://relay.test/ingest"
+    assert token == "relay-secret"
+    assert '"demo"' in blob_json             # the serialized portable blob

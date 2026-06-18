@@ -524,3 +524,220 @@ def test_build_summarizer_local_with_key_fetches_named_var():
         lambda name: fetched.append(name) or "tok",
     )
     assert fetched == ["LOCAL_LLM_KEY"]
+
+
+# --- Relay push wiring (C1, CP4) ----------------------------------------------
+#
+# These pin the additive, fail-soft relay push: it fires exactly once after a
+# successful delivery when enabled, is a no-op when disabled, never fires when no
+# delivery succeeded, and a relay failure never changes the run's outcome. The
+# low-level sender (cli.relay_push) is monkeypatched, so nothing leaves the machine
+# and we assert on what WOULD have been pushed.
+
+
+def _write_relay_config(tmp_path, repo, *, enabled=True):
+    """Write an orion.toml with a [relay] table pointing at a fake relay URL.
+
+    Args:
+        tmp_path: per-test temp dir (also where the state db lives).
+        repo: path to the git repo (used by the git collector).
+        enabled: whether the [relay] table is enabled.
+
+    Why:
+        The relay tests need a project plus a [relay] table; this keeps each test to
+        the enabled/disabled case it cares about instead of repeating TOML (DRY).
+    """
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = {str(enabled).lower()}
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{repo}"
+        share_level = "high_level"
+        collectors = ["git"]
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def _capture_relay(mp):
+    """Monkeypatch cli.relay_push to record (blob_json, url, token) calls.
+
+    Why:
+        Mirrors how env_and_mocks captures discord_send — replace the real sender
+        with an in-memory recorder so the test asserts on what would have been
+        pushed without any network call.
+    """
+    pushes: list[tuple[str, str, str]] = []
+    mp.setattr(cli, "relay_push", lambda blob_json, url, token: pushes.append((blob_json, url, token)))
+    return pushes
+
+
+def test_relay_push_fires_once_on_success(tmp_path, env_and_mocks):
+    """An enabled relay pushes the serialized blob exactly once after delivery.
+
+    Why this matters: C1's whole point is that a delivered report ALSO reaches the
+    dashboard. The push must happen once per run (not per recipient), carry the
+    serialized blob (the project name proves it is the real blob, not a channel
+    payload), and use the configured url + the token from .env.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+
+    # The report itself was delivered (unchanged behavior)...
+    assert len(env_and_mocks["sent"]) == 1
+    # ...and the relay got exactly one push with the right url/token and the blob.
+    assert len(pushes) == 1
+    blob_json, url, token = pushes[0]
+    assert url == "https://relay.test/ingest"
+    assert token == "relay-secret"
+    assert '"demo"' in blob_json  # the serialized portable blob, not a chat payload
+
+
+def test_relay_disabled_is_a_no_op(tmp_path, env_and_mocks):
+    """With the relay disabled (no table), no push happens and the report still sends.
+
+    Why this matters: the relay is opt-in; every pre-C1 config (no [relay] table)
+    must behave exactly as before — deliver, but push nowhere.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    pushes = _capture_relay(mp)
+    repo = _make_repo(tmp_path)
+    toml = _write_config(tmp_path, repo)  # no [relay] table at all
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+
+    assert len(env_and_mocks["sent"]) == 1  # report delivered as usual
+    assert pushes == []                      # but nothing pushed to a relay
+
+
+def test_relay_does_not_fire_when_no_delivery_succeeds(tmp_path, env_and_mocks):
+    """If every delivery fails, the relay is never pushed (it follows a real send).
+
+    Why this matters: the relay push is placed AFTER the "at least one delivery
+    succeeded" guard, so a fully-failed run (nothing delivered, state not advanced)
+    must not leak a blob to the dashboard either.
+    """
+    from orion.delivery import DeliveryError
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    # Make the only recipient's delivery fail, so sent_to ends up empty.
+    def _fail(payload, url):
+        raise DeliveryError("webhook down")
+    mp.setattr(cli, "discord_send", _fail)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 1          # no delivery succeeded -> FAILED
+    assert pushes == []       # and the relay was never reached
+
+
+def test_relay_error_is_non_fatal(tmp_path, env_and_mocks):
+    """A relay push failure is reported but does not fail the run or block state.
+
+    Why this matters: the dashboard is a secondary surface. If the relay is down,
+    the run that already delivered to Discord must still exit 0 with state advanced
+    — proven here by the immediate re-run reporting no activity.
+    """
+    from orion.delivery import DeliveryError
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    # The relay sender raises — exactly what a down relay / bad token surfaces as.
+    mp.setattr(cli, "relay_push", lambda blob_json, url, token: (_ for _ in ()).throw(DeliveryError("relay down")))
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0                          # relay failure did NOT fail the run
+    assert len(env_and_mocks["sent"]) == 1    # the report was still delivered
+
+    # State advanced despite the relay error: a second run finds nothing new.
+    env_and_mocks["sent"].clear()
+    code2 = cli.main(["report", "demo", "--config", str(toml)])
+    assert code2 == 0
+    assert env_and_mocks["sent"] == []
+
+
+# --- relay-serve CLI adapter (C1, CP8) ----------------------------------------
+#
+# These pin the `orion relay-serve` command's argument plumbing and its secret
+# handling WITHOUT actually starting a server: _load_relay_serve is monkeypatched
+# to return a recorder, so serve() is never really called (it would block forever).
+
+
+def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
+    """`relay-serve` reads the token from .env and calls serve() with parsed args.
+
+    Why this matters: this is the whole job of the CLI adapter — turn flags + the
+    ingest token into a serve() call. We patch _load_relay_serve so nothing actually
+    binds a socket, and assert the host/port/db/token reached serve() as resolved.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # ignore real .env
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "_load_relay_serve",
+        lambda: (lambda host, port, db_path, token: calls.append((host, port, db_path, token))),
+    )
+
+    db = tmp_path / "relay.sqlite3"
+    code = cli.main(
+        [
+            "relay-serve",
+            "--host", "127.0.0.1",
+            "--port", "9999",
+            "--db", str(db),
+            "--config", str(tmp_path / "orion.toml"),
+        ]
+    )
+    assert code == 0
+    assert len(calls) == 1
+    host, port, db_path, token = calls[0]
+    assert host == "127.0.0.1"
+    assert port == 9999
+    assert db_path == db
+    assert token == "tok-123"
+
+
+def test_relay_serve_missing_token_is_clean_error_and_never_serves(tmp_path, monkeypatch):
+    """A missing ingest token fails cleanly (exit 1) and never starts the server.
+
+    Why this matters: a relay with no token would 401 every push; catching the gap
+    here turns it into a clear SecretsError naming the variable, before any socket is
+    bound. We prove serve() is never reached.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # don't load a real .env
+    monkeypatch.delenv("ORION_RELAY_TOKEN", raising=False)
+    served = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: served.append(a)))
+
+    code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
+    assert code == 1
+    assert served == []  # never started serving

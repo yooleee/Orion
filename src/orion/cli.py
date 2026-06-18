@@ -37,17 +37,19 @@ from orion.config import (
     ConfigError,
     ProjectConfig,
     Recipient,
+    RelayConfig,
     SummarizerConfig,
     get_project,
     load_config,
 )
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
+from orion.delivery.relay import push as relay_push
 from orion.delivery.slack import send as slack_send
 from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
-from orion.report import build_report
+from orion.report import ReportBlob, build_report, serialize_blob
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import get_marker, open_state, record_report, set_marker
 from orion.summarize import AnthropicSummarizer, LocalSummarizer, Summarizer, SummarizerError
@@ -279,6 +281,41 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
     )
 
+    relay_parser = subparsers.add_parser(
+        "relay-serve",
+        help="Run the local relay: receive pushed reports and serve a read-only dashboard.",
+    )
+    relay_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Interface to bind (default: 127.0.0.1 — loopback only, not world-reachable).",
+    )
+    relay_parser.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="Port to bind (default: 8787).",
+    )
+    relay_parser.add_argument(
+        "--db",
+        default="orion-relay.sqlite3",
+        help="Path to the relay's own sqlite store (default: orion-relay.sqlite3).",
+    )
+    relay_parser.add_argument(
+        "--token-env",
+        default="ORION_RELAY_TOKEN",
+        help=(
+            "Name of the .env variable holding the ingest token "
+            "(default: ORION_RELAY_TOKEN). Must match the token your pushing "
+            "config's [relay] token_env_var resolves to."
+        ),
+    )
+    relay_parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help=f"Path to the config file, used only to locate .env (default: {DEFAULT_CONFIG}).",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "report":
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
@@ -294,6 +331,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_show(args.project, Path(args.config))
     if args.command == "check":
         return cmd_check(Path(args.config))
+    if args.command == "relay-serve":
+        return cmd_relay_serve(
+            args.host, args.port, Path(args.db), args.token_env, Path(args.config)
+        )
     return 1  # Unreachable: subparsers are required.
 
 
@@ -364,7 +405,8 @@ def cmd_report(
     # Fail-soft loop: _run_report catches its own per-project errors and returns
     # STATUS_FAILED, so one bad project never stops the rest of an --all run.
     statuses = [
-        _run_report(project, conn, assume_yes, config.summarizer) for project in projects
+        _run_report(project, conn, assume_yes, config.summarizer, config.relay)
+        for project in projects
     ]
 
     if all_projects:
@@ -416,6 +458,7 @@ def _run_report(
     conn: sqlite3.Connection,
     assume_yes: bool,
     summarizer_cfg: SummarizerConfig,
+    relay_cfg: RelayConfig,
 ) -> str:
     """Run the full report pipeline for ONE already-loaded project.
 
@@ -426,6 +469,9 @@ def _run_report(
             project.auto_send, it decides whether the human preview is bypassed.
         summarizer_cfg: The global summarizer backend config (B4). Used only on
             the raw lane, to build the configured summarizer lazily.
+        relay_cfg: The global relay config (C1). When enabled, the serialized blob
+            is also pushed to the relay after a successful delivery — fail-soft, so
+            a relay error never changes this run's outcome.
 
     Returns:
         One of the STATUS_* constants describing the outcome, so the caller can
@@ -581,6 +627,11 @@ def _run_report(
                 f"(Note: {len(failed)} recipient(s) failed; state advanced because "
                 f"at least one delivery succeeded.)"
             )
+
+        # Additive C1 step: push the portable blob to the relay (if enabled). Placed
+        # AFTER state has advanced and is fail-soft, so the dashboard surface can
+        # never affect the delivered-report outcome or the markers.
+        _relay_push(blob, relay_cfg)
         return STATUS_SENT
 
     except (GitError, SummarizerError, TasksError, NotesError, SecretsError) as exc:
@@ -678,6 +729,11 @@ def cmd_intake(
         print(f"Sent to: {', '.join(sent_to)}.")
         if failed:
             print(f"(Note: {len(failed)} recipient(s) failed.)")
+
+        # Same additive, fail-soft relay push as the report path — one push of the
+        # same portable blob, after the history record, so intake feeds the
+        # dashboard too without affecting the send outcome.
+        _relay_push(blob, config.relay)
         return 0
 
     except (ConfigError, SecretsError) as exc:
@@ -929,6 +985,22 @@ def cmd_check(config_path: Path) -> int:
             print(f"  ✗   {key_env} is MISSING (for the git/raw lane summarizer).")
             problems += 1
 
+    # Relay readiness (C1). Only relevant when the relay is enabled. A missing token
+    # is a WARNING, not a problem: the relay is fail-soft and additive, so a report
+    # still sends fine without it — only the dashboard surface is degraded. Keeping
+    # it out of `problems` means the `check` exit code stays a faithful "is the core
+    # delivery path ready to send?" gate, not "is every optional surface wired up?".
+    if config.relay.enabled:
+        print()
+        if os.environ.get(config.relay.token_env_var, "").strip():
+            print(f"  OK  {config.relay.token_env_var} is set (for the relay push).")
+        else:
+            print(
+                f"  ⚠   {config.relay.token_env_var} is MISSING "
+                f"(relay push will be skipped; the report still sends)."
+            )
+            warnings += 1
+
     print()
     if problems:
         suffix = f", {warnings} warning(s)" if warnings else ""
@@ -944,6 +1016,93 @@ def cmd_check(config_path: Path) -> int:
         print(f"Ready to send ({warnings} warning(s) above).")
     else:
         print("Ready to send.")
+    return 0
+
+
+def _load_relay_serve():
+    """Import the relay server's serve() from the top-level relay/ package.
+
+    Returns:
+        The relay.server.serve callable.
+
+    Why:
+        The relay (the hosted half) lives in a top-level `relay/` package at the
+        repo root, deliberately OUTSIDE the installed `orion` package (src/), so the
+        core stays dependency-light and the relay is separately deployable.
+        `relay-serve` is a convenience launcher for that bundled reference relay,
+        which only exists when Orion is run from a clone of its repo. We import it
+        LAZILY here (not at module top) so importing cli.py — i.e. every other
+        command — never depends on the relay being present. A console-script entry
+        point does not put the repo root on sys.path, so on the first ImportError we
+        add it (relay/ sits at parents[2] of this file: src/orion/cli.py -> repo
+        root) and retry; a remaining failure becomes a clear, actionable message
+        rather than a raw ImportError.
+    """
+    try:
+        from relay.server import serve
+
+        return serve
+    except ImportError:
+        pass
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from relay.server import serve
+
+        return serve
+    except ImportError as exc:
+        raise ConfigError(
+            "Could not import the relay package. `relay-serve` runs the bundled "
+            "reference relay, which is only available when running Orion from a "
+            "clone of its repository (the relay/ package is not part of the "
+            "installed orion distribution)."
+        ) from exc
+
+
+def cmd_relay_serve(
+    host: str,
+    port: int,
+    db_path: Path,
+    token_env: str,
+    config_path: Path,
+) -> int:
+    """Run the local reference relay: ingest endpoint + read-only dashboard.
+
+    Args:
+        host: Interface to bind (default 127.0.0.1 — loopback only).
+        port: Port to bind (default 8787).
+        db_path: Path to the relay's own sqlite store (its own file, separate from
+            Orion's state db).
+        token_env: Name of the .env variable holding the shared ingest token.
+        config_path: Path to orion.toml, used only to locate the sibling .env that
+            holds the token.
+
+    Returns:
+        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (missing
+        token, or the relay package can't be imported).
+
+    Why:
+        This is the thin CLI adapter over relay/server.py — it reads the ingest
+        token from .env (the same secret the pushing side sends as a Bearer token),
+        then hands off to the relay's serve(). The token is read HERE, in the CLI,
+        like every other secret; a missing token is a clean SecretsError naming the
+        variable, not a server that silently 401s every push. Binding loopback by
+        default keeps the dashboard off the network until a hosting decision is
+        made. serve() blocks until interrupted, then returns for a clean exit.
+    """
+    try:
+        # Load .env beside the config (like every command), then read the token.
+        load_secrets(config_path)
+        token = get_required(token_env)
+        serve = _load_relay_serve()
+    except (SecretsError, ConfigError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # Blocks serving requests until Ctrl-C; serve() prints its bound address.
+    serve(host, port, db_path, token)
     return 0
 
 
@@ -1039,6 +1198,46 @@ def _deliver(
     for name, err in failed:
         print(f"  ✗ {name}: {err}", file=sys.stderr)
     return sent_to, failed
+
+
+def _relay_push(blob: ReportBlob, relay_cfg: RelayConfig) -> None:
+    """Push the serialized portable blob to the configured relay (C1), fail-soft.
+
+    Args:
+        blob: The report blob that was just delivered (and whose state, if any, has
+            already advanced). It is serialized here and POSTed verbatim.
+        relay_cfg: The global relay config. When disabled, this is a no-op.
+
+    Returns:
+        None. A relay failure is reported to stderr but never raised.
+
+    Why:
+        This is C1's one outbound addition: local Orion ALSO sends the structured
+        blob to a relay that stores it and serves a dashboard — in addition to the
+        unchanged channel delivery. It is deliberately self-contained and fail-soft:
+        it swallows its own SecretsError (token missing) and DeliveryError (relay
+        down / 4xx) and only prints a warning, so by construction it can never turn
+        a delivered report into a failure or block state advancement (D1). The token
+        is read here, in the CLI (like every other secret), only when the relay is
+        enabled — a disabled relay never touches .env. It calls the module-global
+        relay_push so a test can monkeypatch cli.relay_push, mirroring discord_send.
+    """
+    # Disabled (or absent) relay -> pure no-op. Every pre-C1 config lands here.
+    if not relay_cfg.enabled:
+        return
+
+    try:
+        # The token lives in .env, named by token_env_var (never in the config).
+        token = get_required(relay_cfg.token_env_var)
+        relay_push(serialize_blob(blob), relay_cfg.url, token)
+        print(f"Also pushed to relay: {relay_cfg.url}")
+    except (SecretsError, DeliveryError) as exc:
+        # Fail-soft: the report is already delivered and state advanced. A relay
+        # problem is surfaced but must not change the run's outcome.
+        print(
+            f"  ⚠ relay push failed (report still delivered): {exc}",
+            file=sys.stderr,
+        )
 
 
 def _sender_for(channel: str):

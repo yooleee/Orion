@@ -606,3 +606,143 @@ def test_unknown_project_lists_known(tmp_path):
     config = load_config(path)
     with pytest.raises(ConfigError, match="demo"):
         get_project(config, "typo")
+
+
+# A minimal valid [projects.demo] body reused by the relay tests below, so each
+# relay test contributes only the [relay] snippet it is actually checking (DRY).
+_DEMO_PROJECT = """
+[projects.demo]
+repo_path = "/tmp/demo"
+
+[[projects.demo.recipients]]
+name = "Alex"
+channel = "discord"
+webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+"""
+
+
+def test_relay_absent_defaults_to_disabled(tmp_path):
+    """A config with no [relay] table resolves to a disabled, empty relay.
+
+    Why this matters: the relay is opt-in and C1 must not change any existing
+    config's behavior. An absent table must mean "push nowhere" — disabled with no
+    url/token — so every pre-C1 config keeps delivering exactly as before.
+    """
+    config = load_config(_write(tmp_path, _DEMO_PROJECT))
+
+    assert config.relay.enabled is False
+    assert config.relay.url == ""
+    assert config.relay.token_env_var == ""
+
+
+def test_relay_disabled_ignores_other_fields(tmp_path):
+    """`enabled = false` is a no-op even if url/token are present.
+
+    Why this matters: a user toggling the relay off (rather than deleting the
+    table) should fully disable it without having to also remove url/token. We pin
+    that a disabled table is a pure no-op and does not require — or surface — its
+    other fields.
+    """
+    config = load_config(
+        _write(
+            tmp_path,
+            """
+            [relay]
+            enabled = false
+            url = "http://127.0.0.1:8787/ingest"
+            token_env_var = "ORION_RELAY_TOKEN"
+            """
+            + _DEMO_PROJECT,
+        )
+    )
+
+    assert config.relay.enabled is False
+    # Ignored when disabled: the no-op config carries no destination/token.
+    assert config.relay.url == ""
+    assert config.relay.token_env_var == ""
+
+
+def test_relay_enabled_parses(tmp_path):
+    """A fully-specified enabled relay parses into the expected RelayConfig.
+
+    Why this matters: this is the happy path CP3/CP4 build on — the CLI reads
+    url + token_env_var straight off this object to POST the blob, so they must
+    survive parsing verbatim (whitespace-trimmed).
+    """
+    config = load_config(
+        _write(
+            tmp_path,
+            """
+            [relay]
+            enabled = true
+            url = "http://127.0.0.1:8787/ingest"
+            token_env_var = "ORION_RELAY_TOKEN"
+            """
+            + _DEMO_PROJECT,
+        )
+    )
+
+    assert config.relay.enabled is True
+    assert config.relay.url == "http://127.0.0.1:8787/ingest"
+    assert config.relay.token_env_var == "ORION_RELAY_TOKEN"
+
+
+def test_relay_enabled_without_url_rejected(tmp_path):
+    """An enabled relay with no url fails loudly naming the missing key.
+
+    Why this matters: a relay with nothing to POST to would fail confusingly at
+    push time; catching it at load time turns it into a five-second config fix.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [relay]
+        enabled = true
+        token_env_var = "ORION_RELAY_TOKEN"
+        """
+        + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError, match="url"):
+        load_config(path)
+
+
+def test_relay_enabled_without_token_rejected(tmp_path):
+    """An enabled relay with no token_env_var fails loudly naming the missing key.
+
+    Why this matters: the ingest endpoint is Bearer-authenticated, so an enabled
+    relay with no token would always be rejected (401) at push time. Requiring the
+    token's env-var name up front surfaces the gap at the config, not the wire.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [relay]
+        enabled = true
+        url = "http://127.0.0.1:8787/ingest"
+        """
+        + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError, match="token_env_var"):
+        load_config(path)
+
+
+def test_relay_enabled_non_bool_rejected(tmp_path):
+    """`enabled` must be a real boolean, not a truthy int/string.
+
+    Why this matters: TOML `enabled = 1` or `enabled = "yes"` silently treated as
+    truthy would turn the relay on unexpectedly. The strict isinstance(bool) check
+    (same as auto_send) rejects it so enabling the relay is always an explicit
+    `true`.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [relay]
+        enabled = 1
+        url = "http://127.0.0.1:8787/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+        """
+        + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError, match="enabled"):
+        load_config(path)

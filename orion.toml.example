@@ -41,6 +41,23 @@ state_db = "orion.sqlite3"
 # model       = "llama3.1:8b"
 # api_key_env = "LOCAL_LLM_KEY"   # optional; omit when the endpoint needs no key
 
+# OPTIONAL hosted relay (C1). When enabled, Orion ALSO pushes the portable report
+# blob (the same structured data, already twice-redacted) to a relay that stores
+# it and serves a read-only web dashboard — IN ADDITION to your Discord/Slack
+# delivery, which is unchanged. This whole table is opt-in: omit it (or set
+# enabled = false) and Orion pushes nowhere and behaves exactly as before. The
+# choice is GLOBAL (one relay for every project). A relay push failure is reported
+# but never blocks or fails a run. Run the reference relay locally with
+# `orion relay-serve` (see docs/new-project-setup.md).
+#
+# `url` is the relay's ingest endpoint. `token_env_var` names a .env variable
+# holding the Bearer token the push is authenticated with — the token itself lives
+# in .env, never here (same indirection as a recipient's webhook_env_var).
+# [relay]
+# enabled       = true
+# url           = "http://127.0.0.1:8787/ingest"
+# token_env_var = "ORION_RELAY_TOKEN"
+
 # One [projects.<name>] table per tracked project. <name> is what you pass to
 # `orion report <name>`.
 [projects.orion]

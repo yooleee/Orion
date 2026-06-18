@@ -220,3 +220,22 @@ Deferred).
   an oversight.
 - **Severity:** low
 - **Status:** By-design (extend with a native-API backend only when a real case needs it).
+
+## KI-17 — Reports carry no author/submitter identity (anonymous in a multi-user setting)
+
+- **Detail:** The portable blob names `participants` (who *receives* a report) explicitly, but has
+  no field for who *authored/submitted* it — because the current design is single-user (one local
+  "me" per machine). The C1 dashboard therefore shows *what* was reported and *to whom*, but not
+  *by whom*. With multiple users feeding shared supervisors, reports would be effectively
+  anonymous.
+- **Why it matters:** Once there are multiple users and supervisors, "who submitted this update" is
+  an accountability property a supervisor (or the submitter) will likely want — and sometimes
+  explicitly *not* want (anonymity by preference), so it should be a **configurable** choice, not
+  forced. The seam already keeps this additive: the blob is `orion_version`-stamped, the relay's
+  ingest validates required fields **without rejecting extras**, and the codebase already follows
+  "name participants explicitly, don't hardwire a single 'me'." So an `author`/`submitter` field
+  (plus a config switch for optional anonymity) is a clean later add, not a rewrite. Surfaced from
+  real dashboard feedback (2026-06-18) so it isn't lost.
+- **Severity:** low
+- **Status:** Deferred → Horizon C3 (add with the multi-party identity model; make accountability
+  configurable, not forced).

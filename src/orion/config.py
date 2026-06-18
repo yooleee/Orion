@@ -150,23 +150,56 @@ class SummarizerConfig:
 
 
 @dataclass(frozen=True)
+class RelayConfig:
+    """Whether (and where) to push the portable report blob to a hosted relay (C1).
+
+    Args:
+        enabled: Master opt-in switch. When False, the relay is a pure no-op — no
+            outbound push, no behavior change — so every existing config is
+            unaffected.
+        url: The relay's ingest URL the serialized blob is POSTed to. Empty when
+            disabled; required (non-empty) when enabled.
+        token_env_var: NAME of the .env variable holding the Bearer token sent with
+            the push. The token itself never lives in the config — same env-var
+            indirection as a recipient's webhook_env_var, so the shareable config
+            carries no secret. Empty when disabled; required when enabled.
+
+    Why:
+        C1 adds one outbound seam: "serialize the blob + a token → POST to a URL."
+        Modeling it as a global, opt-in [relay] table (one relay for every project,
+        like [summarizer] is one summarizer) is the smallest surface that turns the
+        push on; a per-project relay stays an additive change later. Keeping the
+        token as an env-var name (not the value) preserves the privacy rule that
+        secrets never enter orion.toml.
+    """
+
+    enabled: bool
+    url: str
+    token_env_var: str
+
+
+@dataclass(frozen=True)
 class Config:
-    """The whole registry: state-DB location, summarizer backend, every project.
+    """The whole registry: state-DB location, summarizer/relay config, every project.
 
     Args:
         state_db: Absolute path to the sqlite state store.
         summarizer: The configured summarizer backend (B4). Defaults to
             Anthropic/Haiku when no [summarizer] table is present.
+        relay: The hosted-relay push config (C1). Defaults to disabled (a no-op)
+            when no [relay] table is present.
         projects: Map of project name -> ProjectConfig.
 
     Why:
-        Bundling the global state_db path and summarizer config with the projects
-        means the CLI loads config once and has everything it needs to open state,
-        build the summarizer, and pick a project.
+        Bundling the global state_db path, summarizer, and relay config with the
+        projects means the CLI loads config once and has everything it needs to
+        open state, build the summarizer, decide whether to push to a relay, and
+        pick a project.
     """
 
     state_db: Path
     summarizer: SummarizerConfig
+    relay: RelayConfig
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
 
@@ -219,7 +252,13 @@ def load_config(path: Path) -> Config:
     # resolves to the Anthropic/Haiku default, so existing configs are unchanged.
     summarizer = _parse_summarizer(raw.get("summarizer"), path)
 
-    return Config(state_db=state_db, summarizer=summarizer, projects=projects)
+    # The relay is global (one [relay] table) and opt-in. An absent or disabled
+    # table resolves to a no-op, so existing configs push nowhere and are unchanged.
+    relay = _parse_relay(raw.get("relay"), path)
+
+    return Config(
+        state_db=state_db, summarizer=summarizer, relay=relay, projects=projects
+    )
 
 
 def _parse_summarizer(raw: object, config_path: Path) -> SummarizerConfig:
@@ -296,6 +335,72 @@ def _parse_summarizer(raw: object, config_path: Path) -> SummarizerConfig:
         model=model.strip(),
         base_url=base_url.strip(),
         api_key_env=api_key_env.strip() if isinstance(api_key_env, str) else None,
+    )
+
+
+def _parse_relay(raw: object, config_path: Path) -> RelayConfig:
+    """Validate the optional [relay] table into a RelayConfig (C1).
+
+    Args:
+        raw: The raw value under the top-level `relay` key, or None when the table
+            is absent.
+        config_path: Path to the config, used to locate error messages.
+
+    Returns:
+        A validated RelayConfig. Absent or `enabled = false` resolves to a disabled
+        no-op (empty url/token), so a config with no relay — or one that has turned
+        it off — pushes nowhere and behaves exactly as before.
+
+    Why:
+        Mirrors _parse_summarizer: centralizing validation here means the CLI can
+        trust the relay config without re-checking it, and a half-specified relay
+        (enabled but no url, or no token var) fails loudly at load time naming the
+        exact key to add — rather than failing confusingly at push time. We only
+        require url/token_env_var when the relay is enabled; when it is off they are
+        irrelevant and ignored even if present (the same "ignore when off" rule
+        _parse_collector_file uses for a disabled collector's file path).
+    """
+    where = f"[relay] in {config_path}"
+
+    # Absent table -> disabled no-op. This is the backward-compatible path: every
+    # config that predates C1 has no [relay] and must keep pushing nowhere.
+    if raw is None:
+        return RelayConfig(enabled=False, url="", token_env_var="")
+
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table.")
+
+    # enabled defaults to False (opt-in) and must be a real boolean. isinstance
+    # rejects ints/strings, so `enabled = 1` or `enabled = "yes"` is caught here
+    # rather than silently treated as truthy — same strictness as auto_send.
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(
+            f"{where} has invalid enabled={enabled!r}. Expected true or false."
+        )
+
+    # Disabled -> a pure no-op; url/token_env_var are irrelevant, so we ignore them
+    # (even if present) and return empty values rather than validating them.
+    if not enabled:
+        return RelayConfig(enabled=False, url="", token_env_var="")
+
+    # Enabled -> both the destination URL and the token's env-var name are required.
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(
+            f"{where} is enabled but missing a non-empty `url` "
+            f'(the relay ingest endpoint, e.g. url = "http://127.0.0.1:8787/ingest").'
+        )
+
+    token_env_var = raw.get("token_env_var")
+    if not isinstance(token_env_var, str) or not token_env_var.strip():
+        raise ConfigError(
+            f"{where} is enabled but missing a non-empty `token_env_var` "
+            f'(the .env variable holding the ingest token, e.g. token_env_var = "ORION_RELAY_TOKEN").'
+        )
+
+    return RelayConfig(
+        enabled=True, url=url.strip(), token_env_var=token_env_var.strip()
     )
 
 

@@ -49,3 +49,12 @@ orion = "orion.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Add the repo root to sys.path for the test session so tests can import the
+# top-level `relay/` package. relay/ is the separately-deployable hosted half
+# (C1) and is intentionally NOT part of the src/ wheel (packages.find is
+# src-only above), so it isn't installed and wouldn't otherwise be importable.
+# `pythonpath` is pytest's purpose-built option for exactly this case. The
+# `orion` package keeps importing via its editable install from src/.
+pythonpath = ["."]

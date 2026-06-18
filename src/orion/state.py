@@ -30,6 +30,14 @@ from pathlib import Path
 # and any backfill share one spelling (DRY) and it reads clearly at call sites.
 GIT_COLLECTOR = "git"
 
+# How long sqlite waits for a held write-lock before raising "database is locked".
+# 5s comfortably covers the realistic concurrency here: two reports firing in quick
+# succession (e.g. a pre-push hook on rapid hackathon commits) — the later writer
+# waits for the earlier one's brief marker/history write instead of failing and
+# silently losing that run's report. Passed to sqlite3.connect as `timeout`, which
+# under the hood sets the connection's busy_timeout (in ms).
+_BUSY_TIMEOUT_SECONDS = 5.0
+
 # Schema kept as a module constant so open_state has a single source of truth and
 # the tables are easy to read in one place. "IF NOT EXISTS" makes open_state
 # idempotent — no migration framework needed for this simple, additive schema.
@@ -80,7 +88,9 @@ def open_state(db_path: Path) -> sqlite3.Connection:
         so a state_db pointed at a not-yet-existing folder doesn't fail.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # Pass a busy timeout so concurrent writers wait for the lock instead of
+    # immediately raising "database is locked" (see _BUSY_TIMEOUT_SECONDS).
+    conn = sqlite3.connect(db_path, timeout=_BUSY_TIMEOUT_SECONDS)
     # executescript runs the multi-statement schema; it commits implicitly.
     conn.executescript(_SCHEMA)
     # Migrate any pre-Phase-2 git markers into the new per-collector table. This

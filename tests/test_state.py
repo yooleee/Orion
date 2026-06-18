@@ -7,6 +7,7 @@
 # =============================================================================
 
 from orion.state import (
+    _BUSY_TIMEOUT_SECONDS,
     get_marker,
     open_state,
     record_report,
@@ -23,6 +24,21 @@ def test_first_run_has_no_marker(tmp_path):
     """
     conn = open_state(tmp_path / "state.sqlite3")
     assert get_marker(conn, "demo", "git") is None
+
+
+def test_open_state_sets_busy_timeout(tmp_path):
+    """open_state opens the connection with a busy timeout, not the default.
+
+    Why this matters: a pre-push hook on rapid successive commits can fire two
+    `report` runs at once; both open the state DB to write a marker/history row.
+    Without a busy timeout the later writer raises "database is locked" and that
+    run's report is silently lost (the hook always exits 0). sqlite3.connect's
+    `timeout` sets the connection's busy_timeout (ms), which we read back to
+    confirm the fix is wired — the later writer now waits instead of failing.
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    busy_timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert busy_timeout_ms == int(_BUSY_TIMEOUT_SECONDS * 1000)
 
 
 def test_set_then_get_round_trips(tmp_path):

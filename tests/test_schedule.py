@@ -44,7 +44,9 @@ def _write_multi_config(tmp_path, specs):
     for name, repo, auto_send in specs:
         lines += [
             f"[projects.{name}]",
-            f'repo_path = "{repo}"',
+            # as_posix(): forward slashes so a Windows repo path isn't read as a
+            # TOML escape sequence (see conftest._write_config for the full why).
+            f'repo_path = "{repo.as_posix()}"',
             'share_level = "high_level"',
             'collectors = ["git"]',
             f"auto_send = {str(auto_send).lower()}",  # TOML booleans are lowercase

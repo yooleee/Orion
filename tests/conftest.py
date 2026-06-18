@@ -89,12 +89,18 @@ def _write_config(tmp_path, repo, *, auto_send=None):
         # TOML booleans are lowercase; render the Python bool accordingly.
         auto_send_line = f"auto_send = {str(auto_send).lower()}\n"
     toml = tmp_path / "orion.toml"
+    # repo.as_posix() writes the path with forward slashes. A Windows path like
+    # C:\\Users\\... placed in a DOUBLE-QUOTED TOML string is read as escape
+    # sequences (\\U, \\x ... expect hex), which fails to parse ("Invalid hex
+    # value") — exactly the gotcha orion.toml.example warns users about. Forward
+    # slashes parse on every OS, and Path()/git both accept them on Windows, so the
+    # fixture's config is valid cross-platform (caught by CI on the Windows runner).
     toml.write_text(
         f"""
         state_db = "state.sqlite3"
 
         [projects.demo]
-        repo_path = "{repo}"
+        repo_path = "{repo.as_posix()}"
         share_level = "high_level"
         collectors = ["git"]
         {auto_send_line}

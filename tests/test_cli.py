@@ -42,7 +42,9 @@ def _write_config_collectors(tmp_path, repo, collectors, *, tasks_file=None, not
         'state_db = "state.sqlite3"',
         "",
         "[projects.demo]",
-        f'repo_path = "{repo}"',
+        # as_posix(): forward slashes so a Windows repo path isn't read as a TOML
+        # escape sequence (see conftest._write_config for the full why).
+        f'repo_path = "{repo.as_posix()}"',
         'share_level = "high_level"',
         f"collectors = {collectors!r}".replace("'", '"'),
     ]
@@ -75,7 +77,7 @@ def _write_dual_channel_config(tmp_path, repo):
         state_db = "state.sqlite3"
 
         [projects.demo]
-        repo_path = "{repo}"
+        repo_path = "{repo.as_posix()}"
         share_level = "high_level"
         collectors = ["git"]
 
@@ -558,7 +560,7 @@ def _write_relay_config(tmp_path, repo, *, enabled=True):
         token_env_var = "ORION_RELAY_TOKEN"
 
         [projects.demo]
-        repo_path = "{repo}"
+        repo_path = "{repo.as_posix()}"
         share_level = "high_level"
         collectors = ["git"]
 

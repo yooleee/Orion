@@ -1,0 +1,49 @@
+# =============================================================================
+# .github/workflows/ci.yml
+# -----------------------------------------------------------------------------
+# Responsible for: Running the test suite on every push to main and every pull
+#                  request, across the OS/Python matrix Orion claims to support.
+# Role in project: The automated proof of two promises the project makes — that
+#                  the suite stays green, and that Orion "runs natively on Linux,
+#                  macOS, and Windows" (README) on Python 3.11-3.13. The real-git,
+#                  threaded-HTTP, and sqlite tests are where a cross-platform
+#                  regression would show up, so the matrix is the honest check.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the rest of the matrix when one cell fails — we want to see
+      # every OS/version result, not just the first failure.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Editable install with the dev extra pulls in the two runtime deps plus
+      # pytest — the same `pip install -e ".[dev]"` a contributor runs locally.
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      # git is preinstalled on all GitHub runners, so the git-collector tests run
+      # against real repos exactly as they do locally.
+      - name: Run tests
+        run: python -m pytest -q

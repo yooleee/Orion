@@ -141,6 +141,15 @@ To have a project report itself **automatically when you commit or push**, insta
 python -m orion install-hook <project>               # default: a pre-push hook
 ```
 
+A brand-new project's **first** report covers its *entire* git history, which can be a large,
+noisy message. To start tracking from **now** instead, run `baseline` once — it records the
+current state as already-reported **without sending anything**, so the next report covers only
+new activity:
+
+```bash
+python -m orion baseline <project>                   # skip the giant first report
+```
+
 ## Configuration (`orion.toml`)
 
 ```toml

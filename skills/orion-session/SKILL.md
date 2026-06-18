@@ -25,9 +25,11 @@ You need two things to send:
 - **The Orion project name** — the `[projects.<name>]` key in the user's
   `orion.toml`. If the user didn't say which project, **ask** (don't guess).
 - **The path to their `orion.toml`** — needed because the skill runs from the
-  current repo, not Orion's directory. If you don't already know it from this
-  session, ask for the absolute path (commonly `~/orion/orion.toml`). Orion will
-  find the matching `.env` next to that config automatically.
+  current repo, not Orion's directory. **If the `ORION_CONFIG` environment variable
+  is set**, Orion uses it automatically, so you can **omit `--config` entirely** (and
+  skip asking). Otherwise, if you don't already know the path from this session, ask
+  for the absolute path (commonly `~/orion/orion.toml`). Either way, Orion finds the
+  matching `.env` next to that config automatically.
 
 ## 2. Write the summary
 

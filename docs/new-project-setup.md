@@ -74,6 +74,11 @@ You'll see a **preview** of exactly what will be sent; confirm with `y` to deliv
 Re-running immediately reports "no new activity" — each report only covers what's
 new since the last one.
 
+> **Tip — skip a giant first report.** On an existing repo, that first `report` covers the
+> project's *entire* git history. To start tracking from **now** instead, run
+> `orion baseline myapp` once first — it records the current state as already-reported
+> **without sending anything**, so your first real report covers only new activity.
+
 To send a hand-written update instead of collected git activity:
 
 ```bash

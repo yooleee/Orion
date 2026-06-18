@@ -22,7 +22,7 @@ from orion import cli
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
 # fixture by name; the plain helper functions are imported explicitly.
-from conftest import _answer, _make_repo, _payload_text, _write_config, use_summary
+from conftest import _answer, _make_repo, _payload_text, _run, _write_config, use_summary
 
 
 def _write_config_collectors(tmp_path, repo, collectors, *, tasks_file=None, notes_file=None):
@@ -743,3 +743,54 @@ def test_relay_serve_missing_token_is_clean_error_and_never_serves(tmp_path, mon
     code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
     assert code == 1
     assert served == []  # never started serving
+
+
+# --- baseline + ORION_CONFIG (unit 4 friction fixes) --------------------------
+
+
+def test_baseline_skips_history_then_reports_only_new_activity(tmp_path, env_and_mocks):
+    """`baseline` marks current state as reported without sending; later reports cover
+    only NEW activity.
+
+    Why this matters: a new project's first `report` would otherwise dump the ENTIRE git
+    history. `baseline` sets the marker to HEAD and delivers nothing, so the immediately-
+    following report finds no activity — and a fresh commit afterward is reported on its
+    own (proving the baseline drew the line at "now," not "never").
+    """
+    mp = env_and_mocks["monkeypatch"]
+    repo = _make_repo(tmp_path)
+    toml = _write_config(tmp_path, repo)
+
+    code = cli.main(["baseline", "demo", "--config", str(toml)])
+    assert code == 0
+    assert env_and_mocks["sent"] == []        # baseline delivers nothing
+
+    # History is baselined away -> an immediate report is a no-op.
+    _answer(mp, "y")
+    assert cli.main(["report", "demo", "--config", str(toml)]) == 0
+    assert env_and_mocks["sent"] == []
+
+    # A new commit AFTER the baseline IS reported (only the new activity).
+    (repo / "feature.py").write_text("def f():\n    return 2\n")
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-q", "-m", "Change feature")
+    assert cli.main(["report", "demo", "--config", str(toml)]) == 0
+    assert len(env_and_mocks["sent"]) == 1    # only the post-baseline commit
+
+
+def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys):
+    """With $ORION_CONFIG set and --config omitted, commands resolve the env-pointed config.
+
+    Why this matters: this is the friction fix for non-interactive callers (the session
+    skill, git hooks, schedulers) — set ORION_CONFIG once instead of passing --config each
+    time. We point it at a config whose project name ("demo") differs from any default
+    orion.toml, and confirm `projects` finds it with no --config flag.
+    """
+    repo = _make_repo(tmp_path)
+    toml = _write_config(tmp_path, repo)              # project "demo"
+    monkeypatch.setenv("ORION_CONFIG", str(toml))
+
+    code = cli.main(["projects"])                     # NO --config flag
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "demo" in out                              # loaded via $ORION_CONFIG

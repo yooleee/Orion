@@ -151,6 +151,13 @@ def main(argv: list[str] | None = None) -> int:
     # print can never raise UnicodeEncodeError on a redirected Windows stream.
     _ensure_utf8_output()
 
+    # The config path defaults to $ORION_CONFIG when set, else "orion.toml". This
+    # lets non-interactive callers (git hooks, schedulers, the Claude session skill)
+    # set the config location once in the environment instead of passing --config
+    # every time. It must be a real env var, NOT a value from .env: the config path
+    # is needed BEFORE .env is loaded (load_secrets finds .env beside the config).
+    default_config = os.environ.get("ORION_CONFIG") or DEFAULT_CONFIG
+
     parser = argparse.ArgumentParser(
         prog="orion",
         description="Turn local git activity into supervisor-ready progress updates.",
@@ -177,8 +184,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     report_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
     report_parser.add_argument(
         "--yes",
@@ -198,8 +205,8 @@ def main(argv: list[str] | None = None) -> int:
     intake_parser.add_argument("project", help="Project name as defined in orion.toml.")
     intake_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
     intake_parser.add_argument(
         "--message",
@@ -234,8 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     hook_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
     hook_parser.add_argument(
         "--print",
@@ -256,8 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     projects_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
     show_parser = subparsers.add_parser(
@@ -267,8 +274,8 @@ def main(argv: list[str] | None = None) -> int:
     show_parser.add_argument("project", help="Project name as defined in orion.toml.")
     show_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
     check_parser = subparsers.add_parser(
@@ -277,8 +284,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     check_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    baseline_parser = subparsers.add_parser(
+        "baseline",
+        help=(
+            "Mark a project's current state as already-reported WITHOUT sending, so the "
+            "first real report covers only new activity (skips a giant first report)."
+        ),
+    )
+    baseline_parser.add_argument("project", help="Project name as defined in orion.toml.")
+    baseline_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
     relay_parser = subparsers.add_parser(
@@ -312,8 +333,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     relay_parser.add_argument(
         "--config",
-        default=DEFAULT_CONFIG,
-        help=f"Path to the config file, used only to locate .env (default: {DEFAULT_CONFIG}).",
+        default=default_config,
+        help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
     )
 
     args = parser.parse_args(argv)
@@ -331,6 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_show(args.project, Path(args.config))
     if args.command == "check":
         return cmd_check(Path(args.config))
+    if args.command == "baseline":
+        return cmd_baseline(args.project, Path(args.config))
     if args.command == "relay-serve":
         return cmd_relay_serve(
             args.host, args.port, Path(args.db), args.token_env, Path(args.config)
@@ -617,6 +640,12 @@ def _run_report(
 
         # --- Advance markers ONLY after at least one successful send, and ONLY
         # for the collectors that had activity this run. ---
+        # KI-1 (deliberate policy, decided 2026-06-18): we advance on >=1 successful
+        # recipient, NOT only on all-success. Advancing only when ALL succeed would let
+        # one permanently-broken recipient block state forever and re-spam the working
+        # ones every run. The accepted gap — a transiently-failed recipient misses this
+        # delta — is bounded; the real fix (per-recipient delivery state) belongs with
+        # the C3 multi-party model (KI-11). See docs/known-issues.md KI-1.
         for collector_name, marker in pending_markers:
             set_marker(conn, project.name, collector_name, marker, generated_at)
         record_report(conn, project.name, safe_body, sent_to, generated_at)
@@ -1016,6 +1045,71 @@ def cmd_check(config_path: Path) -> int:
         print(f"Ready to send ({warnings} warning(s) above).")
     else:
         print("Ready to send.")
+    return 0
+
+
+def cmd_baseline(project_name: str, config_path: Path) -> int:
+    """Record a project's current state as already-reported, sending nothing.
+
+    Args:
+        project_name: The project to baseline.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success (including "nothing to baseline"); 1 on a config error.
+
+    Why:
+        A never-reported project's FIRST `report` collects its ENTIRE history (the git
+        collector diffs against the empty tree), which can be a huge, noisy first
+        message. `baseline` sets each enabled collector's marker to its CURRENT state
+        WITHOUT sending, so the next real report covers only new activity. This is the
+        one sanctioned exception to "advance markers only after a successful send" — it
+        is safe because the user explicitly asked to skip current history, and it sends
+        nothing (no delivery, no privacy surface). It reuses the normal collection path
+        (_collect_for) to read each collector's current marker, so there is no bespoke
+        per-collector API and a future collector is baselined automatically.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+        conn = open_state(config.state_db)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # The marker timestamp: same ISO-8601 UTC form set_marker records on a real report.
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    baselined: list[str] = []
+    for collector_name in project.collectors:
+        prior = get_marker(conn, project.name, collector_name)
+        try:
+            # _collect_for returns the collector's CURRENT marker as new_marker,
+            # regardless of whether there is activity — exactly what we baseline to.
+            result = _collect_for(project, collector_name, prior)
+        except (GitError, TasksError, NotesError) as exc:
+            # A collector that can't be read yet (e.g. a notes file not created) has
+            # nothing to baseline — skip it rather than fail the whole command.
+            print(f"  skipped {collector_name}: {exc}", file=sys.stderr)
+            continue
+        set_marker(conn, project.name, collector_name, result.new_marker, generated_at)
+        # Warn when re-baselining an already-tracked collector: it skips any activity
+        # that accrued since the last report.
+        retracked = (
+            " (was already tracked — re-baselined, skipping any unreported activity)"
+            if prior is not None
+            else ""
+        )
+        baselined.append(collector_name)
+        print(f"  {collector_name}: baseline set{retracked}.")
+
+    if not baselined:
+        print(f"Nothing to baseline for {project.name!r} (no readable collectors).")
+        return 0
+
+    print(
+        f"Baselined {project.name!r}: future reports will cover activity after now. "
+        f"Nothing was sent."
+    )
     return 0
 
 

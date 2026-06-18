@@ -23,10 +23,18 @@ Deferred).
 - **Why it matters:** Advancing on partial success means a recipient who failed never
   receives the activity that was covered by that run — it silently falls into the gap
   between reports. Advancing only on full success risks re-sending to recipients who
-  already got it. Neither is obviously right; it needs a deliberate choice (possibly
-  per-recipient state).
+  already got it.
+- **Decision (2026-06-18):** **Keep advancing on ≥1 success.** All-or-nothing was rejected
+  because a *permanently* broken recipient (e.g. a dead webhook) would block state
+  advancement forever and re-send to the working recipients on every run — a worse failure
+  mode than the bounded gap of one missed delta. The accepted gap's proper fix is
+  **per-recipient delivery state** (each recipient advances independently), which is
+  premature while each channel has a single destination (see KI-11) and belongs with the
+  **C3** multi-party/identity model. The behavior is pinned by
+  `tests/test_cli.py::test_one_channel_failure_does_not_block_the_other` and commented at the
+  marker-advance step in `cli._run_report`.
 - **Severity:** medium
-- **Status:** Needs decision (flagged in the plan's Phase 1 edge-case table).
+- **Status:** Decided (by-design); per-recipient state deferred → **C3** (with KI-11).
 
 ## KI-2 — Discord message truncation is lossy
 

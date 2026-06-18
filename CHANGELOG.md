@@ -14,6 +14,45 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Post-C1 — OSS-readiness pass: CI, contributor docs, onboarding friction (2026-06-18)
+
+The hosting-agnostic polish that follows the C1 slice — making Orion ready to be public and
+smoother to onboard. No change to the core pipeline's behavior. `pytest`: **228**.
+
+### Added
+
+- **CI** (`.github/workflows/ci.yml`): GitHub Actions runs the suite on push to `main` and every
+  pull request across {Linux, macOS, Windows} × {Python 3.11, 3.12, 3.13} — finally *enforcing*
+  the cross-platform claim (it immediately caught two Windows-only test bugs, since fixed).
+- **OSS front door:** `CONTRIBUTING.md`, `SECURITY.md` (private vulnerability reporting), and
+  `.github/` issue + PR templates.
+- **`orion baseline <project>`:** records a project's current state as already-reported **without
+  sending**, so a new project's first report covers only new activity instead of dumping its
+  entire git history. Reuses the existing collector path + `set_marker` (no new collector API).
+- **`ORION_CONFIG` env var:** `--config` falls back to `$ORION_CONFIG`, so non-interactive callers
+  (the session skill, git hooks, schedulers) can set the config path once instead of passing
+  `--config` every time.
+
+### Changed
+
+- README/docs polish: CI badge, a "Confirm it works" checkpoint, a sharpened WSL2-cron caveat, and
+  the new `baseline` / `ORION_CONFIG` notes; the `orion-session` skill can skip asking for the
+  absolute config path when `ORION_CONFIG` is set.
+
+### Decided
+
+- **KI-1 (multi-recipient partial-failure):** keep advancing state on **≥1** successful delivery
+  (not all-or-nothing, which would let a permanently-broken recipient block everyone and re-spam
+  the working ones). Per-recipient delivery state is the real fix, deferred to **C3** (with KI-11).
+  See [`docs/known-issues.md`](docs/known-issues.md).
+
+### Fixed
+
+- Two Windows-only test-fixture bugs surfaced by CI's first run: repo paths written into a
+  double-quoted TOML string (Windows `\` read as escapes → now `as_posix()` forward slashes), and a
+  `/tmp/...` assertion that doesn't hold under Windows path separators. Production code was
+  unaffected and already documented the forward-slash guidance.
+
 ## Phase C1 (first slice) — Hosting-agnostic relay + read-only dashboard (2026-06-18)
 
 Opens **Horizon C** (local-first → hosted/hybrid) with the part buildable *without* settling the

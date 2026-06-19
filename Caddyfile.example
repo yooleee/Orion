@@ -1,0 +1,28 @@
+# =============================================================================
+# Caddyfile.example — TLS termination + reverse proxy for the Orion relay
+# -----------------------------------------------------------------------------
+# Use this on a host where YOU terminate TLS: a VPS, a Raspberry Pi, a Jetson Orin
+# Nano, etc. Caddy auto-provisions a Let's Encrypt certificate for your domain
+# (point its DNS at this host first), terminates HTTPS, and forwards to the relay
+# running on localhost. On a platform that ALREADY gives you HTTPS (Fly, Render)
+# you do NOT need Caddy — point [relay].url straight at the platform URL.
+#
+# Copy to `Caddyfile`, edit the domain, then run e.g. `caddy run`.
+#
+# ⚠ SECURITY — READ THIS. Behind a reverse proxy the relay binds 127.0.0.1, so
+# Orion's fail-closed guard sees a LOOPBACK bind and will NOT force the dashboard
+# view secret for you. You MUST set ORION_RELAY_VIEW_TOKEN on the relay yourself —
+# otherwise the dashboard is world-readable through Caddy. (See KI-18 in
+# docs/known-issues.md.) The optional basic_auth block below is a SECOND layer
+# (defense in depth); generate its hash with `caddy hash-password`.
+# =============================================================================
+
+relay.example.com {
+    # Optional defense-in-depth — uncomment and set a real bcrypt hash:
+    # basic_auth {
+    #     orion <bcrypt-hash-from: caddy hash-password>
+    # }
+
+    # The relay speaks plain HTTP on loopback; Caddy terminates TLS in front of it.
+    reverse_proxy 127.0.0.1:8787
+}

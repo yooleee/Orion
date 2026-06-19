@@ -15,6 +15,11 @@
 > multi-party/hosted pivot, kept coarse). This file looks **forward** (design + phase plan).
 > For what actually shipped, see `[CHANGELOG.md](../CHANGELOG.md)`; for open cross-phase
 > concerns, see `[docs/known-issues.md](../docs/known-issues.md)`.
+>
+> **Strategy overlay:** the *why/what-success* layer above this roadmap — Objective, Goals,
+> differentiators, and deferred long-range directions — lives in
+> `[docs/orion-strategy.md](../docs/orion-strategy.md)` (this roadmap is its "Actions"). Settled in
+> the post-C1 direction-setting pass (2026-06-18); see "Horizon-C direction settled" below.
 
 ## Roadmap (horizons & phases)
 
@@ -61,9 +66,9 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | 🚧 First slice shipped (vendor-neutral relay + Path-B reference; loopback-only). Hosting **settled: Path B (self-host)**; managed/Cloudflare deferred behind the seam, with E2E encryption as the privacy bridge |
-| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🔭 Later (coarse) |
-| C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Later (coarse) |
+| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | 🚧 First slice shipped (vendor-neutral relay + Path-B reference; loopback-only). Hosting **settled: Path B (self-host)**; managed/Cloudflare deferred behind the seam, E2E as the privacy bridge. **Second slice (2026-06-18): deploy *beyond loopback* (Basic-Auth + fail-closed guard) + dashboard hardening.** |
+| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🎯 **Next destination** (direction settled 2026-06-18). The C1 second slice stands up the always-on host C2's listener will live on. "Smallest first slice" (dashboard-comments vs bot Socket-Mode/Gateway; which surface first) settled in its own plan-mode pass. |
+| C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Deferred (a clean seam, not a destination now — committed only on real demand; the multi-party *product* leap). Home of E2E + KI-17 + per-recipient state. |
 
 
 Beyond Horizon C (a Horizon D, …) is deliberately not sketched yet — the discipline is to keep
@@ -294,7 +299,7 @@ Phase 1 is **implemented** in `src/orion/` with a 52-test suite (`tests/`). Pipe
 is additive. **Signed off 2026-06-15** — all release-gate criteria verified (52/52 tests,
 redaction corpus + denylist-path tests, seeded-fake-key clean end to end, share-level
 behavior). Orion now also tracks its own repo (`[projects.orion]`, `high_level`). The
-Phase 2 starting brief lives in `[docs/phase-2-kickoff.md](../docs/phase-2-kickoff.md)`.
+Phase 2 starting brief lives in `[docs/phase-2-kickoff.md](../docs/archive/phase-2-kickoff.md)`.
 
 **Live verification (2026-06-15):** ran the full path against a throwaway repo with a
 seeded fake key and a real Anthropic key + Discord webhook — preview clean, initial and
@@ -391,7 +396,7 @@ docs, with a 126-test suite (+11 over Phase 3.5). It was built in five reviewed 
 the `config.py` `auto_send` field → the `cli.py` `--yes` + `_run_report` refactor (with the
 security-critical tests) → `report --all` (fail-soft + summary) → docs (`auto_send`/`--all`/
 `--yes` in README + `orion.toml.example`, new `docs/scheduling.md`) → these living-doc updates.
-The design was settled with the user up front (see `[docs/phase-4-kickoff.md](../docs/phase-4-kickoff.md)`);
+The design was settled with the user up front (see `[docs/phase-4-kickoff.md](../docs/archive/phase-4-kickoff.md)`);
 this phase was a build, not a re-plan.
 
 What shipped (details in `[CHANGELOG.md](../CHANGELOG.md)`): the `**auto_send`** per-project
@@ -512,7 +517,7 @@ Phase B3 — **richer rendering (Slack Block Kit + Discord embeds)** — is **im
 structured sections on `ReportBlob` + per-section redaction (CP1) → the `ComposedMessage`
 payload seam with delivery as pure transport, no look change (CP2) → the rich per-channel
 renderers + faithful preview + overflow fallback (CP3) → docs + living docs (CP4). The five open
-decisions from `[docs/phase-b3-kickoff.md](../docs/phase-b3-kickoff.md)` were settled with the
+decisions from `[docs/phase-b3-kickoff.md](../docs/archive/phase-b3-kickoff.md)` were settled with the
 user (2026-06-17): **(D1)** carry `(title, body)` sections on the blob, `body` stays canonical +
 fallback; **(D3)** redaction pass 2 runs per section before the blob is built; **(D2)** the
 preview is rendered from the actual payload's text fields; **(D5)** `compose` returns a
@@ -549,7 +554,7 @@ checkpoints: the global `[summarizer]` config + validation (CP1) → the
 `Summarizer` Protocol with the Anthropic backend refactored behind it, default behavior unchanged
 (CP2) → the `LocalSummarizer` (OpenAI-compatible endpoint over stdlib `urllib`) + backend-aware
 `check` (CP3) → docs + living docs (CP4). The open decisions from
-`[docs/phase-b4-kickoff.md](../docs/phase-b4-kickoff.md)` were settled with the user (2026-06-17):
+`[docs/phase-b4-kickoff.md](../docs/archive/phase-b4-kickoff.md)` were settled with the user (2026-06-17):
 **(1)** the seam is a one-method `Summarizer` Protocol, with `cli._build_summarizer` constructing
 the configured backend via explicit provider dispatch (not a registry); **(2)** config is a
 single **global** `[summarizer]` table (per-project override left as a clean, additive seam);
@@ -670,7 +675,7 @@ by the portable blob** — collection stays local, presentation moves hosted —
 the Cloudflare hosting preference. Bidirectional + bots follow later (C2), behind the dashboard,
 at a slot to be decided in detailed planning. Detailed C1–C3 design remains deferred — C1 is
 framed (open decisions surfaced, not settled) in
-[`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md).
+[`docs/phase-c1-kickoff.md`](../docs/archive/phase-c1-kickoff.md).
 
 ## Phase C1 status (2026-06-18) — first slice: hosting-agnostic relay + read-only dashboard
 
@@ -715,12 +720,12 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
   content/design flagged as future.)
 - **C2/C3 sequencing** (bidirectional, multi-party) — firmed up at the same juncture. The
   post-C1 OSS-readiness pass is now complete, so this **horizon-planning juncture is teed up** in
-  [`docs/horizon-planning-kickoff.md`](../docs/horizon-planning-kickoff.md) (north-star + C2/C3 +
+  [`docs/horizon-planning-kickoff.md`](../docs/archive/horizon-planning-kickoff.md) (north-star + C2/C3 +
   hosted-deploy + E2E sequencing), to be run **informed by the 2026-06-20/21 hackathon dogfood
   read**.
 
 Detail on the slice's settled decisions (D1–D7) is in
-[`docs/phase-c1-kickoff.md`](../docs/phase-c1-kickoff.md) and the approved checkpoint plan.
+[`docs/phase-c1-kickoff.md`](../docs/archive/phase-c1-kickoff.md) and the approved checkpoint plan.
 
 ## Hosting decision (settled 2026-06-18) — Path B (self-host), with E2E as the bridge to managed hosting
 
@@ -770,6 +775,52 @@ to carry: **self-host = trust by ownership; managed + E2E = trust by cryptograph
 own-your-data; Path A naive satisfies neither. **Near-term: Path B, plaintext, self-host;** E2E is
 the documented bridge to a managed option later.
 
+## Horizon-C direction settled + C1 second slice (2026-06-18)
+
+The deliberate **post-C1 direction-setting pass** (the `plan-direction-before-building` juncture).
+Run with foundational rigor — *don't default, justify*. The hackathon (6/20–21) was reframed as a
+**readiness test, not a driver** of direction. Strategy detail lives in
+`[docs/orion-strategy.md](../docs/orion-strategy.md)`; the as-launched kickoff is archived at
+`[docs/archive/horizon-planning-kickoff.md](../docs/archive/horizon-planning-kickoff.md)`.
+
+**Settled:**
+
+- **North star — an excellent OSS *solo-dev → supervisor* tool, *scale-invariant by aspiration*** (no
+  scale a second-class citizen; every multi-party feature zero-cost at one participant). Current build
+  focus stays solo→supervisor; multi-party is a clean seam. **Driver: showcase / learning** — which is
+  *why* the next destination is C2, not polish-only.
+- **Differentiators (earned, not bolted on):** data sovereignty (own-your-data/local-first) ·
+  derives-from-existing-work (*reframing, not originating*) · agentic-execution-native (ingests Claude
+  Code sessions) · scale-invariance. Ease-of-use and redaction/preview are *enablers/quality bars*, not
+  differentiators alone.
+- **Sequence — C2 next · C3 deferred · E2E deferred as the documented bridge.** C2 (bidirectional) is
+  inside the north star (a supervisor replying to *your* reports — the loop getting richer, not
+  multi-party) and the richest architecture on the board. C3 (multi-party product leap) and E2E
+  (managed-hosting privacy bridge) stay seams.
+- **Methodology overlay — OGSM + Cagan's Product Operating Model carried as *thought processes*, not
+  installed frameworks** (augment the discipline, never replace it): OGSM = a recurring
+  success-articulation step; POM = a solo-scaled "outcomes over output / discovery / focus" mindset
+  guarding against becoming an order-taker to one's own roadmap. Filled the gap this pass exposed — an
+  explicit definition of success (see the strategy doc's Goals).
+
+**C1 second slice (the immediate build, Thu–Fri pre-hackathon):** deploy the relay **beyond loopback**
+(Path B) + **harden** the dashboard, as one push (hardening *is* the deployed thing's quality).
+Security gate first: the dashboard GET routes have **no read auth** today (loopback-only), so leaving
+loopback requires **HTTP Basic-Auth on GET routes + a fail-closed guard** (refuse a non-loopback bind
+without the view secret) before any deploy. The local push side is already deploy-ready (the `[relay]`
+URL accepts any host; Bearer auth + fail-soft + tests exist).
+
+**Recorded deferred directions** (detail in the strategy doc — *seams kept clean, not built*):
+
+- **Light planning/tracking layer** — the to-do/milestone leg evolves from retrospective-only toward a
+  *derived* forward-looking layer (milestones/sprints/due-dates/at-risk), governed by **reframing, not
+  originating** (no data re-entry; Orion stays downstream even for planning). Converges with the
+  deferred scheduling layer (**KI-13**) and Horizon C's stateful process.
+- **Long-range vision (Horizon D+, aspirational/unvalidated):** Orion as a *coordination/visibility*
+  layer (not an execution platform — complementary to Claude Code), **surface-plural** (native
+  Slack/Discord *and* the dashboard), multi-project/cross-project. The inflection to watch is
+  read-only → read-*write* dashboard.
+
 ## Open questions / to settle before/while building
 
 - **(Resolved, Phase 2, 2026-06-15) Push mechanism:** a **CLI command** (`orion intake <project>`, body via `--message` or stdin). No local HTTP endpoint — no network surface,
@@ -802,7 +853,7 @@ so. Where platforms diverge — scheduling (cron / `launchd` / Task Scheduler), 
 delegate to the OS's native tool and document per-OS rather than embedding one platform's
 mechanism. A dedicated **Phase 3.5 portability pass** (audit + fixes + the scheduling stance)
 precedes Phase 4, because Phases 4–5 are the most platform-divergent features. See
-`[docs/phase-3.5-kickoff.md](../docs/phase-3.5-kickoff.md)`.
+`[docs/phase-3.5-kickoff.md](../docs/archive/phase-3.5-kickoff.md)`.
 - **Modular signals and channels (a direction, not an MVP feature).** The signals (git,
 Claude Code sessions, to-dos, notes) and channels (Discord, Slack) should be **optional
 units a user turns on per project**, so one person can run to-dos + supervisor reporting
@@ -823,6 +874,11 @@ model names a project and its participants/recipients explicitly rather than ass
 single implicit "me," and (2) the report and intake formats stay portable (a summary +
 metadata blob), so they could later be sent to a shared service instead of straight to a
 webhook. No multi-tenant machinery now — just avoid hardwiring "one user, one supervisor."
+- **(2026-06-18) Newer recorded directions** — *scale-invariance* (no scale a second-class citizen),
+the *light planning/tracking layer* (governed by *reframing, not originating*), and the *long-range
+coordination/visibility-hub* vision are recorded under "Horizon-C direction settled" above and in
+detail in `[docs/orion-strategy.md](../docs/orion-strategy.md)`. Same discipline: seams kept clean,
+not built.
 
 ### Cross-platform & future-direction rationale (recorded Phase 3.5, 2026-06-15)
 

@@ -1,6 +1,6 @@
 # Phase B3 Kickoff — Richer message rendering (Slack Block Kit + Discord embeds)
 
-> **Read this, then [`plans/orion-plan.md`](../plans/orion-plan.md) in full, before doing
+> **Read this, then [`plans/orion-plan.md`](../../plans/orion-plan.md) in full, before doing
 > anything.** Unlike the Phase 4 kickoff, **B3's design is NOT pre-settled** — only the *framing*
 > is (from KI-9). Do a **full plan-mode pass**: surface the open decisions below with a
 > recommendation for each, settle them with Yousuf, then build checkpoint by checkpoint, stopping
@@ -14,9 +14,9 @@
 - All four ingestion signals (git, tasks, notes, sessions) feed Orion. Delivery is dual-channel
   (Discord + Slack) with per-recipient routing. **B3 is next** in Horizon B; B4 (summarizer
   flexibility) and B5 (conditional scheduling layer) follow.
-- Doc map: roadmap + design → [`plans/orion-plan.md`](../plans/orion-plan.md); shipped →
-  [`CHANGELOG.md`](../CHANGELOG.md); open concerns → [`known-issues.md`](known-issues.md)
-  (esp. **KI-9** and **KI-10**); test catalog → [`testing.md`](testing.md).
+- Doc map: roadmap + design → [`plans/orion-plan.md`](../../plans/orion-plan.md); shipped →
+  [`CHANGELOG.md`](../../CHANGELOG.md); open concerns → [`known-issues.md`](../known-issues.md)
+  (esp. **KI-9** and **KI-10**); test catalog → [`testing.md`](../testing.md).
 
 ## What B3 is
 
@@ -100,5 +100,5 @@ Surface each with a recommendation; settle with Yousuf before coding:
 .venv/bin/python -m pytest -q
 ```
 
-Then read [`plans/orion-plan.md`](../plans/orion-plan.md) (roadmap + the B3 row) and
-[`known-issues.md`](known-issues.md) KI-9/KI-10, and start the **plan-mode pass**.
+Then read [`plans/orion-plan.md`](../../plans/orion-plan.md) (roadmap + the B3 row) and
+[`known-issues.md`](../known-issues.md) KI-9/KI-10, and start the **plan-mode pass**.

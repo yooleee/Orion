@@ -185,6 +185,10 @@ Deferred).
   `share_level` / `auto_send` validation in `config.py`, and `report --all` is the layering point
   for `--due`.
 - **Severity:** low
+- **Convergence (2026-06-18):** the deferred **light planning/tracking layer** (milestones/sprints/
+  due-dates/at-risk; see "Horizon-C direction settled" in `[plans/orion-plan.md](../plans/orion-plan.md)`
+  and the strategy doc) lands at the *same* "cadence needs Orion's own state" threshold — so it most
+  naturally arrives **with** this scheduling layer and the Horizon-C stateful process, not separately.
 - **Status:** Deferred → Horizon C (gate evaluated 2026-06-17; build when per-project cadence or
   activity-gating is actually wanted, most likely alongside the Horizon-C listener).
 

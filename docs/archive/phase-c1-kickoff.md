@@ -1,6 +1,6 @@
 # Phase C1 Kickoff — Web dashboard (read) + hosted/hybrid relay *(opens Horizon C)*
 
-> **Read this, then [`plans/orion-plan.md`](../plans/orion-plan.md) before doing anything** —
+> **Read this, then [`plans/orion-plan.md`](../../plans/orion-plan.md) before doing anything** —
 > especially the **Horizon C roadmap rows**, the **"Horizon B → C boundary review"** section, the
 > **"Future direction & guiding principles"** + **"Cross-platform & future-direction rationale"**
 > blocks, and **KI-11**. C1 is **not** a normal incremental phase: it **opens Horizon C, the
@@ -21,8 +21,8 @@
 - **Horizon A** shipped. **Horizon B complete:** B1–B4, B6 signed off; **B5 deferred into Horizon
   C** at its gate. `pytest`: **172/172**. The B4 live verification (default Anthropic, local
   Ollama, fail-closed) passed end to end.
-- Doc map: roadmap + design → [`plans/orion-plan.md`](../plans/orion-plan.md); shipped →
-  [`CHANGELOG.md`](../CHANGELOG.md); open concerns → [`known-issues.md`](known-issues.md).
+- Doc map: roadmap + design → [`plans/orion-plan.md`](../../plans/orion-plan.md); shipped →
+  [`CHANGELOG.md`](../../CHANGELOG.md); open concerns → [`known-issues.md`](../known-issues.md).
 
 ## What C1 is (and is not)
 

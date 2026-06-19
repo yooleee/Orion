@@ -722,11 +722,13 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
   **Still deferred:** richer **report content** — submitter/author accountability (**KI-17**) — which
   is entangled with multi-party identity (C3) and reshapes the design, so it waits for C3. (New seams
   recorded: **KI-19** inline-assets vs. a future CSP; **KI-20** message-formatter still UTC.)
-- **C2/C3 sequencing** (bidirectional, multi-party) — firmed up at the same juncture. The
-  post-C1 OSS-readiness pass is now complete, so this **horizon-planning juncture is teed up** in
-  [`docs/horizon-planning-kickoff.md`](../docs/archive/horizon-planning-kickoff.md) (north-star + C2/C3 +
-  hosted-deploy + E2E sequencing), to be run **informed by the 2026-06-20/21 hackathon dogfood
-  read**.
+- **C2/C3 sequencing** (bidirectional, multi-party) — **juncture RUN 2026-06-19** (see "Horizon-C next
+  slice decided" below). C2 shipped (dashboard comments + the comment pull-back), so the pass decided
+  the *next* slice: **native Discord/Slack bots**, with **C3-proper and E2E demand-gated** and the
+  dogfood reframed as a **refinement input, not a gate**. The kickoff is
+  [`docs/native-bots-kickoff.md`](../docs/native-bots-kickoff.md); it supersedes the archived
+  [`docs/archive/horizon-planning-kickoff.md`](../docs/archive/horizon-planning-kickoff.md) for the
+  post-C2 state.
 
 Detail on the slice's settled decisions (D1–D7) is in
 [`docs/phase-c1-kickoff.md`](../docs/archive/phase-c1-kickoff.md) and the approved checkpoint plan.
@@ -824,6 +826,31 @@ URL accepts any host; Bearer auth + fail-soft + tests exist).
   layer (not an execution platform — complementary to Claude Code), **surface-plural** (native
   Slack/Discord *and* the dashboard), multi-project/cross-project. The inflection to watch is
   read-only → read-*write* dashboard.
+
+## Horizon-C next slice decided + E2E confirmed (2026-06-19)
+
+The post-C2 run of the horizon-planning juncture (supersedes the "Sequence — C2 next" snapshot from
+the 2026-06-18 pass, now that C2 is done). Detail and the dogfood capture sheet live in
+[`docs/native-bots-kickoff.md`](../docs/native-bots-kickoff.md).
+
+- **Next slice DECIDED: native Discord/Slack bots.** Among {OSS-readiness polish, light
+  planning/tracking layer, native bots}, native bots is next — it deepens the *delivery surface*
+  (where supervisors already are) into genuine two-way, the natural progression from C2's dashboard
+  comments, and fits the recorded surface-plural long-range vision. OSS-polish and the planning layer
+  remain valid *later* slices.
+- **Dogfood (6/20–21) is a refinement input, NOT a gate.** It tests the current features; the realistic
+  outcome is expand/refine, not remove — so the direction is decided now and the dogfood tunes the
+  bots' scope / smallest-first-slice (esp. the "where was the value — delivery / dashboard / skill?"
+  read). We do not defer the decision to "after the weekend."
+- **E2E confirmed as a documented bridge, NOT a committed goal.** Stay self-host + plaintext (Path B);
+  adopt E2E only if managed-hosting-*for-others* becomes real (genuinely C3-gated). The seam stays
+  clean (encrypt-before-push is additive; the blob is version-stamped).
+- **C3-proper stays demand-gated** (multi-party identity — KI-17 / KI-11 / KI-1) — committed only on
+  real multi-party demand, separate from the dogfood.
+- **Architectural learning carried into the bots design:** C2 needed **no local always-on listener** —
+  it reused the deployed relay's ingest + comment POST + a **pull** (`orion comments` + a local
+  watermark). Native bots WILL force an always-on listener (Gateway / Socket Mode), so how it relates
+  to the existing pull/relay model is a first-order design question for that slice.
 
 ## Open questions / to settle before/while building
 

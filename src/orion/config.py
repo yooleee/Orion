@@ -16,6 +16,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Allowed values, kept as named constants so validation and error messages share
 # one source of truth (DRY) and adding a value later is a one-line change.
@@ -46,6 +47,13 @@ COLLECTOR_FILE_KEYS = {
 }
 
 DEFAULT_STATE_DB = "orion.sqlite3"
+
+# The display time zone for human-facing timestamps in delivered messages (KI-20).
+# Defaults to America/Los_Angeles so a delivered chat message reads in the SAME zone
+# the relay dashboard already renders (PDT/PST, DST-correct), instead of UTC — the two
+# surfaces agreed by default. An IANA zone name; a user with non-Pacific recipients can
+# set `display_timezone = "UTC"` (or any zone) in orion.toml. Validated at load time.
+DEFAULT_DISPLAY_TIMEZONE = "America/Los_Angeles"
 
 
 class ConfigError(Exception):
@@ -189,6 +197,9 @@ class Config:
             Anthropic/Haiku when no [summarizer] table is present.
         relay: The hosted-relay push config (C1). Defaults to disabled (a no-op)
             when no [relay] table is present.
+        display_timezone: IANA zone name for human-facing timestamps in delivered
+            messages (KI-20). Defaults to America/Los_Angeles so messages match the
+            dashboard's Pacific display; overridable per config (e.g. "UTC").
         projects: Map of project name -> ProjectConfig.
 
     Why:
@@ -201,6 +212,7 @@ class Config:
     state_db: Path
     summarizer: SummarizerConfig
     relay: RelayConfig
+    display_timezone: str = DEFAULT_DISPLAY_TIMEZONE
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
 
@@ -257,9 +269,60 @@ def load_config(path: Path) -> Config:
     # table resolves to a no-op, so existing configs push nowhere and are unchanged.
     relay = _parse_relay(raw.get("relay"), path)
 
+    # Global display time zone for delivered-message timestamps (KI-20). Absent ->
+    # the Pacific default, so existing configs simply start matching the dashboard.
+    display_timezone = _parse_display_timezone(raw.get("display_timezone"), path)
+
     return Config(
-        state_db=state_db, summarizer=summarizer, relay=relay, projects=projects
+        state_db=state_db,
+        summarizer=summarizer,
+        relay=relay,
+        display_timezone=display_timezone,
+        projects=projects,
     )
+
+
+def _parse_display_timezone(raw: object, config_path: Path) -> str:
+    """Validate the optional top-level `display_timezone` into a known IANA zone (KI-20).
+
+    Args:
+        raw: The raw value under the top-level `display_timezone` key, or None when
+            the key is absent.
+        config_path: The config file path, for a located error message.
+
+    Returns:
+        A validated IANA zone name (the default America/Los_Angeles when absent).
+
+    Why:
+        Timestamps in delivered messages are rendered in this zone (compose), so a
+        bad value must fail LOUDLY at load time — naming the offending string — rather
+        than surface as a confusing time (or a crash) on the pre-send path. We validate
+        by actually constructing a ZoneInfo: that is the same check the formatter will
+        do, so "valid here" means "usable there." An absent key resolves to the Pacific
+        default so every pre-KI-20 config keeps working and simply starts matching the
+        dashboard. We do NOT keep the ZoneInfo object (it is cheap and cached to
+        re-create at use); storing the string keeps Config plain and serializable.
+    """
+    if raw is None:
+        return DEFAULT_DISPLAY_TIMEZONE
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(
+            f"`display_timezone` in {config_path} must be a non-empty IANA zone name "
+            f'(e.g. display_timezone = "America/Los_Angeles" or "UTC").'
+        )
+    zone = raw.strip()
+    try:
+        # Construct it purely to validate; the formatter re-creates it (ZoneInfo is
+        # internally cached, so this is not wasted work).
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        # ZoneInfoNotFoundError: no such zone in the tz database. ValueError: a
+        # malformed key (e.g. an absolute path). Both are a user typo -> name it.
+        raise ConfigError(
+            f"`display_timezone` in {config_path} is not a valid IANA zone name: "
+            f"{zone!r} ({exc}). Use a name like \"America/Los_Angeles\" or \"UTC\"."
+        ) from exc
+    return zone
 
 
 # A valid environment-variable NAME: a letter or underscore, then letters, digits, or

@@ -67,6 +67,8 @@ def test_valid_config_resolves_defaults(tmp_path):
     assert project.recipients[0].name == "Alex"
     # state_db default is resolved next to the config file, as an absolute path.
     assert config.state_db == (tmp_path / "orion.sqlite3").resolve()
+    # display_timezone defaults to Pacific (KI-20) so messages match the dashboard.
+    assert config.display_timezone == "America/Los_Angeles"
 
 
 def test_missing_file_raises(tmp_path):
@@ -821,4 +823,39 @@ def test_summarizer_api_key_env_rejects_a_pasted_value(tmp_path):
         + _DEMO_PROJECT,
     )
     with pytest.raises(ConfigError, match="api_key_env"):
+        load_config(path)
+
+
+def test_display_timezone_absent_defaults_to_pacific(tmp_path):
+    """A config with no display_timezone resolves to the Pacific default (KI-20).
+
+    Why this matters: the field is opt-in and must not change existing configs'
+    behavior beyond the intended fix — an absent key means messages render in the
+    same Pacific zone the dashboard already uses, so the two surfaces agree by
+    default and every pre-KI-20 config keeps working.
+    """
+    config = load_config(_write(tmp_path, _DEMO_PROJECT))
+    assert config.display_timezone == "America/Los_Angeles"
+
+
+def test_display_timezone_override_parses(tmp_path):
+    """An explicit, valid IANA zone is accepted and carried onto the Config.
+
+    Why this matters: a user with non-Pacific recipients can choose their zone (or
+    UTC). A valid name must round-trip onto the Config so compose renders in it.
+    """
+    path = _write(tmp_path, 'display_timezone = "UTC"\n' + _DEMO_PROJECT)
+    assert load_config(path).display_timezone == "UTC"
+
+
+def test_display_timezone_invalid_zone_raises(tmp_path):
+    """An unknown/garbage zone name fails loudly at load time, naming the value.
+
+    Why this matters: the zone drives timestamp rendering on the pre-send path, so a
+    typo must be a clear five-second fix at load — not a confusing time, or a crash
+    deep in delivery. We validate by actually constructing the ZoneInfo, so "valid
+    here" means "usable there."
+    """
+    path = _write(tmp_path, 'display_timezone = "Mars/Phobos"\n' + _DEMO_PROJECT)
+    with pytest.raises(ConfigError, match="display_timezone"):
         load_config(path)

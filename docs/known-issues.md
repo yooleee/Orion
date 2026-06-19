@@ -277,11 +277,18 @@ Deferred).
   renders **UTC**. So the same report can show a UTC time in the chat message and a Pacific time on
   the dashboard.
 - **Why it matters:** For a single Pacific-based user the message/dashboard mismatch is mildly
-  confusing. It was left intentionally this pass: UTC is defensible for messages that may be read
+  confusing. It was left intentionally one pass: UTC is defensible for messages that may be read
   by recipients in any time zone, and the dashboard-maturation request was scoped to the dashboard.
   Aligning the message formatter to Pacific — or, better, making the display time zone a config
-  value shared by both surfaces — is a small, additive change best done when we next **enrich
-  Slack/Discord delivery**, so it's recorded to resurface then.
+  value — is a small, additive change.
 - **Severity:** low
-- **Status:** Deferred → do alongside the next Slack/Discord enrichment work (Yousuf's call,
-  2026-06-19).
+- **Status:** **Resolved (2026-06-19)** — added a global `display_timezone` config field
+  (`config.py`, default `America/Los_Angeles`), consumed by the message formatter
+  (`compose._format_timestamp` now converts the stored UTC instant to that zone). So a delivered
+  message and the dashboard now read the SAME zone by default, and a user with non-Pacific
+  recipients can set e.g. `display_timezone = "UTC"`. **Remaining asymmetry (small follow-up):** the
+  relay dashboard's zone is still independently hardcoded to Pacific in `relay/render.py`, so if a
+  user *overrides* `display_timezone` to a non-Pacific zone, the dashboard would not follow. Making
+  the relay's display zone configurable too (a relay-serve flag / env, defaulting to the same zone)
+  is the additive next step — deliberately deferred to avoid changing the deployed relay alongside
+  this local-side fix.

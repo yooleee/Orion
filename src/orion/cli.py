@@ -495,7 +495,10 @@ def cmd_report(
     # Fail-soft loop: _run_report catches its own per-project errors and returns
     # STATUS_FAILED, so one bad project never stops the rest of an --all run.
     statuses = [
-        _run_report(project, conn, assume_yes, config.summarizer, config.relay)
+        _run_report(
+            project, conn, assume_yes, config.summarizer, config.relay,
+            config.display_timezone,
+        )
         for project in projects
     ]
 
@@ -549,6 +552,7 @@ def _run_report(
     assume_yes: bool,
     summarizer_cfg: SummarizerConfig,
     relay_cfg: RelayConfig,
+    display_timezone: str,
 ) -> str:
     """Run the full report pipeline for ONE already-loaded project.
 
@@ -562,6 +566,8 @@ def _run_report(
         relay_cfg: The global relay config (C1). When enabled, the serialized blob
             is also pushed to the relay after a successful delivery — fail-soft, so
             a relay error never changes this run's outcome.
+        display_timezone: The configured IANA zone for message timestamps (KI-20),
+            passed to compose so the delivered message matches the dashboard's zone.
 
     Returns:
         One of the STATUS_* constants describing the outcome, so the caller can
@@ -680,7 +686,9 @@ def _run_report(
         # --- Compose once per distinct channel ---
         # Same body, formatted for each channel's Markdown dialect; recipients are
         # routed to their channel's rendering in _deliver.
-        messages = {ch: compose(blob, ch) for ch in _channels(project)}
+        messages = {
+            ch: compose(blob, ch, display_timezone) for ch in _channels(project)
+        }
 
         # --- Preview gate ---
         # By construction, if assume_yes is True here then project.auto_send is
@@ -804,7 +812,10 @@ def cmd_intake(
 
         # Compose per distinct channel and route each recipient accordingly —
         # identical delivery path to cmd_report (just no markers afterward).
-        messages = {ch: compose(blob, ch) for ch in _channels(project)}
+        messages = {
+            ch: compose(blob, ch, config.display_timezone)
+            for ch in _channels(project)
+        }
         # --yes skips the terminal preview (the skill already showed the summary
         # for in-session approval); otherwise preview-before-send as usual.
         if assume_yes:

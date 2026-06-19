@@ -57,7 +57,7 @@ default disk) that file is **wiped on every restart/redeploy** unless it lives o
 Build and exercise the container on your own machine before deploying. This verifies the image,
 the dashboard read-auth, and the **fail-closed guard** end to end over plain HTTP on loopback —
 *before* TLS and hosting are involved. (It does **not** exercise TLS or the reverse-proxy
-topology; for that see Option B and KI-18.)
+topology — for that, and the `--require-view-auth` switch it needs, see Option B.)
 
 ```bash
 # 1) Two throwaway secrets, kept in your shell for the commands below.
@@ -128,16 +128,17 @@ checking in, rough for a live demo.)
 Here **you** terminate TLS with [Caddy](https://caddyserver.com) (auto Let's Encrypt). The
 relay binds **loopback** (`127.0.0.1:8787`); only Caddy reaches it.
 
-> ### ⚠ The one thing the guard can't do for you
+> ### ⚠ Behind a proxy, force read-auth on
 > The fail-closed guard keys off the **bind host**. Behind a proxy the relay binds
-> *loopback*, so the guard sees "safe" and **will not force the view secret** — even
-> though Caddy exposes the dashboard to the world. **You MUST set
-> `ORION_RELAY_VIEW_TOKEN` yourself in this topology**, or the dashboard is
-> world-readable. (Tracked as **KI-18**.) Optionally add Caddy `basic_auth` as a second
-> layer — see `Caddyfile.example`.
+> *loopback*, so the host-based guard alone can't tell the dashboard is publicly
+> reachable. **Pass `--require-view-auth`** in this topology: the guard then demands the
+> view secret even on a loopback bind, so a forgotten secret **fails closed** (the relay
+> won't start) instead of serving a world-readable dashboard. (Closes **KI-18**.)
+> Optionally add Caddy `basic_auth` as a second layer — see `Caddyfile.example`.
 
-1. Run the relay on loopback (Docker with `--host 127.0.0.1`, or via `orion relay-serve`
-   under a systemd unit). Set **both** secrets in its environment.
+1. Run the relay on loopback **with `--require-view-auth`** (Docker with
+   `--host 127.0.0.1 --require-view-auth`, or via `orion relay-serve` under a systemd
+   unit). Set **both** secrets in its environment.
 2. Put `Caddyfile.example` → `Caddyfile`, set your domain, point the domain's DNS at the
    box, and `caddy run`. Caddy fetches a cert and reverse-proxies `127.0.0.1:8787`.
 

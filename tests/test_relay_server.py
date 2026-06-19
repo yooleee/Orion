@@ -36,7 +36,7 @@ _VIEW = "test-view-secret"
 
 
 @contextmanager
-def _running_relay(tmp_path, token=_TOKEN, view_token=None):
+def _running_relay(tmp_path, token=_TOKEN, view_token=None, require_view_auth=False):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
     Args:
@@ -44,6 +44,8 @@ def _running_relay(tmp_path, token=_TOKEN, view_token=None):
         token: the shared ingest Bearer token.
         view_token: optional dashboard read secret. None (default) leaves GETs open,
             matching the loopback access model; set it to exercise read auth.
+        require_view_auth: force the view secret even on this loopback bind (the
+            reverse-proxy topology); used to exercise that guard path.
 
     Why:
         The ingest/read contracts can only be proven against a real server (real auth
@@ -53,7 +55,7 @@ def _running_relay(tmp_path, token=_TOKEN, view_token=None):
         an assertion fails.
     """
     db = tmp_path / "relay.sqlite3"
-    server = create_server("127.0.0.1", 0, db, token, view_token)
+    server = create_server("127.0.0.1", 0, db, token, view_token, require_view_auth)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -461,3 +463,28 @@ def test_is_loopback_classification():
     assert not _is_loopback("0.0.0.0")
     assert not _is_loopback("192.168.1.10")
     assert not _is_loopback("relay.example.com")
+
+
+def test_require_view_auth_forces_secret_on_loopback(tmp_path):
+    """--require-view-auth makes the guard demand a view secret even on a loopback bind.
+
+    Why this matters: behind a reverse proxy the relay binds loopback, so the
+    host-based guard can't see that the dashboard is publicly reachable (KI-18).
+    require_view_auth closes that gap — a loopback bind with no secret now fails closed
+    instead of serving an open dashboard through the proxy.
+    """
+    db = tmp_path / "relay.sqlite3"
+    with pytest.raises(ValueError, match="require-view-auth"):
+        create_server("127.0.0.1", 0, db, _TOKEN, None, require_view_auth=True)
+
+
+def test_require_view_auth_with_secret_on_loopback_enforces_basic(tmp_path):
+    """With require_view_auth + a secret, a loopback relay starts AND gates the dashboard.
+
+    Why this matters: this is the proxy topology done right — the guard passes (a secret
+    is set), and the loopback dashboard still demands Basic credentials, so the proxy
+    cannot expose an unauthenticated view. Proves both the guard and the enforcement.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW, require_view_auth=True) as (base_url, _db):
+        assert _get(base_url, "/")[0] == 401  # no creds -> refused even on loopback
+        assert _get(base_url, "/", password=_VIEW)[0] == 200  # correct creds -> served

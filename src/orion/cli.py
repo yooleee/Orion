@@ -341,6 +341,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--require-view-auth",
+        action="store_true",
+        help=(
+            "Demand the dashboard view secret even on a loopback bind. Use this when "
+            "the relay runs on loopback behind a reverse proxy (the proxy exposes it, "
+            "so 'loopback' isn't actually private) — a forgotten secret then fails "
+            "closed instead of serving an open dashboard. See docs/deployment.md."
+        ),
+    )
+    relay_parser.add_argument(
         "--config",
         default=default_config,
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
@@ -370,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.db),
             args.token_env,
             args.view_token_env,
+            args.require_view_auth,
             Path(args.config),
         )
     return 1  # Unreachable: subparsers are required.
@@ -1175,6 +1186,7 @@ def cmd_relay_serve(
     db_path: Path,
     token_env: str,
     view_token_env: str,
+    require_view_auth: bool,
     config_path: Path,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
@@ -1188,6 +1200,8 @@ def cmd_relay_serve(
         view_token_env: Name of the .env variable holding the optional dashboard read
             secret (HTTP Basic). Required by the relay's fail-closed guard when host
             is non-loopback; absent/empty leaves loopback reads open.
+        require_view_auth: Force the view secret even on a loopback bind (the
+            reverse-proxy topology). The guard then refuses to start without it.
         config_path: Path to orion.toml, used only to locate the sibling .env that
             holds the secrets.
 
@@ -1222,7 +1236,7 @@ def cmd_relay_serve(
         # Blocks until Ctrl-C; serve() prints its bound address and read-auth state.
         # The guard raises ValueError BEFORE binding if host is non-loopback without a
         # view secret — surfaced here as a clean, actionable error, not a traceback.
-        serve(host, port, db_path, token, view_token)
+        serve(host, port, db_path, token, view_token, require_view_auth)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

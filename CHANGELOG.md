@@ -14,6 +14,33 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Post-C1 deploy — Fly artifacts + config hardening (2026-06-19)
+
+**C1 is deployed.** The relay runs on Fly.io over HTTPS, reachable by a supervisor, verified end to
+end (local `intake` → relay → auth-gated dashboard). Plus a security hardening surfaced by the
+deploy. `pytest`: **257**.
+
+### Added
+
+- **`fly.toml` + `.dockerignore`:** a committed Fly.io deploy config (volume mount, port 8787,
+  force-HTTPS, scale-to-zero) and a build-context ignore list (keeps `.env` / `orion.toml` / sqlite
+  out of the image build) — makes the Fly deploy reproducible.
+
+### Changed
+
+- **`docs/deployment.md`:** Option A references the committed `fly.toml`; added a "Common gotchas"
+  section from the first real deploy — `*_env_var` holds a variable NAME not the secret value, "say
+  yes to a single volume" (a single-writer SQLite store wants one), and the scale-to-zero cold-start
+  note.
+
+### Fixed
+
+- **`*_env_var` value-vs-name footgun (config validation).** `token_env_var`, `webhook_env_var`, and
+  `api_key_env` are now validated to look like environment-variable NAMES at config load. Pasting the
+  secret VALUE where the name belongs fails with a clear `ConfigError` — and no longer **echoes the
+  secret** (the old "secret '<value>' is not set" path leaked it). Heuristic, but catches the common
+  shapes (leading digits, hyphens, URL punctuation).
+
 ## C1 second slice — deploy-safe relay + dashboard hardening (2026-06-18)
 
 Makes the C1 relay safe to host **beyond loopback** and polishes the read-only dashboard, so it can

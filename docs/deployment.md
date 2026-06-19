@@ -112,10 +112,16 @@ docker run -d --name orion-relay \
   orion-relay
 ```
 
-**Fly.io** (warm, ~$2/mo): `fly launch` (it detects the Dockerfile), then
-`fly volumes create orion_data --size 1`, mount it at `/data` in `fly.toml`, set
-`internal_port = 8787` with `force_https = true`, and
-`fly secrets set ORION_RELAY_TOKEN=… ORION_RELAY_VIEW_TOKEN=…`. Fly terminates TLS.
+**Fly.io** (warm ~$2/mo, or scale-to-zero for near-free): the repo ships a **`fly.toml`** with the
+volume mount, `internal_port = 8787`, and `force_https` already set — edit its `app` to a
+globally-unique name, then:
+```
+fly launch --no-deploy        # uses the committed fly.toml; decline the Postgres/Redis/Tigris add-ons
+fly volumes create orion_data --size 1 --region <your-region>   # ONE volume — see Gotchas below
+fly secrets set ORION_RELAY_TOKEN=… ORION_RELAY_VIEW_TOKEN=…    # run in a private terminal
+fly deploy
+```
+Fly terminates TLS; the dashboard is at `https://<app>.fly.dev`.
 
 **Render**: a Docker service; add a **Disk** mounted at `/data`; set both env vars; Render
 provides HTTPS at `https://<service>.onrender.com`. (Free instances sleep — fine for
@@ -147,6 +153,22 @@ data never leaves hardware you control); it needs a domain + dynamic DNS (or a t
 Let's Encrypt can validate and supervisors can reach it.
 
 ---
+
+## Common gotchas (learned from the first deploy)
+
+- **`token_env_var` is a variable NAME, not the token.** In `orion.toml`, set
+  `token_env_var = "ORION_RELAY_TOKEN"` — the *name* of a `.env` variable. The secret VALUE goes in
+  `.env` (and on Fly via `fly secrets`), never in `orion.toml`. Pasting the value here used to fail
+  with a confusing "secret '<value>' is not set" (and echoed the secret); config validation now
+  rejects it at load with a clear message. Same rule for recipients' `webhook_env_var`.
+- **Say *yes* to a single volume.** `fly volumes create` warns that one volume isn't highly
+  available and suggests two or more — but the relay is a single-writer SQLite service, so **two
+  volumes = two divergent databases** (split-brain). One volume is the correct shape; the accepted
+  tradeoff is brief downtime if that host has a rare outage (the data persists on the volume).
+- **Scale-to-zero means a cold start.** With `min_machines_running = 0`, the first request after idle
+  wakes the machine (a few seconds). Local Orion's relay push is fail-soft, so a cold-start timeout
+  just skips that push (the report still delivers); re-run, or set `min_machines_running = 1` to stay
+  warm for a live demo.
 
 ## Point local Orion at the deployed relay
 

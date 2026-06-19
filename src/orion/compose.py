@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from orion.report import ReportBlob
 
@@ -75,12 +76,16 @@ class ComposedMessage:
     preview: str
 
 
-def compose(blob: ReportBlob, channel: str) -> ComposedMessage:
+def compose(blob: ReportBlob, channel: str, display_timezone: str) -> ComposedMessage:
     """Format a ReportBlob into a channel-ready payload + preview.
 
     Args:
         blob: The report to render.
         channel: The destination channel ("discord" or "slack").
+        display_timezone: IANA zone name for the human-facing timestamp line (KI-20),
+            e.g. "America/Los_Angeles". Already validated by config.load_config, so it
+            is a known-good zone here; we construct the ZoneInfo ONCE and thread it
+            into the builders, so the message timestamp matches the dashboard's zone.
 
     Returns:
         A ComposedMessage carrying the JSON payload to POST and a faithful text
@@ -92,14 +97,19 @@ def compose(blob: ReportBlob, channel: str) -> ComposedMessage:
         Block Kit message — built from the blob's per-signal sections. If a report
         is too big for that channel's structured limits we fall back to the plain
         message shape (see the per-channel builders). The preview is rendered from
-        whichever payload we end up with, so it is faithful by construction.
+        whichever payload we end up with, so it is faithful by construction. The
+        timezone is resolved here (not per call site) so the whole message renders one
+        consistent zone.
     """
+    # Build the ZoneInfo once and pass it down; ZoneInfo is internally cached, but
+    # resolving it here keeps the builders taking a ready tz rather than re-parsing.
+    tz = ZoneInfo(display_timezone)
     if channel == "slack":
-        payload = _slack_payload(blob)
+        payload = _slack_payload(blob, tz)
     else:
         # Discord, and the defensive default for an unknown channel (config
         # validation restricts `channel` upstream, so this degrades gracefully).
-        payload = _discord_payload(blob)
+        payload = _discord_payload(blob, tz)
     return ComposedMessage(payload=payload, preview=_render_preview(payload))
 
 
@@ -124,11 +134,13 @@ def _sections_for(blob: ReportBlob) -> list[tuple[str, str]]:
     return [("Update", blob.body)]
 
 
-def _discord_payload(blob: ReportBlob) -> dict:
+def _discord_payload(blob: ReportBlob, tz: ZoneInfo) -> dict:
     """Build a Discord embed payload, falling back to plain content if it won't fit.
 
     Args:
         blob: The report to render.
+        tz: The display time zone for the timestamp line (KI-20), passed through to
+            the formatter and the plain-Markdown fallback.
 
     Returns:
         {"embeds": [embed]} when the embed satisfies Discord's size limits, else
@@ -145,7 +157,7 @@ def _discord_payload(blob: ReportBlob) -> dict:
     embed = {
         "title": _cap(f"Progress update — {blob.project}", _DISCORD_TITLE_LIMIT),
         # The friendly date sits under the title; italic via Markdown in the embed.
-        "description": _cap(f"_{_format_timestamp(blob.generated_at)}_", _DISCORD_DESC_LIMIT),
+        "description": _cap(f"_{_format_timestamp(blob.generated_at, tz)}_", _DISCORD_DESC_LIMIT),
         "color": _DISCORD_EMBED_COLOR,
         "fields": [
             {"name": _cap(title, _DISCORD_FIELD_NAME_LIMIT), "value": body, "inline": False}
@@ -154,7 +166,7 @@ def _discord_payload(blob: ReportBlob) -> dict:
     }
     if _discord_embed_fits(embed):
         return {"embeds": [embed]}
-    return {"content": _truncate(_format_markdown(blob), _DISCORD_CONTENT_LIMIT)}
+    return {"content": _truncate(_format_markdown(blob, tz), _DISCORD_CONTENT_LIMIT)}
 
 
 def _discord_embed_fits(embed: dict) -> bool:
@@ -187,11 +199,13 @@ def _discord_embed_fits(embed: dict) -> bool:
     return total <= _DISCORD_EMBED_TOTAL_LIMIT
 
 
-def _slack_payload(blob: ReportBlob) -> dict:
+def _slack_payload(blob: ReportBlob, tz: ZoneInfo) -> dict:
     """Build a Slack Block Kit payload, falling back to plain text if it won't fit.
 
     Args:
         blob: The report to render.
+        tz: The display time zone for the timestamp line (KI-20), passed through to
+            the formatter and the plain-text fallback.
 
     Returns:
         {"blocks": [...], "text": fallback} when the blocks satisfy Slack's limits,
@@ -205,7 +219,7 @@ def _slack_payload(blob: ReportBlob) -> dict:
         duplicate). If the report exceeds Block Kit limits we send that plain text
         on its own instead.
     """
-    fallback = _truncate(_format_slack(blob), _SLACK_TEXT_LIMIT)
+    fallback = _truncate(_format_slack(blob, tz), _SLACK_TEXT_LIMIT)
     blocks: list[dict] = [
         {
             "type": "header",
@@ -219,7 +233,7 @@ def _slack_payload(blob: ReportBlob) -> dict:
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f"_{_format_timestamp(blob.generated_at)}_"}
+                {"type": "mrkdwn", "text": f"_{_format_timestamp(blob.generated_at, tz)}_"}
             ],
         },
     ]
@@ -347,11 +361,12 @@ def _truncate(message: str, limit: int) -> str:
     return message[:keep] + _TRUNCATION_MARKER
 
 
-def _format_markdown(blob: ReportBlob) -> str:
+def _format_markdown(blob: ReportBlob, tz: ZoneInfo) -> str:
     """Render a ReportBlob as a plain Markdown progress update.
 
     Args:
         blob: The report to render.
+        tz: The display time zone for the date line (KI-20).
 
     Returns:
         A Markdown string: a header line, the date, then the body.
@@ -362,15 +377,16 @@ def _format_markdown(blob: ReportBlob) -> str:
         audience-ready, so it is included verbatim.
     """
     header = f"**Progress update — {blob.project}**"
-    date_line = f"_{_format_timestamp(blob.generated_at)}_"
+    date_line = f"_{_format_timestamp(blob.generated_at, tz)}_"
     return f"{header}\n{date_line}\n\n{blob.body}"
 
 
-def _format_slack(blob: ReportBlob) -> str:
+def _format_slack(blob: ReportBlob, tz: ZoneInfo) -> str:
     """Render a ReportBlob as a Slack mrkdwn progress update.
 
     Args:
         blob: The report to render.
+        tz: The display time zone for the date line (KI-20).
 
     Returns:
         A Slack-mrkdwn string: a bold header line, an italic date line, then the
@@ -387,7 +403,7 @@ def _format_slack(blob: ReportBlob) -> str:
         no translation.
     """
     header = f"*Progress update — {blob.project}*"
-    date_line = f"_{_format_timestamp(blob.generated_at)}_"
+    date_line = f"_{_format_timestamp(blob.generated_at, tz)}_"
     body = _to_slack_mrkdwn(blob.body)
     return f"{header}\n{date_line}\n\n{body}"
 
@@ -427,26 +443,31 @@ def _to_slack_mrkdwn(text: str) -> str:
     return converted
 
 
-def _format_timestamp(iso_timestamp: str) -> str:
-    """Render a canonical ISO 8601 timestamp as a human-friendly date line.
+def _format_timestamp(iso_timestamp: str, display_tz: ZoneInfo) -> str:
+    """Render a canonical ISO 8601 timestamp as a human-friendly date line (KI-20).
 
     Args:
         iso_timestamp: An ISO 8601 string as stored on the ReportBlob, e.g.
-            "2026-06-15T01:32:53+00:00".
+            "2026-06-15T01:32:53+00:00" (UTC, what the state DB stores).
+        display_tz: The zone to render in (from config.display_timezone, validated).
+            The canonical instant is converted to this zone's wall-clock time so the
+            delivered message matches the dashboard's display (instead of UTC).
 
     Returns:
-        A friendly string like "June 15, 2026 · 1:32 AM UTC". If the input cannot
-        be parsed, the original string is returned unchanged.
+        A friendly string like "June 14, 2026 · 6:32 PM PDT". If the input cannot be
+        parsed, the original string is returned unchanged.
 
     Why:
-        The blob keeps the timestamp canonical (sortable, portable, what the state
-        DB stores); presentation belongs here in compose. A human supervisor reads
-        "June 15, 2026 · 1:32 AM UTC" far more easily than the raw ISO form. We
-        build the 12-hour clock from components rather than using strftime's
+        The blob keeps the timestamp canonical (sortable, portable, what the state DB
+        stores); presentation belongs here in compose. A human supervisor reads
+        "June 14, 2026 · 6:32 PM PDT" far more easily than the raw ISO form. We convert
+        the absolute instant to `display_tz` so a Pacific user sees Pacific in BOTH the
+        message and the dashboard (KI-20: they previously diverged — UTC vs Pacific).
+        We build the 12-hour clock from components rather than using strftime's
         no-leading-zero flags (%-I on Linux/Mac vs %#I on Windows) so the output is
         identical on every platform — this is open-source and runs anywhere. The
-        try/except is a deliberate safety net: a malformed timestamp must never
-        turn a formatting detail into a failed report on the pre-send path.
+        try/except is a deliberate safety net: a malformed timestamp must never turn a
+        formatting detail into a failed report on the pre-send path.
     """
     try:
         dt = datetime.fromisoformat(iso_timestamp)
@@ -455,7 +476,11 @@ def _format_timestamp(iso_timestamp: str) -> str:
         # rather than raising in the delivery path.
         return iso_timestamp
 
-    # Date part: full month name, no-leading-zero day, full year — e.g. "June 15, 2026".
+    # Convert the stored (UTC) instant to the configured display zone — this is the
+    # KI-20 fix. astimezone applies DST, so %Z below yields "PDT"/"PST" correctly.
+    dt = dt.astimezone(display_tz)
+
+    # Date part: full month name, no-leading-zero day, full year — e.g. "June 14, 2026".
     date_part = f"{dt.strftime('%B')} {dt.day}, {dt.year}"
 
     # 12-hour time built explicitly (portable across platforms):
@@ -465,8 +490,9 @@ def _format_timestamp(iso_timestamp: str) -> str:
     meridiem = "AM" if dt.hour < 12 else "PM"
     time_part = f"{hour_12}:{dt.minute:02d} {meridiem}"  # minute zero-padded to 2 digits
 
-    # Timezone label: Phase 1 timestamps are UTC; %Z yields "UTC" for a UTC-aware
-    # datetime. Fall back to a literal "UTC" if the platform returns an empty name.
-    tz_part = dt.strftime("%Z") or "UTC"
+    # Timezone label: %Z yields the zone's abbreviation for the (now zone-aware)
+    # datetime — "PDT"/"PST" for Pacific, "UTC" for UTC. Fall back to the zone key if
+    # the platform returns an empty name, so the label is never blank.
+    tz_part = dt.strftime("%Z") or str(display_tz)
 
     return f"{date_part} · {time_part} {tz_part}"

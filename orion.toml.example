@@ -11,6 +11,12 @@
 # config file. Tracks the last-reported commit per project + report history.
 state_db = "orion.sqlite3"
 
+# Time zone for human-facing timestamps in delivered messages (an IANA zone name).
+# OPTIONAL — defaults to "America/Los_Angeles", which matches the relay dashboard's
+# display so a report reads the same time in the chat message and on the dashboard.
+# Set this if your recipients are in another zone (e.g. "UTC", "Europe/London").
+# display_timezone = "America/Los_Angeles"
+
 # Which LLM summarizes the raw git lane (the one step that calls an LLM). This
 # whole table is OPTIONAL — omit it and Orion uses Anthropic's Claude Haiku 4.5,
 # the lightest model adequate for summarization. The choice is GLOBAL (one

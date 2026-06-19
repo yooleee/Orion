@@ -19,6 +19,12 @@ from orion.compose import (
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report
 
+# The display time zone compose() now requires (KI-20). The CLI passes
+# config.display_timezone; these tests pass the same default explicitly so the
+# structural assertions are unaffected and the timestamp tests pin the Pacific
+# rendering. A dedicated test below exercises a non-default ("UTC") override.
+_TZ = "America/Los_Angeles"
+
 
 def _project():
     """A small ProjectConfig with two recipients for assembly tests.
@@ -111,18 +117,20 @@ def test_compose_includes_project_and_body():
         source_marker="abc123",
         generated_at="2026-06-14T00:00:00+00:00",
     )
-    message = compose(blob, "discord").preview
+    message = compose(blob, "discord", _TZ).preview
     assert "demo" in message
     assert "Wired the pipeline end to end." in message
 
 
-def test_compose_renders_friendly_timestamp():
-    """The date line is the human-friendly form, not the raw ISO string.
+def test_compose_renders_friendly_timestamp_in_display_zone():
+    """The date line is the human-friendly form, rendered in the configured zone.
 
-    Why this matters: the supervisor reads this header; "June 15, 2026 · 1:32 AM
-    UTC" is far clearer than "2026-06-15T01:32:53+00:00". This also pins the
-    portable 12-hour formatting (no leading zero on the hour, UTC label) so a
-    refactor can't silently regress the rendering back to raw ISO.
+    Why this matters: the supervisor reads this header; "June 14, 2026 · 6:32 PM
+    PDT" is far clearer than "2026-06-15T01:32:53+00:00". With the default Pacific
+    zone (KI-20), the stored UTC instant 01:32 is shown as the previous evening in
+    California (DST → PDT), so this pins BOTH the zone conversion and the portable
+    12-hour formatting (no leading zero on the hour). It also guards against a
+    regression back to raw ISO — or back to UTC, the pre-KI-20 behavior.
     """
     blob = build_report(
         _project(),
@@ -131,10 +139,32 @@ def test_compose_renders_friendly_timestamp():
         source_marker="abc123",
         generated_at="2026-06-15T01:32:53+00:00",
     )
-    message = compose(blob, "discord").preview
-    assert "June 15, 2026" in message            # spelled-out date
-    assert "1:32 AM UTC" in message              # 12-hour, no leading zero, UTC label
+    message = compose(blob, "discord", _TZ).preview
+    # 01:32 UTC on the 15th is 18:32 on the 14th in Pacific (PDT, UTC-7 in June).
+    assert "June 14, 2026" in message            # date rolled back into Pacific
+    assert "6:32 PM PDT" in message              # 12-hour, no leading zero, PDT label
+    assert "UTC" not in message                  # no longer the UTC rendering
     assert "2026-06-15T01:32:53" not in message  # raw ISO must NOT appear
+
+
+def test_compose_timestamp_honors_a_non_default_timezone():
+    """A non-default display_timezone ("UTC") renders that zone's wall-clock + label.
+
+    Why this matters: KI-20 made the display zone configurable, defaulting to Pacific
+    to match the dashboard. A user with non-Pacific recipients can set "UTC" (or any
+    IANA zone); this pins that the formatter actually honors the passed zone rather
+    than hardcoding one — the same 01:32 UTC instant now reads as "1:32 AM UTC".
+    """
+    blob = build_report(
+        _project(),
+        body="Body.",
+        lane="raw",
+        source_marker="abc123",
+        generated_at="2026-06-15T01:32:53+00:00",
+    )
+    message = compose(blob, "discord", "UTC").preview
+    assert "June 15, 2026" in message  # no zone shift in UTC
+    assert "1:32 AM UTC" in message     # the explicit UTC override
 
 
 def test_compose_malformed_timestamp_degrades_gracefully():
@@ -150,7 +180,7 @@ def test_compose_malformed_timestamp_degrades_gracefully():
         source_marker="abc123",
         generated_at="not-a-timestamp",
     )
-    message = compose(blob, "discord").preview
+    message = compose(blob, "discord", _TZ).preview
     assert "not-a-timestamp" in message  # degraded gracefully, no exception
 
 
@@ -178,8 +208,8 @@ def test_compose_returns_rich_payload_per_channel():
     payload, not a plain string. The preview, built FROM that payload, still
     surfaces the project and body so the human sees what will be sent.
     """
-    discord = compose(_blob("Body."), "discord")
-    slack = compose(_blob("Body."), "slack")
+    discord = compose(_blob("Body."), "discord", _TZ)
+    slack = compose(_blob("Body."), "slack", _TZ)
     assert isinstance(discord, ComposedMessage)
     assert "embeds" in discord.payload
     assert "blocks" in slack.payload and "text" in slack.payload  # blocks + fallback
@@ -197,6 +227,7 @@ def test_discord_payload_has_one_field_per_section():
     composed = compose(
         _blob("ignored", sections=(("Code activity", "Did X."), ("Completed tasks", "Did Y."))),
         "discord",
+        _TZ,
     )
     embed = composed.payload["embeds"][0]
     assert [f["name"] for f in embed["fields"]] == ["Code activity", "Completed tasks"]
@@ -213,6 +244,7 @@ def test_discord_embed_keeps_markdown_in_field_values():
     composed = compose(
         _blob("ignored", sections=(("Code activity", "Shipped the **structured lane**."),)),
         "discord",
+        _TZ,
     )
     field = composed.payload["embeds"][0]["fields"][0]
     assert field["name"] == "Code activity"
@@ -229,6 +261,7 @@ def test_slack_payload_has_header_context_and_section_blocks():
     composed = compose(
         _blob("ignored", sections=(("Code activity", "Did X."), ("Completed tasks", "Did Y."))),
         "slack",
+        _TZ,
     )
     types = [b["type"] for b in composed.payload["blocks"]]
     assert types[0] == "header"          # project header (plain_text)
@@ -244,7 +277,7 @@ def test_slack_section_title_is_single_asterisk_bold():
     Why this matters: Slack mrkdwn bold is one asterisk; the section title must be
     in Slack's dialect, and the header block (plain_text) carries no asterisks.
     """
-    composed = compose(_blob("Body.", sections=(("Code activity", "Body."),)), "slack")
+    composed = compose(_blob("Body.", sections=(("Code activity", "Body."),)), "slack", _TZ)
     assert "Progress update — demo" in composed.preview  # header (plain_text)
     assert "*Code activity*" in composed.preview
     assert "**Code activity**" not in composed.preview
@@ -261,6 +294,7 @@ def test_slack_translates_inline_bold_in_section_body():
     composed = compose(
         _blob("ignored", sections=(("Code activity", "Shipped the **structured lane**."),)),
         "slack",
+        _TZ,
     )
     assert "*structured lane*" in composed.preview
     assert "**structured lane**" not in composed.preview
@@ -273,7 +307,7 @@ def test_intake_blob_renders_single_update_section():
     must still render richly — one section/field labeled "Update" — through the same
     path as a multi-section report.
     """
-    composed = compose(_blob("A pushed update."), "discord")
+    composed = compose(_blob("A pushed update."), "discord", _TZ)
     fields = composed.payload["embeds"][0]["fields"]
     assert [f["name"] for f in fields] == ["Update"]
     assert fields[0]["value"] == "A pushed update."
@@ -286,7 +320,7 @@ def test_discord_overflow_falls_back_to_plain_content():
     degrades to today's plain message (truncated to the limit) — a complete report
     beats a rejected one. The preview reflects whatever was actually built.
     """
-    composed = compose(_blob("A" * 5000), "discord")
+    composed = compose(_blob("A" * 5000), "discord", _TZ)
     assert "embeds" not in composed.payload                     # too big -> fallback
     assert len(composed.payload["content"]) <= _DISCORD_CONTENT_LIMIT
     assert composed.preview == composed.payload["content"]
@@ -298,7 +332,7 @@ def test_slack_overflow_falls_back_to_plain_text():
     Why this matters: same graceful degradation for Slack's per-section limit — the
     POSTed `text` must fit, and the preview must equal what is sent.
     """
-    composed = compose(_blob("A" * (_SLACK_TEXT_LIMIT + 1000)), "slack")
+    composed = compose(_blob("A" * (_SLACK_TEXT_LIMIT + 1000)), "slack", _TZ)
     assert "blocks" not in composed.payload                     # too big -> fallback
     assert len(composed.payload["text"]) <= _SLACK_TEXT_LIMIT
     assert composed.preview == composed.payload["text"]

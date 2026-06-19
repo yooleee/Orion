@@ -196,9 +196,9 @@ def test_report_blob_carries_twice_redacted_sections(tmp_path, env_and_mocks):
     captured = {}
     real_compose = cli.compose
 
-    def _capturing_compose(blob, channel):
+    def _capturing_compose(blob, channel, display_timezone):
         captured["blob"] = blob
-        return real_compose(blob, channel)
+        return real_compose(blob, channel, display_timezone)
 
     mp.setattr(cli, "compose", _capturing_compose)
 

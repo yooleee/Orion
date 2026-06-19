@@ -14,6 +14,29 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## KI-20 — configurable message timezone, aligned with the dashboard (2026-06-19)
+
+A small consistency fix: delivered Slack/Discord messages timestamped in **UTC** while the
+dashboard rendered **Pacific**, so the same report showed two different times. `pytest`: **308**.
+
+### Added / Changed
+
+- **`display_timezone` config field (`config.py`, global, optional).** Defaults to
+  `America/Los_Angeles`, validated at load time as a real IANA zone (a bad value is a clean
+  `ConfigError` naming it). The message formatter (`compose._format_timestamp`) now converts the
+  stored UTC instant to this zone, so a delivered message reads the **same** time as the dashboard
+  by default (DST-correct PDT/PST). A user with non-Pacific recipients can set `display_timezone =
+  "UTC"` (or any zone). **Behavior change:** message timestamps now default to Pacific, not UTC.
+- The display zone is threaded through `compose` → the channel builders → `_format_timestamp`; the
+  CLI passes `config.display_timezone` at both send sites (`report`, `intake`).
+
+### Known follow-up
+
+- The relay dashboard's zone is still independently hardcoded to Pacific (`relay/render.py`), so an
+  *override* to a non-Pacific zone wouldn't reflect on the dashboard yet. Making the relay's zone
+  configurable too is the additive next step (KI-20, deferred to avoid touching the deployed relay
+  in this local-side fix).
+
 ## C2 comment pull-back — `orion comments` + unread tracking + skill surfacing (2026-06-19)
 
 Closes the C2 loop **into the developer's workflow**: supervisor replies that previously lived only

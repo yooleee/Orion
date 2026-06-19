@@ -80,7 +80,7 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   (dashboard comments + the `orion comments` pull-back) is done, so the loop is two-way. Next we
   deepen the *delivery surface* into genuine two-way — native bots where supervisors already are —
   still inside the north star (richer loop, not multi-party yet). C3 (multi-party) and E2E stay
-  deferred behind seams. *(Decided 2026-06-19; kickoff: `docs/native-bots-kickoff.md`.)*
+  deferred behind seams. *(Decided 2026-06-19; kickoff: `docs/phase-c2-bots-kickoff.md`.)*
 
 ## Measures (watch + act)
 
@@ -88,7 +88,7 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   change (G3) · the supervisor-value signal (G2). Qualitative by design.
 - **Actions (what we do):** the **horizon phases** in `plans/orion-plan.md`. Done = the
   deploy-beyond-loopback relay + dashboard hardening (C1) and the C2 bidirectional pass (dashboard
-  comments + comment pull-back); next = the **native Slack/Discord bots** slice (`docs/native-bots-kickoff.md`).
+  comments + comment pull-back); next = the **native Slack/Discord bots** slice (`docs/phase-c2-bots-kickoff.md`).
 
 ## The lens we carry (thought processes, not installed frameworks)
 

@@ -112,7 +112,9 @@ gains this table automatically on the next startup — no manual migration. New 
   creds (view secret set) is 401; a cross-origin POST is 403.
 - **End to end against the deployed relay:** after building + testing locally, **`fly deploy`** to
   update the live relay, then comment on a report through the real dashboard and confirm it persists
-  (the volume DB auto-creates the new table).
+  (the volume DB auto-creates the new table). ✅ **Done (2026-06-19):** deployed and verified live —
+  commented with and without a name, and comments persisted across a page refresh and a full server
+  restart.
 
 ## The C2 → C3 boundary (kept clean)
 

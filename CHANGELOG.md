@@ -20,7 +20,10 @@ see [`docs/known-issues.md`](docs/known-issues.md).
 dashboard — making the loop two-way. The slice extends the live relay (no bot, no new infra); its
 center of gravity is inbound security, gated more tightly than the feature itself. Comments are
 append-only, flat, plain text, with an optional self-entered display name (free text, **not**
-authenticated identity — that is C3). `pytest`: **276**.
+authenticated identity — that is C3). `pytest`: **276**. **Deployed & verified live (2026-06-19):**
+`fly deploy`'d to the running relay and exercised through the real dashboard — comments (with and
+without a name) persisted across a page refresh and a full server restart, confirming the volume DB
+auto-migrated the `report_comments` table.
 
 ### Added
 

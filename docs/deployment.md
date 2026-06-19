@@ -52,6 +52,51 @@ default disk) that file is **wiped on every restart/redeploy** unless it lives o
 
 ---
 
+## Test the image locally first (smoke test)
+
+Build and exercise the container on your own machine before deploying. This verifies the image,
+the dashboard read-auth, and the **fail-closed guard** end to end over plain HTTP on loopback —
+*before* TLS and hosting are involved. (It does **not** exercise TLS or the reverse-proxy
+topology; for that see Option B and KI-18.)
+
+```bash
+# 1) Two throwaway secrets, kept in your shell for the commands below.
+export ORION_RELAY_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+export ORION_RELAY_VIEW_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# 2) Build.
+docker build -t orion-relay .
+
+# 3) Negative test — the fail-closed guard: NO view secret => must refuse to start (exit 1).
+docker run --rm -e ORION_RELAY_TOKEN=anything orion-relay
+#   expect: "Error: refusing to bind non-loopback host '0.0.0.0' ..."  and exit code 1
+
+# 4) Real run (both secrets + a volume + the port).
+docker run -d --name orion-relay-test -p 8787:8787 -v orion-test-data:/data \
+  -e ORION_RELAY_TOKEN="$ORION_RELAY_TOKEN" \
+  -e ORION_RELAY_VIEW_TOKEN="$ORION_RELAY_VIEW_TOKEN" \
+  orion-relay
+docker logs orion-relay-test            # expect: "dashboard: Basic-auth required"
+
+# 5) Dashboard auth: no creds => 401; correct creds (any username) => 200.
+curl -s -o /dev/null -w "no-creds:   HTTP %{http_code}\n" http://localhost:8787/
+curl -s -o /dev/null -w "with-creds: HTTP %{http_code}\n" -u orion:"$ORION_RELAY_VIEW_TOKEN" http://localhost:8787/
+
+# 6) Ingest a report with the Bearer token => 201 {"id": 1}.
+curl -s -w "  HTTP %{http_code}\n" -X POST http://localhost:8787/ingest \
+  -H "Authorization: Bearer $ORION_RELAY_TOKEN" -H "Content-Type: application/json" \
+  -d '{"project":"smoke-test","share_level":"high_level","lane":"raw","body":"Hello.","generated_at":"2026-06-18T12:00:00+00:00","orion_version":"0.0.0","participants":["Alex"],"sections":[["Code activity","Verified the image."]]}'
+
+# 7) Confirm it renders, and survives a restart (volume persistence).
+docker restart orion-relay-test
+curl -s -u orion:"$ORION_RELAY_VIEW_TOKEN" http://localhost:8787/ | grep smoke-test
+
+# 8) Cleanup.
+docker rm -f orion-relay-test && docker volume rm orion-test-data
+```
+
+---
+
 ## Option A — Docker, platform terminates TLS (Fly, Render, any Docker host)
 
 Here the relay binds `0.0.0.0` inside the container and the platform gives you HTTPS. The

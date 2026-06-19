@@ -927,3 +927,263 @@ def test_api_comments_bad_since_id_is_400(tmp_path):
             base_url, _api_comments_path(project="demo", since_id="nope"), bearer=_TOKEN
         )
         assert code == 400
+
+
+# --- C2-bots: POST /api/comments (Bearer-authed machine comment write) -----------
+#
+# The native bot's write path: a Slack/Discord bot POSTs JSON {project, body, ...} and
+# the relay appends it to the project's LATEST report's comments — the SAME store the
+# browser comment form writes to, so a chat reply is indistinguishable from a dashboard
+# comment downstream. These tests pin the Bearer gate (NOT the browser's Basic+CSRF), the
+# field validation + caps, latest-report resolution (and the optional report_id override),
+# and that nothing lands in the store on any rejection.
+
+
+def _post_json(base_url, obj, *, token=_TOKEN):
+    """POST a JSON object to /api/comments and return (status, parsed-or-raw).
+
+    Args:
+        base_url: the server base URL.
+        obj: a dict serialized to the JSON request body. Pass a non-dict/garbage via
+            _post directly when exercising the malformed-body path.
+        token: Bearer token to send, or None to omit the Authorization header.
+
+    Why:
+        Centralizes the machine comment-POST plumbing (JSON encoding + Bearer header)
+        so each test states only the fields it exercises. Reuses _post for the actual
+        request; decodes the JSON response when possible, else returns the raw text, so
+        a test can assert on either an error message or the 201 body.
+    """
+    status, raw = _post(
+        base_url, json.dumps(obj).encode("utf-8"), token=token, path="/api/comments"
+    )
+    try:
+        return status, json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return status, raw.decode("utf-8")
+
+
+def test_api_comment_post_stores_on_latest_report_and_returns_201(tmp_path):
+    """A valid Bearer-authed JSON comment is stored on the project's latest report (201).
+
+    Why this matters: this is the bot's happy path end to end — {project, body} with the
+    right token lands a comment on the most recent report, and the 201 echoes both the new
+    comment id and the report it attached to. We then read it back through the store to
+    prove it actually persisted where the dashboard will render it.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, payload = _post_json(
+            base_url, {"project": "demo", "author": "Alex", "body": "From Slack."}
+        )
+        assert status == 201
+        assert payload["report_id"] == report_id
+
+        conn = open_relay_store(db)
+        stored = comments_for(conn, report_id)
+        assert [(c["author"], c["body"]) for c in stored] == [("Alex", "From Slack.")]
+
+
+def test_api_comment_post_attaches_to_newest_when_multiple_reports(tmp_path):
+    """With two reports for a project, a comment attaches to the NEWER one.
+
+    Why this matters: "latest report per channel" is the slice's whole mapping model, so
+    the resolution must pick the most recent report (history() is newest-first). We ingest
+    two reports and assert the comment hangs off the second, not the first.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        first_id = _ingest_one(base_url)
+        second_id = _ingest_one(base_url)
+        assert second_id != first_id
+
+        status, payload = _post_json(base_url, {"project": "demo", "body": "newest"})
+        assert status == 201
+        assert payload["report_id"] == second_id
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, first_id) == []
+        assert [c["body"] for c in comments_for(conn, second_id)] == ["newest"]
+
+
+def test_api_comment_post_optional_report_id_targets_that_report(tmp_path):
+    """An explicit report_id attaches the comment to THAT report, not the latest.
+
+    Why this matters: report_id is the future-additive seam for reply-targeting. When the
+    bot (later) sends it, the comment must land on the named report even though a newer one
+    exists — proving the override path works and bypasses latest-resolution.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        first_id = _ingest_one(base_url)
+        _ingest_one(base_url)  # a newer report that should be IGNORED when id is given
+
+        status, payload = _post_json(
+            base_url, {"project": "demo", "body": "on the old one", "report_id": first_id}
+        )
+        assert status == 201
+        assert payload["report_id"] == first_id
+
+        conn = open_relay_store(db)
+        assert [c["body"] for c in comments_for(conn, first_id)] == ["on the old one"]
+
+
+def test_api_comment_post_report_id_wrong_project_is_400(tmp_path):
+    """A report_id that belongs to a different project is rejected 400, not stored.
+
+    Why this matters: report_id is a cross-project handle, so the endpoint must confirm the
+    named report actually belongs to the named project — otherwise a client could graft a
+    comment onto an unrelated project's report by id. We only have one project here, so we
+    use a mismatched project name against a real report id to exercise the guard.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, _ = _post_json(
+            base_url, {"project": "other", "body": "x", "report_id": report_id}
+        )
+        assert status == 400
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_comment_post_wrong_token_is_401_and_stores_nothing(tmp_path):
+    """A comment POST with the wrong Bearer token is 401 and stores nothing.
+
+    Why this matters: the write path is gated by the same shared token as ingest. A bad
+    token must be refused before the body is even parsed, leaving no trace — and the
+    expected token must never appear in the response.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, payload = _post_json(
+            base_url, {"project": "demo", "body": "nope"}, token="wrong"
+        )
+        assert status == 401
+        assert _TOKEN not in json.dumps(payload)
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_comment_post_absent_token_is_401_with_bearer_scheme(tmp_path):
+    """A comment POST with no Authorization header is 401 + WWW-Authenticate: Bearer.
+
+    Why this matters: missing credentials are refused (never open by omission), and the
+    401 advertises the Bearer scheme — the same standards-correct behavior as /ingest and
+    GET /api/comments, so the three machine endpoints are consistent.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        req = urllib.request.Request(
+            base_url + "/api/comments",
+            data=json.dumps({"project": "demo", "body": "x"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},  # no Authorization
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected a 401")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+            assert exc.headers.get("WWW-Authenticate") == "Bearer"
+
+
+def test_api_comment_post_no_reports_for_project_is_404(tmp_path):
+    """A comment for a project with no reports yet is 404, not a crash.
+
+    Why this matters: a channel can be mapped before the project's first report exists.
+    The endpoint has no report to attach to, so it returns a clean, actionable 404 rather
+    than failing — and stores nothing.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, _ = _post_json(base_url, {"project": "never-seen", "body": "hi"})
+        assert status == 404
+
+
+def test_api_comment_post_empty_body_is_400_and_stores_nothing(tmp_path):
+    """A comment with a whitespace-only body is rejected 400 and stores nothing.
+
+    Why this matters: a comment must carry text. The endpoint strips the body, so a
+    whitespace-only value counts as empty and is caught at the boundary before the store —
+    mirroring the browser comment route's discipline.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, _ = _post_json(base_url, {"project": "demo", "body": "   "})
+        assert status == 400
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_comment_post_oversized_body_is_400(tmp_path):
+    """A comment body over the cap is rejected 400 and stores nothing.
+
+    Why this matters: we never trust a client-sent size. A body beyond
+    MAX_COMMENT_BODY_CHARS is refused at the boundary, the same cap the browser route and
+    the store render enforce, so no oversized text reaches the store.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        too_long = "x" * (MAX_COMMENT_BODY_CHARS + 1)
+        status, _ = _post_json(base_url, {"project": "demo", "body": too_long})
+        assert status == 400
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_comment_post_missing_body_field_is_400(tmp_path):
+    """A payload missing the required `body` field is rejected 400.
+
+    Why this matters: body is required; an absent field is a client error caught cleanly,
+    not a KeyError. Pairs with the empty-body test (present-but-blank) to cover both shapes.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        _ingest_one(base_url)
+        status, _ = _post_json(base_url, {"project": "demo"})
+        assert status == 400
+
+
+def test_api_comment_post_omitted_author_stored_as_empty(tmp_path):
+    """A comment with no author field is stored with an empty author string.
+
+    Why this matters: author is optional (it is a self-entered label, not identity). A bot
+    that cannot resolve a display name may omit it; the comment must still store cleanly
+    with author == "", which the dashboard renders as an anonymous note.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, _ = _post_json(base_url, {"project": "demo", "body": "anon"})
+        assert status == 201
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id)[0]["author"] == ""
+
+
+def test_api_comment_post_malformed_json_is_400(tmp_path):
+    """A Bearer-authed but non-JSON body returns 400.
+
+    Why this matters: even an authenticated bot can send garbage; the endpoint must reject
+    an unparseable body cleanly rather than crash — mirroring /ingest's behavior.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, _ = _post(base_url, b"not json at all", path="/api/comments")
+        assert status == 400
+
+
+def test_api_comment_post_does_not_disturb_other_routes(tmp_path):
+    """Adding the POST /api/comments route leaves /ingest and GET /api/comments working.
+
+    Why this matters: a new route on a shared handler can accidentally shadow others. This
+    regression check proves the three machine endpoints coexist — a normal ingest still
+    201s and the GET pull-back still reads back what the POST wrote.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        report_id = _ingest_one(base_url)  # POST /ingest still works
+        assert _post_json(base_url, {"project": "demo", "body": "loop"})[0] == 201
+
+        # GET /api/comments (the pull-back) sees the comment the POST just wrote.
+        code, raw = _get(base_url, _api_comments_path(project="demo"), bearer=_TOKEN)
+        assert code == 200
+        payload = json.loads(raw)
+        assert [c["body"] for c in payload["comments"]] == ["loop"]
+        assert payload["comments"][0]["report_id"] == report_id

@@ -53,6 +53,9 @@ state_db = "orion.sqlite3"
 # `url` is the relay's ingest endpoint. `token_env_var` names a .env variable
 # holding the Bearer token the push is authenticated with — the token itself lives
 # in .env, never here (same indirection as a recipient's webhook_env_var).
+# NOTE: the dashboard's READ secret is a SERVE-side concern, not a field here — it is
+# set on the machine running `orion relay-serve` (ORION_RELAY_VIEW_TOKEN in its .env),
+# and is REQUIRED before the relay can bind beyond loopback. See .env.example.
 # [relay]
 # enabled       = true
 # url           = "http://127.0.0.1:8787/ingest"

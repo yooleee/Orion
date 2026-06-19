@@ -697,16 +697,22 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     """`relay-serve` reads the token from .env and calls serve() with parsed args.
 
     Why this matters: this is the whole job of the CLI adapter — turn flags + the
-    ingest token into a serve() call. We patch _load_relay_serve so nothing actually
-    binds a socket, and assert the host/port/db/token reached serve() as resolved.
+    ingest token + the optional view secret into a serve() call. We patch
+    _load_relay_serve so nothing actually binds a socket, and assert the
+    host/port/db/token/view-token reached serve() as resolved.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # ignore real .env
     monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
     calls = []
     monkeypatch.setattr(
         cli,
         "_load_relay_serve",
-        lambda: (lambda host, port, db_path, token: calls.append((host, port, db_path, token))),
+        lambda: (
+            lambda host, port, db_path, token, view_token: calls.append(
+                (host, port, db_path, token, view_token)
+            )
+        ),
     )
 
     db = tmp_path / "relay.sqlite3"
@@ -721,11 +727,33 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     )
     assert code == 0
     assert len(calls) == 1
-    host, port, db_path, token = calls[0]
+    host, port, db_path, token, view_token = calls[0]
     assert host == "127.0.0.1"
     assert port == 9999
     assert db_path == db
     assert token == "tok-123"
+    assert view_token == "view-xyz"  # resolved from ORION_RELAY_VIEW_TOKEN
+
+
+def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
+    """A fail-closed guard ValueError from serve() becomes a clean exit 1.
+
+    Why this matters: binding non-loopback without a view secret must fail with a
+    clear, actionable message and exit 1 — not a raw traceback. We make the stubbed
+    serve() raise the guard's ValueError and assert the CLI catches it.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.delenv("ORION_RELAY_VIEW_TOKEN", raising=False)
+
+    def _raise_guard(*_a):
+        raise ValueError("refusing to bind non-loopback host '0.0.0.0' ...")
+
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: _raise_guard)
+    code = cli.main(
+        ["relay-serve", "--host", "0.0.0.0", "--config", str(tmp_path / "orion.toml")]
+    )
+    assert code == 1
 
 
 def test_relay_serve_missing_token_is_clean_error_and_never_serves(tmp_path, monkeypatch):

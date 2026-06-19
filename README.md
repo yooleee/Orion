@@ -258,9 +258,11 @@ orion relay-serve                 # serves ingest + dashboard at http://127.0.0.
 A subsequent `orion report` / `orion intake` delivers as usual **and** pushes the report to the
 relay, which you can browse at `http://127.0.0.1:8787` (projects → history → one report). The
 push is **fail-soft** — a relay that is down or misconfigured never blocks or fails a delivered
-report. At this stage the relay binds **loopback only** (`127.0.0.1`), so the dashboard is for
-your own machine; your supervisors still see the Discord/Slack delivery. See
-[**docs/new-project-setup.md**](docs/new-project-setup.md) for a full walkthrough.
+report. By default the relay binds **loopback only** (`127.0.0.1`), so the dashboard is for your
+own machine. To give a **supervisor** a real URL, you can **deploy it beyond loopback** (Docker or
+a reverse proxy, with dashboard read-auth + TLS) — see
+[**docs/deployment.md**](docs/deployment.md). For the local walkthrough, see
+[**docs/new-project-setup.md**](docs/new-project-setup.md).
 
 ## Scheduling
 

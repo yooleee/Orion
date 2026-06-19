@@ -1,6 +1,6 @@
 # Phase 3.5 Kickoff — Cross-platform portability pass
 
-> **Read this, then read [`plans/orion-plan.md`](../plans/orion-plan.md) before doing
+> **Read this, then read [`plans/orion-plan.md`](../../plans/orion-plan.md) before doing
 > anything.** This is a fast orientation; the plan is the source of truth for architecture and
 > phasing. Phase 3.5 is a deliberate insert *before* Phase 4 (scheduled digests).
 
@@ -13,9 +13,9 @@
   per-recipient routing. `orion intake <project>` sends a pushed/hand-written update.
 - Orion tracks **its own repo** (`[projects.orion]`, now with a Discord *and* a Slack recipient),
   and has live-reported on itself dual-channel.
-- Backward/forward docs: shipped → [`CHANGELOG.md`](../CHANGELOG.md); design + phases →
-  [`plans/orion-plan.md`](../plans/orion-plan.md); open concerns → [`known-issues.md`](known-issues.md);
-  delivered messages → [`test-messages.md`](test-messages.md).
+- Backward/forward docs: shipped → [`CHANGELOG.md`](../../CHANGELOG.md); design + phases →
+  [`plans/orion-plan.md`](../../plans/orion-plan.md); open concerns → [`known-issues.md`](../known-issues.md);
+  delivered messages → [`test-messages.md`](../test-messages.md).
 
 ## Why Phase 3.5 comes before Phase 4
 

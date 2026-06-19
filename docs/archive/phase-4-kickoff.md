@@ -1,6 +1,6 @@
 # Phase 4 Kickoff — Scheduled digests (cadence)
 
-> **Read this, then [`plans/orion-plan.md`](../plans/orion-plan.md), before doing anything.**
+> **Read this, then [`plans/orion-plan.md`](../../plans/orion-plan.md), before doing anything.**
 > Unlike the earlier kickoffs, **Phase 4 is already planned and its design decisions are
 > SETTLED** (below, agreed with Yousuf 2026-06-15) — the heavy plan-mode work is done. Do a
 > *brief* plan-mode re-confirmation pass (re-ground the plan against the current `cli.py` /
@@ -19,10 +19,10 @@
   safe).
 - **Versioning is pre-release / phase-tracked** — no SemVer numbers yet; phases are the
   progression markers (see `CHANGELOG.md`). Source version is the placeholder `0.0.0`.
-- Doc map: shipped → [`CHANGELOG.md`](../CHANGELOG.md); design + phases →
-  [`plans/orion-plan.md`](../plans/orion-plan.md); open concerns →
-  [`known-issues.md`](known-issues.md); test catalog → [`testing.md`](testing.md); manual
-  cross-OS runbook → [`portability-smoke-test.md`](portability-smoke-test.md).
+- Doc map: shipped → [`CHANGELOG.md`](../../CHANGELOG.md); design + phases →
+  [`plans/orion-plan.md`](../../plans/orion-plan.md); open concerns →
+  [`known-issues.md`](../known-issues.md); test catalog → [`testing.md`](../testing.md); manual
+  cross-OS runbook → [`portability-smoke-test.md`](../portability-smoke-test.md).
 
 ## What Phase 4 is
 
@@ -118,7 +118,7 @@ the refactor **wraps** these, it does not replace them; `redact` (both passes) a
 
 Dev is on **Windows 11 + WSL2**; a MacBook may now be in hand. Phase 4's `docs/scheduling.md`
 and the unattended-send path are natural candidates for a cross-OS smoke pass (pair with
-[`portability-smoke-test.md`](portability-smoke-test.md)). Target all three OSes by
+[`portability-smoke-test.md`](../portability-smoke-test.md)). Target all three OSes by
 reasoning/docs, not only the machine in hand.
 
 ## First commands to run next session

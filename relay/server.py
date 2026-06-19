@@ -23,7 +23,9 @@
 
 from __future__ import annotations
 
+import base64
 import hmac
+import ipaddress
 import json
 import sys
 import urllib.parse
@@ -53,6 +55,17 @@ _REQUIRED_STR_FIELDS = (
     "body",
     "generated_at",
     "orion_version",
+)
+
+# Minimal body for a 401 on a dashboard (GET) route. Browsers show their own
+# Basic-auth login dialog on a 401 + WWW-Authenticate header and only render this
+# body if the user cancels, so it stays deliberately tiny — and self-contained in
+# server.py, leaving render.py (the dashboard view layer) untouched.
+_UNAUTHORIZED_HTML = (
+    "<!doctype html><html lang='en'><meta charset='utf-8'>"
+    "<title>Orion — authentication required</title>"
+    "<h1>401 — authentication required</h1>"
+    "<p>This Orion dashboard requires a username and password.</p></html>"
 )
 
 
@@ -141,13 +154,24 @@ class _RelayHandler(BaseHTTPRequestHandler):
         404; an unknown PROJECT renders a friendly empty-state (200), since "no
         reports" and "never existed" look the same to a viewer.
 
-        Why no auth here (yet): the dashboard's access boundary at this stage is
-        LOOPBACK binding — relay-serve binds 127.0.0.1 by default, so the reads are
-        not world-reachable. Real read authentication arrives with the deferred
-        hosting decision (it shapes how the dashboard is exposed); building it now
-        would pre-empt that call. Ingest stays Bearer-authed regardless — it is the
-        write surface.
+        Read auth: when the server is configured with a view secret, every dashboard
+        route requires HTTP Basic credentials (a browser-native login); without one —
+        the loopback-only default — reads stay open for zero-friction local use. The
+        fail-closed guard in create_server() guarantees a view secret IS set whenever
+        the bind host is non-loopback, so a world-reachable dashboard is never
+        unauthenticated. Ingest (the write surface) stays Bearer-authed independently.
         """
+        # Read-auth gate: enforced only when a view secret is configured. A missing
+        # or wrong credential is a 401 whose WWW-Authenticate header makes the browser
+        # present its own login dialog.
+        if self.server.view_token and self._view_auth_error() is not None:
+            self._send_html(
+                401,
+                _UNAUTHORIZED_HTML,
+                extra_headers={"WWW-Authenticate": 'Basic realm="Orion dashboard"'},
+            )
+            return
+
         # Strip any query string; routing is by path only.
         path = urllib.parse.urlparse(self.path).path
         # A fresh connection per request keeps each sqlite handle on its own thread.
@@ -253,6 +277,38 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return "invalid token"
         return None
 
+    def _view_auth_error(self) -> str | None:
+        """Return None if the request carries valid dashboard read credentials.
+
+        Returns:
+            None when valid HTTP Basic credentials are present; otherwise a short
+            reason string (a missing/malformed header, undecodable credentials, or a
+            wrong password). Only called when the server has a view secret set.
+
+        Why:
+            Read auth reuses the same single-shared-secret model as ingest, but over
+            HTTP Basic so a browser shows a native login dialog. Basic credentials are
+            "username:password"; with one shared secret there is no account to
+            enumerate, so the username is accepted as-is and only the PASSWORD is
+            checked — split on the FIRST ':' so a password may itself contain colons.
+            The compare is constant-time (hmac.compare_digest, no timing side-channel),
+            and the expected secret is never echoed, exactly as on the ingest path.
+        """
+        header = self.headers.get("Authorization", "")
+        prefix = "Basic "
+        if not header.startswith(prefix):
+            return "missing or malformed Authorization header (expected Basic auth)"
+        try:
+            decoded = base64.b64decode(header[len(prefix):], validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return "malformed Basic credentials"
+        # "username:password" — keep only the password (partition splits on the first
+        # ':', so colons in the password survive). view_token is non-None here.
+        _, _, password = decoded.partition(":")
+        if not hmac.compare_digest(password, self.server.view_token):
+            return "invalid credentials"
+        return None
+
     def _read_raw_body(self) -> bytes | None:
         """Read the request body per Content-Length, or None if absent/oversized.
 
@@ -301,18 +357,30 @@ class _RelayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, code: int, html_str: str) -> None:
+    def _send_html(
+        self, code: int, html_str: str, *, extra_headers: dict | None = None
+    ) -> None:
         """Write an HTML response with the given status code.
+
+        Args:
+            code: HTTP status code.
+            html_str: The HTML body.
+            extra_headers: Optional extra response headers (e.g. WWW-Authenticate on a
+                401). Defaulted so the common case stays a two-arg call.
 
         Why:
             The dashboard responses are all UTF-8 HTML; this keeps the
             status/header/body sequence and the charset in one place (DRY), so each
             view function just returns a string and never deals with the socket.
+            extra_headers keeps the one case that needs an extra header (the dashboard
+            401's WWW-Authenticate) from forking this method — same shape as _send_json.
         """
         body = html_str.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -325,6 +393,9 @@ class RelayServer(ThreadingHTTPServer):
             port (used by tests).
         db_path: Path to the relay's sqlite store.
         token: The shared Bearer token ingest is authenticated against.
+        view_token: Optional shared secret for dashboard (GET) read auth via HTTP
+            Basic. None (the default) leaves reads open — valid only for a loopback
+            bind, which create_server() enforces with a fail-closed guard.
 
     Why:
         Subclassing ThreadingHTTPServer to hold db_path/token is the clean way to
@@ -337,15 +408,46 @@ class RelayServer(ThreadingHTTPServer):
     # never keep the process alive after shutdown.
     daemon_threads = True
 
-    def __init__(self, server_address, db_path: Path, token: str):
+    def __init__(
+        self, server_address, db_path: Path, token: str, view_token: str | None = None
+    ):
         # Set config before binding so it is available to any request handled after
         # serve_forever() starts.
         self.db_path = db_path
         self.token = token
+        self.view_token = view_token
         super().__init__(server_address, _RelayHandler)
 
 
-def create_server(host: str, port: int, db_path: Path, token: str) -> RelayServer:
+def _is_loopback(host: str) -> bool:
+    """Return True if `host` names a loopback-only bind interface.
+
+    Args:
+        host: The interface string passed to bind (an IP literal or a hostname).
+
+    Returns:
+        True for loopback (127.0.0.0/8, ::1, or the literal "localhost"); False for
+        anything potentially world-/LAN-reachable (0.0.0.0, a LAN IP, a hostname).
+
+    Why:
+        The fail-closed read-auth guard keys off this: a non-loopback bind must carry
+        a view secret. We treat the literal "localhost" as loopback (it resolves
+        there); for IP literals we defer to ipaddress.is_loopback (covers 127.x.x.x
+        and ::1, and correctly rules 0.0.0.0 NOT loopback). Any other hostname is
+        treated as non-loopback — for a security guard the safe default is to assume
+        reachable.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def create_server(
+    host: str, port: int, db_path: Path, token: str, view_token: str | None = None
+) -> RelayServer:
     """Build and bind a RelayServer (does not start serving).
 
     Args:
@@ -353,20 +455,38 @@ def create_server(host: str, port: int, db_path: Path, token: str) -> RelayServe
         port: Port to bind; 0 lets the OS choose a free one.
         db_path: Path to the relay's sqlite store.
         token: The shared Bearer ingest token.
+        view_token: Optional shared secret for dashboard read auth. Required (this
+            function raises without it) whenever `host` is non-loopback.
 
     Returns:
         A bound RelayServer. Its actual bound port is server.server_address[1]
         (useful when port 0 was requested).
 
+    Raises:
+        ValueError: when `host` is non-loopback and no view_token is given — the
+            fail-closed guard. Binding a world-reachable interface would otherwise
+            expose the read-only dashboard to anyone, so we refuse to start rather
+            than serve it unauthenticated.
+
     Why:
         Separating "build/bind" from "serve forever" makes the server testable: a
         test binds to port 0, reads the assigned port, drives requests on a thread,
         then calls shutdown() — none of which is possible if construction blocked.
+        The guard lives HERE (not only in the CLI) so every path to a bound server —
+        serve() and tests alike — is fail-closed by construction.
     """
-    return RelayServer((host, port), db_path, token)
+    if not _is_loopback(host) and not view_token:
+        raise ValueError(
+            f"refusing to bind non-loopback host {host!r} without a dashboard view "
+            "secret: the read-only dashboard would be world-readable. Set a view "
+            "secret (relay-serve --view-token-env) before binding beyond loopback."
+        )
+    return RelayServer((host, port), db_path, token, view_token)
 
 
-def serve(host: str, port: int, db_path: Path, token: str) -> None:
+def serve(
+    host: str, port: int, db_path: Path, token: str, view_token: str | None = None
+) -> None:
     """Run the relay server until interrupted (the blocking entry point).
 
     Args:
@@ -374,19 +494,26 @@ def serve(host: str, port: int, db_path: Path, token: str) -> None:
         port: Port to bind.
         db_path: Path to the relay's sqlite store.
         token: The shared Bearer ingest token.
+        view_token: Optional dashboard read secret (HTTP Basic). Required by
+            create_server() when host is non-loopback.
 
     Returns:
         None. Blocks serving requests until Ctrl-C, then shuts down cleanly.
 
     Why:
-        This is what `orion relay-serve` (CP8) calls. It prints the bound address so
-        the user knows where the dashboard/ingest live, and handles Ctrl-C as a
-        clean stop rather than a traceback.
+        This is what `orion relay-serve` calls. It prints the bound address and
+        whether the dashboard requires read auth, so the user can see at a glance
+        that a non-loopback bind is protected; it handles Ctrl-C as a clean stop
+        rather than a traceback.
     """
-    server = create_server(host, port, db_path, token)
+    server = create_server(host, port, db_path, token, view_token)
     bound_host, bound_port = server.server_address
+    # Surface read-auth state at startup — the operator's confirmation that a
+    # world-reachable bind is gated (the fail-closed guard guarantees it is).
+    auth_state = "Basic-auth required" if view_token else "open (loopback only)"
     print(
-        f"[relay] listening on http://{bound_host}:{bound_port}  (db: {db_path})",
+        f"[relay] listening on http://{bound_host}:{bound_port}  "
+        f"(db: {db_path}; dashboard: {auth_state})",
         file=sys.stderr,
     )
     try:

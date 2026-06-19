@@ -1,9 +1,16 @@
 # Horizon-planning kickoff — the post-C1 direction-setting juncture
 
-> **Read FIRST:** [`plans/orion-plan.md`](../plans/orion-plan.md) — the **Horizon C roadmap rows**,
+> **⚠ SUPERSEDED (2026-06-18) — archived record.** This pass has been executed; its outcomes live
+> in [`docs/orion-strategy.md`](../orion-strategy.md) (north-star, differentiators, deferred
+> directions) and the updated roadmap in [`plans/orion-plan.md`](../../plans/orion-plan.md). One
+> correction to this doc's framing: it overstated the hackathon dogfood (6/20–21) as the *decisive
+> input*. The hackathon is a **readiness test, not a driver** — "is Orion good enough that I reach
+> for it?" — and was not treated as dictating direction. Kept as the as-launched record.
+
+> **Read FIRST:** [`plans/orion-plan.md`](../../plans/orion-plan.md) — the **Horizon C roadmap rows**,
 > the **"Hosting decision (settled 2026-06-18)"** section, the **"Phase C1 status"** + **"Horizon
 > B → C boundary review"**, and the **"Future direction & guiding principles"** block — and
-> [`docs/known-issues.md`](known-issues.md) (KI-1, KI-8, KI-11, KI-13, KI-16, KI-17). This is **not
+> [`docs/known-issues.md`](../known-issues.md) (KI-1, KI-8, KI-11, KI-13, KI-16, KI-17). This is **not
 > a normal phase kickoff**: it is the deliberate **direction-setting pass before any new
 > Horizon-C build**, the one Yousuf flagged (saved as the `plan-direction-before-building` working
 > preference). Treat the foundational calls here with **extra rigor** (long-term lock-in): **do not

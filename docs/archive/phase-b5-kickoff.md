@@ -4,12 +4,12 @@
 > B4 live verification COMPLETED.** The build-or-defer gate below was evaluated with Yousuf and
 > the decision is to **not build B5 now** (no concrete mixed-cadence need; the real need likely
 > arrives with the Horizon-C listener that would host an in-process scheduler). See the **Phase
-> B5 status** section in [`plans/orion-plan.md`](../plans/orion-plan.md) and **KI-13** in
-> [`known-issues.md`](known-issues.md). The B4 live/manual verification (next section) was run
+> B5 status** section in [`plans/orion-plan.md`](../../plans/orion-plan.md) and **KI-13** in
+> [`known-issues.md`](../known-issues.md). The B4 live/manual verification (next section) was run
 > end to end and passed — default Anthropic path, a local Ollama backend (`qwen2.5:0.5b`), and
 > local fail-closed. The rest of this doc is preserved as the record of the gate analysis.
 
-> **Read this, then [`plans/orion-plan.md`](../plans/orion-plan.md) in full, before doing
+> **Read this, then [`plans/orion-plan.md`](../../plans/orion-plan.md) in full, before doing
 > anything** — especially the **roadmap B5 row**, the **Phase 4 status** block, **KI-13**, and
 > **"When a built-in scheduling *layer* becomes right"** in the Future-direction section. Like B3
 > and B4, B5's design is **NOT pre-settled** — and unlike them, **B5 is conditional**: the first
@@ -43,9 +43,9 @@ flagging). If anything misbehaves, treat it as a **B4 follow-up fix before B5**,
 - **Horizon A** (A1–A4) shipped & signed off. **Horizon B:** B1, B2, B3, B4, and B6 are signed
   off. `pytest`: **172/172**. **B5 is the only remaining Horizon-B phase** — and it is
   **conditional** (it may be deferred into Horizon C; see the gate below).
-- Doc map: roadmap + design → [`plans/orion-plan.md`](../plans/orion-plan.md); shipped →
-  [`CHANGELOG.md`](../CHANGELOG.md); open concerns → [`known-issues.md`](known-issues.md);
-  the Phase-4 OS-scheduling runbook → [`scheduling.md`](scheduling.md).
+- Doc map: roadmap + design → [`plans/orion-plan.md`](../../plans/orion-plan.md); shipped →
+  [`CHANGELOG.md`](../../CHANGELOG.md); open concerns → [`known-issues.md`](../known-issues.md);
+  the Phase-4 OS-scheduling runbook → [`scheduling.md`](../scheduling.md).
 
 ## What B5 is (and is not)
 
@@ -149,6 +149,6 @@ Surface each with a recommendation; settle with Yousuf before coding:
 # 2. Then run the carried-over B4 live/manual verification (section above) BEFORE any B5 work.
 ```
 
-Then read [`plans/orion-plan.md`](../plans/orion-plan.md) — the B5 row, the Phase 4 status block,
+Then read [`plans/orion-plan.md`](../../plans/orion-plan.md) — the B5 row, the Phase 4 status block,
 KI-13, and "When a built-in scheduling *layer* becomes right" — and start the **plan-mode pass**
 with the build-or-defer gate.

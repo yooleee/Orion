@@ -1,6 +1,6 @@
 # Phase 2 Kickoff — starting brief for the next session
 
-> **Read this, then read [`plans/orion-plan.md`](../plans/orion-plan.md) in full before
+> **Read this, then read [`plans/orion-plan.md`](../../plans/orion-plan.md) in full before
 > doing anything.** This file is a fast orientation, not a replacement for the plan. The
 > plan is the source of truth for architecture and phasing; this just tells you where
 > Phase 1 left things and how to open Phase 2.
@@ -14,10 +14,10 @@
 - **Orion now tracks its own repo**: `orion.toml` has `[projects.orion]`
   (`repo_path = /home/yoolee/orion`, `share_level = high_level`). Run
   `.venv/bin/orion report orion` to post a progress update (preview-gated, default-no).
-- **Backward/forward/open docs:** what shipped → [`CHANGELOG.md`](../CHANGELOG.md);
-  design + phases → [`plans/orion-plan.md`](../plans/orion-plan.md); open cross-phase
-  concerns → [`docs/known-issues.md`](known-issues.md); delivered messages →
-  [`docs/test-messages.md`](test-messages.md).
+- **Backward/forward/open docs:** what shipped → [`CHANGELOG.md`](../../CHANGELOG.md);
+  design + phases → [`plans/orion-plan.md`](../../plans/orion-plan.md); open cross-phase
+  concerns → [`docs/known-issues.md`](../known-issues.md); delivered messages →
+  [`docs/test-messages.md`](../test-messages.md).
 
 ## What Phase 2 is
 

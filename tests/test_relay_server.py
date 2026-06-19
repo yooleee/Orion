@@ -1,9 +1,11 @@
 # =============================================================================
 # tests/test_relay_server.py
 # -----------------------------------------------------------------------------
-# Responsible for: Verifying the relay's ingest endpoint end to end — Bearer auth
-#                  (401), payload validation (400), successful store (201), and
-#                  unknown-path (404) — against a REAL running server.
+# Responsible for: Verifying the relay's HTTP surface end to end against a REAL
+#                  running server — the ingest endpoint (Bearer auth 401, payload
+#                  validation 400, successful store 201, unknown-path 404) AND the
+#                  dashboard read auth (HTTP Basic) plus the fail-closed bind guard
+#                  that forbids a non-loopback bind without a view secret.
 # Role in project: The ingest endpoint is Orion's first inbound surface; these
 #                  tests pin that it authenticates, validates, and only then
 #                  stores. Critically, the happy path is fed REAL serialize_blob
@@ -14,6 +16,7 @@
 #                then assert on responses and on what landed in the store.
 # =============================================================================
 
+import base64
 import json
 import threading
 import urllib.error
@@ -21,27 +24,36 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
-from relay.server import create_server
+from relay.server import _is_loopback, create_server
 from relay.store import get, list_projects, open_relay_store
 
 _TOKEN = "test-ingest-token"
+_VIEW = "test-view-secret"
 
 
 @contextmanager
-def _running_relay(tmp_path, token=_TOKEN):
+def _running_relay(tmp_path, token=_TOKEN, view_token=None):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
+    Args:
+        tmp_path: pytest temp dir for the relay's sqlite file.
+        token: the shared ingest Bearer token.
+        view_token: optional dashboard read secret. None (default) leaves GETs open,
+            matching the loopback access model; set it to exercise read auth.
+
     Why:
-        The ingest contract can only be proven against a real server (real auth
+        The ingest/read contracts can only be proven against a real server (real auth
         header parsing, real status codes). Binding to port 0 avoids port clashes;
         serving on a daemon thread lets the test make blocking HTTP calls from the
         main thread. The context manager guarantees the server is shut down even if
         an assertion fails.
     """
     db = tmp_path / "relay.sqlite3"
-    server = create_server("127.0.0.1", 0, db, token)
+    server = create_server("127.0.0.1", 0, db, token, view_token)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -80,15 +92,27 @@ def _post(base_url, body, *, token=_TOKEN, path="/ingest"):
         return exc.code, exc.read()
 
 
-def _get(base_url, path):
+def _get(base_url, path, *, password=None):
     """GET `path` from the relay and return (status_code, response_text).
 
+    Args:
+        base_url: the server's base URL.
+        path: the request path.
+        password: optional dashboard read secret to send as HTTP Basic auth (any
+            username; None omits the Authorization header).
+
     Why:
-        The dashboard routes are unauthenticated GETs; this mirrors _post for the
-        read side, unwrapping HTTPError so a 404 comes back as a tuple to assert on.
+        Mirrors _post for the read side, unwrapping HTTPError so a 401/404 comes back
+        as a tuple to assert on. The password arg lets read-auth tests send (or omit)
+        Basic credentials without each test rebuilding the request by hand.
     """
+    headers = {}
+    if password is not None:
+        raw = base64.b64encode(f"orion:{password}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {raw}"
+    request = urllib.request.Request(base_url + path, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(base_url + path, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8")
@@ -312,3 +336,128 @@ def test_dashboard_unknown_get_path_is_404(tmp_path):
     with _running_relay(tmp_path) as (base_url, _db):
         code, _ = _get(base_url, "/nope")
         assert code == 404
+
+
+# --- CP1: dashboard read auth (HTTP Basic) + the fail-closed bind guard ---------
+#
+# Read auth is enforced ONLY when a view secret is configured; with none set (the
+# loopback default) GETs stay open. The fail-closed guard then guarantees a secret
+# IS set whenever the bind is non-loopback, so a world-reachable dashboard is never
+# unauthenticated. Ingest (the write surface) is unaffected — it stays Bearer-authed.
+
+
+def test_dashboard_open_when_no_view_secret(tmp_path):
+    """With no view secret, dashboard GETs serve without credentials (200).
+
+    Why this matters: this pins the backward-compatible default — local, loopback
+    use stays zero-friction (no password) exactly as before CP1. The guard (below)
+    is what keeps this default safe by forbidding it on a non-loopback bind.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        code, _ = _get(base_url, "/")
+        assert code == 200
+
+
+def test_dashboard_requires_basic_auth_when_view_secret_set(tmp_path):
+    """With a view secret set, a GET sent with no credentials is rejected 401.
+
+    Why this matters: this is the read gate that makes leaving loopback safe — once a
+    secret exists, the dashboard is closed to anyone who can't present it.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        code, _ = _get(base_url, "/")
+        assert code == 401
+
+
+def test_dashboard_401_advertises_basic_and_never_echoes_secret(tmp_path):
+    """A read 401 carries WWW-Authenticate: Basic and never leaks the secret.
+
+    Why this matters: the Basic scheme header is what makes a browser show its native
+    login dialog (the whole UX of read auth). And, like the ingest path, the response
+    must never contain the expected secret.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        # Build the request directly so the response headers are readable on the error.
+        req = urllib.request.Request(base_url + "/", method="GET")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected a 401")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+            assert exc.headers.get("WWW-Authenticate", "").startswith("Basic")
+            assert _VIEW not in exc.read().decode("utf-8")
+
+
+def test_dashboard_wrong_password_is_401(tmp_path):
+    """Basic credentials with the wrong password are rejected 401.
+
+    Why this matters: a present-but-wrong credential must be refused just like a
+    missing one — the secret is the gate, not merely the presence of a header.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        code, _ = _get(base_url, "/", password="not-the-secret")
+        assert code == 401
+
+
+def test_dashboard_correct_password_is_200(tmp_path):
+    """Basic credentials with the right password render the dashboard (200).
+
+    Why this matters: the positive path — a viewer who presents the secret sees the
+    content, proving the auth check lets valid requests through to the renderer.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        assert _post(base_url, _real_blob_json().encode("utf-8"))[0] == 201
+        code, html = _get(base_url, "/", password=_VIEW)
+        assert code == 200
+        assert "demo" in html
+
+
+def test_ingest_unaffected_by_view_secret(tmp_path):
+    """A view secret gates GETs but does not touch the Bearer-authed ingest path.
+
+    Why this matters: read auth and write auth are independent. With a view secret set,
+    a normal Bearer-authed push must still be accepted (201) — read protection must not
+    accidentally break the write surface.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        status, _ = _post(base_url, _real_blob_json().encode("utf-8"))
+        assert status == 201
+
+
+def test_guard_refuses_non_loopback_bind_without_view_secret(tmp_path):
+    """create_server raises (and never binds) for a non-loopback host with no secret.
+
+    Why this matters: this is the fail-closed guard — the single rule that makes
+    "deployed 0.0.0.0 with an open dashboard" impossible by construction. It raises
+    BEFORE binding, so no world-reachable socket is ever opened.
+    """
+    db = tmp_path / "relay.sqlite3"
+    with pytest.raises(ValueError, match="non-loopback"):
+        create_server("0.0.0.0", 0, db, _TOKEN)  # no view_token
+
+
+def test_guard_allows_non_loopback_bind_with_view_secret(tmp_path):
+    """A non-loopback bind WITH a view secret is permitted (the guard passes).
+
+    Why this matters: the guard must block only the unsafe case — a deployer who has
+    set a read secret is allowed to bind beyond loopback. We construct then immediately
+    close the server (never serve) to assert construction does not raise.
+    """
+    db = tmp_path / "relay.sqlite3"
+    server = create_server("0.0.0.0", 0, db, _TOKEN, _VIEW)
+    server.server_close()  # opened an ephemeral socket; close it without serving
+
+
+def test_is_loopback_classification():
+    """_is_loopback treats loopback hosts as such and everything else as reachable.
+
+    Why this matters: the guard keys entirely off this classification, so its edges
+    must be right — 0.0.0.0 (bind-all) and a LAN IP/hostname must NOT count as
+    loopback, while 127.x, ::1, and the literal "localhost" must.
+    """
+    assert _is_loopback("127.0.0.1")
+    assert _is_loopback("localhost")
+    assert _is_loopback("::1")
+    assert not _is_loopback("0.0.0.0")
+    assert not _is_loopback("192.168.1.10")
+    assert not _is_loopback("relay.example.com")

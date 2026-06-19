@@ -1,6 +1,6 @@
 # Phase B4 Kickoff — Summarizer flexibility (provider-agnostic seam)
 
-> **Read this, then [`plans/orion-plan.md`](../plans/orion-plan.md) in full, before doing
+> **Read this, then [`plans/orion-plan.md`](../../plans/orion-plan.md) in full, before doing
 > anything.** Like B3, B4's design is **NOT pre-settled** — only the *framing* is. Do a full
 > **plan-mode pass**: surface the open decisions below with a recommendation for each, settle them
 > with Yousuf, then build checkpoint by checkpoint, stopping at each boundary for review.
@@ -10,8 +10,8 @@
 - **Horizon A** (A1–A4) shipped & signed off. **Horizon B:** B1 (git-hook triggers), B2 (session
   skill), B6 (config-inspect), and **B3 (richer rendering)** are signed off. `origin/main` in
   sync; `pytest`: **154/154**. **B4 is next**; B5 (conditional scheduling layer) follows.
-- Doc map: roadmap + design → [`plans/orion-plan.md`](../plans/orion-plan.md); shipped →
-  [`CHANGELOG.md`](../CHANGELOG.md); open concerns → [`known-issues.md`](known-issues.md).
+- Doc map: roadmap + design → [`plans/orion-plan.md`](../../plans/orion-plan.md); shipped →
+  [`CHANGELOG.md`](../../CHANGELOG.md); open concerns → [`known-issues.md`](../known-issues.md).
 
 ## What B4 is
 
@@ -117,5 +117,5 @@ Surface each with a recommendation; settle with Yousuf before coding:
 .venv/bin/python -m pytest -q     # or: uv run --no-sync python -m pytest -q
 ```
 
-Then read [`plans/orion-plan.md`](../plans/orion-plan.md) (the B4 row) and `summarize.py` +
+Then read [`plans/orion-plan.md`](../../plans/orion-plan.md) (the B4 row) and `summarize.py` +
 `cli.py`'s summarizer client construction, and start the **plan-mode pass**.

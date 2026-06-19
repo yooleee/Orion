@@ -332,6 +332,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--view-token-env",
+        default="ORION_RELAY_VIEW_TOKEN",
+        help=(
+            "Name of the .env variable holding the dashboard read secret for HTTP "
+            "Basic auth (default: ORION_RELAY_VIEW_TOKEN). REQUIRED when --host is "
+            "non-loopback; optional on loopback (reads stay open)."
+        ),
+    )
+    relay_parser.add_argument(
         "--config",
         default=default_config,
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
@@ -356,7 +365,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_baseline(args.project, Path(args.config))
     if args.command == "relay-serve":
         return cmd_relay_serve(
-            args.host, args.port, Path(args.db), args.token_env, Path(args.config)
+            args.host,
+            args.port,
+            Path(args.db),
+            args.token_env,
+            args.view_token_env,
+            Path(args.config),
         )
     return 1  # Unreachable: subparsers are required.
 
@@ -1160,6 +1174,7 @@ def cmd_relay_serve(
     port: int,
     db_path: Path,
     token_env: str,
+    view_token_env: str,
     config_path: Path,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
@@ -1170,33 +1185,47 @@ def cmd_relay_serve(
         db_path: Path to the relay's own sqlite store (its own file, separate from
             Orion's state db).
         token_env: Name of the .env variable holding the shared ingest token.
+        view_token_env: Name of the .env variable holding the optional dashboard read
+            secret (HTTP Basic). Required by the relay's fail-closed guard when host
+            is non-loopback; absent/empty leaves loopback reads open.
         config_path: Path to orion.toml, used only to locate the sibling .env that
-            holds the token.
+            holds the secrets.
 
     Returns:
-        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (missing
-        token, or the relay package can't be imported).
+        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (missing ingest
+        token, the relay package can't be imported, or the fail-closed guard refuses a
+        non-loopback bind without a view secret).
 
     Why:
-        This is the thin CLI adapter over relay/server.py — it reads the ingest
-        token from .env (the same secret the pushing side sends as a Bearer token),
-        then hands off to the relay's serve(). The token is read HERE, in the CLI,
-        like every other secret; a missing token is a clean SecretsError naming the
-        variable, not a server that silently 401s every push. Binding loopback by
-        default keeps the dashboard off the network until a hosting decision is
-        made. serve() blocks until interrupted, then returns for a clean exit.
+        This is the thin CLI adapter over relay/server.py — it reads the ingest token
+        from .env (the same secret the pushing side sends as a Bearer token) and the
+        OPTIONAL dashboard read secret, then hands off to serve(). Secrets are read
+        HERE, like every other secret; a missing INGEST token is a clean SecretsError
+        naming the variable. The view secret is read softly (empty -> None) because on
+        loopback the dashboard may serve open; the relay's guard — not this CLI — is
+        what refuses a non-loopback bind without it, so the rule is enforced for every
+        caller, not just this one. serve() blocks until interrupted, then returns.
     """
     try:
-        # Load .env beside the config (like every command), then read the token.
+        # Load .env beside the config (like every command), then read the secrets.
         load_secrets(config_path)
         token = get_required(token_env)
+        # Optional: empty/unset -> None. The fail-closed guard inside serve() refuses a
+        # non-loopback bind when it is None; on loopback, None means "reads open".
+        view_token = os.environ.get(view_token_env, "").strip() or None
         serve = _load_relay_serve()
     except (SecretsError, ConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    # Blocks serving requests until Ctrl-C; serve() prints its bound address.
-    serve(host, port, db_path, token)
+    try:
+        # Blocks until Ctrl-C; serve() prints its bound address and read-auth state.
+        # The guard raises ValueError BEFORE binding if host is non-loopback without a
+        # view secret — surfaced here as a clean, actionable error, not a traceback.
+        serve(host, port, db_path, token, view_token)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

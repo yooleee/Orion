@@ -185,6 +185,10 @@ Deferred).
   `share_level` / `auto_send` validation in `config.py`, and `report --all` is the layering point
   for `--due`.
 - **Severity:** low
+- **Convergence (2026-06-18):** the deferred **light planning/tracking layer** (milestones/sprints/
+  due-dates/at-risk; see "Horizon-C direction settled" in `[plans/orion-plan.md](../plans/orion-plan.md)`
+  and the strategy doc) lands at the *same* "cadence needs Orion's own state" threshold — so it most
+  naturally arrives **with** this scheduling layer and the Horizon-C stateful process, not separately.
 - **Status:** Deferred → Horizon C (gate evaluated 2026-06-17; build when per-project cadence or
   activity-gating is actually wanted, most likely alongside the Horizon-C listener).
 
@@ -247,3 +251,23 @@ Deferred).
 - **Severity:** low
 - **Status:** Deferred → Horizon C3 (add with the multi-party identity model; make accountability
   configurable, not forced).
+
+## KI-18 — The fail-closed bind guard keys off the bind host, not proxy exposure
+
+- **Detail:** `relay.server.create_server` refuses a **non-loopback** bind without a dashboard view
+  secret (the fail-closed guard, C1 second slice). But behind a **reverse proxy** (Caddy/nginx) the
+  relay binds `127.0.0.1`, so the guard sees a *loopback* bind and does **not** force the view secret
+  — even though the proxy exposes the dashboard publicly. The relay cannot detect a proxy in front of
+  it.
+- **Why it matters:** a self-hoster who runs the relay loopback-behind-a-proxy but forgets to set
+  `ORION_RELAY_VIEW_TOKEN` would serve a **world-readable dashboard with no guard error** — a security
+  foot-gun. Mitigated *today* by documentation: `[docs/deployment.md](deployment.md)` (Option B) and
+  `Caddyfile.example` both prominently require setting the view secret in the proxy topology, with
+  optional Caddy `basic_auth` as a second layer. The clean code-level fix is an explicit
+  "force read-auth regardless of bind host" switch (e.g. `--require-view-auth` /
+  `ORION_RELAY_REQUIRE_VIEW_AUTH=1`) so the guard demands the secret even on a loopback bind —
+  **additive**, no rewrite. Deliberately not built now: the doc warning covers the case and the flag
+  is cheap to add when wanted (or before a wider release).
+- **Severity:** medium (security foot-gun, but documented, only in the proxy topology, and the
+  operator controls the proxy).
+- **Status:** Open (doc-mitigated; add a force-view-auth flag if it bites or before a wider release).

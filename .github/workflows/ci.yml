@@ -2,12 +2,23 @@
 # .github/workflows/ci.yml
 # -----------------------------------------------------------------------------
 # Responsible for: Running the test suite on every push to main and every pull
-#                  request, across the OS/Python matrix Orion claims to support.
-# Role in project: The automated proof of two promises the project makes — that
-#                  the suite stays green, and that Orion "runs natively on Linux,
-#                  macOS, and Windows" (README) on Python 3.11-3.13. The real-git,
-#                  threaded-HTTP, and sqlite tests are where a cross-platform
-#                  regression would show up, so the matrix is the honest check.
+#                  request, and the FULL OS/Python matrix on a weekly schedule
+#                  (and on demand), across everything Orion claims to support.
+# Role in project: The automated proof of two promises — that the suite stays
+#                  green, and that Orion "runs natively on Linux, macOS, and
+#                  Windows" (README) on Python 3.11-3.13.
+# Cost note (why the matrix is event-dependent): this is a PRIVATE repo, so
+#                  Actions minutes are metered, and GitHub bills per-OS at very
+#                  different rates — Linux 1x, Windows 2x, macOS 10x. Running the
+#                  full 3-OS x 3-Python matrix on every PR and push burned the
+#                  monthly quota almost entirely on the macOS jobs. So we run a
+#                  cheap Ubuntu-only check on every PR/push (fast feedback, ~1x
+#                  cost; the logic is OS-agnostic, so this catches the vast
+#                  majority of regressions), and reserve the full cross-platform
+#                  matrix for a WEEKLY schedule + a manual trigger — which is where
+#                  the macOS/Windows guarantee actually needs proving (and the
+#                  natural thing to run before a release or going public). Local
+#                  `pytest` stays the per-change source of truth either way.
 # =============================================================================
 
 name: CI
@@ -16,6 +27,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly full-matrix run (Mondays 06:00 UTC) — the cross-platform proof, kept
+  # off the per-PR/per-push path so it can't drain the metered quota.
+  schedule:
+    - cron: "0 6 * * 1"
+  # Manual trigger for the full matrix on demand (e.g. before a release, after a
+  # cross-platform-sensitive change, or before going public).
+  workflow_dispatch:
 
 jobs:
   test:
@@ -26,7 +44,11 @@ jobs:
       # every OS/version result, not just the first failure.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Full 3-OS matrix ONLY on the scheduled / manual full runs; Ubuntu-only
+        # on every PR and push (cheap 1x cost, fast feedback). A matrix value may
+        # be an expression that evaluates to a JSON array, so we switch on the
+        # triggering event here rather than duplicating the whole job.
+        os: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:

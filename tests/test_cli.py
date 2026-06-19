@@ -17,6 +17,8 @@
 # Everything else (config, state, git collection, redaction) runs for real.
 # =============================================================================
 
+import json
+
 from orion import cli
 
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
@@ -831,6 +833,199 @@ def test_baseline_skips_history_then_reports_only_new_activity(tmp_path, env_and
     _run(repo, "commit", "-q", "-m", "Change feature")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0
     assert len(env_and_mocks["sent"]) == 1    # only the post-baseline commit
+
+
+# --- `orion comments` pull-back (C2) ------------------------------------------
+#
+# These pin the pull-back command WITHOUT any network call: cli.pull_comments is
+# monkeypatched to a recorder that returns a canned relay response, so the tests
+# assert on the since_id the CLI passes (the watermark behavior), the output shape,
+# and the error paths — never on a real relay.
+
+
+def _capture_pull(mp, response):
+    """Monkeypatch cli.pull_comments to record calls and return a canned response.
+
+    Args:
+        mp: pytest monkeypatch.
+        response: the dict pull_comments should return (a {"comments", "latest_id"}).
+
+    Returns:
+        A `calls` list; each entry is the (project, since_id) the CLI passed, so a
+        test can assert what watermark the pull used (the whole point of the cursor).
+
+    Why:
+        Mirrors _capture_relay — replace the real client with an in-memory recorder so
+        the command's logic (watermark read/advance, output, errors) is tested with no
+        relay running.
+    """
+    calls: list[tuple[str, int]] = []
+
+    def fake_pull(relay_url, token, project, since_id, **_kw):
+        calls.append((project, since_id))
+        return response
+
+    mp.setattr(cli, "pull_comments", fake_pull)
+    return calls
+
+
+def _two_comments():
+    """A canned relay response with two comments (latest_id = the higher id).
+
+    Why:
+        Shared fixture-shaped helper so each test states only what it asserts; the
+        created_at values are real ISO-8601 UTC so the human formatter can parse them.
+    """
+    return {
+        "comments": [
+            {"id": 1, "report_id": 10, "author": "Alex", "body": "Looks great.",
+             "created_at": "2026-06-19T19:30:00+00:00"},
+            {"id": 2, "report_id": 10, "author": "", "body": "One nit on naming.",
+             "created_at": "2026-06-19T20:00:00+00:00"},
+        ],
+        "latest_id": 2,
+    }
+
+
+def test_comments_default_shows_new_and_advances_watermark(tmp_path, monkeypatch, capsys):
+    """A default pull shows comments, then advances the watermark to latest_id.
+
+    Why this matters: the unread cursor is the feature. The FIRST pull starts at
+    since_id=0 (full history); after it, the watermark must advance so the SECOND pull
+    starts at the latest_id of the first (2 here) — only what is newer. We assert both
+    the since_id sequence and that the comment text reached stdout.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # ignore real .env
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_pull(monkeypatch, _two_comments())
+
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "Alex" in out and "Looks great." in out
+    assert "(anonymous)" in out  # the empty-author comment shows a placeholder
+
+    # Second run: the watermark advanced to latest_id (2) after the first pull.
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 0
+    assert [since for _project, since in calls] == [0, 2]
+
+
+def test_comments_all_shows_everything_without_advancing(tmp_path, monkeypatch, capsys):
+    """`--all` pulls from since_id=0 and leaves the watermark untouched.
+
+    Why this matters: --all is the explicit re-read escape hatch. It must always start
+    at 0 (show everything) AND must not move the cursor, so a normal run afterward still
+    resumes from where the last NORMAL run left it. We advance the watermark with a
+    default run (to 2), then assert --all uses 0 and a following default run still uses 2.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_pull(monkeypatch, _two_comments())
+
+    cli.main(["comments", "demo", "--config", str(toml)])              # default -> advances to 2
+    cli.main(["comments", "demo", "--config", str(toml), "--all"])     # --all -> since_id 0
+    cli.main(["comments", "demo", "--config", str(toml)])              # default -> still 2
+
+    assert [since for _project, since in calls] == [0, 0, 2]
+
+
+def test_comments_json_emits_the_raw_response(tmp_path, monkeypatch, capsys):
+    """`--json` prints exactly the relay response dict (for the session skill).
+
+    Why this matters: the skill parses this output, so it must be valid JSON equal to
+    what pull_comments returned (comments + latest_id), not the human listing.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    response = _two_comments()
+    _capture_pull(monkeypatch, response)
+
+    assert cli.main(["comments", "demo", "--config", str(toml), "--json"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == response
+
+
+def test_comments_empty_default_is_friendly_and_advances(tmp_path, monkeypatch, capsys):
+    """With nothing new, the default prints a 'no new comments' line and is exit 0.
+
+    Why this matters: a quiet result must read as a deliberate answer, not silence, and
+    still be a clean success. latest_id echoes since_id, so advancing is a safe no-op.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    _capture_pull(monkeypatch, {"comments": [], "latest_id": 0})
+
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "No new comments" in out
+
+
+def test_comments_disabled_relay_is_clean_error(tmp_path, monkeypatch, capsys):
+    """With no relay enabled, `comments` fails cleanly (exit 1) and never pulls.
+
+    Why this matters: comments live on the relay; asking to read them without one is a
+    user error, surfaced as a clear message rather than a crash or an empty result.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo, enabled=False)
+    calls = _capture_pull(monkeypatch, _two_comments())
+
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 1
+    assert calls == []  # never reached the pull
+    assert "no relay" in capsys.readouterr().err.lower()
+
+
+def test_comments_missing_token_is_clean_error_and_never_pulls(tmp_path, monkeypatch, capsys):
+    """A missing relay token fails with a named SecretsError (exit 1), no pull.
+
+    Why this matters: the token gates the authenticated pull; a missing one must be a
+    clean error naming the variable (never its value), caught before any request.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("ORION_RELAY_TOKEN", raising=False)  # token absent
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_pull(monkeypatch, _two_comments())
+
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 1
+    assert calls == []
+    assert "ORION_RELAY_TOKEN" in capsys.readouterr().err  # names the var
+
+
+def test_comments_pull_failure_does_not_advance_watermark(tmp_path, monkeypatch):
+    """A failed pull (DeliveryError) is exit 1 and leaves the watermark unmoved.
+
+    Why this matters: the cursor must only advance on a SUCCESSFUL pull — otherwise a
+    transient relay outage would skip comments forever. We make the first pull raise,
+    then let a second succeed and assert it still starts at since_id=0 (never advanced).
+    """
+    from orion.delivery import DeliveryError
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+
+    # First call raises; the recorder below replaces it for the second call.
+    monkeypatch.setattr(
+        cli,
+        "pull_comments",
+        lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
+    )
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 1
+
+    # A subsequent successful pull must still start at 0 — the failure advanced nothing.
+    calls = _capture_pull(monkeypatch, _two_comments())
+    assert cli.main(["comments", "demo", "--config", str(toml)]) == 0
+    assert calls == [("demo", 0)]
 
 
 def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys):

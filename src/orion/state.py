@@ -69,6 +69,22 @@ CREATE TABLE IF NOT EXISTS report_history (
     recipients TEXT NOT NULL,      -- JSON array of recipient names
     sent_at    TEXT NOT NULL       -- ISO 8601 UTC timestamp
 );
+
+-- C2 pull-back: the per-developer "unread" cursor for supervisor comments. When you
+-- pull a project's comments back from a relay, we record the highest comment id seen
+-- so the next pull shows only what's newer. This is a LOCAL notion: "unread" is per
+-- reader, so the relay stays a dumb append-only store and never holds a read-cursor.
+-- Keyed by (project, relay_url) — NOT project alone — so pointing a project at a
+-- different relay starts a fresh cursor instead of silently reusing a stale one that
+-- counts ids from the old relay's store. A separate table (not collector_markers) on
+-- purpose: this is a read-cursor, semantically distinct from a report's delta marker.
+CREATE TABLE IF NOT EXISTS comment_watermark (
+    project              TEXT NOT NULL,
+    relay_url            TEXT NOT NULL,
+    last_seen_comment_id INTEGER NOT NULL,  -- highest relay comment id pulled so far
+    updated_at           TEXT NOT NULL,     -- ISO 8601 UTC of the pull that set it
+    PRIMARY KEY (project, relay_url)
+);
 """
 
 
@@ -187,6 +203,76 @@ def set_marker(
             reported_at = excluded.reported_at
         """,
         (project, collector, marker, reported_at),
+    )
+    conn.commit()
+
+
+def get_comment_watermark(
+    conn: sqlite3.Connection, project: str, relay_url: str
+) -> int:
+    """Return the highest comment id already pulled for a (project, relay), or 0.
+
+    Args:
+        conn: An open state connection.
+        project: The project the comments belong to.
+        relay_url: The relay the comments were pulled from (the configured [relay]
+            `url`). Part of the key so a different relay gets its own cursor.
+
+    Returns:
+        The stored last-seen comment id, or 0 when there is no row yet (a first-ever
+        pull). 0 is the natural "seen nothing" sentinel: relay comment ids start at 1,
+        so `id > 0` returns everything — exactly what a first pull should show.
+
+    Why:
+        This is the read side of the unread cursor. Returning 0 (not None) for "never
+        pulled" lets the caller pass it straight to pull_comments as `since_id` with no
+        null handling — the first pull naturally fetches the full history, and every
+        later pull fetches only what is newer than what it last recorded.
+    """
+    row = conn.execute(
+        "SELECT last_seen_comment_id FROM comment_watermark "
+        "WHERE project = ? AND relay_url = ?",
+        (project, relay_url),
+    ).fetchone()
+    return row[0] if row is not None else 0
+
+
+def set_comment_watermark(
+    conn: sqlite3.Connection,
+    project: str,
+    relay_url: str,
+    last_seen_comment_id: int,
+    updated_at: str,
+) -> None:
+    """Record the highest comment id pulled for a (project, relay) (insert or update).
+
+    Args:
+        conn: An open state connection.
+        project: The project the comments belong to.
+        relay_url: The relay they were pulled from (the configured [relay] `url`).
+        last_seen_comment_id: The new high-water mark — the `latest_id` the relay
+            returned for this pull.
+        updated_at: ISO 8601 UTC timestamp of this pull.
+
+    Returns:
+        None. Side effect: upserts the comment_watermark row and commits.
+
+    Why:
+        Mirrors set_marker's UPSERT on a composite key: the first pull inserts and
+        every later pull updates the same row — one code path for both, one row per
+        (project, relay). The caller advances this AFTER a successful pull (and only
+        for a normal run, not an `--all` re-read), so the cursor always reflects what
+        was actually shown.
+    """
+    conn.execute(
+        """
+        INSERT INTO comment_watermark (project, relay_url, last_seen_comment_id, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project, relay_url) DO UPDATE SET
+            last_seen_comment_id = excluded.last_seen_comment_id,
+            updated_at = excluded.updated_at
+        """,
+        (project, relay_url, last_seen_comment_id, updated_at),
     )
     conn.commit()
 

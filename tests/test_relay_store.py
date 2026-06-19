@@ -18,6 +18,7 @@
 from relay.store import (
     add_comment,
     comments_for,
+    comments_for_project,
     get,
     history,
     ingest,
@@ -238,3 +239,69 @@ def test_comments_for_report_with_none_is_empty(tmp_path):
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
     assert comments_for(conn, report_id) == []
+
+
+# --- C2 pull-back: comments_for_project (by-project pull + since_id cursor) ----
+
+
+def test_comments_for_project_spans_reports_and_scopes_to_project(tmp_path):
+    """comments_for_project gathers a project's comments across reports, excluding others.
+
+    Why this matters: the pull-back fetches by PROJECT, not by a report id the client
+    doesn't hold. A project can have several reports each with comments, and a comment
+    on a DIFFERENT project must never bleed in. We ingest two reports for 'alpha' and
+    one for 'beta', comment on each, and confirm alpha's pull returns exactly its two
+    comments (across both its reports), oldest first.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    alpha_1 = ingest(conn, _blob("alpha"), "2026-06-18T00:00:01+00:00")
+    alpha_2 = ingest(conn, _blob("alpha"), "2026-06-18T00:00:02+00:00")
+    beta_1 = ingest(conn, _blob("beta"), "2026-06-18T00:00:03+00:00")
+
+    add_comment(conn, alpha_1, "Alex", "on alpha report 1", "2026-06-18T10:00:00+00:00")
+    add_comment(conn, beta_1, "Sam", "on beta", "2026-06-18T10:30:00+00:00")
+    add_comment(conn, alpha_2, "Jo", "on alpha report 2", "2026-06-18T11:00:00+00:00")
+
+    comments = comments_for_project(conn, "alpha")
+    # Both alpha comments, across its two reports, in ascending-id (chronological) order.
+    assert [c["body"] for c in comments] == ["on alpha report 1", "on alpha report 2"]
+    # The report_id linkage is preserved (the comments came from different reports).
+    assert [c["report_id"] for c in comments] == [alpha_1, alpha_2]
+
+
+def test_comments_for_project_since_id_returns_only_newer(tmp_path):
+    """since_id returns only comments with a strictly greater id (the unread cursor).
+
+    Why this matters: this is the watermark mechanism. After a client has seen up to
+    comment id N, the next pull passes since_id=N and must get back only what came
+    after — never the already-seen ones, and never missing a new one. We add three
+    comments, then pull with since_id set to the second's id and expect only the third.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    report_id = ingest(conn, _blob("demo"), "2026-06-18T00:00:01+00:00")
+    c1 = add_comment(conn, report_id, "Alex", "first", "2026-06-18T10:00:00+00:00")
+    c2 = add_comment(conn, report_id, "Sam", "second", "2026-06-18T11:00:00+00:00")
+    c3 = add_comment(conn, report_id, "Jo", "third", "2026-06-18T12:00:00+00:00")
+
+    # since_id defaults to 0 → everything.
+    assert [c["id"] for c in comments_for_project(conn, "demo")] == [c1, c2, c3]
+    # since_id = c2 → only the strictly-newer c3.
+    newer = comments_for_project(conn, "demo", since_id=c2)
+    assert [c["body"] for c in newer] == ["third"]
+    assert newer[0]["id"] == c3
+
+
+def test_comments_for_project_unknown_or_caught_up_is_empty(tmp_path):
+    """An unknown project, or one with nothing newer than since_id, returns [].
+
+    Why this matters: "no new replies" and "no such project" both map to a clean empty
+    list (not None, not an error), which the endpoint turns into a 200 empty response
+    and the client reads as "nothing new". We check both: a never-seen project, and a
+    real project pulled with since_id at its newest comment.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    report_id = ingest(conn, _blob("demo"), "2026-06-18T00:00:01+00:00")
+    last = add_comment(conn, report_id, "Alex", "only", "2026-06-18T10:00:00+00:00")
+
+    assert comments_for_project(conn, "never-seen") == []
+    assert comments_for_project(conn, "demo", since_id=last) == []

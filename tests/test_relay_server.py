@@ -31,7 +31,13 @@ from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
 from relay.render import MAX_COMMENT_BODY_CHARS
 from relay.server import _is_loopback, create_server
-from relay.store import comments_for, get, list_projects, open_relay_store
+from relay.store import (
+    add_comment,
+    comments_for,
+    get,
+    list_projects,
+    open_relay_store,
+)
 
 _TOKEN = "test-ingest-token"
 _VIEW = "test-view-secret"
@@ -96,7 +102,7 @@ def _post(base_url, body, *, token=_TOKEN, path="/ingest"):
         return exc.code, exc.read()
 
 
-def _get(base_url, path, *, password=None):
+def _get(base_url, path, *, password=None, bearer=None):
     """GET `path` from the relay and return (status_code, response_text).
 
     Args:
@@ -104,16 +110,21 @@ def _get(base_url, path, *, password=None):
         path: the request path.
         password: optional dashboard read secret to send as HTTP Basic auth (any
             username; None omits the Authorization header).
+        bearer: optional Bearer token for the machine-JSON /api routes (None omits
+            it). Distinct from `password` because the two surfaces use different auth
+            schemes — Basic for the browser dashboard, Bearer for the pull-back API.
 
     Why:
         Mirrors _post for the read side, unwrapping HTTPError so a 401/404 comes back
-        as a tuple to assert on. The password arg lets read-auth tests send (or omit)
-        Basic credentials without each test rebuilding the request by hand.
+        as a tuple to assert on. The password/bearer args let read-auth tests send (or
+        omit) the right credential scheme without each test rebuilding the request.
     """
     headers = {}
     if password is not None:
         raw = base64.b64encode(f"orion:{password}".encode("utf-8")).decode("ascii")
         headers["Authorization"] = f"Basic {raw}"
+    if bearer is not None:
+        headers["Authorization"] = f"Bearer {bearer}"
     request = urllib.request.Request(base_url + path, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -731,3 +742,188 @@ def test_comment_appears_on_the_report_page(tmp_path):
         assert code == 200
         assert "Reviewer" in html
         assert "Looks solid." in html
+
+
+# --- C2 pull-back: GET /api/comments (Bearer-authed machine JSON) ----------------
+#
+# This is the machine-readable counterpart to the browser dashboard: the local
+# pull-back client fetches a project's comments as JSON over Bearer auth (the SAME
+# token /ingest uses), entirely separate from the Basic-gated HTML routes. These
+# tests pin the auth scheme, the project/since_id validation, and the JSON shape
+# (comments + the latest_id watermark) the client advances from.
+
+
+def _api_comments_path(project=None, since_id=None):
+    """Build a "/api/comments" path with an (optionally) encoded query string.
+
+    Args:
+        project: value for the `project` query param, or None to omit it (the
+            missing-required-param case).
+        since_id: value for `since_id` (any type — str is sent verbatim to exercise
+            the bad-input path), or None to omit it (defaults to 0 server-side).
+
+    Why:
+        Centralizes query-string construction so each test states only the params it
+        is exercising, and so a deliberately-bad since_id (e.g. "nope") can be sent
+        without urlencode rejecting it.
+    """
+    params = {}
+    if project is not None:
+        params["project"] = project
+    if since_id is not None:
+        params["since_id"] = since_id
+    query = urllib.parse.urlencode(params)
+    return "/api/comments" + (f"?{query}" if query else "")
+
+
+def _seed_comments(db, report_id, bodies):
+    """Append comments (by body) to a report directly via the store; return their ids.
+
+    Why:
+        The /api/comments tests need existing comments to read back. Seeding through
+        the store (not the HTTP comment route) keeps these tests focused on the read
+        endpoint alone, independent of the comment POST path's auth/CSRF rules.
+    """
+    conn = open_relay_store(db)
+    try:
+        return [
+            add_comment(conn, report_id, "Alex", body, "2026-06-18T10:00:00+00:00")
+            for body in bodies
+        ]
+    finally:
+        conn.close()
+
+
+def test_api_comments_requires_bearer_and_advertises_scheme(tmp_path):
+    """GET /api/comments with no Bearer token is 401 + WWW-Authenticate: Bearer.
+
+    Why this matters: the read endpoint is authed before any query runs, using the
+    same Bearer scheme as /ingest (NOT the dashboard's Basic). A 401 advertising
+    Bearer tells the client how to authenticate, and nothing about the data leaks
+    because the query never executes.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        # Build the request directly so the 401's headers are readable on the error.
+        req = urllib.request.Request(
+            base_url + _api_comments_path(project="demo"), method="GET"
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected a 401")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+            assert exc.headers.get("WWW-Authenticate") == "Bearer"
+
+
+def test_api_comments_wrong_token_is_401_and_never_echoes_secret(tmp_path):
+    """A wrong Bearer token is rejected 401 and the response never contains the token.
+
+    Why this matters: like the ingest path, a mismatch is refused and the expected
+    token is never echoed — the secret stays secret even in an error.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        code, body = _get(base_url, _api_comments_path(project="demo"), bearer="wrong")
+        assert code == 401
+        assert _TOKEN not in body
+
+
+def test_api_comments_returns_projects_comments_as_json(tmp_path):
+    """A Bearer-authed pull returns the project's comments and a latest_id watermark.
+
+    Why this matters: this is the endpoint's core promise — the client gets each
+    comment's fields as JSON, oldest first, plus the highest id so it can advance its
+    local unread watermark. We seed two comments across the project and read them back.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        c1, c2 = _seed_comments(db, report_id, ["first reply", "second reply"])
+
+        code, body = _get(base_url, _api_comments_path(project="demo"), bearer=_TOKEN)
+        assert code == 200
+        payload = json.loads(body)
+        assert [c["body"] for c in payload["comments"]] == ["first reply", "second reply"]
+        assert [c["id"] for c in payload["comments"]] == [c1, c2]
+        # latest_id is the highest comment id, the watermark the client advances to.
+        assert payload["latest_id"] == c2
+
+
+def test_api_comments_since_id_returns_only_newer(tmp_path):
+    """since_id returns only strictly-newer comments; latest_id reflects them.
+
+    Why this matters: this is the unread cursor over HTTP. After seeing up to c1, a
+    pull with since_id=c1 must return only c2 and report latest_id=c2 — no re-delivery
+    of seen comments, no missed new ones.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        c1, c2 = _seed_comments(db, report_id, ["seen", "new"])
+
+        code, body = _get(
+            base_url, _api_comments_path(project="demo", since_id=c1), bearer=_TOKEN
+        )
+        assert code == 200
+        payload = json.loads(body)
+        assert [c["body"] for c in payload["comments"]] == ["new"]
+        assert payload["latest_id"] == c2
+
+
+def test_api_comments_caught_up_echoes_since_id_as_latest(tmp_path):
+    """With nothing newer than since_id, comments is [] and latest_id echoes since_id.
+
+    Why this matters: "no new replies" must keep the watermark where the client asked
+    (so advancing to latest_id is always safe and idempotent), and return a clean 200
+    empty rather than a 404 — matching the dashboard's empty-state philosophy.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        (last,) = _seed_comments(db, report_id, ["only"])
+
+        code, body = _get(
+            base_url, _api_comments_path(project="demo", since_id=last), bearer=_TOKEN
+        )
+        assert code == 200
+        payload = json.loads(body)
+        assert payload["comments"] == []
+        assert payload["latest_id"] == last
+
+
+def test_api_comments_unknown_project_is_200_empty(tmp_path):
+    """An authed pull for a project with no comments is a 200 empty list, not a 404.
+
+    Why this matters: "never seen" and "no replies yet" look the same to the client —
+    both a clean empty result with latest_id echoing the requested since_id (0 here).
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        code, body = _get(
+            base_url, _api_comments_path(project="never-seen"), bearer=_TOKEN
+        )
+        assert code == 200
+        payload = json.loads(body)
+        assert payload["comments"] == []
+        assert payload["latest_id"] == 0
+
+
+def test_api_comments_missing_project_is_400(tmp_path):
+    """A pull without the required `project` param is rejected 400.
+
+    Why this matters: project is the handle the whole pull is keyed on; an absent or
+    blank one is a client error caught at the boundary, never a query with no filter.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        # Authed, but no project param.
+        code, _ = _get(base_url, _api_comments_path(), bearer=_TOKEN)
+        assert code == 400
+
+
+def test_api_comments_bad_since_id_is_400(tmp_path):
+    """A non-numeric since_id is rejected 400 (never trust client input).
+
+    Why this matters: since_id drives a SQL comparison; a non-integer must be refused
+    cleanly (mirroring the report-id isdigit() guard) rather than coerced or crashing.
+    A negative value is likewise non-numeric to isdigit(), so it is caught here too.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        code, _ = _get(
+            base_url, _api_comments_path(project="demo", since_id="nope"), bearer=_TOKEN
+        )
+        assert code == 400

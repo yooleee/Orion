@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from orion import __version__
@@ -92,3 +94,86 @@ def push(blob_json: str, url: str, token: str, *, timeout: float = 10.0) -> None
         # Connection refused, DNS failure, timeout, etc. — e.g. the relay server is
         # not running.
         raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+
+def pull_comments(
+    relay_url: str,
+    token: str,
+    project: str,
+    since_id: int,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    """GET a project's supervisor comments newer than since_id from the relay (C2).
+
+    Args:
+        relay_url: The configured relay URL — the SAME value push() uses (the
+            [relay] table's `url`, which points at the ingest endpoint, e.g.
+            ".../ingest"). The read URL is DERIVED from it (see Why), so the caller
+            passes one configured URL, not two.
+        token: The Bearer token authenticating this pull (read from .env via the
+            relay's `token_env_var`) — the same shared secret the push sends. Sent as
+            `Authorization: Bearer <token>`.
+        project: The project whose comments to fetch. Sent as a query parameter.
+        since_id: Return only comments with id strictly greater than this — the
+            client's unread watermark. Pass 0 to fetch all of the project's comments.
+        timeout: Seconds to wait for the request before failing.
+
+    Returns:
+        The parsed JSON response: {"comments": [ {id, report_id, author, body,
+        created_at}, ... ], "latest_id": <int>}. `latest_id` is the highest comment
+        id seen (or `since_id` when nothing is newer), which the caller advances its
+        local watermark to. Raises DeliveryError on any non-2xx response, network
+        failure, or unparseable body.
+
+    Why:
+        This is the inbound half of the relay seam, mirroring push() as closely as
+        possible (stdlib urllib, the same User-Agent, the same DeliveryError mapping)
+        so the two directions read alike and the caller handles a pull failure with
+        the same fail-soft uniformity. The read URL is derived with urljoin against a
+        ROOT-RELATIVE "/api/comments": urljoin(".../ingest", "/api/comments") ->
+        ".../api/comments", which replaces the whole path and matches the relay's
+        root-level API route — so a single configured `url` serves both push (its own
+        path) and pull (the derived path) without a second config field. Unlike push,
+        we PARSE the response: the body is the data the caller acts on, so a 200 with
+        an unparseable body is itself a DeliveryError rather than a later crash.
+    """
+    # Derive the read URL from the configured (ingest) URL. A root-relative path makes
+    # urljoin replace the entire path, so ".../ingest" -> ".../api/comments" regardless
+    # of the configured path segment.
+    base = urllib.parse.urljoin(relay_url, "/api/comments")
+    # urlencode handles escaping a project name with spaces/special chars; since_id is
+    # an int, str-encoded by urlencode.
+    query = urllib.parse.urlencode({"project": project, "since_id": since_id})
+    request = urllib.request.Request(
+        f"{base}?{query}",
+        headers={
+            "User-Agent": _USER_AGENT,
+            # Same Bearer scheme as push: the relay checks it constant-time and 401s
+            # a mismatch (the /api/comments endpoint authenticates before querying).
+            "Authorization": f"Bearer {token}",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            # urlopen only returns (no raise) for a 2xx, so any body here is the
+            # success payload; 4xx/5xx arrive as HTTPError below.
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        # 401 = token mismatch; 400 = bad project/since_id. Both surface as a reported
+        # DeliveryError, like the push path.
+        raise DeliveryError(
+            f"Relay comments returned HTTP {exc.code}: {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        # Connection refused, DNS failure, timeout, etc. — e.g. the relay is down.
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        # A 2xx with a body we can't parse means the relay and client disagree on the
+        # contract — treat it as a transport failure, not a silent empty result.
+        raise DeliveryError("Relay returned an unparseable comments response.") from exc

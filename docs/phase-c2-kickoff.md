@@ -133,13 +133,20 @@ watermark to `latest_id` (unless `--all`). Errors name the missing secret like t
 
 ## Verification
 
-- Unit/integration tests above; `pytest` stays green across the matrix.
+- Unit/integration tests above; `pytest` stays green across the matrix. ✅ **Done:** 304 tests
+  pass across py3.11–3.13 × macOS/Ubuntu/Windows (PR #10, merged 2026-06-19).
 - **Security proof points (tests):** `/api/comments` without Bearer → 401; a bad `since_id` → 400.
+  ✅ **Done** (both covered in `tests/test_relay_server.py`).
 - **Local loopback end-to-end:** `relay-serve` on `127.0.0.1`; `intake` a report; comment on it
   via the dashboard; run `orion comments <project>` → the comment appears; run again → nothing new
   (watermark advanced); `--all` → shows it again. Then exercise the skill flow.
-- **Against the deployed relay (your call):** `fly deploy`, then `orion comments` against the live
-  relay pulls a real dashboard comment back.
+- **Against the deployed relay:** `fly deploy`, then `orion comments` against the live relay pulls a
+  real dashboard comment back. ✅ **Done (2026-06-19):** deployed; ran `orion comments orion` plain,
+  `--json`, and `--all` against the live relay (`orion-relay-horizon-c.fly.dev`) and pulled real
+  dashboard comments back. Then exercised the **full `orion-session` skill flow** end to end —
+  drafted a summary, delivered to both supervisors (Discord + Slack), pushed to the dashboard, and
+  the skill's step-6 pull surfaced a fresh supervisor reply back into the session. Loop closed and
+  dogfooded.
 
 ## Out of scope (record; do not pull in)
 

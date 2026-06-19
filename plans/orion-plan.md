@@ -711,13 +711,17 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
   CI, CONTRIBUTING, SECURITY, issue/PR templates, README/docs polish (WSL2-cron caveat, a "you're
   ready" checkpoint), **plus** the friction items — KI-1 dual-channel partial-failure policy, a
   new-repo blob baseline / `--init`, and the `orion-session` abs-path ergonomics.
-- **Dashboard maturation (rides with the hosting decision):** the C1 dashboard is deliberately
-  minimal (loopback-only, plain server-rendered HTML) — right for a "does it work" pass, not a
-  finished surface. A proper **visual design** *and* richer **report content** (e.g. submitter/
-  author accountability — **KI-17**) land when the dashboard becomes **supervisor-facing**, because
-  those content features (multi-party identity, C3) reshape the design — so designing it now would
-  be premature. (Recorded from the 2026-06-18 dashboard dogfood: drill-down navigation validated;
-  content/design flagged as future.)
+- **Dashboard maturation (rides with the hosting decision):** the C1 dashboard was deliberately
+  minimal (plain server-rendered HTML) — right for a "does it work" pass, not a finished surface.
+  **Visual design: done (2026-06-19).** With the dashboard now supervisor-facing (post-C2 deploy), a
+  **refined-minimal restyle** landed (token-based palette, type scale, styled list/report/comment
+  components) plus **California-time display** (DST-correct PDT/PST via `zoneinfo`+`tzdata`) and a
+  **relative-timestamp progressive enhancement** (one inline script; the page stays fully functional
+  with no JS). Decisions this pass: keep it inline-CSS + light JS (no static-asset routing, no
+  framework); larger features (sidebars, etc.) deferred to a dedicated dashboard-expansion design.
+  **Still deferred:** richer **report content** — submitter/author accountability (**KI-17**) — which
+  is entangled with multi-party identity (C3) and reshapes the design, so it waits for C3. (New seams
+  recorded: **KI-19** inline-assets vs. a future CSP; **KI-20** message-formatter still UTC.)
 - **C2/C3 sequencing** (bidirectional, multi-party) — firmed up at the same juncture. The
   post-C1 OSS-readiness pass is now complete, so this **horizon-planning juncture is teed up** in
   [`docs/horizon-planning-kickoff.md`](../docs/archive/horizon-planning-kickoff.md) (north-star + C2/C3 +

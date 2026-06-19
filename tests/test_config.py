@@ -746,3 +746,79 @@ def test_relay_enabled_non_bool_rejected(tmp_path):
     )
     with pytest.raises(ConfigError, match="enabled"):
         load_config(path)
+
+
+def test_relay_token_env_var_rejects_a_pasted_value(tmp_path):
+    """A token VALUE in `token_env_var` (not the variable name) is rejected — and the
+    error never echoes the value.
+
+    Why this matters: pasting the secret where the NAME belongs is a real footgun (it
+    happened on the first Fly deploy). It must fail at config load with a clear message,
+    and must NOT print the secret back — the old "secret '<value>' is not set" path leaked
+    it. The sample has a leading digit and a hyphen, which a real env-var name cannot.
+    """
+    leaked = "0CoZb-jeUavOrr_uy0KCnK9pYtDCqzJhZJKGSGqDiTI"
+    path = _write(
+        tmp_path,
+        f"""
+        [relay]
+        enabled = true
+        url = "https://relay.example.com/ingest"
+        token_env_var = "{leaked}"
+        """
+        + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    msg = str(exc.value)
+    assert "token_env_var" in msg
+    assert "environment variable name" in msg
+    assert leaked not in msg  # the secret must NOT be echoed back
+
+
+def test_recipient_webhook_env_var_rejects_a_pasted_url(tmp_path):
+    """A webhook URL pasted into `webhook_env_var` (not the variable name) is rejected,
+    without echoing it.
+
+    Why this matters: the same footgun as the relay token — a user pastes the secret
+    (here a webhook URL, full of ':' and '/') where the env-var NAME belongs.
+    """
+    url = "https://hooks.slack.com/services/T00/B00/XXXX"
+    path = _write(
+        tmp_path,
+        f"""
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "slack"
+        webhook_env_var = "{url}"
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    msg = str(exc.value)
+    assert "webhook_env_var" in msg
+    assert url not in msg
+
+
+def test_summarizer_api_key_env_rejects_a_pasted_value(tmp_path):
+    """A pasted key VALUE in `api_key_env` (local summarizer) is rejected.
+
+    Why this matters: api_key_env is the third *_env_var field; it gets the same
+    name-shape guard so the value-vs-name slip can't leak a key here either.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "local"
+        model = "llama3.1"
+        base_url = "http://localhost:11434/v1"
+        api_key_env = "sk-abc-123456"
+        """
+        + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError, match="api_key_env"):
+        load_config(path)

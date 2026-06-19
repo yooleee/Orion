@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -261,6 +262,42 @@ def load_config(path: Path) -> Config:
     )
 
 
+# A valid environment-variable NAME: a letter or underscore, then letters, digits, or
+# underscores (POSIX-ish). The *_env_var config fields must be NAMES — the secret VALUE
+# lives in .env — so we validate them against this.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_env_var_name(value: str, field: str, where: str) -> None:
+    """Raise ConfigError if `value` is not shaped like an environment variable name.
+
+    Args:
+        value: the configured string (caller has already confirmed a non-empty str).
+        field: the config key, e.g. "token_env_var", for the error message.
+        where: a human location, e.g. "[relay]" or "recipient 'Alex'".
+
+    Returns:
+        None. Raises ConfigError when `value` is not a valid variable name.
+
+    Why:
+        Each *_env_var field NAMES a .env variable; the secret itself never belongs in the
+        config. Validating the name shape here turns the easy "pasted the secret value
+        where the variable name goes" slip into a clear error at config load — and avoids a
+        later "secret '<value>' is not set" path that would ECHO the pasted secret. We
+        deliberately do NOT put `value` in the message (it may be the secret). Heuristic,
+        not airtight (a value that happens to be a valid identifier would still pass), but
+        it catches the common shapes: leading digits, hyphens in base64url tokens, spaces,
+        and the punctuation of a pasted webhook URL.
+    """
+    if not _ENV_VAR_NAME_RE.match(value):
+        raise ConfigError(
+            f"{where} has a `{field}` that is not a valid environment variable name. "
+            f"It must NAME a .env variable — letters, digits and underscores, not starting "
+            f'with a digit (e.g. "ORION_RELAY_TOKEN") — not the secret value itself, which '
+            f"belongs in .env."
+        )
+
+
 def _parse_summarizer(raw: object, config_path: Path) -> SummarizerConfig:
     """Validate the optional [summarizer] table into a SummarizerConfig (B4).
 
@@ -329,6 +366,8 @@ def _parse_summarizer(raw: object, config_path: Path) -> SummarizerConfig:
         raise ConfigError(
             f"{where} has an invalid `api_key_env` (must be a non-empty string when set)."
         )
+    if isinstance(api_key_env, str) and api_key_env.strip():
+        _validate_env_var_name(api_key_env.strip(), "api_key_env", where)
 
     return SummarizerConfig(
         provider="local",
@@ -398,6 +437,7 @@ def _parse_relay(raw: object, config_path: Path) -> RelayConfig:
             f"{where} is enabled but missing a non-empty `token_env_var` "
             f'(the .env variable holding the ingest token, e.g. token_env_var = "ORION_RELAY_TOKEN").'
         )
+    _validate_env_var_name(token_env_var.strip(), "token_env_var", where)
 
     return RelayConfig(
         enabled=True, url=url.strip(), token_env_var=token_env_var.strip()
@@ -570,6 +610,7 @@ def _parse_recipients(raw: object, where: str) -> tuple[Recipient, ...]:
             )
         if not isinstance(webhook_env_var, str) or not webhook_env_var.strip():
             raise ConfigError(f"{rwhere} is missing a non-empty `webhook_env_var`.")
+        _validate_env_var_name(webhook_env_var.strip(), "webhook_env_var", rwhere)
 
         recipients.append(
             Recipient(name=name, channel=channel, webhook_env_var=webhook_env_var)

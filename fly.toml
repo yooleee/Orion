@@ -1,0 +1,38 @@
+# =============================================================================
+# fly.toml — Fly.io deploy config for the Orion relay (deployment Option A)
+# -----------------------------------------------------------------------------
+# Builds the repo's Dockerfile and runs the relay on Fly, which terminates TLS in
+# front of it. CHANGE `app` to your own globally-unique name before deploying.
+#
+# Secrets are NOT in this file — set them with `fly secrets set` (see
+# docs/deployment.md). The relay needs two:
+#   ORION_RELAY_TOKEN       — ingest Bearer token (must match your local [relay] config)
+#   ORION_RELAY_VIEW_TOKEN  — dashboard Basic-auth password (any username)
+# =============================================================================
+
+app = "orion-relay-horizon-c"
+primary_region = "sjc"   # pick one near you / your supervisors: `fly platform regions`
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Fly terminates HTTPS and forwards to the container's port 8787. The relay binds
+# 0.0.0.0:8787 (the Dockerfile entrypoint), so the fail-closed guard REQUIRES the
+# view secret on that non-loopback bind — a misconfigured deploy refuses to start.
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0   # scale to zero when idle; set to 1 to stay warm (no cold start)
+
+# Persist the sqlite store across restarts/redeploys (it lives at /data in the image).
+# Create the volume first, in the SAME region:
+#   fly volumes create orion_data --size 1 --region iad
+[mounts]
+  source = "orion_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"   # comfortable for the Python import; try 256mb to trim cost

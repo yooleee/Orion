@@ -1,5 +1,5 @@
 <!-- =========================================================================
-native-bots-kickoff.md
+phase-c2-bots-kickoff.md
 ---------------------------------------------------------------------------
 Responsible for: Scoping the next Horizon-C slice — native Discord/Slack bots
                  (genuine two-way interaction in the chat surface, beyond the

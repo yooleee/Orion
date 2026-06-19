@@ -726,7 +726,7 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
   slice decided" below). C2 shipped (dashboard comments + the comment pull-back), so the pass decided
   the *next* slice: **native Discord/Slack bots**, with **C3-proper and E2E demand-gated** and the
   dogfood reframed as a **refinement input, not a gate**. The kickoff is
-  [`docs/native-bots-kickoff.md`](../docs/native-bots-kickoff.md); it supersedes the archived
+  [`docs/phase-c2-bots-kickoff.md`](../docs/phase-c2-bots-kickoff.md); it supersedes the archived
   [`docs/archive/horizon-planning-kickoff.md`](../docs/archive/horizon-planning-kickoff.md) for the
   post-C2 state.
 
@@ -831,7 +831,7 @@ URL accepts any host; Bearer auth + fail-soft + tests exist).
 
 The post-C2 run of the horizon-planning juncture (supersedes the "Sequence — C2 next" snapshot from
 the 2026-06-18 pass, now that C2 is done). Detail and the dogfood capture sheet live in
-[`docs/native-bots-kickoff.md`](../docs/native-bots-kickoff.md).
+[`docs/phase-c2-bots-kickoff.md`](../docs/phase-c2-bots-kickoff.md).
 
 - **Next slice DECIDED: native Discord/Slack bots.** Among {OSS-readiness polish, light
   planning/tracking layer, native bots}, native bots is next — it deepens the *delivery surface*

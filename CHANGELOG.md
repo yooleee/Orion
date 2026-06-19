@@ -14,6 +14,48 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## C2 comment pull-back — `orion comments` + unread tracking + skill surfacing (2026-06-19)
+
+Closes the C2 loop **into the developer's workflow**: supervisor replies that previously lived only
+on the dashboard are now pulled back to the machine where you work. The first C2 slice made the loop
+two-way *on the dashboard*; this increment surfaces those replies where you report. All stdlib, **no
+new dependencies**. `pytest`: **304**. See [`docs/phase-c2-kickoff.md`](docs/phase-c2-kickoff.md).
+
+### Added
+
+- **`orion comments <project>` command (`src/orion/cli.py`).** Pulls a project's supervisor comments
+  back from the relay. `--all` re-reads everything without moving the unread marker; `--json` emits
+  the raw response for the session skill; the default is a human listing
+  (`author · <Pacific time> · body`). Requires an enabled `[relay]` (a clear error otherwise) and
+  authenticates with the **same Bearer token the push uses** — whoever can push a project's reports
+  can read its replies. A failed pull advances nothing.
+- **Relay read endpoint `GET /api/comments?project=&since_id=` (`relay/server.py`).** A Bearer-authed
+  machine-JSON route, dispatched *before* the dashboard's Basic gate so the two consumers keep
+  distinct auth schemes cleanly. Validates `project` (required) and `since_id` (non-negative int or
+  400); returns `{"comments": [...], "latest_id": N}`, an empty 200 for a project with nothing new
+  (matching the dashboard's empty-state philosophy). Backed by a new `comments_for_project` store
+  query (`relay/store.py`) that JOINs comments→reports to resolve the by-project link the flat schema
+  can't.
+- **Local pull client `pull_comments` (`src/orion/delivery/relay.py`).** Mirrors `push` (stdlib
+  `urllib`, Bearer auth, `DeliveryError` mapping); derives the read URL from the configured ingest
+  URL via `urljoin(url, "/api/comments")`, so one configured `url` serves both directions.
+- **Unread watermark (`src/orion/state.py`, `comment_watermark` table).** A per-`(project, relay_url)`
+  cursor (`get/set_comment_watermark`) so each pull shows only what's new and changing relays starts a
+  fresh cursor. Kept separate from `collector_markers` — a read-cursor is not a report delta.
+- **Session-skill surfacing (`orion-session` skill).** After a successful `orion intake`, the skill
+  runs `orion comments … --json` and surfaces any new replies in-session ("Since your last report,
+  <supervisor> said: …"), closing the loop without opening the dashboard.
+
+### Why it's shaped this way
+
+- **Pull by project, watermark local.** The local side never recorded the relay's comment ids (the
+  push discards them), so the natural handle is the project. "Unread" is a per-developer notion, so
+  the relay stays a dumb append-only store and the cursor lives locally. Ids are a monotonic
+  autoincrement, so `id > since_id` is a robust cursor with no clock/tie issues.
+- **Comments aren't redaction-scanned** (same reasoning as the comment POST: inbound supervisor text
+  on an access-gated relay, not the developer's outbound secrets) — but the endpoint is still
+  Bearer-gated, auth checked before any query.
+
 ## Dashboard maturation — refined-minimal restyle + Pacific time + relative timestamps (2026-06-19)
 
 The relay dashboard is now genuinely **supervisor-facing** (post-C2 deploy), so it gets a quality

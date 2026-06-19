@@ -98,8 +98,11 @@ gains this table automatically on the next startup — no manual migration. New 
 
 ## Deferred (record; do not pull in)
 
-- **Push comments back to the developer** (`orion comments` pull / session-skill surfacing) — the
-  next increment.
+- ~~**Push comments back to the developer** (`orion comments` pull / session-skill surfacing) — the
+  next increment.~~ ✅ **Done (2026-06-19):** built as the C2 comment pull-back —
+  `orion comments <project>` pulls replies by project over the Bearer-authed `GET /api/comments`,
+  a per-(project, relay) local watermark tracks unread, and the `orion-session` skill surfaces new
+  replies after a report. See `docs/phase-c2-kickoff.md`.
 - **Native Discord/Slack replies (bots)** — the richer add-on (Gateway / Socket Mode; the
   build-and-maintain cost).
 - **Authenticated per-person identity** — C3 / KI-17 (the self-entered name is the lightweight stand-in).

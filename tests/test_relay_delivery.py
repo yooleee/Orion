@@ -11,12 +11,13 @@
 #                return a canned response (or raise) — mirrors test_delivery.py.
 # =============================================================================
 
+import json
 import urllib.error
 
 import pytest
 
 from orion.delivery import DeliveryError
-from orion.delivery.relay import push
+from orion.delivery.relay import pull_comments, push
 
 
 class _FakeResponse:
@@ -127,3 +128,114 @@ def test_connection_error_becomes_delivery_error(monkeypatch):
 
     with pytest.raises(DeliveryError):
         push(_BLOB_JSON, "https://relay.test/ingest", "tok")
+
+
+# --- C2 pull-back: pull_comments (the inbound half of the relay seam) ------------
+
+
+class _FakeReadResponse:
+    """Context-manager stand-in for urlopen whose .read() returns canned bytes.
+
+    Why:
+        pull_comments reads and decodes the response body (unlike push, which only
+        checks .status), so the fake must support `with urlopen(...) as r: r.read()`
+        and hand back the bytes the test wants parsed.
+    """
+
+    def __init__(self, body_bytes):
+        self._body = body_bytes
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_pull_derives_read_url_sends_query_and_bearer(monkeypatch):
+    """pull_comments derives /api/comments from the ingest URL and sends the right request.
+
+    Why this matters: the caller passes ONE configured URL (the ingest URL); the pull
+    must derive the read endpoint from it (urljoin to a root-relative path replaces
+    "/ingest" with "/api/comments"), carry the project and since_id as query params,
+    and authenticate with the Bearer token. We also confirm the JSON body is parsed
+    and returned as-is.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["user_agent"] = request.headers.get("User-agent")
+        body = json.dumps(
+            {"comments": [{"id": 7, "author": "Alex", "body": "ship it"}], "latest_id": 7}
+        ).encode("utf-8")
+        return _FakeReadResponse(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = pull_comments("https://relay.test/ingest", "s3cr3t", "my proj", 3)
+
+    # The read URL is derived from the ingest URL (path replaced, host kept).
+    assert captured["url"].startswith("https://relay.test/api/comments?")
+    # Query carries both params, with the space in the project name escaped.
+    assert "project=my+proj" in captured["url"]
+    assert "since_id=3" in captured["url"]
+    assert captured["authorization"] == "Bearer s3cr3t"
+    assert captured["user_agent"] is not None and "Orion" in captured["user_agent"]
+    # The JSON body is parsed and returned verbatim for the caller to act on.
+    assert result == {
+        "comments": [{"id": 7, "author": "Alex", "body": "ship it"}],
+        "latest_id": 7,
+    }
+
+
+def test_pull_http_error_becomes_delivery_error(monkeypatch):
+    """A 4xx (e.g. 401 bad token / 400 bad params) is translated into DeliveryError.
+
+    Why this matters: a pull failure must surface as the same uniform, catchable
+    DeliveryError as a push failure — the CLI reports it without crashing.
+    """
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 401, "Unauthorized", hdrs=None, fp=None
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(DeliveryError):
+        pull_comments("https://relay.test/ingest", "wrong", "demo", 0)
+
+
+def test_pull_connection_error_becomes_delivery_error(monkeypatch):
+    """A network failure (URLError) — relay down — becomes DeliveryError.
+
+    Why this matters: an unreachable relay on the read path is the same non-fatal
+    failure as on the write path; the CLI turns it into a reported error, not a crash.
+    """
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(DeliveryError):
+        pull_comments("https://relay.test/ingest", "tok", "demo", 0)
+
+
+def test_pull_unparseable_body_becomes_delivery_error(monkeypatch):
+    """A 2xx whose body is not valid JSON is treated as a DeliveryError, not empty data.
+
+    Why this matters: pull_comments returns the parsed body for the caller to act on,
+    so a success status with a garbage body means client/relay disagree on the
+    contract — failing loudly is safer than silently returning nothing.
+    """
+    def fake_urlopen(request, timeout=None):
+        return _FakeReadResponse(b"this is not json")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(DeliveryError):
+        pull_comments("https://relay.test/ingest", "tok", "demo", 0)

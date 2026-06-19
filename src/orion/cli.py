@@ -19,11 +19,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from orion.collectors import LANE_RAW, LANE_STRUCTURED
 from orion.collectors.git import GitError
@@ -44,14 +46,21 @@ from orion.config import (
 )
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
-from orion.delivery.relay import push as relay_push
+from orion.delivery.relay import pull_comments, push as relay_push
 from orion.delivery.slack import send as slack_send
 from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
 from orion.report import ReportBlob, build_report, serialize_blob
 from orion.secrets import SecretsError, get_required, load_secrets
-from orion.state import get_marker, open_state, record_report, set_marker
+from orion.state import (
+    get_comment_watermark,
+    get_marker,
+    open_state,
+    record_report,
+    set_comment_watermark,
+    set_marker,
+)
 from orion.summarize import AnthropicSummarizer, LocalSummarizer, Summarizer, SummarizerError
 
 # Section title shown in the report for each collector. Kept as an explicit table
@@ -302,6 +311,35 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    comments_parser = subparsers.add_parser(
+        "comments",
+        help="Pull supervisor comments on your reports back from the relay (C2).",
+    )
+    comments_parser.add_argument("project", help="Project name as defined in orion.toml.")
+    comments_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    comments_parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help=(
+            "Emit the raw JSON response (for the Claude session skill) instead of the "
+            "human-readable listing."
+        ),
+    )
+    comments_parser.add_argument(
+        "--all",
+        dest="show_all",
+        action="store_true",
+        help=(
+            "Show ALL comments without advancing the unread marker (the default shows "
+            "only comments new since your last check, and advances the marker)."
+        ),
+    )
+
     relay_parser = subparsers.add_parser(
         "relay-serve",
         help="Run the local relay: receive pushed reports and serve a read-only dashboard.",
@@ -373,6 +411,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(Path(args.config))
     if args.command == "baseline":
         return cmd_baseline(args.project, Path(args.config))
+    if args.command == "comments":
+        return cmd_comments(
+            args.project, Path(args.config), as_json=args.as_json, show_all=args.show_all
+        )
     if args.command == "relay-serve":
         return cmd_relay_serve(
             args.host,
@@ -1136,6 +1178,150 @@ def cmd_baseline(project_name: str, config_path: Path) -> int:
         f"Nothing was sent."
     )
     return 0
+
+
+def cmd_comments(
+    project_name: str, config_path: Path, *, as_json: bool, show_all: bool
+) -> int:
+    """Pull supervisor comments on a project's reports back from the relay (C2).
+
+    Args:
+        project_name: The project whose comments to pull.
+        config_path: Path to orion.toml.
+        as_json: When True, print the raw JSON response (for the session skill);
+            otherwise print a human-readable listing.
+        show_all: When True, show ALL comments and do NOT advance the unread marker
+            (an explicit re-read); when False (default), show only comments newer than
+            the stored watermark and advance it afterward.
+
+    Returns:
+        Exit code: 0 on a successful pull (including "nothing new"); 1 on a config /
+        secrets error, a disabled relay, or a failed pull.
+
+    Why:
+        This closes the C2 loop into the developer's workflow: supervisor replies that
+        previously lived only on the dashboard are pulled to the machine where you
+        work. The pull is BY PROJECT (the local side never recorded the relay's comment
+        ids), authenticated with the SAME Bearer token the push uses (whoever can push
+        a project's reports can read its replies), and "unread" is a LOCAL watermark —
+        the relay stays a dumb append-only store. The default advances that watermark so
+        each run shows only what's new; --all is the escape hatch to re-read everything
+        without disturbing the cursor. The token is read here, in the CLI (like every
+        other secret), only when the relay is enabled, and a missing one is named, never
+        printed. pull_comments is the module-global so a test can monkeypatch it,
+        mirroring relay_push.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+        load_secrets(config_path)
+
+        relay_cfg = config.relay
+        # Pulling comments is only meaningful when a relay is configured — that is
+        # where comments live. A disabled/absent relay is a clean, actionable error
+        # (not a crash), mirroring how the push path treats a disabled relay as a no-op.
+        if not relay_cfg.enabled:
+            print(
+                f"Error: cannot pull comments for {project.name!r} — no relay is "
+                f"enabled in {config_path}. Comments live on the relay you push reports "
+                f"to; enable the [relay] table to read replies back.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # The Bearer token lives in .env, named by token_env_var (never in the config).
+        # A missing one is named by get_required and surfaces as a clean SecretsError.
+        token = get_required(relay_cfg.token_env_var)
+
+        conn = open_state(config.state_db)
+        # since_id is the unread cursor: 0 for --all (fetch the full history), else the
+        # stored watermark (fetch only what's newer). Keyed by (project, relay_url).
+        since_id = (
+            0 if show_all else get_comment_watermark(conn, project.name, relay_cfg.url)
+        )
+        response = pull_comments(relay_cfg.url, token, project.name, since_id)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        # All three are user-fixable (a config typo, a missing token, a down relay).
+        # Print cleanly and fail; never advance the watermark on a failed pull.
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    comments = response.get("comments", [])
+    # latest_id lets us advance the watermark even when the listing is empty; fall back
+    # to since_id defensively if the relay omitted it.
+    latest_id = response.get("latest_id", since_id)
+
+    if as_json:
+        # Emit the response verbatim for the skill to parse (it reads `comments`).
+        print(json.dumps(response))
+    else:
+        _print_comments(comments, project.name, show_all)
+
+    # Advance the watermark ONLY on a normal run — --all is an explicit re-read that
+    # must not move the cursor. Advancing to latest_id is idempotent (it echoes
+    # since_id when nothing is new), so a no-new-comments run is a safe no-op write.
+    if not show_all:
+        pulled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        set_comment_watermark(conn, project.name, relay_cfg.url, latest_id, pulled_at)
+
+    return 0
+
+
+def _print_comments(comments: list[dict], project_name: str, show_all: bool) -> None:
+    """Print a project's pulled comments as a human-readable listing.
+
+    Args:
+        comments: The comment dicts from pull_comments (id, author, body, created_at).
+        project_name: The project the comments belong to (for the header/empty line).
+        show_all: Whether this was an --all pull, which only changes the empty-state
+            wording ("no comments" vs "no new comments").
+
+    Returns:
+        None. Writes to stdout.
+
+    Why:
+        The default, human-facing output: one line per comment as
+        "author · <Pacific time> · body". An empty result is a friendly one-liner
+        rather than silence, so a run that found nothing reads as a deliberate result.
+        The wording distinguishes "no comments at all" (--all) from "nothing new since
+        last check" (default) so the user knows which question was answered.
+    """
+    if not comments:
+        qualifier = "" if show_all else " new"
+        print(f"No{qualifier} comments for {project_name!r}.")
+        return
+
+    print(f"{len(comments)} comment(s) for {project_name!r}:")
+    for comment in comments:
+        # author is the self-entered display name and may be "" (anonymous); show a
+        # placeholder so the line never starts with a bare separator.
+        author = comment["author"] or "(anonymous)"
+        print(f"  {author} · {_format_pacific(comment['created_at'])} · {comment['body']}")
+
+
+def _format_pacific(iso: str) -> str:
+    """Render a stored UTC ISO-8601 timestamp as human Pacific wall-clock time.
+
+    Args:
+        iso: An ISO-8601 timestamp with an offset (as the relay stores it, e.g.
+            "2026-06-19T19:30:00+00:00").
+
+    Returns:
+        A human string in America/Los_Angeles, e.g. "2026-06-19 12:30 PDT".
+
+    Why:
+        Comments are shown in a fixed Pacific zone (matching the dashboard's display
+        choice) so timestamps read consistently regardless of the machine's local
+        timezone. ZoneInfo is internally cached, so constructing it per call is cheap;
+        doing it HERE rather than at module import keeps a missing tzdata from breaking
+        every other command — only the `comments` listing depends on it. This
+        deliberately does NOT import relay/render.py's formatter: orion/ shares no code
+        with relay/, the same independence the duplicated busy-timeout constant reflects.
+    """
+    # fromisoformat parses the stored "+00:00" offset; astimezone converts that absolute
+    # instant to California wall-clock time (zoneinfo applies DST -> PDT/PST).
+    pacific = datetime.fromisoformat(iso).astimezone(ZoneInfo("America/Los_Angeles"))
+    return pacific.strftime("%Y-%m-%d %H:%M %Z")
 
 
 def _load_relay_serve():

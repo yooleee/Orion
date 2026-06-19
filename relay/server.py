@@ -44,6 +44,7 @@ from .render import (
 from .store import (
     add_comment,
     comments_for,
+    comments_for_project,
     get,
     history,
     ingest,
@@ -228,7 +229,22 @@ class _RelayHandler(BaseHTTPRequestHandler):
         fail-closed guard in create_server() guarantees a view secret IS set whenever
         the bind host is non-loopback, so a world-reachable dashboard is never
         unauthenticated. Ingest (the write surface) stays Bearer-authed independently.
+
+        The "/api/..." namespace is the EXCEPTION: it is a machine-JSON surface for the
+        local pull-back client (C2), Bearer-authed like /ingest — NOT the browser's
+        Basic scheme. So it is routed FIRST, before the Basic gate below, keeping the
+        two consumers' auth schemes cleanly separated (a browser never reaches it; the
+        CLI never trips the Basic dialog).
         """
+        # Strip any query string; routing is by path only (the /api/ handler re-reads
+        # the query itself, since it — unlike the dashboard — takes parameters).
+        path = urllib.parse.urlparse(self.path).path
+
+        # Machine-JSON API routes are Bearer-authed and bypass the Basic view gate.
+        if path == "/api/comments":
+            self._handle_api_comments()
+            return
+
         # Read-auth gate: enforced only when a view secret is configured. A missing
         # or wrong credential is a 401 whose WWW-Authenticate header makes the browser
         # present its own login dialog.
@@ -239,9 +255,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 extra_headers={"WWW-Authenticate": 'Basic realm="Orion dashboard"'},
             )
             return
-
-        # Strip any query string; routing is by path only.
-        path = urllib.parse.urlparse(self.path).path
         # A fresh connection per request keeps each sqlite handle on its own thread.
         conn = open_relay_store(self.server.db_path)
         try:
@@ -432,6 +445,73 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # 303 + Location → the browser re-GETs the report (POST-redirect-GET), so a
         # refresh of the resulting page does not resubmit the comment.
         self._send_redirect(303, f"/report/{report_id}")
+
+    def _handle_api_comments(self) -> None:
+        """Return a project's comments as JSON for the local pull-back (GET /api/comments).
+
+        Query parameters:
+          - project  (required): the project whose comments to return.
+          - since_id (optional): return only comments with id > this. A non-negative
+            integer; defaults to 0 (all of the project's comments).
+
+        The inbound-security checklist, enforced IN ORDER:
+          1. Auth — Bearer, the SAME token /ingest uses (whoever can push a project's
+             reports can read its replies). 401 + WWW-Authenticate: Bearer otherwise.
+             Checked BEFORE any query parsing or store touch.
+          2. Validate — `project` required non-empty (400 if missing/blank); `since_id`
+             must be a non-negative integer (400 on anything else). "Never trust client
+             input," mirroring _read_raw_body and the comment POST.
+          3. Query + respond — JSON {"comments": [...], "latest_id": <n>}.
+
+        Why:
+            This is the machine-readable counterpart to the browser dashboard: the CLI
+            pull-back consumes JSON over Bearer, leaving the HTML routes' Basic scheme
+            untouched. latest_id lets the client advance its local unread watermark even
+            when the rendered list is empty (it echoes since_id then), so the relay stays
+            a dumb append-only store and "unread" is purely a per-developer local notion.
+            Comments are NOT redaction-scanned (same reasoning as the comment POST: they
+            are inbound supervisor text on an access-gated relay, not the developer's own
+            outbound secrets), but the endpoint is still Bearer-gated.
+        """
+        # 1) Authenticate FIRST, exactly like /ingest — validate nothing until authorized.
+        auth_error = self._auth_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Parse and validate the query string. do_GET strips the query for routing,
+        # so we re-read it from self.path here (this is the one GET route with params).
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        # parse_qs maps each key to a LIST of values; take the first (or "" if absent).
+        project = query.get("project", [""])[0].strip()
+        if not project:
+            self._send_json(400, {"error": "query parameter 'project' is required"})
+            return
+        # since_id is optional; default "0". isdigit() accepts only a non-negative
+        # integer (no sign, no whitespace) — same guard do_GET uses for a report id —
+        # so a negative or non-numeric value is a clean 400, never a store touch.
+        since_id_raw = query.get("since_id", ["0"])[0]
+        if not since_id_raw.isdigit():
+            self._send_json(
+                400, {"error": "query parameter 'since_id' must be a non-negative integer"}
+            )
+            return
+        since_id = int(since_id_raw)
+
+        # 3) Query and respond. A fresh connection per request keeps each sqlite handle
+        # on its own thread (the threading-server pattern used throughout this handler).
+        conn = open_relay_store(self.server.db_path)
+        try:
+            comments = comments_for_project(conn, project, since_id)
+        finally:
+            conn.close()
+        # Comments are ordered by ascending id, so the last one carries the highest id;
+        # with none returned the watermark stays where the client asked (since_id), so a
+        # caller can always advance to latest_id unconditionally.
+        latest_id = comments[-1]["id"] if comments else since_id
+        self._send_json(200, {"comments": comments, "latest_id": latest_id})
 
     def _auth_error(self) -> str | None:
         """Return None if the request is authorized, else a 401 reason string.

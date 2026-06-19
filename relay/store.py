@@ -357,3 +357,56 @@ def comments_for(conn: sqlite3.Connection, report_id: int) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def comments_for_project(
+    conn: sqlite3.Connection, project: str, since_id: int = 0
+) -> list[dict]:
+    """Return a project's comments newer than `since_id`, oldest first (C2 pull-back).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project name whose comments to fetch. Matched exactly against
+            relay_reports.project.
+        since_id: Return only comments with id strictly greater than this. Defaults
+            to 0, which (since the autoincrement id starts at 1) returns ALL of the
+            project's comments — the "first check" / `--all` case.
+
+    Returns:
+        A list of {"id", "report_id", "author", "body", "created_at"} dicts — the
+        same shape comments_for returns — across every report in the project, in
+        ascending-id (chronological) order. Empty when the project has no newer
+        comments (or no reports at all).
+
+    Why:
+        The local pull-back fetches by PROJECT, because the local side never recorded
+        the relay-side comment/report ids (the push discards them) — project is the
+        handle the client actually holds. Comments are stored flat (report_comments
+        has no project column), so this JOINs through relay_reports to resolve the
+        comment->project link the schema can't express directly. The `id > since_id`
+        filter is the unread cursor: ids are a monotonic autoincrement, so comparing
+        ids is robust with no clock/precision/tie issues a created_at filter would
+        have. ORDER BY c.id ASC means the LAST element is the highest id, which the
+        endpoint uses as the watermark to advance to. Parameterized binds keep both
+        `project` and `since_id` injection-safe.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.id, c.report_id, c.author, c.body, c.created_at
+        FROM report_comments c
+        JOIN relay_reports r ON c.report_id = r.id
+        WHERE r.project = ? AND c.id > ?
+        ORDER BY c.id ASC
+        """,
+        (project, since_id),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "report_id": row["report_id"],
+            "author": row["author"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]

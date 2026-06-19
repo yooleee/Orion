@@ -33,13 +33,34 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .render import render_index, render_not_found, render_project, render_report
-from .store import get, history, ingest, list_projects, open_relay_store
+from .render import (
+    MAX_AUTHOR_CHARS,
+    MAX_COMMENT_BODY_CHARS,
+    render_index,
+    render_not_found,
+    render_project,
+    render_report,
+)
+from .store import (
+    add_comment,
+    comments_for,
+    get,
+    history,
+    ingest,
+    list_projects,
+    open_relay_store,
+)
 
 # Reject a Content-Length larger than this outright. A report blob is a few KB; 1 MB
 # is far above any real payload but well below "read gigabytes into memory". Cheap
 # defensive hygiene on an inbound surface — we do not trust a client-sent length.
 _MAX_BLOB_BYTES = 1_000_000
+
+# Per-field caps for a supervisor comment (C2) are defined in render.py (the
+# dependency-free module) and imported above, so the form's maxlength hint and this
+# server-side enforcement share ONE definition. The 1 MB raw-body cap above remains
+# the outer memory guard; MAX_COMMENT_BODY_CHARS / MAX_AUTHOR_CHARS are the semantic
+# limits on the DECODED form fields.
 
 # The blob fields the relay consumes, each required to be a string. NOTE: the
 # vestigial `source_marker` (always "", KI-8, unused by the store) is intentionally
@@ -131,6 +152,53 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _parse_comment_path(path: str) -> int | None:
+    """Extract the report id from a "/report/<id>/comment" path, or None.
+
+    Args:
+        path: The request path, already stripped of any query string.
+
+    Returns:
+        The integer report id when `path` is exactly "/report/<digits>/comment";
+        otherwise None (the route did not match).
+
+    Why:
+        do_POST routes by path, so it needs a single yes/no-with-id matcher for the
+        comment route. We accept only an all-digit id segment (mirroring do_GET's
+        id_str.isdigit() guard), so a non-numeric or malformed id simply fails to
+        match and falls through to the 404 — no exception, no store touch.
+    """
+    prefix, suffix = "/report/", "/comment"
+    if not (path.startswith(prefix) and path.endswith(suffix)):
+        return None
+    middle = path[len(prefix):-len(suffix)]
+    return int(middle) if middle.isdigit() else None
+
+
+def _simple_html(heading: str, detail: str) -> str:
+    """Build a minimal self-contained HTML page for a browser-facing error.
+
+    Args:
+        heading: The <h1> / <title> text. MUST be a static, trusted literal.
+        detail: A one-line explanation. Same static-only contract.
+
+    Returns:
+        A tiny complete HTML document string.
+
+    Why:
+        The comment POST is driven by a browser form, so its rejections (400/403)
+        read better as HTML than the JSON /ingest returns. These pages carry NO
+        dynamic input — every caller passes a fixed message — so, exactly like
+        _UNAUTHORIZED_HTML, they need no escaping. Keeping them here leaves render.py
+        (the dashboard view layer) untouched.
+    """
+    return (
+        "<!doctype html><html lang='en'><meta charset='utf-8'>"
+        f"<title>Orion — {heading}</title>"
+        f"<h1>{heading}</h1><p>{detail}</p></html>"
+    )
+
+
 class _RelayHandler(BaseHTTPRequestHandler):
     """Handles relay HTTP requests; reads its config from self.server (RelayServer).
 
@@ -195,7 +263,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 if report is None:
                     self._send_html(404, render_not_found(f"No report {id_str!r}."))
                     return
-                self._send_html(200, render_report(report))
+                # report is not None implies id_str was numeric, so int() is safe.
+                comments = comments_for(conn, int(id_str))
+                self._send_html(200, render_report(report, comments))
                 return
 
             self._send_html(404, render_not_found(f"Unknown path {path!r}."))
@@ -203,11 +273,39 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
 
     def do_POST(self) -> None:
-        """Route a POST. The only POST route is /ingest."""
-        if self.path != "/ingest":
-            self._send_json(404, {"error": "not found"})
+        """Route a POST to one of the relay's write surfaces.
+
+        Routes: "/ingest" (the Bearer-authed report push) and "/report/<id>/comment"
+        (a view-authed supervisor comment, C2). Anything else is a 404. Routing is by
+        path only, so any query string is stripped first — mirroring do_GET.
+
+        Why a router: do_POST used to be the single ingest handler. C2 adds a second,
+        very differently-authed write path (HTTP Basic + a CSRF check, not Bearer), so
+        the dispatch is split out and each path gets its own handler — keeping this
+        method a short, readable table of routes rather than one branching blob.
+        """
+        path = urllib.parse.urlparse(self.path).path
+
+        if path == "/ingest":
+            self._handle_ingest()
             return
 
+        comment_report_id = _parse_comment_path(path)
+        if comment_report_id is not None:
+            self._handle_comment(comment_report_id)
+            return
+
+        self._send_json(404, {"error": "not found"})
+
+    def _handle_ingest(self) -> None:
+        """Authenticate, validate, and store a pushed report blob (POST /ingest).
+
+        Why:
+            This is the original ingest path, unchanged — moved verbatim out of
+            do_POST when the second write route (comments) was added. It speaks JSON
+            (a machine-to-machine push from local Orion), in contrast to the comment
+            route, which speaks HTTP form data from a browser.
+        """
         # 1) Authenticate FIRST: validate nothing about the payload until the caller
         # is authorized. We DO distinguish "no/!malformed header" from "wrong token"
         # in the message: with a single shared token there is no identity to
@@ -251,6 +349,89 @@ class _RelayHandler(BaseHTTPRequestHandler):
             file=sys.stderr,
         )
         self._send_json(201, {"id": new_id})
+
+    def _handle_comment(self, report_id: int) -> None:
+        """Store one supervisor comment on a report (POST /report/<id>/comment, C2).
+
+        Args:
+            report_id: The report the comment attaches to (parsed from the path).
+
+        The inbound-security checklist, enforced IN ORDER:
+          1. Auth — gated by the dashboard view secret, exactly as the GET dashboard
+             is: a view secret set means require HTTP Basic (401 otherwise); none set
+             (loopback dev) means open — consistent with reads.
+          2. CSRF — Basic auth makes the browser auto-send credentials, so a forged
+             cross-site POST would otherwise succeed. Require an Origin header whose
+             host matches the request Host; reject a mismatch with 403.
+          3. Validate — parse the urlencoded form; require a non-empty body within the
+             length caps (and a capped author); reject with 400.
+          4. Report exists — 404 if the id has no report (a stale or forged link).
+          5. Store, then 303 redirect back to the report (POST-redirect-GET, so a
+             browser refresh does not resubmit the comment).
+
+        Why:
+            This is Orion's first write-from-a-browser surface, so it is gated more
+            tightly than the feature itself. The comment text is deliberately NOT
+            redaction-scanned: redaction is an OUTBOUND control for the developer's own
+            secrets, whereas an inbound supervisor comment shown only on the
+            access-gated dashboard is a different threat. The relevant control here is
+            XSS-escaping on render (pinned in render.py), not redaction.
+        """
+        # 1) Auth: enforced only when a view secret is configured (same gate as do_GET).
+        if self.server.view_token and self._view_auth_error() is not None:
+            self._send_html(
+                401,
+                _UNAUTHORIZED_HTML,
+                extra_headers={"WWW-Authenticate": 'Basic realm="Orion dashboard"'},
+            )
+            return
+
+        # 2) CSRF: require a same-origin POST.
+        if self._origin_error() is not None:
+            self._send_html(
+                403, _simple_html("forbidden", "Request blocked by an origin (CSRF) check.")
+            )
+            return
+
+        # 3) Read and parse the urlencoded form body.
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_html(
+                400, _simple_html("bad request", "Missing, oversized, or unreadable body.")
+            )
+            return
+        try:
+            fields = urllib.parse.parse_qs(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            self._send_html(400, _simple_html("bad request", "Body is not valid UTF-8."))
+            return
+
+        # parse_qs maps each key to a LIST of values; take the first (or "" if absent),
+        # then strip — a name/body of only whitespace counts as empty.
+        author = fields.get("author", [""])[0].strip()
+        body = fields.get("body", [""])[0].strip()
+
+        # 4) Validate: a non-empty body within caps, and a capped author.
+        if not body:
+            self._send_html(400, _simple_html("bad request", "A comment body is required."))
+            return
+        if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
+            self._send_html(400, _simple_html("bad request", "Comment or name is too long."))
+            return
+
+        # 5) Confirm the report exists, then store and redirect back to it. One fresh
+        # connection per request keeps each sqlite handle on its own thread.
+        conn = open_relay_store(self.server.db_path)
+        try:
+            if get(conn, report_id) is None:
+                self._send_html(404, render_not_found(f"No report {report_id!r}."))
+                return
+            add_comment(conn, report_id, author, body, _utc_now_iso())
+        finally:
+            conn.close()
+        # 303 + Location → the browser re-GETs the report (POST-redirect-GET), so a
+        # refresh of the resulting page does not resubmit the comment.
+        self._send_redirect(303, f"/report/{report_id}")
 
     def _auth_error(self) -> str | None:
         """Return None if the request is authorized, else a 401 reason string.
@@ -307,6 +488,35 @@ class _RelayHandler(BaseHTTPRequestHandler):
         _, _, password = decoded.partition(":")
         if not hmac.compare_digest(password, self.server.view_token):
             return "invalid credentials"
+        return None
+
+    def _origin_error(self) -> str | None:
+        """Return None if the request is same-origin, else a 403 reason string.
+
+        Returns:
+            None when an Origin header is present and its host (netloc) equals the
+            request's Host header; otherwise a short reason — Origin missing, or
+            Origin not matching Host.
+
+        Why:
+            The comment POST authenticates via the view secret over HTTP Basic, which
+            the browser AUTO-SENDS on every request to this origin — including one a
+            malicious third-party page triggers (classic CSRF). An Origin check is the
+            lightweight, dependency-free defense: a genuine same-site form submit
+            carries an Origin equal to our own host, while a cross-site forgery carries
+            the attacker's origin (or, for some flows, none) — so we require Origin
+            present AND matching. We compare netloc (host[:port]) because that is what
+            survives the Fly topology: the browser sends Origin
+            "https://<app>.fly.dev", whose netloc is "<app>.fly.dev", and the proxied
+            request arrives with Host "<app>.fly.dev" — equal. (A SameSite-cookie
+            defense doesn't apply here: there is no session cookie, the credential is
+            Basic auth, so the Origin check is the right tool.)
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return "missing Origin header"
+        if urllib.parse.urlparse(origin).netloc != self.headers.get("Host", ""):
+            return "Origin does not match Host"
         return None
 
     def _read_raw_body(self) -> bytes | None:
@@ -383,6 +593,24 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_redirect(self, code: int, location: str) -> None:
+        """Write a bodyless redirect response to `location`.
+
+        Args:
+            code: The 3xx status code (303 for POST-redirect-GET).
+            location: The path to redirect to (a site-relative path is fine).
+
+        Why:
+            After a successful comment POST we 303 back to the report page so the
+            browser re-fetches it with a GET — the POST-redirect-GET pattern, which
+            stops a page refresh from resubmitting the comment. A redirect needs no
+            body, so we send an explicit zero Content-Length plus the Location header.
+        """
+        self.send_response(code)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 class RelayServer(ThreadingHTTPServer):

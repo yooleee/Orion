@@ -20,6 +20,7 @@ import base64
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,8 +29,9 @@ import pytest
 
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
+from relay.render import MAX_COMMENT_BODY_CHARS
 from relay.server import _is_loopback, create_server
-from relay.store import get, list_projects, open_relay_store
+from relay.store import comments_for, get, list_projects, open_relay_store
 
 _TOKEN = "test-ingest-token"
 _VIEW = "test-view-secret"
@@ -488,3 +490,244 @@ def test_require_view_auth_with_secret_on_loopback_enforces_basic(tmp_path):
     with _running_relay(tmp_path, view_token=_VIEW, require_view_auth=True) as (base_url, _db):
         assert _get(base_url, "/")[0] == 401  # no creds -> refused even on loopback
         assert _get(base_url, "/", password=_VIEW)[0] == 200  # correct creds -> served
+
+
+# --- C2: dashboard comments (POST /report/<id>/comment) -------------------------
+#
+# The comment route is Orion's first write-from-a-browser surface, so these tests are
+# the security checklist made executable: auth (view secret), CSRF (Origin check),
+# validation (non-empty body + length caps), report-existence, and the 303
+# POST-redirect-GET on success. The route speaks HTTP form data (not JSON like
+# /ingest) and is gated by the SAME view secret as the read dashboard.
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """An opener handler that does NOT follow redirects.
+
+    Why:
+        A successful comment POST replies 303 (POST-redirect-GET). urllib follows 3xx
+        automatically, which would swallow the 303 and return the redirected GET's 200.
+        Returning None from redirect_request stops the follow, so the 303 + Location
+        surface to the test (as an HTTPError we unwrap) instead of being hidden.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _ingest_one(base_url):
+    """Push one real report and return its id (the target for comment tests).
+
+    Why:
+        Every comment test needs an existing report to hang a comment off. Ingest is
+        Bearer-authed and independent of the view secret, so this works whether or not
+        the relay has a view secret set.
+    """
+    status, body = _post(base_url, _real_blob_json().encode("utf-8"))
+    assert status == 201
+    return json.loads(body)["id"]
+
+
+def _post_comment(
+    base_url,
+    report_id,
+    *,
+    author="Alex",
+    body="Nice work.",
+    password=None,
+    origin="__match__",
+):
+    """POST a comment form and return (status, headers, text), without following 303.
+
+    Args:
+        base_url: the server base URL.
+        report_id: the report id to comment on (goes in the path).
+        author, body: the urlencoded form fields. Pass body="" to exercise the
+            empty-body rejection (parse_qs drops blank values, so the server sees none).
+        password: optional view secret sent as HTTP Basic (any username); None omits
+            the Authorization header (the no-credentials case).
+        origin: the Origin header. "__match__" (default) sends an Origin equal to the
+            server's own base URL, so its host matches the request Host (a same-origin
+            request). None omits the header; any other string is sent verbatim to
+            exercise a cross-origin rejection.
+
+    Why:
+        Centralizes the form-POST plumbing (urlencoding, Basic auth, Origin, and the
+        no-redirect opener) so each test states only the field it is exercising. A
+        303 or any 4xx surfaces as an HTTPError, unwrapped here into a uniform
+        (code, headers, text) tuple.
+    """
+    data = urllib.parse.urlencode({"author": author, "body": body}).encode("utf-8")
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if password is not None:
+        raw = base64.b64encode(f"orion:{password}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {raw}"
+    if origin == "__match__":
+        # Same-origin: derive Origin from base_url so its netloc equals the Host header
+        # urllib sets from the URL.
+        headers["Origin"] = base_url
+    elif origin is not None:
+        headers["Origin"] = origin
+    req = urllib.request.Request(
+        base_url + f"/report/{report_id}/comment",
+        data=data,
+        headers=headers,
+        method="POST",
+    )
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=5) as response:
+            return response.status, response.headers, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read().decode("utf-8")
+
+
+def test_comment_is_stored_and_redirects(tmp_path):
+    """A valid, authed, same-origin comment is stored and answered with a 303.
+
+    Why this matters: this is the happy path end to end — correct view credentials, a
+    matching Origin, and a non-empty body produce a stored comment and a 303 redirect
+    back to the report (POST-redirect-GET, so a refresh won't resubmit). We assert both
+    the redirect target and that the comment actually landed in the store.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+
+        status, headers, _ = _post_comment(
+            base_url, report_id, author="Alex", body="Ship it.", password=_VIEW
+        )
+        assert status == 303
+        assert headers.get("Location") == f"/report/{report_id}"
+
+        conn = open_relay_store(db)
+        stored = comments_for(conn, report_id)
+        assert len(stored) == 1
+        assert stored[0]["author"] == "Alex"
+        assert stored[0]["body"] == "Ship it."
+
+
+def test_comment_without_credentials_is_401(tmp_path):
+    """With a view secret set, a comment POST sent with no credentials is 401, not stored.
+
+    Why this matters: the comment write path reuses the dashboard read gate — once a
+    view secret exists, you must present it to comment, exactly as to read. Auth is
+    checked first, so nothing is stored.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, _, _ = _post_comment(base_url, report_id, password=None)
+        assert status == 401
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_comment_cross_origin_is_403_and_stores_nothing(tmp_path):
+    """An authed comment from a foreign Origin is rejected 403 (CSRF guard), not stored.
+
+    Why this matters: Basic auth means the browser auto-sends credentials, so a
+    malicious page could forge an authenticated comment POST. The Origin check is the
+    defense: a request whose Origin host differs from Host is refused even with valid
+    credentials, and leaves no trace in the store.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, _, _ = _post_comment(
+            base_url, report_id, password=_VIEW, origin="https://evil.example"
+        )
+        assert status == 403
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_comment_missing_origin_is_403(tmp_path):
+    """A comment POST with NO Origin header is rejected 403.
+
+    Why this matters: the CSRF guard requires Origin to be present AND matching — a
+    request that omits it entirely (as some forged cross-site flows do) must fail
+    closed, not be treated as same-origin by default.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        report_id = _ingest_one(base_url)
+        status, _, _ = _post_comment(base_url, report_id, password=_VIEW, origin=None)
+        assert status == 403
+
+
+def test_comment_on_missing_report_is_404(tmp_path):
+    """An authed, same-origin comment on a nonexistent report id returns 404.
+
+    Why this matters: a stale or forged /report/<id>/comment link must be a clean 404,
+    not a crash. Auth and the Origin check pass first (so this isolates the
+    report-existence guard), then the missing report is reported as not found.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        status, _, _ = _post_comment(base_url, 999, password=_VIEW)
+        assert status == 404
+
+
+def test_comment_empty_body_is_400_and_stores_nothing(tmp_path):
+    """A comment with an empty body is rejected 400 and stored nothing.
+
+    Why this matters: a comment must carry text. An empty (or whitespace-only) body is
+    a validation failure, caught at the inbound boundary before the store is touched.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, _, _ = _post_comment(base_url, report_id, body="", password=_VIEW)
+        assert status == 400
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_comment_oversized_body_is_400(tmp_path):
+    """A comment body over the length cap is rejected 400.
+
+    Why this matters: we never trust a client-sent size. A body beyond
+    MAX_COMMENT_BODY_CHARS is refused, mirroring the ingest endpoint's length
+    discipline, so no oversized text reaches the store.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        too_long = "x" * (MAX_COMMENT_BODY_CHARS + 1)
+        status, _, _ = _post_comment(base_url, report_id, body=too_long, password=_VIEW)
+        assert status == 400
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_comment_open_when_no_view_secret(tmp_path):
+    """With NO view secret, a same-origin comment is accepted without credentials.
+
+    Why this matters: this pins the loopback-dev default — reads are open without a
+    secret, and so is commenting, keeping local use zero-friction. The Origin check
+    still applies (it is not an auth control), so the request must be same-origin.
+    """
+    with _running_relay(tmp_path) as (base_url, db):  # view_token=None
+        report_id = _ingest_one(base_url)
+        status, _, _ = _post_comment(base_url, report_id, body="local note", password=None)
+        assert status == 303
+
+        conn = open_relay_store(db)
+        assert [c["body"] for c in comments_for(conn, report_id)] == ["local note"]
+
+
+def test_comment_appears_on_the_report_page(tmp_path):
+    """After posting, the comment is shown on the report's GET page.
+
+    Why this matters: this is the store -> render wiring end to end — a posted comment
+    must actually surface (author and body) when the report page is fetched, proving
+    do_GET feeds comments_for into render_report.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        report_id = _ingest_one(base_url)
+        _post_comment(
+            base_url, report_id, author="Reviewer", body="Looks solid.", password=_VIEW
+        )
+
+        code, html = _get(base_url, f"/report/{report_id}", password=_VIEW)
+        assert code == 200
+        assert "Reviewer" in html
+        assert "Looks solid." in html

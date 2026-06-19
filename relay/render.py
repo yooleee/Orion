@@ -13,17 +13,33 @@
 #                  "<script>" — so escaping is what guarantees the dashboard renders
 #                  data as inert text, never as markup. Only the static structure
 #                  and the inline CSS below are un-escaped.
-# Why no template engine / JS: the views are a handful of small, static-structured
-#                  pages. Stdlib f-strings + html.escape meet the need with zero
-#                  dependencies and nothing to audit beyond "is every value escaped",
-#                  which is the open-source-simplicity bar.
+# Why no template engine: the views are a handful of small, static-structured pages.
+#                  Stdlib f-strings + html.escape meet the need with zero dependencies
+#                  and nothing to audit beyond "is every value escaped", the
+#                  open-source-simplicity bar.
+# On JavaScript: the dashboard is server-rendered and fully functional with NO JS. The
+#                  one script (_PAGE_JS, inline) is PROGRESSIVE ENHANCEMENT only — it
+#                  rewrites absolute timestamps to relative ("2 days ago") in the
+#                  browser. It writes via textContent (never innerHTML) and reads only
+#                  server-escaped values, so it adds no injection surface: the
+#                  every-value-escaped audit above still fully covers safety.
 # =============================================================================
 
 from __future__ import annotations
 
 import html
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# The dashboard displays timestamps in California time. We pin a FIXED IANA zone
+# (not the server's local time, not the reader's) so the displayed time is the same
+# regardless of where the relay runs or who is viewing — and zoneinfo applies the
+# DST rules, so it reads PDT (UTC-7) in summer and PST (UTC-8) in winter
+# automatically. Created once at import (ZoneInfo is cached). Requires the `tzdata`
+# package on platforms without a system tz database (slim Docker, native Windows);
+# it is a declared dependency, so a missing-tzdata failure can't reach production.
+_DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
 
 # Input limits for a supervisor comment (C2). They live HERE — the dependency-free
 # module — because BOTH sides need them: render.py uses them as the comment form's
@@ -36,23 +52,136 @@ MAX_AUTHOR_CHARS = 200
 
 # A small inline stylesheet. Inline (not a served static file) keeps the relay a
 # single self-contained process with no static-asset routing — the simplest thing
-# that gives the dashboard a readable layout.
+# that gives the dashboard a readable, "refined-minimal" layout. The palette is
+# driven by CSS custom properties (design tokens) defined once for light and once
+# for dark (prefers-color-scheme), so colors stay coherent and future theming is a
+# token change rather than a sweep. color-scheme also makes native form controls and
+# scrollbars match the active scheme.
 _PAGE_CSS = """
-:root { color-scheme: light dark; }
-body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto;
-       padding: 0 1rem; line-height: 1.5; }
-header a { font-weight: bold; text-decoration: none; }
-/* Visible focus ring for keyboard navigation: without this, tabbing through
-   links gives no on-screen indication of focus (an accessibility gap). */
-a:focus { outline: 2px solid #4af; outline-offset: 2px; }
-h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-h2 { font-size: 1.1rem; margin-top: 1.5rem; }
-.meta { color: #777; font-size: 0.9rem; }
-ul.list { list-style: none; padding: 0; }
-ul.list li { padding: 0.4rem 0; border-bottom: 1px solid #8884; }
-pre { white-space: pre-wrap; word-wrap: break-word; background: #8881;
-      padding: 0.75rem; border-radius: 4px; }
-.empty { color: #777; font-style: italic; }
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b6b6b;
+  --accent: #2563eb;
+  --border: #e4e4e7;
+  --surface: #f6f6f7;
+  --radius: 8px;
+  --maxw: 720px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --fg: #e8e8ea;
+    --muted: #9aa0a6;
+    --accent: #6ea8fe;
+    --border: #2a2d33;
+    --surface: #1e2127;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  max-width: var(--maxw); margin: 0 auto; padding: 2.5rem 1.25rem 4rem;
+  line-height: 1.6; color: var(--fg); background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+header { margin-bottom: 2rem; }
+header a {
+  font-weight: 600; font-size: 1.05rem; letter-spacing: -0.01em;
+  text-decoration: none; color: var(--fg);
+}
+header a:hover { color: var(--accent); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+/* Visible focus ring for keyboard nav (accessibility). :focus-visible shows it for
+   keyboard users without ringing on every mouse click. */
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px;
+}
+h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 0.35rem; letter-spacing: -0.02em; }
+h2 { font-size: 1.05rem; margin: 2rem 0 0.5rem; letter-spacing: -0.01em; }
+p { margin: 0.5rem 0; }
+.meta { color: var(--muted); font-size: 0.875rem; }
+/* List views (index, project history): each row is a link on the left with quiet
+   meta on the right; wraps cleanly on narrow screens. */
+ul.list { list-style: none; padding: 0; margin: 1.25rem 0 0; }
+ul.list li {
+  display: flex; flex-wrap: wrap; gap: 0.2rem 0.75rem;
+  align-items: baseline; justify-content: space-between;
+  padding: 0.7rem 0; border-bottom: 1px solid var(--border);
+}
+ul.list li a { font-weight: 500; }
+/* Report bodies: preserve line structure; sit on a subtle bordered surface. */
+section { margin: 1.25rem 0; }
+pre {
+  white-space: pre-wrap; word-wrap: break-word;
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 0.9rem 1rem; border-radius: var(--radius);
+  font-size: 0.9rem; line-height: 1.55; overflow-x: auto;
+}
+.empty { color: var(--muted); font-style: italic; }
+/* Comment thread: stack each comment (byline above body) rather than the
+   left/right row layout the other lists use. */
+ul.list.comments li { display: block; padding: 1rem 0; }
+ul.list.comments .meta { display: block; margin-bottom: 0.35rem; }
+ul.list.comments pre { margin: 0; }
+/* Comment form. */
+form { margin-top: 1.25rem; }
+form label { display: block; font-size: 0.875rem; color: var(--muted); margin-bottom: 1rem; }
+input[type="text"], textarea {
+  display: block; width: 100%; margin-top: 0.3rem; font: inherit;
+  color: var(--fg); background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0.5rem 0.65rem;
+}
+textarea { resize: vertical; }
+button {
+  font: inherit; font-weight: 500; cursor: pointer; color: #ffffff;
+  background: var(--accent); border: 1px solid transparent;
+  border-radius: var(--radius); padding: 0.5rem 1.1rem;
+}
+button:hover { filter: brightness(1.05); }
+""".strip()
+
+# A single, static progressive-enhancement script. It rewrites each <time datetime>
+# element (emitted by _time_tag) to a relative label ("2 days ago") and keeps the
+# absolute California time as the hover title. PROGRESSIVE ENHANCEMENT: with JS off,
+# the server-rendered absolute text simply stands — the page is fully functional
+# without this. SECURITY: it reads only the datetime attribute (server-escaped) and
+# the existing textContent, and writes via textContent (never innerHTML), so it adds
+# NO injection surface — the "every dynamic value escaped on the server" rule is
+# untouched. Inline (like _PAGE_CSS) to keep the relay a single self-contained
+# process with no static-asset routing.
+_PAGE_JS = """
+(function () {
+  function relative(then, now) {
+    var secs = Math.round((now - then) / 1000);
+    var future = secs < 0;
+    secs = Math.abs(secs);
+    var units = [
+      ["year", 31536000], ["month", 2592000], ["week", 604800],
+      ["day", 86400], ["hour", 3600], ["minute", 60]
+    ];
+    for (var i = 0; i < units.length; i++) {
+      var n = Math.floor(secs / units[i][1]);
+      if (n >= 1) {
+        var label = n + " " + units[i][0] + (n === 1 ? "" : "s");
+        return future ? "in " + label : label + " ago";
+      }
+    }
+    return "just now";
+  }
+  var now = Date.now();
+  var nodes = document.querySelectorAll("time[datetime]");
+  for (var i = 0; i < nodes.length; i++) {
+    var el = nodes[i];
+    var t = Date.parse(el.getAttribute("datetime"));
+    if (isNaN(t)) { continue; }           // leave an unparseable value as rendered
+    if (!el.title) { el.title = el.textContent; }  // absolute Pacific time on hover
+    el.textContent = relative(t, now);             // textContent => no HTML injection
+  }
+})();
 """.strip()
 
 
@@ -96,29 +225,32 @@ def _url(value: object) -> str:
 
 
 def _format_ts(iso: str) -> str:
-    """Render a stored ISO-8601 UTC timestamp as a readable, UTC-pinned string.
+    """Render a stored ISO-8601 timestamp as a readable California-time string.
 
     Args:
         iso: A stored timestamp string, e.g. "2026-06-18T14:32:00+00:00".
 
     Returns:
-        A human-readable form like "Jun 18 2026, 14:32 UTC". If the input cannot
+        A human-readable form like "Jun 18 2026, 07:32 PDT". If the input cannot
         be parsed, the original string is returned UNCHANGED (fail-safe).
 
     Why:
-        Raw ISO strings are precise but noisy to read. We humanize them for the
-        dashboard, but a report is a cross-machine artifact: it is generated on one
-        machine and read on another, so the displayed time must be stable and
-        machine-independent. We therefore convert to UTC and format with a FIXED
-        English month table (strftime("%b") is locale-dependent, so it is avoided) —
-        never local time and never locale formatting. Failing safe (return the input)
-        means a malformed or unexpected timestamp degrades to the raw string rather
-        than raising and breaking the whole page render.
+        Raw ISO strings are precise but noisy to read. We humanize them and display
+        them in California time (where the user and supervisors are). We convert to a
+        FIXED zone (America/Los_Angeles), NOT the server's local time and NOT the
+        reader's — so the displayed time is identical no matter where the relay runs
+        or who views it — and zoneinfo applies DST, so the abbreviation/offset is
+        correct year-round (PDT in summer, PST in winter; read live via tzname()).
+        The month uses a FIXED English table (strftime("%b") is locale-dependent, so
+        it is avoided); the tz abbreviation comes from the IANA data, not the locale,
+        so it too is stable. Failing safe (return the input) means a malformed or
+        unexpected timestamp degrades to the raw string rather than raising and
+        breaking the whole page render.
     """
     try:
-        # fromisoformat handles the stored "+00:00" offset. We force UTC so an input
-        # carrying any other offset is still displayed in UTC, not as-stored.
-        parsed = datetime.fromisoformat(iso).astimezone(timezone.utc)
+        # fromisoformat handles the stored "+00:00" offset; astimezone converts that
+        # absolute instant into California wall-clock time (DST applied by zoneinfo).
+        parsed = datetime.fromisoformat(iso).astimezone(_DISPLAY_TZ)
     except (ValueError, TypeError):
         # Fail safe: an unparseable value is shown verbatim rather than crashing the
         # render. The caller still escapes it on the way into HTML.
@@ -131,7 +263,35 @@ def _format_ts(iso: str) -> str:
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     )
     month = months[parsed.month - 1]  # month is 1-indexed; the table is 0-indexed.
-    return f"{month} {parsed.day:02d} {parsed.year}, {parsed.hour:02d}:{parsed.minute:02d} UTC"
+    # tzname() returns the zone's abbreviation for THIS instant ("PDT" or "PST"),
+    # from the IANA database — so the label always matches the offset just applied.
+    abbrev = parsed.tzname()
+    return (
+        f"{month} {parsed.day:02d} {parsed.year}, "
+        f"{parsed.hour:02d}:{parsed.minute:02d} {abbrev}"
+    )
+
+
+def _time_tag(iso: str) -> str:
+    """Wrap a stored timestamp in a <time> element: machine ISO + human Pacific text.
+
+    Args:
+        iso: The stored ISO-8601 timestamp string.
+
+    Returns:
+        '<time datetime="<escaped ISO>">escaped human Pacific time</time>'. Both the
+        attribute and the visible text are escaped via _esc.
+
+    Why:
+        The carrier for the relative-timestamp progressive enhancement. The visible
+        text is the absolute California time (_format_ts), so the page reads correctly
+        with NO JavaScript. The datetime attribute carries the machine-readable instant
+        so _PAGE_JS can compute a relative label ("2 days ago") in the browser without
+        re-parsing the human string. The raw ISO now appears in the page — but only
+        inside this machine-readable attribute, escaped — which is exactly its purpose;
+        the human-facing text is still the humanized form.
+    """
+    return f'<time datetime="{_esc(iso)}">{_esc(_format_ts(iso))}</time>'
 
 
 def _page(title: str, body_html: str) -> str:
@@ -166,6 +326,9 @@ def _page(title: str, body_html: str) -> str:
         "<main>\n"
         f"{body_html}\n"
         "</main>\n"
+        # Script at end of body so the DOM it enhances already exists. It is the only
+        # JS on the page and is purely additive (see _PAGE_JS).
+        f"<script>{_PAGE_JS}</script>\n"
         "</body>\n"
         "</html>\n"
     )
@@ -241,7 +404,7 @@ def render_project(project_name: str, reports: list[dict]) -> str:
         else:
             heft = f"{section_count} sections"
         items.append(
-            f'<li><a href="{_esc(href)}">{_esc(_format_ts(report["generated_at"]))}</a> '
+            f'<li><a href="{_esc(href)}">{_time_tag(report["generated_at"])}</a> '
             f"<span class='meta'>{_esc(report['lane'])} · "
             f"{_esc(report['share_level'])} · {_esc(heft)}</span></li>"
         )
@@ -282,12 +445,12 @@ def render_report(report: dict, comments: list[dict] | None = None) -> str:
     meta = (
         "<p class='meta'>"
         f"Report #{_esc(report['id'])} · "
-        f"Generated {_esc(_format_ts(report['generated_at']))} · "
+        f"Generated {_time_tag(report['generated_at'])} · "
         f"lane {_esc(report['lane'])} · "
         f"{_esc(report['share_level'])} · "
         f"{recipients} · "
         f"Orion {_esc(report['orion_version'])} · "
-        f"received {_esc(_format_ts(report['ingested_at']))}"
+        f"received {_time_tag(report['ingested_at'])}"
         "</p>"
     )
 
@@ -351,10 +514,10 @@ def _render_comments(report_id: object, comments: list[dict]) -> str:
             who = comment["author"] if comment["author"] else "anonymous"
             items.append(
                 f'<li><span class="meta">{_esc(who)} · '
-                f'{_esc(_format_ts(comment["created_at"]))}</span>'
+                f'{_time_tag(comment["created_at"])}</span>'
                 f'<pre>{_esc(comment["body"])}</pre></li>'
             )
-        thread_html = '<ul class="list">\n' + "\n".join(items) + "\n</ul>"
+        thread_html = '<ul class="list comments">\n' + "\n".join(items) + "\n</ul>"
     else:
         thread_html = "<p class='empty'>No comments yet.</p>"
 

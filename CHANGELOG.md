@@ -14,6 +14,42 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Dashboard maturation — refined-minimal restyle + Pacific time + relative timestamps (2026-06-19)
+
+The relay dashboard is now genuinely **supervisor-facing** (post-C2 deploy), so it gets a quality
+pass: a refined-minimal restyle, California-time display, and a relative-timestamp progressive
+enhancement. Server-rendered HTML stays the source of truth — every page is fully functional with
+**no JavaScript**. `pytest`: **278**.
+
+### Added
+
+- **Refined-minimal restyle (`relay/render.py`, `_PAGE_CSS`).** A token-based palette (CSS custom
+  properties) defined once each for light and dark (`prefers-color-scheme`); a real type scale and
+  vertical rhythm; styled list rows (link left / quiet meta right), report `<pre>` blocks on a
+  bordered surface, the comment thread + form, and a `:focus-visible` ring across links, buttons,
+  and inputs. Evolves the existing minimal look — no framework, no build step.
+- **Relative timestamps (progressive enhancement).** Timestamps now render as
+  `<time datetime="<ISO>">…</time>` (new `_time_tag`); one small inline script (`_PAGE_JS`) rewrites
+  them to "2 days ago" with the absolute time on hover. With JS off, the absolute time stands. The
+  script writes via `textContent` only (never `innerHTML`) and reads only server-escaped values, so
+  it adds **no XSS surface** — the every-value-escaped rule still covers safety.
+
+### Changed
+
+- **Dashboard timestamps now display in California time (`_format_ts`).** Converts to a fixed
+  `America/Los_Angeles` zone via stdlib `zoneinfo` and labels with the live abbreviation, so it
+  reads **PDT in summer, PST in winter** automatically (not the server's or reader's local time).
+- **New runtime dependency: `tzdata`** (`pyproject.toml`). The IANA tz database for `zoneinfo` —
+  data-only, no transitive deps, CPython-core-maintained. Required because `python:*-slim` (the
+  relay's Docker base) and native Windows lack a system tz database. Runtime deps are now
+  `anthropic`, `python-dotenv`, `tzdata`.
+
+### Notes
+
+- New known issues recorded: **KI-19** (inline CSS/JS vs. a future Content-Security-Policy) and
+  **KI-20** (delivered Slack/Discord messages still timestamp in UTC while the dashboard is Pacific
+  — to align when delivery is next enriched).
+
 ## C2 first slice — dashboard comments (2026-06-19)
 
 **Orion's first inbound write surface.** Supervisors can comment back on a report from the

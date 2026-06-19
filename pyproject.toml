@@ -3,9 +3,11 @@
 # -----------------------------------------------------------------------------
 # Responsible for: Packaging metadata and the single `orion` console command.
 # Role in project: Defines how Orion installs (`pip install -e .`) and the
-#                  runtime dependencies. Deliberately minimal — Phase 1 needs
-#                  only two third-party packages; config (tomllib), state
-#                  (sqlite3), git (subprocess), and HTTP (urllib) are all stdlib.
+#                  runtime dependencies. Deliberately minimal — two functional
+#                  third-party packages (anthropic, python-dotenv) plus tzdata, a
+#                  data-only tz database for the relay's Pacific timestamps; config
+#                  (tomllib), state (sqlite3), git (subprocess), and HTTP (urllib)
+#                  are all stdlib.
 # Assumptions: Python 3.11+ (for stdlib `tomllib`). src/ layout.
 # =============================================================================
 
@@ -36,6 +38,13 @@ dependencies = [
     "anthropic>=0.40",
     # Loads secrets from a gitignored .env (webhook URLs, API key) into the environment.
     "python-dotenv>=1.0",
+    # IANA time-zone database for stdlib `zoneinfo`. Data-only (no code, no transitive
+    # deps), maintained by the CPython core team. Needed because the relay dashboard
+    # renders timestamps in America/Los_Angeles (DST-correct PDT/PST), and the
+    # platforms that lack a SYSTEM tz database — the python:*-slim Docker base the
+    # relay deploys on, and native Windows — would otherwise raise at render time.
+    # zoneinfo falls back to this package automatically; Linux/macOS use their own.
+    "tzdata",
 ]
 
 [project.optional-dependencies]

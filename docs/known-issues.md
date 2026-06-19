@@ -251,3 +251,37 @@ Deferred).
 - **Severity:** low
 - **Status:** Deferred → Horizon C3 (add with the multi-party identity model; make accountability
   configurable, not forced).
+
+## KI-19 — Dashboard serves inline CSS/JS; no Content-Security-Policy yet
+
+- **Detail:** The dashboard's page scaffold (`relay/render.py._page`) serves an inline `<style>`
+  and (since the dashboard-maturation slice) an inline `<script>`. No `Content-Security-Policy`
+  header is sent. A future CSP that forbids `unsafe-inline` would block both unless each carries a
+  per-response nonce/hash, or they move to served static assets.
+- **Why it matters:** A CSP is strong defence-in-depth against XSS — it would neutralize an
+  injected script even if an escaping bug slipped past the `_esc` discipline, on what is now a
+  public, authenticated surface. Inline assets are the deliberate choice today (a single
+  self-contained process, no static-asset routing — the C1 stance), but they are exactly what a
+  strict CSP wants gone. The fix is additive and known: emit a nonce per request and reference it,
+  or split CSS/JS to a small static route. Recorded so the interaction isn't a surprise when a CSP
+  is considered. Pairs with the deferred "static CSS asset" option (the dashboard-maturation pass
+  chose inline + light JS over static assets).
+- **Severity:** low
+- **Status:** Deferred (by-design for now; revisit if/when a CSP is added).
+
+## KI-20 — Delivered Slack/Discord messages still timestamp in UTC, dashboard now in Pacific
+
+- **Detail:** The relay dashboard renders timestamps in California time (DST-correct PDT/PST) via
+  `relay/render.py._format_ts`, but the LOCAL core's message formatter
+  (`src/orion/compose.py._format_timestamp`, pinned by `tests/test_report_compose.py`) still
+  renders **UTC**. So the same report can show a UTC time in the chat message and a Pacific time on
+  the dashboard.
+- **Why it matters:** For a single Pacific-based user the message/dashboard mismatch is mildly
+  confusing. It was left intentionally this pass: UTC is defensible for messages that may be read
+  by recipients in any time zone, and the dashboard-maturation request was scoped to the dashboard.
+  Aligning the message formatter to Pacific — or, better, making the display time zone a config
+  value shared by both surfaces — is a small, additive change best done when we next **enrich
+  Slack/Discord delivery**, so it's recorded to resurface then.
+- **Severity:** low
+- **Status:** Deferred → do alongside the next Slack/Discord enrichment work (Yousuf's call,
+  2026-06-19).

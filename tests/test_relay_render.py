@@ -139,7 +139,7 @@ def test_report_body_is_escaped():
     as inert text and can never execute in a viewer's browser.
     """
     html = render_report(_report(sections=[], body=_XSS))
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
 
 
@@ -150,7 +150,7 @@ def test_report_section_title_and_body_are_escaped():
     must be escaped, not just one.
     """
     html = render_report(_report(sections=[[_XSS, _XSS]]))
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
 
 
@@ -161,7 +161,7 @@ def test_report_participant_name_is_escaped():
     line; they are dynamic and must be escaped like everything else.
     """
     html = render_report(_report(participants=[_XSS]))
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
 
 
@@ -175,7 +175,7 @@ def test_index_project_name_is_escaped():
     html = render_index(
         [{"project": _XSS, "report_count": 1, "latest_generated_at": "2026-06-18T00:00:00+00:00"}]
     )
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
 
 
@@ -186,7 +186,7 @@ def test_not_found_message_is_escaped():
     input (the bad path/id), so it is a real XSS vector if rendered raw.
     """
     html = render_not_found(f"Unknown path {_XSS!r}.")
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
 
 
@@ -225,24 +225,37 @@ def test_not_found_has_back_link_to_index():
     assert "← Back to projects" in html
 
 
-def test_format_ts_humanizes_a_utc_iso_string():
-    """A well-formed ISO-8601 UTC string becomes a readable UTC-pinned form.
+def test_format_ts_humanizes_to_california_summer_pdt():
+    """A summer UTC instant renders in California time as PDT (UTC-7).
 
     Why this matters: this is the core of the helper — "2026-06-18T14:32:00+00:00"
-    must render as "Jun 18 2026, 14:32 UTC", staying in UTC (not local time) so the
-    displayed time is stable across the machine that wrote it and the one reading it.
+    (June, so DST is in effect) must render as "Jun 18 2026, 07:32 PDT": converted to
+    California wall-clock (14:32 UTC - 7h = 07:32) and labelled PDT, not UTC.
     """
-    assert _format_ts("2026-06-18T14:32:00+00:00") == "Jun 18 2026, 14:32 UTC"
+    assert _format_ts("2026-06-18T14:32:00+00:00") == "Jun 18 2026, 07:32 PDT"
 
 
-def test_format_ts_keeps_utc_for_a_nonzero_offset():
-    """A timestamp with a non-UTC offset is converted to UTC, not shown as-stored.
+def test_format_ts_handles_dst_winter_pst():
+    """A winter UTC instant renders as PST (UTC-8), proving DST is applied live.
 
-    Why this matters: the discipline is UTC-only. An input carrying e.g. +02:00 must
-    be normalized to UTC (14:32+02:00 -> 12:32 UTC), never displayed in its source
-    offset or in the reader's local time.
+    Why this matters: California time is not a fixed offset — this is exactly what the
+    tzdata dependency buys. A January instant ("2026-01-15T14:32:00+00:00") must shift
+    by 8 hours and read "Jan 15 2026, 06:32 PST", while the June case above shifts by 7
+    and reads PDT. If the zone were hardcoded to a fixed offset, one of these would be
+    wrong.
     """
-    assert _format_ts("2026-06-18T14:32:00+02:00") == "Jun 18 2026, 12:32 UTC"
+    assert _format_ts("2026-01-15T14:32:00+00:00") == "Jan 15 2026, 06:32 PST"
+
+
+def test_format_ts_converts_a_nonzero_offset_to_california():
+    """A timestamp with a non-UTC offset is normalized to the same absolute instant.
+
+    Why this matters: the input is an absolute instant regardless of the offset it
+    carries. "2026-06-18T14:32:00+02:00" is 12:32 UTC, which is 05:32 in California
+    (PDT, -7), so it must render "Jun 18 2026, 05:32 PDT" — never its source offset or
+    the reader's local time.
+    """
+    assert _format_ts("2026-06-18T14:32:00+02:00") == "Jun 18 2026, 05:32 PDT"
 
 
 def test_format_ts_fails_safe_on_garbage():
@@ -254,11 +267,14 @@ def test_format_ts_fails_safe_on_garbage():
     assert _format_ts("not-a-timestamp") == "not-a-timestamp"
 
 
-def test_report_humanizes_timestamps_not_raw_iso():
-    """render_report shows the humanized time, not the raw ISO string verbatim.
+def test_report_wraps_timestamps_in_time_tags():
+    """render_report shows the humanized time as visible text and the ISO in <time>.
 
-    Why this matters: the helper must actually be wired into the view — the readable
-    form should appear and the raw ISO (with its "T" and offset) should not.
+    Why this matters: the helper must be wired into the view as a <time> element — the
+    readable California form is the visible text (works with no JS), while the raw ISO
+    appears ONLY inside the machine-readable datetime attribute (its purpose: the JS
+    relative-timestamp enhancement reads it). So the ISO is present, but in the
+    attribute, never as the human-facing text.
     """
     html = render_report(
         _report(
@@ -266,20 +282,24 @@ def test_report_humanizes_timestamps_not_raw_iso():
             ingested_at="2026-06-18T14:35:00+00:00",
         )
     )
-    assert "Jun 18 2026, 14:32 UTC" in html      # generated_at, humanized
-    assert "Jun 18 2026, 14:35 UTC" in html      # ingested_at, humanized
-    assert "2026-06-18T14:32:00+00:00" not in html  # raw ISO not shown verbatim
+    assert "Jun 18 2026, 07:32 PDT" in html      # generated_at, humanized to PDT
+    assert "Jun 18 2026, 07:35 PDT" in html      # ingested_at, humanized to PDT
+    # The ISO lives in the datetime attribute (machine-readable), not the visible text.
+    assert '<time datetime="2026-06-18T14:32:00+00:00">' in html
+    assert ">2026-06-18T14:32:00+00:00<" not in html  # never as element text content
 
 
-def test_project_humanizes_timestamp():
-    """render_project shows each report's generated_at humanized, not raw ISO.
+def test_project_wraps_timestamp_in_time_tag():
+    """render_project shows each report's generated_at humanized inside a <time>.
 
-    Why this matters: the history list link text must also be humanized so the
-    timeline reads cleanly, with the raw ISO not leaking through.
+    Why this matters: the history list link text must be humanized so the timeline
+    reads cleanly, with the raw ISO carried only in the datetime attribute (for the JS
+    enhancement), not shown as the visible link text.
     """
     html = render_project("demo", [_report(generated_at="2026-06-18T09:05:00+00:00")])
-    assert "Jun 18 2026, 09:05 UTC" in html
-    assert "2026-06-18T09:05:00+00:00" not in html
+    assert "Jun 18 2026, 02:05 PDT" in html  # 09:05 UTC -> 02:05 California (PDT)
+    assert '<time datetime="2026-06-18T09:05:00+00:00">' in html
+    assert ">2026-06-18T09:05:00+00:00<" not in html  # not the visible text
 
 
 def test_project_section_count_badge_plural():
@@ -337,6 +357,19 @@ def test_css_has_focus_outline():
     assert "a:focus" in html
 
 
+def test_page_includes_progressive_enhancement_script():
+    """Every page embeds the inline relative-timestamp script.
+
+    Why this matters: the relative-timestamp enhancement only works if the shared
+    scaffold actually ships the script. We assert it is present (a <script> with the
+    distinctive time[datetime] selector it queries) on any view — like the CSS, it
+    lives in _page so every page gets it.
+    """
+    html = render_not_found("anything")  # any view embeds the shared scaffold
+    assert "<script>" in html
+    assert "time[datetime]" in html  # the selector the enhancement queries
+
+
 # --- C2: comments section on the report page ----------------------------------
 
 
@@ -386,16 +419,18 @@ def test_report_shows_comment_content_humanized():
     """A comment's author, body, and humanized timestamp all appear on the page.
 
     Why this matters: this is the read half of the loop — a stored comment must
-    surface with its author and text, and the timestamp humanized (UTC-pinned), not as
-    raw ISO, matching how report timestamps render.
+    surface with its author and text, and the timestamp humanized to California time,
+    not as raw ISO, matching how report timestamps render.
     """
     html = render_report(
         _report(), comments=[_comment(author="Sam", body="Nice progress.")]
     )
     assert "Sam" in html
     assert "Nice progress." in html
-    assert "Jun 18 2026, 14:32 UTC" in html        # humanized created_at
-    assert "2026-06-18T14:32:00+00:00" not in html  # raw ISO not shown verbatim
+    assert "Jun 18 2026, 07:32 PDT" in html        # 14:32 UTC -> 07:32 California
+    # ISO carried only in the <time> datetime attribute, not as visible text.
+    assert '<time datetime="2026-06-18T14:32:00+00:00">' in html
+    assert ">2026-06-18T14:32:00+00:00<" not in html
 
 
 def test_report_anonymous_comment_placeholder():
@@ -417,7 +452,7 @@ def test_report_comment_body_is_escaped():
     as inert text and can never execute in a viewer's browser.
     """
     html = render_report(_report(), comments=[_comment(body=_XSS)])
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
 
 
@@ -429,5 +464,5 @@ def test_report_comment_author_is_escaped():
     dynamic.
     """
     html = render_report(_report(), comments=[_comment(author=_XSS)])
-    assert "<script>" not in html
+    assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html

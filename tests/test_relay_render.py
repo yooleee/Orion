@@ -335,3 +335,99 @@ def test_css_has_focus_outline():
     """
     html = render_not_found("anything")  # any view embeds the shared _PAGE_CSS
     assert "a:focus" in html
+
+
+# --- C2: comments section on the report page ----------------------------------
+
+
+def _comment(**overrides):
+    """A comment dict (comments_for's shape) with defaults, overridable.
+
+    Why:
+        render_report's comments section reads author/body/created_at; defaulting them
+        keeps each test to the one field it exercises (e.g. inject _XSS into just the
+        body) instead of restating the dict (DRY).
+    """
+    comment = {
+        "id": 1,
+        "report_id": 1,
+        "author": "Alex",
+        "body": "Looks good.",
+        "created_at": "2026-06-18T14:32:00+00:00",
+    }
+    comment.update(overrides)
+    return comment
+
+
+def test_report_renders_the_comment_form():
+    """The report page includes a POST form to /report/<id>/comment with a textarea.
+
+    Why this matters: the form is the whole inbound surface in the view — it must
+    target the right route for this report's id and offer a body textarea, so a
+    supervisor can actually comment back.
+    """
+    html = render_report(_report(id=7), comments=[])
+    assert 'action="/report/7/comment"' in html
+    assert 'method="post"' in html
+    assert "<textarea" in html
+
+
+def test_report_comments_empty_state():
+    """A report with no comments shows a friendly empty-state, not a blank section.
+
+    Why this matters: a report nobody has commented on yet should read as "No comments
+    yet" rather than an empty gap, while still showing the form below it.
+    """
+    html = render_report(_report(), comments=[])
+    assert "No comments yet" in html
+
+
+def test_report_shows_comment_content_humanized():
+    """A comment's author, body, and humanized timestamp all appear on the page.
+
+    Why this matters: this is the read half of the loop — a stored comment must
+    surface with its author and text, and the timestamp humanized (UTC-pinned), not as
+    raw ISO, matching how report timestamps render.
+    """
+    html = render_report(
+        _report(), comments=[_comment(author="Sam", body="Nice progress.")]
+    )
+    assert "Sam" in html
+    assert "Nice progress." in html
+    assert "Jun 18 2026, 14:32 UTC" in html        # humanized created_at
+    assert "2026-06-18T14:32:00+00:00" not in html  # raw ISO not shown verbatim
+
+
+def test_report_anonymous_comment_placeholder():
+    """A comment whose author was omitted ("") shows an "anonymous" byline.
+
+    Why this matters: the name is optional, stored as "" when omitted; the view must
+    render a neutral placeholder rather than a blank byline so the comment still reads
+    cleanly.
+    """
+    html = render_report(_report(), comments=[_comment(author="")])
+    assert "anonymous" in html
+
+
+def test_report_comment_body_is_escaped():
+    """A <script> in a comment body is rendered escaped, never as a live tag.
+
+    Why this matters: a comment is attacker-influenced text on an access-controlled but
+    shared page — the classic stored-XSS vector. Escaping is the guarantee it is shown
+    as inert text and can never execute in a viewer's browser.
+    """
+    html = render_report(_report(), comments=[_comment(body=_XSS)])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_report_comment_author_is_escaped():
+    """A <script> in a comment author is escaped.
+
+    Why this matters: the author is self-entered free text, just as injectable as the
+    body, so it must go through the same escape path — both axes of a comment are
+    dynamic.
+    """
+    html = render_report(_report(), comments=[_comment(author=_XSS)])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html

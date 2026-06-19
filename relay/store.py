@@ -57,6 +57,25 @@ CREATE TABLE IF NOT EXISTS relay_reports (
 -- History lookups filter by project; a tiny index keeps that query fast and
 -- signals intent, even though the data volume here is small.
 CREATE INDEX IF NOT EXISTS idx_relay_reports_project ON relay_reports(project);
+
+-- C2: supervisor comments on a report. Append-only and flat (no threading, edit, or
+-- delete) — the v1 model. report_id points at relay_reports.id but is deliberately
+-- NOT a foreign key: sqlite enforces FKs only when explicitly enabled per-connection,
+-- and the server already confirms the report exists (get()) before inserting, so the
+-- check lives there rather than in a constraint we'd have to opt into. author is the
+-- self-entered display name (free text, "" when omitted — NOT authenticated identity,
+-- which is C3); body is plain text, escaped on render. created_at is when the relay
+-- received the comment (its clock), matching ingested_at's provenance meaning.
+CREATE TABLE IF NOT EXISTS report_comments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id   INTEGER NOT NULL,   -- the relay_reports.id this hangs off
+    author      TEXT NOT NULL,      -- self-entered display name, or "" when omitted
+    body        TEXT NOT NULL,      -- plain text; escaped on render
+    created_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay received it
+);
+
+-- Comments are always fetched for one report; the index keeps that filter fast.
+CREATE INDEX IF NOT EXISTS idx_report_comments_report ON report_comments(report_id);
 """
 
 
@@ -255,3 +274,86 @@ def _row_to_report(row: sqlite3.Row) -> dict:
         "orion_version": row["orion_version"],
         "ingested_at": row["ingested_at"],
     }
+
+
+def add_comment(
+    conn: sqlite3.Connection,
+    report_id: int,
+    author: str,
+    body: str,
+    created_at: str,
+) -> int:
+    """Append one supervisor comment to a report and return its new row id.
+
+    Args:
+        conn: An open relay-store connection.
+        report_id: The relay_reports.id this comment hangs off. The server confirms
+            the report exists (get()) BEFORE calling this, so this function does not
+            re-check — it just inserts.
+        author: The self-entered display name, or "" when omitted. Free text, NOT an
+            authenticated identity (that is C3); the server has already length-capped it.
+        body: The plain-text comment. Already validated non-empty and length-capped by
+            the server; stored as-is and escaped only on render.
+        created_at: ISO 8601 UTC timestamp of when the relay received the comment.
+            Passed in (not generated here) so the server controls the clock and this
+            function stays deterministic and easy to test — same pattern as ingest().
+
+    Returns:
+        The autoincrement id of the inserted comment row.
+
+    Why:
+        Mirrors ingest(): a single INSERT + commit, returning the new id. Comments are
+        append-only and flat (no update/delete path) per the v1 model, so this is the
+        only write the table ever takes. The author/body validation and the
+        report-exists check both live in the server (the inbound boundary), keeping
+        this store function a thin, trusted persistence call.
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO report_comments (report_id, author, body, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (report_id, author, body, created_at),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def comments_for(conn: sqlite3.Connection, report_id: int) -> list[dict]:
+    """Return all comments on one report, oldest first.
+
+    Args:
+        conn: An open relay-store connection.
+        report_id: The report whose comments to fetch.
+
+    Returns:
+        A list of {"id", "report_id", "author", "body", "created_at"} dicts in
+        chronological (oldest-first) order. Empty when the report has no comments.
+
+    Why:
+        Backs the comments section on the report detail page. We order by id ASC —
+        which, because id is a monotonic autoincrement, is insertion (chronological)
+        order — so an append-only thread reads top-to-bottom in the order it was
+        written. Unlike relay_reports there are no JSON columns to decode, so the rows
+        map straight to plain dicts. Returning [] (not None) for a report with no
+        comments lets the renderer show a clean empty state without a null check.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, report_id, author, body, created_at
+        FROM report_comments
+        WHERE report_id = ?
+        ORDER BY id ASC
+        """,
+        (report_id,),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "report_id": row["report_id"],
+            "author": row["author"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]

@@ -14,6 +14,43 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## C2 first slice — dashboard comments (2026-06-19)
+
+**Orion's first inbound write surface.** Supervisors can comment back on a report from the
+dashboard — making the loop two-way. The slice extends the live relay (no bot, no new infra); its
+center of gravity is inbound security, gated more tightly than the feature itself. Comments are
+append-only, flat, plain text, with an optional self-entered display name (free text, **not**
+authenticated identity — that is C3). `pytest`: **276**.
+
+### Added
+
+- **`POST /report/<id>/comment` (`relay/server.py`).** The comment write path, enforced in order:
+  **auth** (reuses the dashboard view secret over HTTP Basic — read access == comment access; open
+  on loopback dev), **CSRF** (a new `_origin_error` requires the `Origin` header present and its
+  host equal to the request `Host`; works behind the Fly proxy), **validation** (parses the
+  urlencoded form; requires a non-empty body within length caps; rejects oversized/empty with 400),
+  **report-existence** (404 for a stale/forged id), then store + **303 POST-redirect-GET** so a
+  refresh does not resubmit. `do_POST` is now a small router (`_handle_ingest` / `_handle_comment`).
+- **`report_comments` table + `add_comment` / `comments_for` (`relay/store.py`).** Auto-migrating
+  (the existing `CREATE TABLE IF NOT EXISTS` on open creates it on the deployed volume at next
+  startup — no manual migration). Append-only; oldest-first reads.
+- **Comments section on the report page (`relay/render.py`).** `render_report` gains an optional
+  `comments` argument (additive — existing callers unaffected) and renders the escaped thread plus a
+  plain-HTML post form. **Every** comment field (author, body, timestamp) goes through the existing
+  `_esc` path — the stored-XSS defense; pinned by render tests that neutralize a `<script>` comment.
+- **Tests:** comment store round-trip/ordering/scoping; the full POST checklist (stored+303,
+  no-creds 401, cross-origin/missing-Origin 403, missing-report 404, empty/oversized 400); render
+  escaping + form presence.
+
+### Why
+
+- **Not redaction-scanned, deliberately.** Redaction is an *outbound* control for the developer's
+  own secrets; an inbound supervisor comment shown only on the access-gated dashboard is a different
+  threat — XSS-escaping on render is the relevant control, not redaction.
+- **Length caps live in `render.py`, imported by `server.py`** — one definition shared by the form's
+  `maxlength` hint and the server's authoritative enforcement (server already imports render; the
+  reverse would be a cycle).
+
 ## Post-C1 deploy — Fly artifacts + config hardening (2026-06-19)
 
 **C1 is deployed.** The relay runs on Fly.io over HTTPS, reachable by a supervisor, verified end to

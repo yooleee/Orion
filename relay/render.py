@@ -25,6 +25,15 @@ import html
 import urllib.parse
 from datetime import datetime, timezone
 
+# Input limits for a supervisor comment (C2). They live HERE — the dependency-free
+# module — because BOTH sides need them: render.py uses them as the comment form's
+# client-side `maxlength` hint, and server.py imports them to ENFORCE the limit on the
+# decoded fields (the authoritative check). Keeping one definition avoids the two
+# numbers drifting apart. server.py already imports from render.py, so this direction
+# introduces no import cycle (the reverse would).
+MAX_COMMENT_BODY_CHARS = 4_000
+MAX_AUTHOR_CHARS = 200
+
 # A small inline stylesheet. Inline (not a served static file) keeps the relay a
 # single self-contained process with no static-asset routing — the simplest thing
 # that gives the dashboard a readable layout.
@@ -240,23 +249,28 @@ def render_project(project_name: str, reports: list[dict]) -> str:
     return _page(f"Orion — {project_name}", body)
 
 
-def render_report(report: dict) -> str:
-    """Render a single report: its metadata and its sections (or flat body).
+def render_report(report: dict, comments: list[dict] | None = None) -> str:
+    """Render a single report: its metadata, its sections (or flat body), comments.
 
     Args:
         report: One get() result dict (project, body, sections, participants,
             share_level, lane, generated_at, orion_version, ingested_at).
+        comments: The comments_for() list for this report (each a dict with author,
+            body, created_at). Defaults to None → treated as empty, so existing
+            one-argument callers/tests keep working (the comments section is additive).
 
     Returns:
         A complete HTML page.
 
     Why:
-        The leaf view — the actual update a supervisor reads. When the report has
-        per-signal sections we render each as a titled block; when it has none (an
-        intake push carries a single body and no sections) we render the flat body
-        as one block, mirroring how the chat composer treats "no sections". Bodies
-        go in <pre> so the report's line structure survives, with the content
-        escaped so that structure can never become markup.
+        The leaf view — the actual update a supervisor reads, and now ALSO where they
+        comment back (C2). When the report has per-signal sections we render each as a
+        titled block; when it has none (an intake push carries a single body and no
+        sections) we render the flat body as one block, mirroring how the chat composer
+        treats "no sections". Bodies go in <pre> so the report's line structure
+        survives, with the content escaped so that structure can never become markup.
+        The comments section (list + post form) is appended last via a helper, keeping
+        this function focused on the report itself.
     """
     # Empty-participants guard: with no recipients, joining yields "" and the line
     # would read "to  ·" (a dangling "to "). Show an explicit placeholder instead.
@@ -297,10 +311,67 @@ def render_report(report: dict) -> str:
         # No per-signal sections (e.g. an intake push): render the flat body.
         sections_html = f"<section><pre>{_esc(report['body'])}</pre></section>"
 
+    comments_html = _render_comments(report["id"], comments or [])
+
     body = (
-        f"{breadcrumb}\n<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}"
+        f"{breadcrumb}\n<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}\n"
+        f"{comments_html}"
     )
     return _page(f"Orion — {report['project']} report", body)
+
+
+def _render_comments(report_id: object, comments: list[dict]) -> str:
+    """Render the comments section: the existing thread plus the post form.
+
+    Args:
+        report_id: The report's id — used both to build the form's POST action and
+            (it is already trusted, but) escaped on the way into the href anyway.
+        comments: The report's comments, oldest-first (comments_for's order). May be
+            empty, in which case a friendly empty-state stands in for the list.
+
+    Returns:
+        An HTML fragment (heading + list/empty-state + form), every dynamic value
+        escaped. Assembled here, not inline in render_report, to keep that function
+        readable.
+
+    Why:
+        This is the C2 inbound surface's view half. EVERY dynamic value — the author,
+        the body, the timestamp, and the id inside the form action — is routed through
+        _esc (and the id additionally through _url for the path), because a comment is
+        attacker-influenced text: the stored-XSS defense for the whole feature lives in
+        this escaping. The form is a plain HTML POST (no JS): the browser submits it,
+        the server validates + stores + 303-redirects back here. maxlength mirrors the
+        server's caps as a courtesy, but the server is the authoritative check.
+    """
+    if comments:
+        items = []
+        for comment in comments:
+            # An omitted name was stored as "", so show a neutral placeholder rather
+            # than a blank byline. The placeholder is static (not user input).
+            who = comment["author"] if comment["author"] else "anonymous"
+            items.append(
+                f'<li><span class="meta">{_esc(who)} · '
+                f'{_esc(_format_ts(comment["created_at"]))}</span>'
+                f'<pre>{_esc(comment["body"])}</pre></li>'
+            )
+        thread_html = '<ul class="list">\n' + "\n".join(items) + "\n</ul>"
+    else:
+        thread_html = "<p class='empty'>No comments yet.</p>"
+
+    # The id is trusted (an int from the store), but encode + escape it anyway so the
+    # action attribute is built by the same safe path as every other dynamic href.
+    action = _esc("/report/" + _url(report_id) + "/comment")
+    form = (
+        f'<form method="post" action="{action}">\n'
+        '<p><label>Name (optional)<br>'
+        f'<input type="text" name="author" maxlength="{MAX_AUTHOR_CHARS}"></label></p>\n'
+        '<p><label>Comment<br>'
+        f'<textarea name="body" rows="4" required '
+        f'maxlength="{MAX_COMMENT_BODY_CHARS}"></textarea></label></p>\n'
+        '<p><button type="submit">Post comment</button></p>\n'
+        "</form>"
+    )
+    return f"<h2>Comments</h2>\n{thread_html}\n{form}"
 
 
 def render_not_found(message: str = "Not found.") -> str:

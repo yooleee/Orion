@@ -15,7 +15,15 @@
 #                independence from orion — CP6 proves the real end-to-end contract.
 # =============================================================================
 
-from relay.store import get, history, ingest, list_projects, open_relay_store
+from relay.store import (
+    add_comment,
+    comments_for,
+    get,
+    history,
+    ingest,
+    list_projects,
+    open_relay_store,
+)
 
 
 def _blob(project="demo", *, generated_at="2026-06-18T00:00:00+00:00", sections=None):
@@ -154,3 +162,79 @@ def test_list_projects_counts_and_orders_by_latest(tmp_path):
     assert by_name["alpha"]["report_count"] == 2
     assert by_name["beta"]["report_count"] == 1
     assert by_name["alpha"]["latest_generated_at"] == "2026-06-18T09:00:00+00:00"
+
+
+# --- C2: report comments (append-only, flat) ----------------------------------
+
+
+def test_add_comment_then_fetch_round_trips(tmp_path):
+    """A comment added to a report comes back from comments_for with every field.
+
+    Why this matters: this is the comment store's core promise — what the dashboard
+    renders must equal what was posted. We ingest a real report, attach one comment,
+    and confirm all four user/clock fields survive the round-trip (author, body,
+    created_at, and the report_id linkage), since the renderer reads each of them.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
+
+    comment_id = add_comment(
+        conn, report_id, "Alex", "Looks great, ship it.", "2026-06-18T10:00:00+00:00"
+    )
+
+    comments = comments_for(conn, report_id)
+    assert len(comments) == 1
+    only = comments[0]
+    assert only["id"] == comment_id
+    assert only["report_id"] == report_id
+    assert only["author"] == "Alex"
+    assert only["body"] == "Looks great, ship it."
+    assert only["created_at"] == "2026-06-18T10:00:00+00:00"
+
+
+def test_comments_are_oldest_first(tmp_path):
+    """comments_for returns a report's comments in chronological (insertion) order.
+
+    Why this matters: an append-only thread must read top-to-bottom in the order it
+    was written. We add three comments and assert they come back in insertion order
+    (id ASC), which the renderer relies on to lay the thread out correctly.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
+
+    add_comment(conn, report_id, "Alex", "first", "2026-06-18T10:00:00+00:00")
+    add_comment(conn, report_id, "Sam", "second", "2026-06-18T11:00:00+00:00")
+    add_comment(conn, report_id, "", "third (anonymous)", "2026-06-18T12:00:00+00:00")
+
+    bodies = [c["body"] for c in comments_for(conn, report_id)]
+    assert bodies == ["first", "second", "third (anonymous)"]
+
+
+def test_comments_are_scoped_to_their_report(tmp_path):
+    """comments_for(report) returns only that report's comments, not another's.
+
+    Why this matters: comments hang off a specific report_id; a comment on report A
+    must never leak into report B's thread. We ingest two reports, comment on each,
+    and confirm each fetch sees only its own.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    report_a = ingest(conn, _blob("alpha"), "2026-06-18T00:00:01+00:00")
+    report_b = ingest(conn, _blob("beta"), "2026-06-18T00:00:02+00:00")
+
+    add_comment(conn, report_a, "Alex", "on A", "2026-06-18T10:00:00+00:00")
+    add_comment(conn, report_b, "Sam", "on B", "2026-06-18T11:00:00+00:00")
+
+    assert [c["body"] for c in comments_for(conn, report_a)] == ["on A"]
+    assert [c["body"] for c in comments_for(conn, report_b)] == ["on B"]
+
+
+def test_comments_for_report_with_none_is_empty(tmp_path):
+    """A report with no comments returns an empty list, not None.
+
+    Why this matters: the render layer shows a clean "No comments yet" empty state;
+    returning [] (not None) lets it iterate without a null check, matching how
+    history() handles a project with no reports.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
+    assert comments_for(conn, report_id) == []

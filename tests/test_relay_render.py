@@ -12,6 +12,7 @@
 # =============================================================================
 
 from relay.render import (
+    _format_ts,
     render_index,
     render_not_found,
     render_project,
@@ -72,7 +73,8 @@ def test_project_lists_reports_linking_to_each_report():
     """
     html = render_project("demo", [_report(id=7, generated_at="2026-06-18T09:00:00+00:00")])
     assert 'href="/report/7"' in html
-    assert "2026-06-18T09:00:00+00:00" in html
+    # The link text is the humanized timestamp (see test_project_humanizes_timestamp),
+    # so the raw ISO string is no longer shown verbatim here.
 
 
 def test_report_shows_sections_and_metadata():
@@ -186,3 +188,150 @@ def test_not_found_message_is_escaped():
     html = render_not_found(f"Unknown path {_XSS!r}.")
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
+
+
+# --- CP3 hardening: report id, breadcrumbs, timestamps, badges, guards ---------
+
+
+def test_report_shows_its_id():
+    """The report detail page shows "Report #<id>" in the metadata line.
+
+    Why this matters: the URL carries /report/<id> but the page never echoed it;
+    surfacing the id lets a reader cite or cross-reference a specific report.
+    """
+    html = render_report(_report(id=42))
+    assert "Report #42" in html
+
+
+def test_report_has_breadcrumb_back_to_project():
+    """The report page links back to its project's history (← <project>).
+
+    Why this matters: the leaf view was a dead end; a breadcrumb lets a reader step
+    back up to the project's timeline. The href must point at /project/<name>.
+    """
+    html = render_report(_report(project="demo"))
+    assert 'href="/project/demo"' in html
+    assert "← demo" in html
+
+
+def test_not_found_has_back_link_to_index():
+    """The 404 page offers a "← Back to projects" link to the index.
+
+    Why this matters: a stale/bad link should not be a dead end — the viewer needs
+    a way home from the error page.
+    """
+    html = render_not_found("nope")
+    assert 'href="/"' in html
+    assert "← Back to projects" in html
+
+
+def test_format_ts_humanizes_a_utc_iso_string():
+    """A well-formed ISO-8601 UTC string becomes a readable UTC-pinned form.
+
+    Why this matters: this is the core of the helper — "2026-06-18T14:32:00+00:00"
+    must render as "Jun 18 2026, 14:32 UTC", staying in UTC (not local time) so the
+    displayed time is stable across the machine that wrote it and the one reading it.
+    """
+    assert _format_ts("2026-06-18T14:32:00+00:00") == "Jun 18 2026, 14:32 UTC"
+
+
+def test_format_ts_keeps_utc_for_a_nonzero_offset():
+    """A timestamp with a non-UTC offset is converted to UTC, not shown as-stored.
+
+    Why this matters: the discipline is UTC-only. An input carrying e.g. +02:00 must
+    be normalized to UTC (14:32+02:00 -> 12:32 UTC), never displayed in its source
+    offset or in the reader's local time.
+    """
+    assert _format_ts("2026-06-18T14:32:00+02:00") == "Jun 18 2026, 12:32 UTC"
+
+
+def test_format_ts_fails_safe_on_garbage():
+    """An unparseable timestamp is returned unchanged instead of raising.
+
+    Why this matters: a malformed/unexpected stored value must degrade to the raw
+    string rather than crash the whole page render (fail-safe contract).
+    """
+    assert _format_ts("not-a-timestamp") == "not-a-timestamp"
+
+
+def test_report_humanizes_timestamps_not_raw_iso():
+    """render_report shows the humanized time, not the raw ISO string verbatim.
+
+    Why this matters: the helper must actually be wired into the view — the readable
+    form should appear and the raw ISO (with its "T" and offset) should not.
+    """
+    html = render_report(
+        _report(
+            generated_at="2026-06-18T14:32:00+00:00",
+            ingested_at="2026-06-18T14:35:00+00:00",
+        )
+    )
+    assert "Jun 18 2026, 14:32 UTC" in html      # generated_at, humanized
+    assert "Jun 18 2026, 14:35 UTC" in html      # ingested_at, humanized
+    assert "2026-06-18T14:32:00+00:00" not in html  # raw ISO not shown verbatim
+
+
+def test_project_humanizes_timestamp():
+    """render_project shows each report's generated_at humanized, not raw ISO.
+
+    Why this matters: the history list link text must also be humanized so the
+    timeline reads cleanly, with the raw ISO not leaking through.
+    """
+    html = render_project("demo", [_report(generated_at="2026-06-18T09:05:00+00:00")])
+    assert "Jun 18 2026, 09:05 UTC" in html
+    assert "2026-06-18T09:05:00+00:00" not in html
+
+
+def test_project_section_count_badge_plural():
+    """A report with multiple sections shows "· N sections" in the history row.
+
+    Why this matters: the badge lets a reader gauge a report's heft at a glance;
+    the multi-section case must pluralize.
+    """
+    html = render_project(
+        "demo",
+        [_report(sections=[["A", "x"], ["B", "y"], ["C", "z"]])],
+    )
+    assert "3 sections" in html
+
+
+def test_project_section_count_badge_singular():
+    """A report with exactly one section shows "1 section" (not "1 sections").
+
+    Why this matters: correct pluralization — the singular boundary is the easy bug
+    to ship, so it gets its own assertion.
+    """
+    html = render_project("demo", [_report(sections=[["A", "x"]])])
+    assert "1 section" in html
+    assert "1 sections" not in html
+
+
+def test_project_section_count_badge_flat_body():
+    """A report with no sections shows "· flat body" in the history row.
+
+    Why this matters: a sectionless intake push should read as "flat body" rather
+    than "0 sections", matching how the report view renders the flat case.
+    """
+    html = render_project("demo", [_report(sections=[])])
+    assert "flat body" in html
+
+
+def test_report_empty_participants_shows_guard():
+    """A report with no participants shows "(no recipients)", not a dangling "to ".
+
+    Why this matters: joining an empty list yields "", which would render as "to  ·"
+    — a confusing dangling label. The guard makes the empty case explicit.
+    """
+    html = render_report(_report(participants=[]))
+    assert "(no recipients)" in html
+    assert "to  ·" not in html  # no dangling "to " with empty join
+
+
+def test_css_has_focus_outline():
+    """The page CSS includes a visible a:focus outline rule.
+
+    Why this matters: keyboard navigation was invisible (no focus ring). The rule
+    must be present in every page's inline stylesheet.
+    """
+    html = render_not_found("anything")  # any view embeds the shared _PAGE_CSS
+    assert "a:focus" in html

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import urllib.parse
+from datetime import datetime, timezone
 
 # A small inline stylesheet. Inline (not a served static file) keeps the relay a
 # single self-contained process with no static-asset routing — the simplest thing
@@ -32,6 +33,9 @@ _PAGE_CSS = """
 body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto;
        padding: 0 1rem; line-height: 1.5; }
 header a { font-weight: bold; text-decoration: none; }
+/* Visible focus ring for keyboard navigation: without this, tabbing through
+   links gives no on-screen indication of focus (an accessibility gap). */
+a:focus { outline: 2px solid #4af; outline-offset: 2px; }
 h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
 h2 { font-size: 1.1rem; margin-top: 1.5rem; }
 .meta { color: #777; font-size: 0.9rem; }
@@ -80,6 +84,45 @@ def _url(value: object) -> str:
         landing in an href, so it is both URL- and HTML-safe.
     """
     return urllib.parse.quote(str(value), safe="")
+
+
+def _format_ts(iso: str) -> str:
+    """Render a stored ISO-8601 UTC timestamp as a readable, UTC-pinned string.
+
+    Args:
+        iso: A stored timestamp string, e.g. "2026-06-18T14:32:00+00:00".
+
+    Returns:
+        A human-readable form like "Jun 18 2026, 14:32 UTC". If the input cannot
+        be parsed, the original string is returned UNCHANGED (fail-safe).
+
+    Why:
+        Raw ISO strings are precise but noisy to read. We humanize them for the
+        dashboard, but a report is a cross-machine artifact: it is generated on one
+        machine and read on another, so the displayed time must be stable and
+        machine-independent. We therefore convert to UTC and format with a FIXED
+        English month table (strftime("%b") is locale-dependent, so it is avoided) —
+        never local time and never locale formatting. Failing safe (return the input)
+        means a malformed or unexpected timestamp degrades to the raw string rather
+        than raising and breaking the whole page render.
+    """
+    try:
+        # fromisoformat handles the stored "+00:00" offset. We force UTC so an input
+        # carrying any other offset is still displayed in UTC, not as-stored.
+        parsed = datetime.fromisoformat(iso).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        # Fail safe: an unparseable value is shown verbatim rather than crashing the
+        # render. The caller still escapes it on the way into HTML.
+        return iso
+
+    # A fixed, locale-independent month table. Using this instead of strftime("%b")
+    # keeps the output identical regardless of the host machine's locale.
+    months = (
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    )
+    month = months[parsed.month - 1]  # month is 1-indexed; the table is 0-indexed.
+    return f"{month} {parsed.day:02d} {parsed.year}, {parsed.hour:02d}:{parsed.minute:02d} UTC"
 
 
 def _page(title: str, body_html: str) -> str:
@@ -179,10 +222,19 @@ def render_project(project_name: str, reports: list[dict]) -> str:
     items = []
     for report in reports:
         href = "/report/" + _url(report["id"])
+        # Section-count badge: gives a reader a sense of each report's heft at a
+        # glance. A report with no sections is a flat-body intake push.
+        section_count = len(report["sections"])
+        if section_count == 0:
+            heft = "flat body"
+        elif section_count == 1:
+            heft = "1 section"  # singular — never "1 sections".
+        else:
+            heft = f"{section_count} sections"
         items.append(
-            f'<li><a href="{_esc(href)}">{_esc(report["generated_at"])}</a> '
+            f'<li><a href="{_esc(href)}">{_esc(_format_ts(report["generated_at"]))}</a> '
             f"<span class='meta'>{_esc(report['lane'])} · "
-            f"{_esc(report['share_level'])}</span></li>"
+            f"{_esc(report['share_level'])} · {_esc(heft)}</span></li>"
         )
     body = heading + "\n<ul class='list'>\n" + "\n".join(items) + "\n</ul>"
     return _page(f"Orion — {project_name}", body)
@@ -206,15 +258,31 @@ def render_report(report: dict) -> str:
         go in <pre> so the report's line structure survives, with the content
         escaped so that structure can never become markup.
     """
+    # Empty-participants guard: with no recipients, joining yields "" and the line
+    # would read "to  ·" (a dangling "to "). Show an explicit placeholder instead.
+    if report["participants"]:
+        recipients = "to " + _esc(", ".join(report["participants"]))
+    else:
+        recipients = _esc("(no recipients)")
+
     meta = (
         "<p class='meta'>"
-        f"Generated {_esc(report['generated_at'])} · "
+        f"Report #{_esc(report['id'])} · "
+        f"Generated {_esc(_format_ts(report['generated_at']))} · "
         f"lane {_esc(report['lane'])} · "
         f"{_esc(report['share_level'])} · "
-        f"to {_esc(', '.join(report['participants']))} · "
+        f"{recipients} · "
         f"Orion {_esc(report['orion_version'])} · "
-        f"received {_esc(report['ingested_at'])}"
+        f"received {_esc(_format_ts(report['ingested_at']))}"
         "</p>"
+    )
+
+    # Breadcrumb back to the project's history. The name is percent-encoded for the
+    # href (one safe segment) and escaped for both the href and the display text.
+    project_href = "/project/" + _url(report["project"])
+    breadcrumb = (
+        f'<p class="meta"><a href="{_esc(project_href)}">'
+        f"← {_esc(report['project'])}</a></p>"
     )
 
     if report["sections"]:
@@ -229,7 +297,9 @@ def render_report(report: dict) -> str:
         # No per-signal sections (e.g. an intake push): render the flat body.
         sections_html = f"<section><pre>{_esc(report['body'])}</pre></section>"
 
-    body = f"<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}"
+    body = (
+        f"{breadcrumb}\n<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}"
+    )
     return _page(f"Orion — {report['project']} report", body)
 
 
@@ -248,5 +318,10 @@ def render_not_found(message: str = "Not found.") -> str:
         way home rather than a bare error. The message is escaped because it
         typically contains the requested path/id, which is attacker-controllable.
     """
-    body = f"<h1>Not found</h1>\n<p>{_esc(message)}</p>"
+    # Back-link to the index so a dead-end 404 still offers a way home. The href is
+    # the static root, so no escaping/encoding of dynamic input is needed here.
+    body = (
+        f"<h1>Not found</h1>\n<p>{_esc(message)}</p>\n"
+        '<p class="meta"><a href="/">← Back to projects</a></p>'
+    )
     return _page("Orion — not found", body)

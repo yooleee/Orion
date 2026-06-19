@@ -446,7 +446,12 @@ def _is_loopback(host: str) -> bool:
 
 
 def create_server(
-    host: str, port: int, db_path: Path, token: str, view_token: str | None = None
+    host: str,
+    port: int,
+    db_path: Path,
+    token: str,
+    view_token: str | None = None,
+    require_view_auth: bool = False,
 ) -> RelayServer:
     """Build and bind a RelayServer (does not start serving).
 
@@ -456,25 +461,40 @@ def create_server(
         db_path: Path to the relay's sqlite store.
         token: The shared Bearer ingest token.
         view_token: Optional shared secret for dashboard read auth. Required (this
-            function raises without it) whenever `host` is non-loopback.
+            function raises without it) whenever `host` is non-loopback, or whenever
+            require_view_auth is set.
+        require_view_auth: When True, demand view_token even on a LOOPBACK bind. For
+            the reverse-proxy topology (relay on loopback, a proxy exposing it), where
+            the host-based guard alone can't tell the dashboard is publicly reachable
+            (KI-18). Off by default so local loopback dev stays password-free.
 
     Returns:
         A bound RelayServer. Its actual bound port is server.server_address[1]
         (useful when port 0 was requested).
 
     Raises:
-        ValueError: when `host` is non-loopback and no view_token is given — the
-            fail-closed guard. Binding a world-reachable interface would otherwise
-            expose the read-only dashboard to anyone, so we refuse to start rather
-            than serve it unauthenticated.
+        ValueError: when a view secret is required but absent — the fail-closed guard.
+            That is either (a) a non-loopback bind, which would expose the dashboard to
+            the network, or (b) require_view_auth on a loopback bind (the proxy case).
+            We refuse to start rather than serve the dashboard unauthenticated.
 
     Why:
         Separating "build/bind" from "serve forever" makes the server testable: a
         test binds to port 0, reads the assigned port, drives requests on a thread,
         then calls shutdown() — none of which is possible if construction blocked.
         The guard lives HERE (not only in the CLI) so every path to a bound server —
-        serve() and tests alike — is fail-closed by construction.
+        serve() and tests alike — is fail-closed by construction. Enforcement itself
+        needs nothing extra: do_GET already requires Basic auth whenever a view secret
+        is set, and these guards guarantee it is set when it must be.
     """
+    # (b) Proxy case: read-auth forced even though the bind looks loopback-safe.
+    if require_view_auth and _is_loopback(host) and not view_token:
+        raise ValueError(
+            "refusing to start: --require-view-auth is set but no dashboard view "
+            "secret is configured — the dashboard would be served unauthenticated. "
+            "Set a view secret (relay-serve --view-token-env) first."
+        )
+    # (a) Non-loopback bind: the dashboard would be reachable on the network.
     if not _is_loopback(host) and not view_token:
         raise ValueError(
             f"refusing to bind non-loopback host {host!r} without a dashboard view "
@@ -485,7 +505,12 @@ def create_server(
 
 
 def serve(
-    host: str, port: int, db_path: Path, token: str, view_token: str | None = None
+    host: str,
+    port: int,
+    db_path: Path,
+    token: str,
+    view_token: str | None = None,
+    require_view_auth: bool = False,
 ) -> None:
     """Run the relay server until interrupted (the blocking entry point).
 
@@ -495,7 +520,9 @@ def serve(
         db_path: Path to the relay's sqlite store.
         token: The shared Bearer ingest token.
         view_token: Optional dashboard read secret (HTTP Basic). Required by
-            create_server() when host is non-loopback.
+            create_server() when host is non-loopback (or require_view_auth is set).
+        require_view_auth: Force the view secret even on a loopback bind (the
+            reverse-proxy case; see create_server / KI-18).
 
     Returns:
         None. Blocks serving requests until Ctrl-C, then shuts down cleanly.
@@ -506,7 +533,7 @@ def serve(
         that a non-loopback bind is protected; it handles Ctrl-C as a clean stop
         rather than a traceback.
     """
-    server = create_server(host, port, db_path, token, view_token)
+    server = create_server(host, port, db_path, token, view_token, require_view_auth)
     bound_host, bound_port = server.server_address
     # Surface read-auth state at startup — the operator's confirmation that a
     # world-reachable bind is gated (the fail-closed guard guarantees it is).

@@ -709,8 +709,8 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
         cli,
         "_load_relay_serve",
         lambda: (
-            lambda host, port, db_path, token, view_token: calls.append(
-                (host, port, db_path, token, view_token)
+            lambda host, port, db_path, token, view_token, require_view_auth: calls.append(
+                (host, port, db_path, token, view_token, require_view_auth)
             )
         ),
     )
@@ -727,12 +727,39 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     )
     assert code == 0
     assert len(calls) == 1
-    host, port, db_path, token, view_token = calls[0]
+    host, port, db_path, token, view_token, require_view_auth = calls[0]
     assert host == "127.0.0.1"
     assert port == 9999
     assert db_path == db
     assert token == "tok-123"
     assert view_token == "view-xyz"  # resolved from ORION_RELAY_VIEW_TOKEN
+    assert require_view_auth is False  # flag absent -> default off
+
+
+def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
+    """`--require-view-auth` reaches serve() as True.
+
+    Why this matters: the proxy-topology safety switch must actually thread from the
+    CLI flag through to serve()/the guard — a flag that parses but gets dropped would
+    silently leave the dashboard unprotected behind a proxy (the exact KI-18 footgun
+    this closes).
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
+    seen = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: seen.append(a)))
+
+    code = cli.main(
+        [
+            "relay-serve",
+            "--host", "127.0.0.1",
+            "--require-view-auth",
+            "--config", str(tmp_path / "orion.toml"),
+        ]
+    )
+    assert code == 0
+    assert seen and seen[0][-1] is True  # require_view_auth is the final positional arg
 
 
 def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):

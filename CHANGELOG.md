@@ -14,6 +14,37 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## C1 second slice — deploy-safe relay + dashboard hardening (2026-06-18)
+
+Makes the C1 relay safe to host **beyond loopback** and polishes the read-only dashboard, so it can
+give a supervisor a real URL. Local collection / redaction / delivery is unchanged. `pytest`: **254**.
+
+### Added
+
+- **Dashboard read auth (HTTP Basic):** the relay's web view is gated by a shared view secret
+  (`ORION_RELAY_VIEW_TOKEN`, any username + this as the password). Enforced **only when set**, so
+  loopback dev stays password-free.
+- **Fail-closed bind guard:** the relay refuses to start if it binds a non-loopback host without a
+  view secret — a world-readable dashboard is impossible by construction.
+- **`relay-serve --require-view-auth`:** forces the view secret even on a loopback bind, for the
+  reverse-proxy topology where the host-based guard alone can't see the dashboard is publicly exposed.
+- **Deployment recipe:** a host-agnostic `Dockerfile`, `Caddyfile.example`, and a
+  `docs/deployment.md` runbook (Docker / Fly / Render and reverse-proxy paths, with a
+  build → smoke-test → deploy flow).
+
+### Changed
+
+- **Dashboard hardening:** report id on the detail page, a project breadcrumb + a 404 back-link,
+  UTC-humanized timestamps, a section-count badge, keyboard-focus styling, and an empty-participants
+  guard.
+
+### Fixed
+
+- **KI-18 — proxy-exposure blind spot:** the fail-closed guard keyed off the *bind host*, so a
+  loopback bind behind a reverse proxy wasn't required to set a view secret (the proxy could expose an
+  unauthenticated dashboard). `--require-view-auth` closes it — a forgotten secret now fails closed;
+  the deploy recipe prescribes the flag for the proxy topology.
+
 ## Post-C1 — OSS-readiness pass: CI, contributor docs, onboarding friction (2026-06-18)
 
 The hosting-agnostic polish that follows the C1 slice — making Orion ready to be public and

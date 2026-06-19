@@ -10,11 +10,11 @@
 # Copy to `Caddyfile`, edit the domain, then run e.g. `caddy run`.
 #
 # ⚠ SECURITY — READ THIS. Behind a reverse proxy the relay binds 127.0.0.1, so
-# Orion's fail-closed guard sees a LOOPBACK bind and will NOT force the dashboard
-# view secret for you. You MUST set ORION_RELAY_VIEW_TOKEN on the relay yourself —
-# otherwise the dashboard is world-readable through Caddy. (See KI-18 in
-# docs/known-issues.md.) The optional basic_auth block below is a SECOND layer
-# (defense in depth); generate its hash with `caddy hash-password`.
+# Orion's fail-closed guard sees a LOOPBACK bind. Run the relay with
+# `--require-view-auth` so it demands the dashboard view secret anyway — a forgotten
+# secret then fails closed (the relay won't start) instead of serving a world-readable
+# dashboard through Caddy. (Closes KI-18.) The optional basic_auth block below is a
+# SECOND layer (defense in depth); generate its hash with `caddy hash-password`.
 # =============================================================================
 
 relay.example.com {

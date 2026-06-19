@@ -76,15 +76,19 @@ The 3–5 decisions that define the route — and, by implication, what we're **
 - **S4 — Security & privacy are permanent invariants.** Redact + preview-before-send + fail-closed,
   gaining an inbound validate/authorize side as interaction goes two-way. (The one non-negotiable;
   everything else above is stage-appropriate and expected to evolve.)
-- **S5 — Bidirectional (C2) is the next destination.** A supervisor replying to *your* reports — the
-  loop getting richer, still inside the north star. C3 (multi-party) and E2E deferred behind seams.
+- **S5 — Bidirectional (C2) shipped; native Slack/Discord bots are the next destination.** C2
+  (dashboard comments + the `orion comments` pull-back) is done, so the loop is two-way. Next we
+  deepen the *delivery surface* into genuine two-way — native bots where supervisors already are —
+  still inside the north star (richer loop, not multi-party yet). C3 (multi-party) and E2E stay
+  deferred behind seams. *(Decided 2026-06-19; kickoff: `docs/native-bots-kickoff.md`.)*
 
 ## Measures (watch + act)
 
 - **Dashboard (what we watch):** the dogfood read (G1) · the 10-minute setup test on any onboarding
   change (G3) · the supervisor-value signal (G2). Qualitative by design.
-- **Actions (what we do):** the **horizon phases** in `plans/orion-plan.md`. Immediate = the
-  deploy-beyond-loopback relay + dashboard-hardening slice; next = the C2 bidirectional plan-mode pass.
+- **Actions (what we do):** the **horizon phases** in `plans/orion-plan.md`. Done = the
+  deploy-beyond-loopback relay + dashboard hardening (C1) and the C2 bidirectional pass (dashboard
+  comments + comment pull-back); next = the **native Slack/Discord bots** slice (`docs/native-bots-kickoff.md`).
 
 ## The lens we carry (thought processes, not installed frameworks)
 

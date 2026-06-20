@@ -340,6 +340,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    bot_parser = subparsers.add_parser(
+        "bot",
+        help="Run the always-on Slack bot: relay channel replies into report comments (C2-bots).",
+    )
+    bot_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     relay_parser = subparsers.add_parser(
         "relay-serve",
         help="Run the local relay: receive pushed reports and serve a read-only dashboard.",
@@ -415,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_comments(
             args.project, Path(args.config), as_json=args.as_json, show_all=args.show_all
         )
+    if args.command == "bot":
+        return cmd_bot(Path(args.config))
     if args.command == "relay-serve":
         return cmd_relay_serve(
             args.host,
@@ -1333,6 +1345,98 @@ def _format_pacific(iso: str) -> str:
     # instant to California wall-clock time (zoneinfo applies DST -> PDT/PST).
     pacific = datetime.fromisoformat(iso).astimezone(ZoneInfo("America/Los_Angeles"))
     return pacific.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _load_run_bot():
+    """Import the Slack bot's run_bot() from the installed orion.bot package.
+
+    Returns:
+        The orion.bot.slack_bot.run_bot callable.
+
+    Why:
+        Unlike _load_relay_serve (which reaches a top-level, out-of-wheel package),
+        orion.bot IS part of the installed distribution, so this is a plain import —
+        no sys.path hack needed. We still import it through a tiny loader (rather than
+        at module top) for two reasons: it keeps cli.py importable without touching the
+        bot package on every other command, and it gives tests a single seam to
+        monkeypatch run_bot. The import here does NOT pull in slack-bolt — slack_bot.py
+        imports that lazily inside run_bot — so a missing optional dependency surfaces
+        only when the bot actually starts, as a clean ConfigError cmd_bot reports.
+    """
+    from orion.bot.slack_bot import run_bot
+
+    return run_bot
+
+
+def cmd_bot(config_path: Path) -> int:
+    """Run the always-on Slack bot: relay channel replies into report comments (C2-bots).
+
+    Args:
+        config_path: Path to orion.toml (also locates the sibling .env for secrets).
+
+    Returns:
+        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error — the bot or the
+        relay is disabled, a required token is missing, or the optional slack-bolt
+        dependency is not installed.
+
+    Why:
+        This is the thin CLI adapter over the bot shell, mirroring cmd_relay_serve. The
+        bot WRITES INTO the relay (a chat reply becomes a comment on the relay), so both
+        [bot] and [relay] must be enabled — a disabled either is a clean, actionable
+        error, not a crash. Three secrets are read HERE (like every other secret), only
+        when enabled, and a missing one is named by get_required, never printed: the
+        Slack bot token, the Socket Mode app-level token, and the relay Bearer token
+        (reused from [relay]). The channel→project bindings become the runtime map. The
+        run_bot import is the module seam tests monkeypatch; the missing-dependency case
+        surfaces as a ConfigError from inside run_bot and is reported the same way.
+    """
+    try:
+        config = load_config(config_path)
+        load_secrets(config_path)
+
+        bot_cfg = config.bot
+        # The bot is opt-in; without an enabled [bot] there is nothing to run.
+        if not bot_cfg.enabled:
+            print(
+                f"Error: no bot is enabled in {config_path}. Add an enabled [bot] "
+                f"table (platform, token env vars, and [[bot.channels]]) to run it.",
+                file=sys.stderr,
+            )
+            return 1
+
+        relay_cfg = config.relay
+        # The bot's whole job is to land replies in the relay's comment store, so a
+        # relay must be configured — its url + token are the bot's write target.
+        if not relay_cfg.enabled:
+            print(
+                f"Error: the bot writes replies into the relay, but no [relay] is "
+                f"enabled in {config_path}. Enable [relay] (the bot reuses its url and "
+                f"token) before running the bot.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Secrets live in .env, named by the *_env_var fields (never in the config). A
+        # missing one is named by get_required and surfaces as a clean SecretsError.
+        bot_token = get_required(bot_cfg.token_env_var)
+        app_token = get_required(bot_cfg.app_token_env_var)
+        relay_token = get_required(relay_cfg.token_env_var)
+
+        # The frozen (channel_id, project) pairs become the runtime lookup map.
+        channel_map = dict(bot_cfg.channel_bindings)
+        run_bot = _load_run_bot()
+    except (SecretsError, ConfigError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        # Blocks until Ctrl-C. run_bot raises ConfigError if slack-bolt is missing
+        # (the optional extra) — surfaced here as a clean, actionable error.
+        run_bot(bot_token, app_token, channel_map, relay_cfg.url, relay_token)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _load_relay_serve():

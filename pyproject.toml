@@ -51,6 +51,14 @@ dependencies = [
 # Test-only dependency. Kept out of the runtime install so a user who just wants
 # to run Orion still gets the two-dependency "clone and run in 10 minutes" path.
 dev = ["pytest>=8.0"]
+# Native Slack bot (C2-bots, `orion bot`). slack-bolt holds the Socket Mode
+# connection (its outbound WebSocket, heartbeat, and reconnect); it pulls in
+# slack_sdk. Kept OPTIONAL and lazily imported (only inside orion.bot.slack_bot)
+# so the core install stays at three deps for everyone NOT running the bot. This
+# optional-extra shape is the smallest-slice choice and is expected to graduate to
+# a first-class integration as the bot becomes load-bearing (the seams keep that
+# additive — see plans/build-the-native-bots-slice-squishy-key.md).
+slack-bot = ["slack-bolt>=1.18"]
 
 [project.scripts]
 # Installs an `orion` command on PATH that calls orion.cli:main.

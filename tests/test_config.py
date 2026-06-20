@@ -859,3 +859,178 @@ def test_display_timezone_invalid_zone_raises(tmp_path):
     path = _write(tmp_path, 'display_timezone = "Mars/Phobos"\n' + _DEMO_PROJECT)
     with pytest.raises(ConfigError, match="display_timezone"):
         load_config(path)
+
+
+# --- C2-bots: the [bot] table (native two-way chat bot) -------------------------
+#
+# The bot is global, opt-in, and writes INTO the relay, so these mirror the [relay]
+# tests: absent/disabled is a no-op; enabled requires both token env-var NAMES and at
+# least one channel→project binding; a binding to an unknown project, a pasted secret,
+# or a non-bool `enabled` all fail loudly at load time.
+
+# A full, valid [bot] block reused below so each test contributes only the deviation
+# it is checking (DRY). It binds one channel to the demo project that _DEMO_PROJECT
+# defines, so the project-existence validation passes.
+_VALID_BOT = """
+[bot]
+enabled = true
+platform = "slack"
+token_env_var = "ORION_SLACK_BOT_TOKEN"
+app_token_env_var = "ORION_SLACK_APP_TOKEN"
+
+[[bot.channels]]
+channel_id = "C07ABC123"
+project = "demo"
+"""
+
+
+def test_bot_absent_defaults_to_disabled(tmp_path):
+    """A config with no [bot] table resolves to a disabled, empty BotConfig.
+
+    Why this matters: the bot is opt-in and must not change any existing config's
+    behavior. An absent table means "run no bot" — disabled with empty fields — so
+    every pre-bots config keeps working exactly as before.
+    """
+    config = load_config(_write(tmp_path, _DEMO_PROJECT))
+
+    assert config.bot.enabled is False
+    assert config.bot.platform == ""
+    assert config.bot.token_env_var == ""
+    assert config.bot.app_token_env_var == ""
+    assert config.bot.channel_bindings == ()
+
+
+def test_bot_disabled_ignores_other_fields(tmp_path):
+    """`enabled = false` is a no-op even if tokens/channels are present.
+
+    Why this matters: toggling the bot off (rather than deleting the table) should
+    fully disable it without having to also strip its other fields — a disabled table
+    is a pure no-op that surfaces none of them.
+    """
+    config = load_config(
+        _write(
+            tmp_path,
+            _VALID_BOT.replace("enabled = true", "enabled = false") + _DEMO_PROJECT,
+        )
+    )
+
+    assert config.bot.enabled is False
+    assert config.bot.channel_bindings == ()
+
+
+def test_bot_enabled_parses(tmp_path):
+    """A fully-specified enabled bot parses into the expected BotConfig.
+
+    Why this matters: this is the happy path cmd_bot builds on — it reads the platform,
+    the two token env-var names, and the channel→project map straight off this object,
+    so they must survive parsing verbatim (whitespace-trimmed) and the bindings must
+    become an ordered (channel_id, project) tuple.
+    """
+    config = load_config(_write(tmp_path, _VALID_BOT + _DEMO_PROJECT))
+
+    assert config.bot.enabled is True
+    assert config.bot.platform == "slack"
+    assert config.bot.token_env_var == "ORION_SLACK_BOT_TOKEN"
+    assert config.bot.app_token_env_var == "ORION_SLACK_APP_TOKEN"
+    assert config.bot.channel_bindings == (("C07ABC123", "demo"),)
+
+
+def test_bot_enabled_missing_bot_token_rejected(tmp_path):
+    """An enabled bot with no token_env_var fails loudly naming the missing key.
+
+    Why this matters: without the bot token the listener cannot authenticate to Slack;
+    catching it at load time is a five-second fix instead of a confusing runtime auth
+    failure.
+    """
+    path = _write(
+        tmp_path, _VALID_BOT.replace('token_env_var = "ORION_SLACK_BOT_TOKEN"\n', "") + _DEMO_PROJECT
+    )
+    with pytest.raises(ConfigError, match="token_env_var"):
+        load_config(path)
+
+
+def test_bot_enabled_missing_app_token_rejected(tmp_path):
+    """An enabled bot with no app_token_env_var fails loudly naming the missing key.
+
+    Why this matters: Socket Mode needs the app-level token to open its WebSocket — it
+    is distinct from the bot token. A bot configured with only the bot token would fail
+    to connect, so requiring both at load time prevents a confusing startup failure.
+    """
+    path = _write(
+        tmp_path,
+        _VALID_BOT.replace('app_token_env_var = "ORION_SLACK_APP_TOKEN"\n', "") + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError, match="app_token_env_var"):
+        load_config(path)
+
+
+def test_bot_enabled_without_channels_rejected(tmp_path):
+    """An enabled bot with no [[bot.channels]] fails loudly.
+
+    Why this matters: a bot bound to no channels would listen to nothing — almost
+    certainly a mistake. Requiring at least one binding makes "enabled" mean "actually
+    doing something."
+    """
+    # Drop the [[bot.channels]] block, keeping the table header + tokens.
+    bot_no_channels = _VALID_BOT.split("[[bot.channels]]")[0]
+    path = _write(tmp_path, bot_no_channels + _DEMO_PROJECT)
+    with pytest.raises(ConfigError, match="no channels"):
+        load_config(path)
+
+
+def test_bot_channel_bound_to_unknown_project_rejected(tmp_path):
+    """A channel bound to a project that does not exist fails loudly naming it.
+
+    Why this matters: a typo'd project name would otherwise silently relay a
+    supervisor's reply to the wrong (or nonexistent) project. Validating the binding
+    against the real project names catches it at load, before the bot is running.
+    """
+    path = _write(
+        tmp_path, _VALID_BOT.replace('project = "demo"', 'project = "typo"') + _DEMO_PROJECT
+    )
+    with pytest.raises(ConfigError, match="unknown project"):
+        load_config(path)
+
+
+def test_bot_enabled_non_bool_rejected(tmp_path):
+    """`enabled = 1` (int) is rejected — enabling the bot must be an explicit bool.
+
+    Why this matters: a truthy non-bool would turn the always-on bot on unexpectedly.
+    The strict isinstance(bool) check (same as [relay] and auto_send) makes enabling it
+    deliberate.
+    """
+    path = _write(tmp_path, _VALID_BOT.replace("enabled = true", "enabled = 1") + _DEMO_PROJECT)
+    with pytest.raises(ConfigError, match="enabled"):
+        load_config(path)
+
+
+def test_bot_unsupported_platform_rejected(tmp_path):
+    """An unknown platform fails loudly naming the supported set.
+
+    Why this matters: only Slack is supported in this slice; a config naming another
+    platform must fail at load (naming what IS supported) rather than start a bot that
+    has no listener for that platform.
+    """
+    path = _write(
+        tmp_path, _VALID_BOT.replace('platform = "slack"', 'platform = "irc"') + _DEMO_PROJECT
+    )
+    with pytest.raises(ConfigError, match="platform"):
+        load_config(path)
+
+
+def test_bot_token_env_var_rejects_a_pasted_value(tmp_path):
+    """A token VALUE in `token_env_var` (not the variable name) is rejected, unechoed.
+
+    Why this matters: the same footgun as the relay token — pasting the secret where
+    the NAME belongs. The bot token field gets the same name-shape guard, and the error
+    must not echo the pasted secret (the sample has a hyphen a real env-var name can't).
+    """
+    leaked = "xoxb-1234567890-abcdEFGHijklMNOP"
+    path = _write(
+        tmp_path, _VALID_BOT.replace('"ORION_SLACK_BOT_TOKEN"', f'"{leaked}"') + _DEMO_PROJECT
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    msg = str(exc.value)
+    assert "token_env_var" in msg
+    assert leaked not in msg  # the secret must NOT be echoed back

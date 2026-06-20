@@ -1044,3 +1044,156 @@ def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert code == 0
     assert "demo" in out                              # loaded via $ORION_CONFIG
+
+
+# --- `orion bot` CLI adapter (C2-bots) ----------------------------------------
+#
+# These pin the `orion bot` command's setup WITHOUT starting a real listener:
+# cli._load_run_bot is monkeypatched to return a recorder, so run_bot (which would
+# block on a Socket Mode connection) is never really called. They assert the
+# enable-gates ([bot] and [relay]), the secret resolution, and the args reaching
+# run_bot.
+
+
+def _write_bot_config(tmp_path, repo, *, bot_enabled=True, relay_enabled=True):
+    """Write an orion.toml with [relay] and [bot] tables for the bot-command tests.
+
+    Args:
+        tmp_path: per-test temp dir (also where the state db lives).
+        repo: path to the git repo (used only to make the project valid).
+        bot_enabled / relay_enabled: toggles for the two enable-gate tests.
+
+    Why:
+        cmd_bot requires both an enabled [bot] (what to run) and an enabled [relay]
+        (its write target). This keeps each test to the toggle it exercises (DRY),
+        mirroring _write_relay_config.
+    """
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = {str(relay_enabled).lower()}
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [bot]
+        enabled = {str(bot_enabled).lower()}
+        platform = "slack"
+        token_env_var = "ORION_SLACK_BOT_TOKEN"
+        app_token_env_var = "ORION_SLACK_APP_TOKEN"
+
+          [[bot.channels]]
+          channel_id = "C07ABC123"
+          project = "demo"
+
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git"]
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def test_bot_dispatches_with_resolved_args(tmp_path, monkeypatch):
+    """`orion bot` resolves both tokens + the relay token and calls run_bot with the map.
+
+    Why this matters: this is the whole job of the CLI adapter — turn the [bot]/[relay]
+    config and the three .env secrets into a run_bot call. We patch _load_run_bot so
+    nothing connects, and assert the bot token, app token, channel map, relay url, and
+    relay token all reach run_bot as resolved.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # ignore real .env
+    monkeypatch.setenv("ORION_SLACK_BOT_TOKEN", "xoxb-123")
+    monkeypatch.setenv("ORION_SLACK_APP_TOKEN", "xapp-456")
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "_load_run_bot",
+        lambda: (
+            lambda bot_token, app_token, channel_map, relay_url, relay_token: calls.append(
+                (bot_token, app_token, channel_map, relay_url, relay_token)
+            )
+        ),
+    )
+
+    repo = _make_repo(tmp_path)
+    toml = _write_bot_config(tmp_path, repo)
+    code = cli.main(["bot", "--config", str(toml)])
+
+    assert code == 0
+    assert len(calls) == 1
+    bot_token, app_token, channel_map, relay_url, relay_token = calls[0]
+    assert bot_token == "xoxb-123"
+    assert app_token == "xapp-456"
+    assert channel_map == {"C07ABC123": "demo"}
+    assert relay_url == "https://relay.test/ingest"
+    assert relay_token == "relay-secret"
+
+
+def test_bot_disabled_is_clean_error_and_never_runs(tmp_path, monkeypatch):
+    """A disabled [bot] fails cleanly (exit 1) and never calls run_bot.
+
+    Why this matters: the bot is opt-in; running `orion bot` with it off must be a
+    clear, actionable error, not a crash — and the listener must never start.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    ran = []
+    monkeypatch.setattr(cli, "_load_run_bot", lambda: (lambda *a: ran.append(a)))
+
+    repo = _make_repo(tmp_path)
+    toml = _write_bot_config(tmp_path, repo, bot_enabled=False)
+    code = cli.main(["bot", "--config", str(toml)])
+
+    assert code == 1
+    assert ran == []  # never started
+
+
+def test_bot_requires_enabled_relay(tmp_path, monkeypatch):
+    """`orion bot` with [bot] on but [relay] off fails cleanly (exit 1), never runs.
+
+    Why this matters: the bot writes replies INTO the relay, so a missing write target
+    is a setup error caught before the listener starts — not a confusing failure on the
+    first reply.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_SLACK_BOT_TOKEN", "xoxb-123")
+    monkeypatch.setenv("ORION_SLACK_APP_TOKEN", "xapp-456")
+    ran = []
+    monkeypatch.setattr(cli, "_load_run_bot", lambda: (lambda *a: ran.append(a)))
+
+    repo = _make_repo(tmp_path)
+    toml = _write_bot_config(tmp_path, repo, relay_enabled=False)
+    code = cli.main(["bot", "--config", str(toml)])
+
+    assert code == 1
+    assert ran == []
+
+
+def test_bot_missing_token_is_clean_error_and_never_runs(tmp_path, monkeypatch):
+    """A missing bot token fails cleanly (exit 1) and never starts the listener.
+
+    Why this matters: a bot with no token can't authenticate to Slack; catching the gap
+    here turns it into a clear SecretsError naming the variable, before any connection.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("ORION_SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("ORION_SLACK_APP_TOKEN", "xapp-456")
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    ran = []
+    monkeypatch.setattr(cli, "_load_run_bot", lambda: (lambda *a: ran.append(a)))
+
+    repo = _make_repo(tmp_path)
+    toml = _write_bot_config(tmp_path, repo)
+    code = cli.main(["bot", "--config", str(toml)])
+
+    assert code == 1
+    assert ran == []

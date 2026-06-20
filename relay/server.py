@@ -288,19 +288,31 @@ class _RelayHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Route a POST to one of the relay's write surfaces.
 
-        Routes: "/ingest" (the Bearer-authed report push) and "/report/<id>/comment"
-        (a view-authed supervisor comment, C2). Anything else is a 404. Routing is by
-        path only, so any query string is stripped first — mirroring do_GET.
+        Routes: "/ingest" (the Bearer-authed report push), "/api/comments" (a
+        Bearer-authed MACHINE comment write — the native bot's path, C2-bots), and
+        "/report/<id>/comment" (a view-authed BROWSER comment, C2). Anything else is a
+        404. Routing is by path only, so any query string is stripped first — mirroring
+        do_GET.
 
-        Why a router: do_POST used to be the single ingest handler. C2 adds a second,
-        very differently-authed write path (HTTP Basic + a CSRF check, not Bearer), so
-        the dispatch is split out and each path gets its own handler — keeping this
+        Why a router: do_POST used to be the single ingest handler. C2 added a second,
+        very differently-authed write path (HTTP Basic + a CSRF check, not Bearer), and
+        the bots slice adds a third — a machine sibling of GET /api/comments that takes
+        Bearer (like /ingest), not Basic. Each path gets its own handler, keeping this
         method a short, readable table of routes rather than one branching blob.
+
+        Note "/api/comments" is shared between do_GET (the pull-back read) and do_POST
+        (the bot's write): the HTTP method already disambiguates them, so the same
+        Bearer-gated machine path serves both directions — symmetric with how the
+        browser uses /report/<id> (GET) and /report/<id>/comment (POST).
         """
         path = urllib.parse.urlparse(self.path).path
 
         if path == "/ingest":
             self._handle_ingest()
+            return
+
+        if path == "/api/comments":
+            self._handle_api_comment_post()
             return
 
         comment_report_id = _parse_comment_path(path)
@@ -512,6 +524,139 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # caller can always advance to latest_id unconditionally.
         latest_id = comments[-1]["id"] if comments else since_id
         self._send_json(200, {"comments": comments, "latest_id": latest_id})
+
+    def _handle_api_comment_post(self) -> None:
+        """Store a supervisor comment pushed by a machine client (POST /api/comments).
+
+        This is the native-bot write path: a Slack/Discord bot, on a supervisor's reply,
+        POSTs JSON {project, body, author?, report_id?} here and the relay appends it to
+        the project's report_comments — the EXACT same store the browser comment form
+        (`_handle_comment`) and the dashboard render from. So a chat reply and a dashboard
+        comment are indistinguishable downstream, and `orion comments` keeps working
+        unchanged.
+
+        Body fields:
+          - project   (required): the project to attach the comment to.
+          - body      (required): the comment text (non-empty after strip, length-capped).
+          - author    (optional): self-entered display name; "" when omitted. NOT an
+            authenticated identity (that is C3) — a free-text label, length-capped.
+          - report_id (optional): attach to THIS specific report instead of the latest.
+            Unused by the smallest-slice bot (which always omits it → latest report), but
+            accepted now so a later reply-targeting feature is a bot-only change with no
+            further relay edit. When present it must name an existing report IN `project`.
+
+        The inbound-security checklist, enforced IN ORDER (mirrors _handle_ingest):
+          1. Auth — Bearer, the SAME token /ingest and GET /api/comments use (whoever can
+             push a project's reports can comment on them). 401 + WWW-Authenticate: Bearer.
+             Checked BEFORE the body is read. NO CSRF/Origin check is needed (unlike the
+             browser `_handle_comment`): a Bearer token is never auto-attached by a browser,
+             so there is no cross-site-forgery vector — the same reasoning GET /api/comments
+             uses to skip it.
+          2. Read + parse — the 1 MB raw-body cap (`_read_raw_body`), then JSON; a missing/
+             oversized body or non-object/invalid JSON is a 400.
+          3. Validate — `project`/`body` required non-empty strings; `author` optional str;
+             body within MAX_COMMENT_BODY_CHARS and author within MAX_AUTHOR_CHARS. 400 otherwise.
+          4. Resolve the target report — by `report_id` if given (404 if it does not exist,
+             400 if it belongs to another project), else the project's LATEST report (404 if
+             the project has no reports yet — an expected state, e.g. a channel mapped before
+             the first report).
+          5. Store + 201 — `add_comment`, then {"id", "report_id"}.
+
+        Why:
+            Comments are deliberately NOT redaction-scanned — same rationale as
+            `_handle_comment` and `_handle_api_comments`: redaction is an OUTBOUND control
+            for the developer's own secrets, whereas an inbound supervisor comment shown
+            only on the access-gated dashboard is a different threat (the control there is
+            XSS-escaping on render, in render.py). This handler stays Bearer-gated all the same.
+        """
+        # 1) Authenticate FIRST, exactly like /ingest — validate nothing until authorized.
+        auth_error = self._auth_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Read and JSON-parse the body (1 MB cap inside _read_raw_body).
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "payload must be a JSON object"})
+            return
+
+        # 3) Validate the fields. project and body are required strings; author is an
+        # optional string defaulting to "". Strip both text fields so a whitespace-only
+        # body counts as empty — same as the browser comment route.
+        project = payload.get("project")
+        body = payload.get("body")
+        author = payload.get("author", "")
+        if not isinstance(project, str) or not project.strip():
+            self._send_json(400, {"error": "field 'project' must be a non-empty string"})
+            return
+        if not isinstance(body, str):
+            self._send_json(400, {"error": "field 'body' must be a string"})
+            return
+        if not isinstance(author, str):
+            self._send_json(400, {"error": "field 'author' must be a string"})
+            return
+        project = project.strip()
+        body = body.strip()
+        author = author.strip()
+        if not body:
+            self._send_json(400, {"error": "a comment body is required"})
+            return
+        if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
+            self._send_json(400, {"error": "comment or author is too long"})
+            return
+
+        # report_id is optional. When present it must be a plain integer (JSON true/false
+        # are ints in Python, so reject bools explicitly) — anything else is a 400 before
+        # we touch the store.
+        report_id = payload.get("report_id")
+        if report_id is not None and (
+            not isinstance(report_id, int) or isinstance(report_id, bool)
+        ):
+            self._send_json(400, {"error": "field 'report_id' must be an integer"})
+            return
+
+        # 4) Resolve the target report, then 5) store. One fresh connection per request
+        # keeps each sqlite handle on its own thread (the threading-server pattern).
+        conn = open_relay_store(self.server.db_path)
+        try:
+            if report_id is not None:
+                # Explicit target: it must exist AND belong to the named project, so a
+                # client cannot attach a comment to another project's report by id.
+                target = get(conn, report_id)
+                if target is None:
+                    self._send_json(404, {"error": f"no report {report_id}"})
+                    return
+                if target["project"] != project:
+                    self._send_json(
+                        400, {"error": "report_id does not belong to project"}
+                    )
+                    return
+            else:
+                # Default (the smallest-slice bot path): the project's LATEST report.
+                # history() is newest-first, so [0] is the most recent.
+                reports = history(conn, project)
+                if not reports:
+                    self._send_json(
+                        404, {"error": f"no reports for project {project!r}"}
+                    )
+                    return
+                report_id = reports[0]["id"]
+
+            new_id = add_comment(conn, report_id, author, body, _utc_now_iso())
+        finally:
+            conn.close()
+        self._send_json(201, {"id": new_id, "report_id": report_id})
 
     def _auth_error(self) -> str | None:
         """Return None if the request is authorized, else a 401 reason string.

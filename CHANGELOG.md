@@ -14,6 +14,52 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## C2-bots — native Slack bot: two-way in chat (2026-06-19)
+
+The next Horizon-C slice ([`docs/phase-c2-bots-kickoff.md`](docs/phase-c2-bots-kickoff.md)): an
+always-on **Slack bot** so a supervisor's reply in a mapped channel lands in the **existing relay
+comment store** — visible on the dashboard and via `orion comments`, unchanged. Built in four
+reviewable checkpoints (PRs #16–#19). `pytest`: **367**. The first new runtime dependency
+(`slack-bolt`) is **optional and lazily imported**, so the core clone-and-run install stays at three
+deps. Smallest first slice: one platform, no slash commands, replies attach to a project's *latest*
+report (no message→report map yet — the relay endpoint already accepts an optional `report_id` for
+that later, additive change).
+
+### Added
+
+- **Relay `POST /api/comments` (`relay/server.py`).** A Bearer-authed machine sibling of the existing
+  `GET /api/comments` pull-back: validates `{project, body, author?, report_id?}`, attaches the
+  comment to the project's latest report (or an explicit `report_id`), reuses `add_comment`. **No
+  CSRF check** (a Bearer token isn't browser-auto-attached). Comments stay non-redaction-scanned
+  (inbound, access-gated) — the outbound redaction rule is untouched.
+- **Bot package (`src/orion/bot/`), split pure-core / sync-shell.** `core.py` — `decide_forward`, the
+  pure decision logic encoding the inbound threat model (drop bot/webhook authors → loop prevention,
+  drop subtyped events, forward only configured channels, strip + cap). `relay_client.py` — a sync
+  stdlib-`urllib` `post_comment` (URL derived from the one `[relay].url`, failures → `DeliveryError`).
+  `slack_bot.py` — the thin Socket Mode shell (the only file importing `slack-bolt`, lazily): event
+  normalization, fail-soft author resolution, and a fail-soft decide-then-relay handler.
+- **`orion bot` command + `[bot]` config.** `BotConfig` + `SUPPORTED_BOT_PLATFORMS` + `_parse_bot`
+  (global opt-in table: platform, the two token env-var *names*, channel→project bindings validated
+  against real project names; reuses `[relay]` as the write target). `cmd_bot` mirrors
+  `cmd_relay_serve` (blocking, Ctrl-C clean stop), gated on both `[bot]` and `[relay]` enabled.
+- **Optional extra `slack-bot = ["slack-bolt>=1.18"]`** + docs: [`docs/slack-bot.md`](docs/slack-bot.md)
+  (Slack-app walkthrough, limits, threat model), `orion.toml.example` `[bot]` block, `.env.example`
+  Slack tokens.
+
+### Tests
+
+- 53 new across the four checkpoints: the relay endpoint (auth/validation/caps/latest-resolution/
+  `report_id` override/no-reports-404/route coexistence), the pure core (every guard + boundary), the
+  relay client (URL derivation + error translation), the Slack shell glue (testable without
+  `slack-bolt`; missing-dep `ConfigError` via `skipif`), the `[bot]` config validation, and `cmd_bot`
+  arg/gate/secret wiring.
+
+### Notes
+
+- The optional-extra / lazy-import shape is a **stage-bound** smallest-slice choice, expected to
+  graduate to a first-class integration as the bot becomes load-bearing; the seams (pure core, relay
+  client, platform-neutral config, `report_id`-optional endpoint) keep that additive.
+
 ## KI-20 — configurable message timezone, aligned with the dashboard (2026-06-19)
 
 A small consistency fix: delivered Slack/Discord messages timestamped in **UTC** while the

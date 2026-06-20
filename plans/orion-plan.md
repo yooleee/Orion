@@ -67,7 +67,7 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | ✅ **Deployed (2026-06-19): live on Fly.io (Path B), HTTPS + dashboard Basic-auth, verified end to end** (local `intake` → relay → auth-gated dashboard). First slice = vendor-neutral relay + Path-B reference (loopback). Second slice (2026-06-18) = deploy beyond loopback (Basic-Auth + fail-closed guard + `--require-view-auth`) + dashboard hardening. Hosting **settled: Path B**; managed/Cloudflare + E2E deferred behind the seam. Dashboard *visual* maturation + KI-17 ride with C3 (supervisor-facing). |
-| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🚧 **First slice built (2026-06-19): dashboard comments on the deployed relay** — `POST /report/<id>/comment` gated by the full inbound checklist (view-secret auth · Origin/CSRF check · non-empty + length-capped validation · stored-XSS escaping on render), append-only flat plain-text comments with an optional self-entered name, 303 POST-redirect-GET. Auto-migrating `report_comments` table. Tested (auth/CSRF/validation/404/303 + escaping). Bots/native replies and authenticated identity (C3/KI-17) deferred. Scoped in [`docs/c2-kickoff.md`](../docs/c2-kickoff.md). **Deployed & verified live (2026-06-19):** `fly deploy`'d to the running relay; commented through the real dashboard both with and without a self-entered name — comments persisted across a page refresh and a full server restart (the volume DB auto-migrated the `report_comments` table). **Loop closed into the workflow (2026-06-19):** the comment pull-back — `orion comments <project>` pulls replies by project over a Bearer-authed `GET /api/comments`, a per-`(project, relay)` local watermark tracks unread, and the `orion-session` skill surfaces new replies after a report. All stdlib, no new deps. Tested (304 across py3.11–3.13 × macOS/Ubuntu/Windows, PR #10). Scoped in [`docs/phase-c2-kickoff.md`](../docs/phase-c2-kickoff.md). **Verified live (2026-06-19):** ran `orion comments` against the deployed relay (plain · `--json` · `--all`) and exercised the full `orion-session` skill flow end to end — delivered to both supervisors, pushed to the dashboard, and pulled a fresh supervisor reply back into the session. |
+| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🚧 **First slice built (2026-06-19): dashboard comments on the deployed relay** — `POST /report/<id>/comment` gated by the full inbound checklist (view-secret auth · Origin/CSRF check · non-empty + length-capped validation · stored-XSS escaping on render), append-only flat plain-text comments with an optional self-entered name, 303 POST-redirect-GET. Auto-migrating `report_comments` table. Tested (auth/CSRF/validation/404/303 + escaping). Bots/native replies and authenticated identity (C3/KI-17) deferred. Scoped in [`docs/c2-kickoff.md`](../docs/c2-kickoff.md). **Deployed & verified live (2026-06-19):** `fly deploy`'d to the running relay; commented through the real dashboard both with and without a self-entered name — comments persisted across a page refresh and a full server restart (the volume DB auto-migrated the `report_comments` table). **Loop closed into the workflow (2026-06-19):** the comment pull-back — `orion comments <project>` pulls replies by project over a Bearer-authed `GET /api/comments`, a per-`(project, relay)` local watermark tracks unread, and the `orion-session` skill surfaces new replies after a report. All stdlib, no new deps. Tested (304 across py3.11–3.13 × macOS/Ubuntu/Windows, PR #10). Scoped in [`docs/phase-c2-kickoff.md`](../docs/phase-c2-kickoff.md). **Verified live (2026-06-19):** ran `orion comments` against the deployed relay (plain · `--json` · `--all`) and exercised the full `orion-session` skill flow end to end — delivered to both supervisors, pushed to the dashboard, and pulled a fresh supervisor reply back into the session. **Native-bots first slice built (2026-06-19): a Slack Socket Mode bot (`orion bot`) relays channel replies into the existing comment store via a new Bearer-authed `POST /api/comments`** — PRs #16–#19, `slack-bolt` optional/lazy, `pytest` 367. See the "C2-bots status" section below and [`docs/slack-bot.md`](../docs/slack-bot.md). |
 | C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Deferred (a clean seam, not a destination now — committed only on real demand; the multi-party *product* leap). Home of E2E + KI-17 + per-recipient state. |
 
 
@@ -851,6 +851,39 @@ the 2026-06-18 pass, now that C2 is done). Detail and the dogfood capture sheet 
   it reused the deployed relay's ingest + comment POST + a **pull** (`orion comments` + a local
   watermark). Native bots WILL force an always-on listener (Gateway / Socket Mode), so how it relates
   to the existing pull/relay model is a first-order design question for that slice.
+
+## C2-bots status (2026-06-19) — native Slack bot, first slice (built)
+
+The native-bots slice, built in four reviewable checkpoints (PRs #16–#19), `pytest` **367**. Scoped
+in [`docs/phase-c2-bots-kickoff.md`](../docs/phase-c2-bots-kickoff.md); operator guide in
+[`docs/slack-bot.md`](../docs/slack-bot.md). The four open design questions settled thus:
+
+- **Platform / connection model — Slack, Socket Mode.** An *outbound* WebSocket → **no public inbound
+  endpoint** to host or secure (the smallest, most secure posture; the Events-API HTTP path would add
+  a public URL + signature verification). Discord (Gateway) is the planned next platform — additive
+  via `SUPPORTED_BOT_PLATFORMS` + a new shell, since the config, the pure core, and the relay endpoint
+  are all platform-neutral.
+- **Listener ↔ pull/relay relationship (the first-order question) — the bot FEEDS the relay.** It is a
+  third Bearer-authed machine client (alongside push and pull), POSTing replies to a new **`POST
+  /api/comments`** that lands them in the *existing* `report_comments` store. So the bot does **not**
+  replace the pull and does **not** co-locate with the relay; the dashboard and `orion comments` are
+  unchanged. The C2 learning held: no new server, just a new machine endpoint + an outbound listener.
+- **Report mapping — channel→project, attach-to-latest.** A reply attaches to the project's latest
+  report; no message→report map (which would force the bot to *post* reports — out of scope). The
+  endpoint already takes an optional `report_id`, so reply-targeting later is a **bot-only** change.
+- **Dependency — `slack-bolt`, optional + lazy.** First new runtime dep, quarantined to an optional
+  extra (`orion[slack-bot]`) imported only inside the bot shell; core install stays 3 deps. Bolt's
+  sync App + `SocketModeHandler` run on a background thread, so **no asyncio** enters the codebase.
+
+**Architecture:** a pure decision core (`src/orion/bot/core.py`, the threat model as ordered guards),
+a sync relay client (`relay_client.py`), and a thin Bolt shell (`slack_bot.py`); the relay change is
+one endpoint. **Inbound security:** no public surface; two-pronged loop prevention (bot/`bot_message`
+— Orion's own reports arrive as webhooks); configured-channels-only; untrusted text never parsed as a
+command; Bearer write; redaction stays outbound-only.
+
+**Stage-bound:** the optional-extra/lazy shape is the smallest-slice choice, expected to **graduate to
+a first-class integration** as the bot becomes load-bearing — the seams keep that additive (build the
+interface, defer the implementation). **Dogfood (6/20–21)** remains a refinement input, not a gate.
 
 ## Open questions / to settle before/while building
 

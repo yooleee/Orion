@@ -67,6 +67,34 @@ state_db = "orion.sqlite3"
 # url           = "http://127.0.0.1:8787/ingest"
 # token_env_var = "ORION_RELAY_TOKEN"
 
+# OPTIONAL native Slack bot (C2-bots) — two-way in chat. When enabled and run with
+# `orion bot`, a supervisor's reply in a mapped Slack channel is relayed into that
+# project's LATEST report as a comment (visible on the dashboard AND via
+# `orion comments`, exactly like a dashboard comment). This is opt-in: omit the
+# table (or set enabled = false) and no bot runs. The choice is GLOBAL (one bot
+# process serves every project). The bot writes INTO the [relay] above — it reuses
+# the relay's `url` and `token_env_var`, so [relay] must ALSO be enabled.
+#
+# Requires the optional extra: pip install orion[slack-bot] (pulls in slack-bolt).
+# Needs a Slack app with Socket Mode ON, the channels:history + users:read scopes,
+# the message.channels event subscription, and the bot invited to each channel.
+# See docs/slack-bot.md for the full walkthrough.
+#
+# `token_env_var` names the .env var holding the bot token (xoxb-…);
+# `app_token_env_var` names the one holding the Socket Mode app-level token (xapp-…).
+# Both are NAMES — the tokens live in .env, never here. Each [[bot.channels]] binds
+# one Slack channel id to one project (turn on Developer Mode in Slack, then
+# right-click a channel → Copy → Copy channel ID).
+# [bot]
+# enabled           = true
+# platform          = "slack"
+# token_env_var     = "ORION_SLACK_BOT_TOKEN"
+# app_token_env_var = "ORION_SLACK_APP_TOKEN"
+#
+#   [[bot.channels]]
+#   channel_id = "C07ABC123"   # the Slack channel to listen in
+#   project    = "orion"       # which project its replies attach to
+
 # One [projects.<name>] table per tracked project. <name> is what you pass to
 # `orion report <name>`.
 [projects.orion]

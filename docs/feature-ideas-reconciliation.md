@@ -136,6 +136,11 @@ as a one-line prompt-tuning todo at most: sanity-check the summarizer prompt aga
 
 ## 3. The config-write rule — reconsider, don't remove (revised #4)
 
+> **DONE (2026-06-23): shipped as `orion add-project`.** The middle-ground below was implemented —
+> an explicit, preview-gated, append-only writer (creates a minimal config when absent, infers
+> name/repo from cwd, recipients via `--like`/`--recipient`). See the dated note "Config-write
+> invariant refined" in `plans/orion-plan.md`. The original analysis is kept below for the record.
+
 The current invariant: **Orion never writes `orion.toml`** (human-edited, read-only via stdlib
 `tomllib`; a `config set` command was deliberately excluded). The weekend dogfood showed this is
 *also* the root of the #1 onboarding friction — there is no register-a-project path, so adding
@@ -201,7 +206,7 @@ identity, dedupe-by-person)?
 - **Proper reconciling — DONE (2026-06-23).** Outcomes folded into `plans/orion-plan.md` (the dated
   note "Meta-layer feature ideas reconciled + dogfood captured"), and
   `docs/feature-ideas-meta-session.md`'s status flipped to reconciled (pointing here).
-- **Config-write reconsideration:** dedicated plan-mode pass (touches a hard constraint).
+- **Config-write reconsideration — DONE (2026-06-23):** shipped as `orion add-project` (section 3).
 - **Next-slice decision:** separate session; dogfood points at OSS-readiness / onboarding polish.
 - **Bot verification debt:** the Slack Socket Mode bot / `slack-bolt` slice still needs a live
   exercise.

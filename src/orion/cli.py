@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from orion.collectors.tasks import TasksError
 from orion.collectors.tasks import collect as collect_tasks
 from orion.compose import ComposedMessage, compose
 from orion.config import (
+    SHARE_LEVELS,
     ConfigError,
     ProjectConfig,
     Recipient,
@@ -52,6 +54,7 @@ from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
 from orion.report import ReportBlob, build_report, serialize_blob
+from orion.scaffold import parse_recipient_spec, render_project_stanza
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_comment_watermark,
@@ -265,6 +268,81 @@ def main(argv: list[str] | None = None) -> int:
         help="Overwrite an existing hook of the same name.",
     )
 
+    # The ONE config-writing command. It is explicit, append-only, and previews
+    # before writing — so the "config is never written as a side effect of a run"
+    # invariant holds (see config.py header).
+    add_parser = subparsers.add_parser(
+        "add-project",
+        help="Register a new project in orion.toml (the only command that writes config).",
+    )
+    add_parser.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Project name (default: the repo directory's name).",
+    )
+    add_parser.add_argument(
+        "--repo-path",
+        dest="repo_path",
+        default=None,
+        help="Path to the git repo (default: the current repo's top level, else cwd).",
+    )
+    add_parser.add_argument(
+        "--like",
+        default=None,
+        metavar="PROJECT",
+        help="Copy recipients from this existing project (combine with or use instead of --recipient).",
+    )
+    add_parser.add_argument(
+        "--recipient",
+        dest="recipients",
+        action="append",
+        default=[],
+        metavar='"Name:channel:ENV_VAR"',
+        help='Add a recipient (repeatable). Channel is "discord" or "slack"; the last field NAMES a .env variable.',
+    )
+    add_parser.add_argument(
+        "--share-level",
+        dest="share_level",
+        choices=SHARE_LEVELS,
+        default="high_level",
+        help="How much git detail to expose (default: high_level — no code diff).",
+    )
+    add_parser.add_argument(
+        "--collectors",
+        default="git",
+        help="Comma-separated signals to enable (default: git). Any of: git,tasks,notes.",
+    )
+    add_parser.add_argument(
+        "--tasks-file",
+        dest="tasks_file",
+        default=None,
+        help="Path to the tasks checklist (required if 'tasks' is in --collectors).",
+    )
+    add_parser.add_argument(
+        "--notes-file",
+        dest="notes_file",
+        default=None,
+        help="Path to the notes file (required if 'notes' is in --collectors).",
+    )
+    add_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    add_parser.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="Print the stanza that would be written, and write nothing (review first).",
+    )
+    add_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Write without the preview confirmation (for non-interactive callers).",
+    )
+
     # Read-only inspect commands (B6). They print config; they never write it.
     projects_parser = subparsers.add_parser(
         "projects",
@@ -412,6 +490,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "install-hook":
         return cmd_install_hook(
             args.project, Path(args.config), args.hook, args.print_only, args.force
+        )
+    if args.command == "add-project":
+        return cmd_add_project(
+            args.name,
+            Path(args.config),
+            repo_path=args.repo_path,
+            like=args.like,
+            recipient_specs=args.recipients,
+            share_level=args.share_level,
+            collectors_csv=args.collectors,
+            tasks_file=args.tasks_file,
+            notes_file=args.notes_file,
+            print_only=args.print_only,
+            assume_yes=args.yes,
         )
     if args.command == "projects":
         return cmd_projects(Path(args.config))
@@ -944,6 +1036,217 @@ def cmd_install_hook(
             f"SKIP sending (nothing is delivered) until you set auto_send=true in "
             f"{config_path}."
         )
+    return 0
+
+
+def _confirm(prompt: str) -> bool:
+    """Ask a yes/no question on stdin, defaulting to NO.
+
+    Args:
+        prompt: The question to show (should end with a trailing space).
+
+    Returns:
+        True only if the user types y/yes; False on anything else or no stdin.
+
+    Why:
+        The preview-before-write gate for `add-project`, mirroring the report
+        preview (_preview_and_confirm). A non-interactive stdin (EOFError) means
+        "not confirmed" — safer than assuming yes for a command that writes a file.
+    """
+    try:
+        answer = input(prompt)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _git_toplevel(start: Path) -> Path | None:
+    """Return the git work-tree root containing `start`, or None if not in one.
+
+    Args:
+        start: Directory to look from (normally the current working directory).
+
+    Returns:
+        The repo's top-level Path, or None when `start` isn't in a git repo or
+        git isn't installed.
+
+    Why:
+        `add-project` infers a project's repo_path from where it is run, so
+        `cd myproject && orion add-project` just works — even from a subdirectory,
+        because we ask git for the work-tree root rather than using cwd directly.
+        Failure is a soft None (the caller falls back to cwd), never an error:
+        inference is a convenience, not a requirement.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    out = completed.stdout.strip()
+    return Path(out) if out else None
+
+
+def cmd_add_project(
+    name: str | None,
+    config_path: Path,
+    *,
+    repo_path: str | None,
+    like: str | None,
+    recipient_specs: list[str],
+    share_level: str,
+    collectors_csv: str,
+    tasks_file: str | None,
+    notes_file: str | None,
+    print_only: bool,
+    assume_yes: bool,
+) -> int:
+    """Register a new project by appending (or creating) a stanza in orion.toml.
+
+    Args:
+        name: The project name, or None to infer it from the repo directory.
+        config_path: Path to orion.toml (created if it does not exist).
+        repo_path: The git repo path, or None to infer from the current repo/cwd.
+        like: An existing project whose recipients to copy, or None.
+        recipient_specs: Explicit "Name:channel:ENV_VAR" recipients (may be empty).
+        share_level: One of SHARE_LEVELS.
+        collectors_csv: Comma-separated collector names (e.g. "git,tasks").
+        tasks_file: Path for the tasks collector (required if "tasks" enabled).
+        notes_file: Path for the notes collector (required if "notes" enabled).
+        print_only: Print the stanza and write nothing.
+        assume_yes: Skip the preview confirmation (for non-interactive callers).
+
+    Returns:
+        Exit code: 0 on success or a declined preview; 1 on any error.
+
+    Why:
+        This is Orion's ONLY config writer, added to kill the onboarding friction
+        the dogfood surfaced (no way to register a project from its own directory).
+        It keeps the invariant's spirit — config is never written as a side effect
+        of a run — by being explicit, preview-gated, and append-only (it never
+        rewrites existing content, so hand-written comments and ordering survive).
+        The validating/rendering lives in scaffold.py; this function owns inference
+        and file I/O, mirroring the cmd_install_hook / build_hook_script split.
+    """
+    try:
+        # 1. Infer the repo path: an explicit flag wins; else this git repo's root;
+        #    else the cwd. A relative --repo-path resolves against the cwd.
+        if repo_path is not None:
+            resolved_repo = Path(repo_path).expanduser()
+            if not resolved_repo.is_absolute():
+                resolved_repo = (Path.cwd() / resolved_repo).resolve()
+        else:
+            resolved_repo = _git_toplevel(Path.cwd()) or Path.cwd()
+
+        # 2. Infer the name from the repo directory when not given.
+        project_name = name if name else resolved_repo.name
+
+        # 3. Load the existing config (if any). It gives us the projects to copy
+        #    from (--like) and to check for a duplicate, and it validates the file
+        #    we are about to append to (we never append to a broken config).
+        config_exists = config_path.exists()
+        config = load_config(config_path) if config_exists else None
+
+        if config is not None and project_name in config.projects:
+            print(
+                f"Error: project {project_name!r} already exists in {config_path}. "
+                f"Pick a different name (pass it as the first argument), or edit the "
+                f"config by hand to change the existing one.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # 4. Resolve recipients: those copied from --like, plus any explicit
+        #    --recipient specs. A project needs at least one (the loader requires it).
+        recipients: list[Recipient] = []
+        if like is not None:
+            if config is None:
+                print(
+                    f"Error: --like {like!r} needs an existing config to copy from, but "
+                    f"none was found at {config_path}. Use --recipient for the first "
+                    f"project instead.",
+                    file=sys.stderr,
+                )
+                return 1
+            recipients.extend(get_project(config, like).recipients)
+        recipients.extend(parse_recipient_spec(spec) for spec in recipient_specs)
+
+        if not recipients:
+            print(
+                "Error: no recipients given. Use --like <project> to copy an existing "
+                'project\'s recipients, or --recipient "Name:channel:ENV_VAR" '
+                "(repeatable).",
+                file=sys.stderr,
+            )
+            return 1
+
+        # 5. Render the stanza. This validates the name, share level, collectors,
+        #    and collector/file pairing, and rejects values it cannot safely quote.
+        collectors = tuple(c.strip() for c in collectors_csv.split(",") if c.strip())
+        stanza = render_project_stanza(
+            project_name,
+            resolved_repo,
+            share_level,
+            collectors,
+            tuple(recipients),
+            tasks_file=tasks_file,
+            notes_file=notes_file,
+            with_state_db=not config_exists,
+        )
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # 6. --print: show exactly what would be written, change nothing.
+    if print_only:
+        print(stanza, end="")
+        return 0
+
+    # 7. Preview-before-write: the human gate for the new write surface.
+    if not assume_yes:
+        bar = "=" * 60
+        action = "create" if not config_exists else "append to"
+        print(bar)
+        print(f"PREVIEW — would {action} {config_path} (nothing written yet)")
+        print(bar)
+        print(stanza, end="")
+        print(bar)
+        if not _confirm("Write this to the config? [y/N] "):
+            print("Aborted. Nothing was written.")
+            return 0
+
+    # 8. Write: create a new file, or append a blank-line-separated stanza to the
+    #    existing one. newline="\n" keeps the file LF on every OS, matching the
+    #    rest of the config and avoiding a CRLF surprise on Windows.
+    if config_exists:
+        existing = config_path.read_text(encoding="utf-8")
+        combined = existing.rstrip("\n") + "\n\n" + stanza
+    else:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        combined = stanza
+    config_path.write_text(combined, encoding="utf-8", newline="\n")
+
+    # 9. Re-load to prove the written file parses and the project is present — the
+    #    same belt-and-suspenders idea as report's "redact again before send".
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        print(
+            f"Error: wrote {config_path} but it failed to re-load ({exc}). Please review it.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 10. Confirm, and point at the remaining manual steps (secrets stay in .env).
+    print(f"Registered {project_name!r} in {config_path}.")
+    env_vars = sorted({r.webhook_env_var for r in recipients})
+    print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
+    print(f"  Then: python -m orion check {project_name}")
     return 0
 
 

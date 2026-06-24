@@ -120,6 +120,21 @@ def test_share_level_changes_the_system_prompt():
     assert fake_high.last_kwargs["system"] != fake_detailed.last_kwargs["system"]
 
 
+def test_system_prompt_carries_clean_prose_style_guardrails():
+    """The assembled prompt instructs the model to write clean prose.
+
+    Why this matters: idea #7 asks summaries to follow the project's Writing &
+    Documentation Style (no em-dashes, no semicolons, no generic LLM filler) so
+    they read like a person wrote them. This is a prompt tune, not an inheritance
+    mechanism, so the only thing to pin is that those guardrails are present in
+    the system prompt both share levels share.
+    """
+    prompt = summarize._build_system_prompt("high_level")
+    assert "em-dashes" in prompt
+    assert "semicolons" in prompt
+    assert "LLM filler" in prompt
+
+
 def test_api_error_is_wrapped_as_summarizer_error():
     """An Anthropic APIError becomes a SummarizerError.
 

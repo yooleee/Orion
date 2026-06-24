@@ -393,6 +393,111 @@ def test_unknown_channel_is_rejected(tmp_path):
         load_config(path)
 
 
+# --- D5: per-recipient signals filter ----------------------------------------
+
+
+def test_signals_omitted_defaults_to_all_collectors(tmp_path):
+    """A recipient with no `signals` key receives every project collector.
+
+    Why this matters: this is the backward-compatible default — every pre-D5 config
+    (which has no `signals` line) must keep delivering all signals to all
+    recipients. We use a two-collector project so "all" is a real set, not just git.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git", "notes"]
+        notes_file = "NOTES.md"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    # Resolved to the project's full collector set, in collector order.
+    assert project.recipients[0].signals == ("git", "notes")
+
+
+def test_signals_subset_is_kept(tmp_path):
+    """An explicit `signals` subset is parsed as given, in the order written.
+
+    Why this matters: D5's whole point is that a recipient can receive a SLICE of
+    the report — here, only git — so the subset must survive load intact.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git", "notes"]
+        notes_file = "NOTES.md"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        signals = ["git"]
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.recipients[0].signals == ("git",)
+
+
+def test_signals_unknown_value_rejected(tmp_path):
+    """A `signals` entry the project does not collect fails with a clear error.
+
+    Why this matters: a recipient asking for a signal the project never collects
+    could only ever receive nothing — almost certainly a typo. Failing loudly at
+    load time (naming the bad value) beats a silently-empty delivery at send time.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git"]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        signals = ["tasks"]
+        """,
+    )
+    # The message should name the offending signal so the fix is obvious.
+    with pytest.raises(ConfigError, match="tasks"):
+        load_config(path)
+
+
+def test_signals_empty_list_rejected(tmp_path):
+    """An empty `signals = []` is rejected rather than meaning "receive nothing".
+
+    Why this matters: a recipient that receives nothing is pointless and almost
+    certainly a mistake; the user should OMIT the key to mean "everything", not
+    write an empty list. We reject it loudly to catch that confusion at load time.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git"]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        signals = []
+        """,
+    )
+    with pytest.raises(ConfigError, match="signals"):
+        load_config(path)
+
+
 def test_summarizer_defaults_to_anthropic_haiku(tmp_path):
     """A config with no [summarizer] table resolves to Anthropic/Haiku.
 

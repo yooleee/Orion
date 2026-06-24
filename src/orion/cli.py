@@ -24,6 +24,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -722,7 +723,7 @@ def _run_report(
         # --- Collect from each enabled signal, in config order ---
         # Each collector becomes one titled section; each tracks its own delta
         # marker independently (advancing git must not disturb tasks/notes).
-        sections: list[tuple[str, str]] = []          # (title, finished body)
+        sections: list[tuple[str, str, str]] = []     # (collector, title, finished body)
         pending_markers: list[tuple[str, str]] = []   # (collector, new_marker) to advance on send
         redaction_hits = 0
         any_raw_lane = False
@@ -753,7 +754,9 @@ def _run_report(
                 # left dead; structured collectors now fill it.
                 body = pass1.text
 
-            sections.append((_COLLECTOR_TITLES[collector_name], body))
+            # Carry the collector name (not just its title) so D5 can filter
+            # sections per recipient-audience without re-deriving it from the title.
+            sections.append((collector_name, _COLLECTOR_TITLES[collector_name], body))
             pending_markers.append((collector_name, result.new_marker))
 
         if not sections:
@@ -770,17 +773,21 @@ def _run_report(
         # boundary. Sections that are empty after redaction are dropped here, the
         # same rule merge_sections applies, so the carried sections and the flat
         # body always agree.
-        redacted_sections: list[tuple[str, str]] = []
-        for title, section_body in sections:
+        redacted_sections: list[tuple[str, str, str]] = []   # (collector, title, safe body)
+        for collector_name, title, section_body in sections:
             pass2 = redact(section_body)
             redaction_hits += pass2.hit_count
             safe_section = pass2.text.strip()
             if not safe_section:
                 continue
-            redacted_sections.append((title, safe_section))
+            redacted_sections.append((collector_name, title, safe_section))
 
-        merged = merge_sections(redacted_sections)
-        safe_body = merged
+        # The FULL body/blob (every surviving section) backs two things the
+        # per-audience filtering must NOT change: the empty-after-redaction safety
+        # guard below, and the relay push (the dashboard always receives the
+        # complete, unfiltered report — D5 filters only the chat-channel delivery).
+        full_pairs = [(title, body) for _, title, body in redacted_sections]
+        safe_body = merge_sections(full_pairs)
         if not safe_body.strip():
             print(
                 f"Refusing to send {project.name!r}: the report body is empty "
@@ -789,40 +796,86 @@ def _run_report(
             )
             return STATUS_FAILED
 
-        # --- Build the portable report blob ---
+        # --- Build the portable (full) report blob ---
         # lane is provenance: RAW if the LLM touched any part of this run, else
         # STRUCTURED. source_marker is now per-collector (in state), so the blob's
         # single field is no longer meaningful — pass "" (see KI-8). The
-        # twice-redacted sections ride along for B3's structured rendering.
+        # twice-redacted sections ride along for B3's structured rendering. This is
+        # the blob the relay receives; the per-audience blobs below are derived from
+        # the same sections, filtered.
         generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         lane = LANE_RAW if any_raw_lane else LANE_STRUCTURED
-        blob = build_report(
-            project, safe_body, lane, "", generated_at, sections=tuple(redacted_sections)
+        full_blob = build_report(
+            project, safe_body, lane, "", generated_at, sections=tuple(full_pairs)
         )
 
-        # --- Compose once per distinct channel ---
-        # Same body, formatted for each channel's Markdown dialect; recipients are
-        # routed to their channel's rendering in _deliver.
-        messages = {
-            ch: compose(blob, ch, display_timezone) for ch in _channels(project)
-        }
+        # --- Group recipients into audiences and compose one filtered message
+        #     per audience (D5) ---
+        # An audience is (channel, signal-set): recipients who share both receive
+        # the exact same bytes. For each audience we keep only the sections whose
+        # collector that audience subscribed to, then merge/build/compose that
+        # filtered slice (reusing merge_sections/build_report/compose unchanged). An
+        # audience whose subscribed signals had no activity this run yields no
+        # sections and is skipped — those recipients simply get nothing this run.
+        groups = _audience_groups(project)
+        group_messages: dict[tuple[str, frozenset[str]], ComposedMessage] = {}
+        for (channel, signals), _recips in groups.items():
+            group_pairs = [
+                (title, body)
+                for collector_name, title, body in redacted_sections
+                if collector_name in signals
+            ]
+            if not group_pairs:
+                continue
+            group_body = merge_sections(group_pairs)
+            # The group blob is transient — it only feeds compose. lane rides along
+            # as the run's provenance; compose does not read it and this blob is
+            # never serialized (the relay gets full_blob), so the run-level value is
+            # honest enough without tracking lane per section.
+            group_blob = build_report(
+                project, group_body, lane, "", generated_at, sections=tuple(group_pairs)
+            )
+            group_messages[(channel, signals)] = compose(
+                group_blob, channel, display_timezone
+            )
+
+        if not group_messages:
+            # Sections existed, but no recipient subscribed to a signal that was
+            # active this run. Nothing to send; do NOT advance markers (an
+            # unconsumed delta stays available for a future recipient of that signal).
+            print(
+                f"No new activity for {project.name!r} matched any recipient's "
+                f"signals this run; nothing sent, state unchanged."
+            )
+            return STATUS_NO_ACTIVITY
 
         # --- Preview gate ---
         # By construction, if assume_yes is True here then project.auto_send is
         # also True (the not-opted case returned above), so this branch is the
         # BOTH-required bypass. Otherwise we always show the human preview — which
-        # is why auto_send alone (no --yes) can never skip it.
+        # is why auto_send alone (no --yes) can never skip it. With >1 audience each
+        # block is labeled with who receives it, so the human sees each filtered view.
+        multi = len(group_messages) > 1
+        previews = [
+            (_describe_group(channel, recips) if multi else "", group_messages[(channel, signals)])
+            for (channel, signals), recips in groups.items()
+            if (channel, signals) in group_messages
+        ]
         if assume_yes:
             print(
                 f"Auto-sending {project.name!r} "
                 f"(preview skipped: --yes and auto_send=true)."
             )
-        elif not _preview_and_confirm(messages, redaction_hits):
+        elif not _preview_and_confirm(previews, redaction_hits):
             print("Aborted. Nothing was sent; state unchanged.")
             return STATUS_ABORTED
 
-        # --- Deliver to each recipient's webhook (per their channel) ---
-        sent_to, failed = _deliver(messages, project)
+        # --- Deliver: each recipient gets the message composed for its audience ---
+        sent_to, failed = _deliver(
+            group_messages,
+            project.recipients,
+            lambda r: (r.channel, frozenset(r.signals)),
+        )
         if not sent_to:
             print(
                 f"No deliveries succeeded for {project.name!r}; state not advanced.",
@@ -837,7 +890,10 @@ def _run_report(
         # one permanently-broken recipient block state forever and re-spam the working
         # ones every run. The accepted gap — a transiently-failed recipient misses this
         # delta — is bounded; the real fix (per-recipient delivery state) belongs with
-        # the C3 multi-party model (KI-11). See docs/known-issues.md KI-1.
+        # the C3 multi-party model (KI-11). D5 nuance: with per-recipient signal
+        # routing, ALL active markers still advance on >=1 send of the run, so a signal
+        # whose only subscriber failed (while another audience succeeded) advances
+        # unreceived — the same bounded gap at audience granularity. See known-issues KI-1.
         for collector_name, marker in pending_markers:
             set_marker(conn, project.name, collector_name, marker, generated_at)
         record_report(conn, project.name, safe_body, sent_to, generated_at)
@@ -851,8 +907,10 @@ def _run_report(
 
         # Additive C1 step: push the portable blob to the relay (if enabled). Placed
         # AFTER state has advanced and is fail-soft, so the dashboard surface can
-        # never affect the delivered-report outcome or the markers.
-        _relay_push(blob, relay_cfg)
+        # never affect the delivered-report outcome or the markers. The relay always
+        # receives the FULL, unfiltered report — D5's per-recipient filtering applies
+        # only to chat-channel delivery, not the dashboard's record.
+        _relay_push(full_blob, relay_cfg)
         return STATUS_SENT
 
     except (GitError, SummarizerError, TasksError, NotesError, SecretsError) as exc:
@@ -928,20 +986,25 @@ def cmd_intake(
         blob = build_report(project, safe_body, LANE_STRUCTURED, "", generated_at)
 
         # Compose per distinct channel and route each recipient accordingly —
-        # identical delivery path to cmd_report (just no markers afterward).
+        # identical delivery path to cmd_report (just no markers afterward). Intake
+        # is deliberately UNFILTERED: a pushed body has no per-signal sections, so a
+        # recipient's `signals` filter cannot apply — every recipient gets the push,
+        # keyed only by channel. (D5 filtering lives on the collected-report path.)
         messages = {
             ch: compose(blob, ch, config.display_timezone)
             for ch in _channels(project)
         }
+        multi = len(messages) > 1
+        previews = [(ch if multi else "", messages[ch]) for ch in messages]
         # --yes skips the terminal preview (the skill already showed the summary
         # for in-session approval); otherwise preview-before-send as usual.
         if assume_yes:
             print(f"Sending {project.name!r} (preview skipped: --yes).")
-        elif not _preview_and_confirm(messages, redaction_hits):
+        elif not _preview_and_confirm(previews, redaction_hits):
             print("Aborted. Nothing was sent.")
             return 0
 
-        sent_to, failed = _deliver(messages, project)
+        sent_to, failed = _deliver(messages, project.recipients, lambda r: r.channel)
         if not sent_to:
             print("No deliveries succeeded.", file=sys.stderr)
             return 1
@@ -2014,13 +2077,22 @@ def _channels(project: ProjectConfig) -> list[str]:
 
 
 def _deliver(
-    messages: dict[str, ComposedMessage], project: ProjectConfig
+    messages: dict,
+    recipients: tuple[Recipient, ...],
+    key_func: Callable[[Recipient], object],
 ) -> tuple[list[str], list[tuple[str, str]]]:
-    """Send each recipient the message composed for that recipient's channel.
+    """Send each recipient the message composed for its audience key.
 
     Args:
-        messages: Map of channel name -> ComposedMessage for that channel.
-        project: The project whose recipients receive it.
+        messages: Map of audience key -> ComposedMessage. The key shape is decided
+            by `key_func`: the report path keys by (channel, frozenset(signals)) so
+            each filtered audience gets its own message; the intake path keys by
+            channel alone (unfiltered).
+        recipients: The recipients to deliver to.
+        key_func: Maps a recipient to its key into `messages`. A recipient whose key
+            is absent from `messages` is skipped, NOT failed — that means its
+            audience had no matching activity this run (D5), so there is nothing to
+            send it, which is a clean no-op rather than a delivery error.
 
     Returns:
         A (sent_to, failed) tuple: the names that received the message, and a list
@@ -2029,21 +2101,28 @@ def _deliver(
 
     Why:
         Both cmd_report and cmd_intake deliver the same way — for each recipient,
-        pick their channel's rendering and its sender, try the send, and let one
-        failure not abort the others. Routing lives here (one place, DRY); each
-        caller decides what "nobody received it" means (report does not advance
-        markers; intake just reports the failure). It does NOT decide success/exit
-        codes — that stays with the caller, which knows its own bookkeeping.
+        pick its audience's rendering and its sender, try the send, and let one
+        failure not abort the others. Keying by a caller-supplied function (rather
+        than hardcoding "channel") lets the SAME loop serve report's per-audience
+        routing and intake's per-channel routing without duplicating the send/fail
+        bookkeeping (DRY). Each caller still decides what "nobody received it" means
+        (report does not advance markers; intake just reports it). It does NOT decide
+        success/exit codes — that stays with the caller, which knows its own books.
     """
     sent_to: list[str] = []
     failed: list[tuple[str, str]] = []
-    for recipient in project.recipients:
+    for recipient in recipients:
+        key = key_func(recipient)
+        # No message for this recipient's audience -> its subscribed signals had no
+        # activity this run. Skip silently: nothing to send is not a failure.
+        if key not in messages:
+            continue
         try:
             url = get_required(recipient.webhook_env_var)
-            # Route to the right channel's message + sender. config validation
-            # guarantees recipient.channel is supported, so both lookups hit.
+            # Route to the right channel's sender. config validation guarantees
+            # recipient.channel is supported, so the sender lookup hits.
             send = _sender_for(recipient.channel)
-            send(messages[recipient.channel].payload, url)
+            send(messages[key].payload, url)
             sent_to.append(recipient.name)
         except (SecretsError, DeliveryError) as exc:
             # A per-recipient failure shouldn't abort the others.
@@ -2052,6 +2131,56 @@ def _deliver(
     for name, err in failed:
         print(f"  ✗ {name}: {err}", file=sys.stderr)
     return sent_to, failed
+
+
+def _audience_groups(
+    project: ProjectConfig,
+) -> dict[tuple[str, frozenset[str]], list[Recipient]]:
+    """Group a project's recipients into delivery audiences (D5).
+
+    Args:
+        project: The project whose recipients to group.
+
+    Returns:
+        An ordered map of (channel, frozenset(signals)) -> the recipients sharing
+        that audience, in recipient first-appearance order.
+
+    Why:
+        Two recipients on the same channel who subscribe to the same signal set
+        receive byte-identical output, so we compose ONCE per distinct audience
+        rather than once per recipient. The key pairs the channel (which decides the
+        rendering dialect) with the signal set (which decides the filtered content) —
+        the two things that make two recipients' messages identical or not.
+        first-appearance order (a dict's insertion order) gives a stable, predictable
+        preview/delivery order without sorting away the user's intent.
+    """
+    groups: dict[tuple[str, frozenset[str]], list[Recipient]] = {}
+    for recipient in project.recipients:
+        key = (recipient.channel, frozenset(recipient.signals))
+        groups.setdefault(key, []).append(recipient)
+    return groups
+
+
+def _describe_group(channel: str, recipients: list[Recipient]) -> str:
+    """A short human label for one audience's preview block (D5).
+
+    Args:
+        channel: The audience's channel (e.g. "discord").
+        recipients: The recipients in that audience.
+
+    Returns:
+        A label like "discord → Alex, Sam" naming the channel and who receives this
+        exact (filtered) block.
+
+    Why:
+        With per-audience filtering, different recipients see different content, so
+        the preview must say WHO each block is for — otherwise the human gate can't
+        tell which supervisor is about to receive which slice. We label by recipient
+        names (not the raw signal set) because the filtered content is already shown
+        in the block; what the human needs is the destination.
+    """
+    names = ", ".join(r.name for r in recipients)
+    return f"{channel} → {names}"
 
 
 def _relay_push(blob: ReportBlob, relay_cfg: RelayConfig) -> None:
@@ -2209,12 +2338,17 @@ def _collect_for(project: ProjectConfig, collector: str, prior: str | None):
     raise ConfigError(f"Unknown collector {collector!r}.")
 
 
-def _preview_and_confirm(messages: dict[str, ComposedMessage], redaction_hits: int) -> bool:
+def _preview_and_confirm(
+    previews: list[tuple[str, ComposedMessage]], redaction_hits: int
+) -> bool:
     """Show the composed message(s) and ask the user to confirm sending.
 
     Args:
-        messages: Map of channel name -> the message that channel will receive.
-            One preview block is shown per channel.
+        previews: Ordered (label, message) pairs — one preview block per distinct
+            audience. A non-empty label (e.g. "discord → Alex") is shown in the block
+            header so the human can tell which recipients receive which (possibly
+            filtered) view; an empty label renders one unlabeled block, identical to
+            a single-audience run before D5.
         redaction_hits: How many potential secrets were redacted in this run.
 
     Returns:
@@ -2222,22 +2356,22 @@ def _preview_and_confirm(messages: dict[str, ComposedMessage], redaction_hits: i
 
     Why:
         Preview-before-send is the human gate that makes the whole privacy story
-        trustworthy — the user sees the EXACT bytes each platform will receive
-        before they leave the machine. With more than one channel we show a block
-        per channel (Slack and Discord render differently), labeled so it's clear
-        which is which; a single-channel run shows one unlabeled block, identical
-        to before. One confirm covers all channels. We default to NO (a bare
-        Enter, EOF, or anything but yes does not send) and surface the redaction
-        count so the user scrutinizes harder when the redactor fired.
+        trustworthy — the user sees the EXACT bytes each audience will receive
+        before they leave the machine. D5 means different recipients can receive
+        different (filtered) content, so each audience gets its own labeled block;
+        the caller supplies the labels so this stays decoupled from how audiences are
+        keyed (channel, or channel+signals). One confirm covers them all. We default
+        to NO (a bare Enter, EOF, or anything but yes does not send) and surface the
+        redaction count so the user scrutinizes harder when the redactor fired.
     """
     bar = "=" * 60
-    multi = len(messages) > 1
-    for channel, message in messages.items():
-        # Label the block only when there's more than one channel, so a
-        # single-channel preview is unchanged from Phase 1/2.
-        label = f" ({channel})" if multi else ""
+    multi = len(previews) > 1
+    for label, message in previews:
+        # Label the block only when given one (the caller passes "" for a single
+        # audience), so a single-audience preview is unchanged from before D5.
+        suffix = f" ({label})" if label else ""
         print(bar)
-        print(f"PREVIEW{label} — this report has NOT been sent yet")
+        print(f"PREVIEW{suffix} — this report has NOT been sent yet")
         print(bar)
         # .preview is the faithful text rendering of the exact payload that will
         # be POSTed — the human approves what actually leaves the machine.

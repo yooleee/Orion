@@ -143,6 +143,19 @@ name = "Alex (supervisor)"
 channel = "discord"                       # "discord" or "slack".
 webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"   # names the .env key holding the URL.
 
+# Optional: `signals` filters WHICH signals this recipient receives — a subset of
+# the project's `collectors` above. Omit it (as Alex does) to receive everything
+# (the default). Set it to route different slices to different people: e.g. a
+# mentor who should only see your hand-written notes, not every commit. Each run
+# composes one filtered message per distinct (channel, signals) audience, so two
+# recipients who want the same slice on the same channel share one rendering.
+# A signal not in `collectors` is rejected at load time (it could never arrive).
+# [[projects.orion.recipients]]
+# name = "Mentor"
+# channel = "discord"
+# webhook_env_var = "ORION_DISCORD_WEBHOOK_MENTOR"
+# signals = ["notes"]                     # this recipient sees ONLY the notes signal.
+
 # A Slack recipient: same shape, channel = "slack", pointing at a Slack incoming
 # webhook in .env. Uncomment to also report to a Slack channel.
 # [[projects.orion.recipients]]

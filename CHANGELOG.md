@@ -33,6 +33,15 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
   shows new unreported activity (`new: git`) or `up to date`, plus how long since the last report. It
   reuses the report flow's activity detector so it can't disagree with a real `report`, and derives
   the last-report time from `report_history` (no new schema). Fail-soft per collector; nothing is sent.
+- **Per-recipient signal routing (D5).** A recipient can now carry an optional `signals` filter — a
+  subset of the project's `collectors` — so different people receive different slices of one project's
+  report (a mentor gets your notes, a teammate gets git). Omitting it keeps today's behavior (the
+  recipient receives everything). Each run composes one **filtered** message per distinct
+  `(channel, signals)` audience and previews/delivers per audience, so two recipients who want the same
+  slice on the same channel share one rendering. The filter is config-level *content* routing on the
+  existing named-recipient seam — **no per-recipient identity or state** (that stays deferred to C3).
+  The hosted relay still receives the **full, unfiltered report**; only chat-channel delivery is
+  filtered. An unknown or empty `signals` is rejected at load time. See `plans/orion-plan.md` "D5".
 
 ### Changed
 

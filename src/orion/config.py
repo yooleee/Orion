@@ -86,17 +86,34 @@ class Recipient:
         channel: Delivery channel — one of SUPPORTED_CHANNELS ("discord" or "slack").
         webhook_env_var: Name of the .env variable that holds this recipient's
             webhook URL. The URL itself is never stored in the config.
+        signals: The signal types this recipient receives — a subset of the
+            project's enabled collectors (e.g. ("git",) for a recipient who should
+            only see code activity). Resolved at load time: omitting `signals` in
+            the config means the recipient gets ALL of the project's collectors
+            (today's behavior), so it is populated with the project's collectors
+            then. Defaults to () on the dataclass purely so direct construction
+            (scaffold, tests) stays valid; config-loaded recipients always carry a
+            concrete, non-empty subset.
 
     Why:
         Modeling recipients explicitly (rather than assuming a single implicit
         "me") keeps the door open for multi-supervisor delivery later without a
         rewrite. The env-var indirection keeps secrets out of the shareable
-        config file — a privacy requirement, not just a style choice.
+        config file — a privacy requirement, not just a style choice. `signals`
+        adds lightweight, audience-typed routing (D5): different supervisors can
+        receive different slices of the same project's report (a mentor sees the
+        incubator/idea signal, a teammate sees git) without any per-recipient
+        identity or state — it is pure config-level CONTENT filtering on today's
+        named-recipient seam, orthogonal to the per-recipient delivery state that
+        C3 defers. Omitting it preserves the existing "everyone gets everything".
     """
 
     name: str
     channel: str
     webhook_env_var: str
+    # Defaulted last (() ) so existing keyword/positional construction stays valid;
+    # the loader replaces () with the project's collectors when the key is omitted.
+    signals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -751,7 +768,10 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
             f"{where} has invalid auto_send={auto_send!r}. Expected true or false."
         )
 
-    recipients = _parse_recipients(body.get("recipients"), where)
+    # Recipients are parsed AFTER collectors are validated so each recipient's
+    # `signals` filter can default to (and be validated against) the project's
+    # actual collector set — see _parse_recipients.
+    recipients = _parse_recipients(body.get("recipients"), where, tuple(collectors_raw))
 
     # Structured file-backed collectors each need their file path — but only when
     # that collector is actually enabled. _parse_collector_file enforces exactly
@@ -825,12 +845,17 @@ def _parse_collector_file(
     return path
 
 
-def _parse_recipients(raw: object, where: str) -> tuple[Recipient, ...]:
+def _parse_recipients(
+    raw: object, where: str, project_collectors: tuple[str, ...]
+) -> tuple[Recipient, ...]:
     """Validate the list of recipients for one project.
 
     Args:
         raw: The raw value under `recipients` (expected list of tables).
         where: A locating string for error messages.
+        project_collectors: The project's enabled collector names, already
+            validated. Each recipient's `signals` filter defaults to this (when the
+            key is omitted) and is validated as a subset of it.
 
     Returns:
         A tuple of validated Recipient objects.
@@ -838,7 +863,9 @@ def _parse_recipients(raw: object, where: str) -> tuple[Recipient, ...]:
     Why:
         Delivery is pointless with no recipient, and a half-specified recipient
         (missing channel or webhook var) would fail confusingly at send time —
-        far from the typo. Validating here surfaces the problem at load time.
+        far from the typo. Validating here surfaces the problem at load time. The
+        `signals` subset check needs the project's collectors, hence the extra
+        argument: a recipient cannot ask for a signal the project does not collect.
     """
     if not isinstance(raw, list) or not raw:
         raise ConfigError(f"{where} needs at least one [[projects.<name>.recipients]] entry.")
@@ -864,11 +891,72 @@ def _parse_recipients(raw: object, where: str) -> tuple[Recipient, ...]:
             raise ConfigError(f"{rwhere} is missing a non-empty `webhook_env_var`.")
         _validate_env_var_name(webhook_env_var.strip(), "webhook_env_var", rwhere)
 
+        signals = _parse_recipient_signals(item.get("signals"), project_collectors, rwhere)
+
         recipients.append(
-            Recipient(name=name, channel=channel, webhook_env_var=webhook_env_var)
+            Recipient(
+                name=name,
+                channel=channel,
+                webhook_env_var=webhook_env_var,
+                signals=signals,
+            )
         )
 
     return tuple(recipients)
+
+
+def _parse_recipient_signals(
+    raw: object, project_collectors: tuple[str, ...], rwhere: str
+) -> tuple[str, ...]:
+    """Resolve and validate one recipient's `signals` filter (D5).
+
+    Args:
+        raw: The raw value under the recipient's `signals` key, or None when absent.
+        project_collectors: The project's enabled collector names (the allowed set
+            and the default).
+        rwhere: A locating string for error messages (e.g. "… recipient #2").
+
+    Returns:
+        The recipient's signal subset as a tuple, in the order given. When the key
+        is absent, the project's full collector set (the recipient gets everything).
+
+    Why:
+        Pulling this out keeps _parse_recipients readable and gives the subset rule
+        one home. The default is "everything" so every pre-D5 config — which has no
+        `signals` key — keeps delivering all signals to all recipients, unchanged.
+        When the key IS present we require a non-empty list whose every entry is a
+        real project collector: an empty list (a recipient that receives nothing)
+        is almost certainly a mistake, and a signal the project does not collect
+        could never be delivered, so both fail loudly at load time naming the fix —
+        far better than a recipient silently receiving nothing at send time.
+    """
+    # Absent -> everything (the backward-compatible default).
+    if raw is None:
+        return project_collectors
+
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(
+            f"{rwhere} has an invalid `signals` (must be a non-empty list of "
+            f"collector names, a subset of this project's collectors "
+            f"{project_collectors}). Omit it to receive all signals."
+        )
+
+    signals: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError(
+                f"{rwhere} has a `signals` entry that is not a non-empty string."
+            )
+        signal = entry.strip()
+        if signal not in project_collectors:
+            raise ConfigError(
+                f"{rwhere} lists signal {signal!r}, which this project does not "
+                f"collect. Choose from {project_collectors}, or enable that "
+                f"collector for the project."
+            )
+        signals.append(signal)
+
+    return tuple(signals)
 
 
 def get_project(config: Config, name: str) -> ProjectConfig:

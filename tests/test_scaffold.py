@@ -102,7 +102,16 @@ def test_render_create_mode_round_trips(tmp_path):
     assert project.share_level == "high_level"
     assert project.collectors == ("git",)
     assert project.auto_send is False  # always false on registration
-    assert project.recipients == (_recipient(),)
+    # The stanza writes no `signals` line, so on load the recipient's signals
+    # resolve to the project's collectors (D5: omitting signals = receive all).
+    assert project.recipients == (
+        Recipient(
+            name="Alex (supervisor)",
+            channel="discord",
+            webhook_env_var="ORION_DISCORD_ALEX",
+            signals=("git",),
+        ),
+    )
 
 
 def test_render_append_mode_round_trips(tmp_path):

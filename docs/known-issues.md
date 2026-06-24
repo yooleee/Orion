@@ -33,6 +33,12 @@ Deferred).
   **C3** multi-party/identity model. The behavior is pinned by
   `tests/test_cli.py::test_one_channel_failure_does_not_block_the_other` and commented at the
   marker-advance step in `cli._run_report`.
+- **D5 nuance (2026-06-24):** per-recipient `signals` routing slices this gap finer. All
+  active collectors' markers still advance on ≥1 successful send *of the run* — so if the
+  only subscriber to a given signal fails while a different audience succeeds, that signal's
+  marker advances though no subscriber received it. This is the same bounded, by-design gap at
+  audience granularity, with the same proper fix (per-recipient/per-audience delivery state in
+  C3). Not a new severity.
 - **Severity:** medium
 - **Status:** Decided (by-design); per-recipient state deferred → **C3** (with KI-11).
 

@@ -94,7 +94,7 @@ is the committed near-term band; Horizon **E** is a recorded direction with the 
 | D2 | `orion status` — unreported-across-projects backlog/digest (idea #6; derivable from `report_history`, no new schema) | ✅ Shipped (2026-06-24) |
 | D3 | OSS-readiness polish — honest README positioning vs incumbents (Gitmore/Gitrecap/dev-journal), the ≤10-min setup test (G3), fix the absolute-path README assessment pointer, trim dogfood friction | ✅ Shipped (2026-06-24) |
 | D4 | Incubator-as-fifth-signal (idea #1) — a new collector emitting idea-pipeline updates; the first real test of the "modular signals" direction | 📋 Planned |
-| D5 | Lightweight audience-typed routing (idea #2) — tag recipients with the signal types they receive, on today's named-recipient seam. **Gate RESOLVED (2026-06-24): ships without C3 identity.** Pairs with D4 (D5 is what makes D4 valuable); build D5 first | 📋 Planned (design settled) |
+| D5 | Lightweight audience-typed routing (idea #2) — per-recipient `signals` filter + per-audience compose grouping on today's named-recipient seam, no C3 identity. Each run composes one filtered message per distinct `(channel, signals)` audience; relay still gets the full report | ✅ Shipped (2026-06-24) |
 
 Small follow-ons (no separate phase): `graduate-idea` → calls `add-project` (idea #4 follow-on);
 summarizer-prompt style sanity-check (idea #7, mostly done); relay-dashboard timezone configurable
@@ -1043,30 +1043,34 @@ for an eventual open-source reader.
   `sar_hackathon`) from committed planning docs — honest historical context for now; revisit closer to
   going public. **Next:** D4/D5 (incubator-signal + lightweight audience-typed routing).
 
-## D4/D5 — gate resolved, design settled (2026-06-24) — next-session opener
+## D4/D5 — D5 shipped, D4 next (2026-06-24)
 
-Planned in a dedicated pass; not yet built. Decisions locked so the next session starts clean:
-
-- **Gate RESOLVED:** lightweight **audience-typed routing (D5)** ships on today's named-recipient
-  model with **no identity/C3 work**. A recipient is a named webhook destination; a per-recipient
-  `signals` filter is config-level *content filtering*, orthogonal to the per-recipient state/identity
-  that KI-1/KI-11/KI-17 defer to C3. Backward-compatible: omitting `signals` = the recipient gets
-  everything (today's behavior).
-- **Build order: D5 first, then D4**, as **two separate PRs** (each useful alone). #2 (routing) is the
-  enabler that makes #1 (incubator signal) valuable.
-- **D5 design:** add `signals: tuple[str, ...]` to `Recipient` (default = the project's collectors,
-  validated as a subset). In `_run_report`, carry each section's collector name, group recipients by
-  `(channel, frozenset(signals))`, build a filtered blob per group (reuse `merge_sections`/
-  `build_report`/`compose` unchanged), skip empty groups, preview/deliver per group. Relay push keeps
-  the full blob.
-- **D4 design:** a new structured-lane collector `collectors/incubator.py` reading the incubator
-  `index.md` table into `{idea: status}`; marker = sorted-JSON of that map (the tasks.py pattern),
-  `has_activity` = any new idea / status change, `raw_text` = transition lines. Wire it as a fifth
-  file-backed collector (`incubator_file`), additively, across the enumerated slots. Configured as a
-  **dedicated `[projects.incubator]`** (repo_path = the incubator repo, recipients = mentors/family via
-  D5 routing).
-- Full file-by-file design + verification are in the approved plan for this slice. After D4/D5,
-  Horizon D is complete; Horizon E stays a recorded, not-yet-built direction.
+- **D5 SHIPPED (2026-06-24, this PR).** Per-recipient audience-typed routing on today's
+  named-recipient model with **no identity/C3 work**: a `signals` filter is config-level *content
+  filtering*, orthogonal to the per-recipient state/identity KI-1/KI-11/KI-17 defer to C3.
+  Backward-compatible — omitting `signals` = the recipient gets everything.
+  What landed:
+  - `config.Recipient` grew `signals: tuple[str, ...]`; `_parse_recipients` defaults it to the
+    project's collectors and validates it as a non-empty subset (`_parse_recipient_signals`).
+  - `_run_report` carries each section's collector name, groups recipients by
+    `(channel, frozenset(signals))` (`_audience_groups`), composes one **filtered** blob per audience
+    (reusing `merge_sections`/`build_report`/`compose` unchanged), skips audiences whose signals were
+    idle, and previews/delivers per audience. `_deliver`/`_preview_and_confirm` were made
+    key-agnostic so report (keyed by channel+signals) and intake (keyed by channel, **unfiltered** —
+    a push has no per-signal sections) share one path.
+  - The **relay push keeps the full, unfiltered blob** — D5 filters chat delivery only, not the
+    dashboard's record.
+  - Tests: 4 config (default-to-all, subset kept, unknown-signal rejected, empty-list rejected) +
+    3 CLI (disjoint slices routed, idle-signal recipient gets nothing, relay gets the full report).
+    Verified by a real CLI run: a notes-only and a tasks-only recipient received different filtered
+    previews from one run.
+- **D4 NEXT (separate PR):** a new structured-lane collector `collectors/incubator.py` reading the
+  incubator `index.md` table into `{idea: status}`; marker = sorted-JSON of that map (the tasks.py
+  pattern), `has_activity` = any new idea / status change, `raw_text` = transition lines. Wire it as a
+  fifth file-backed collector (`incubator_file`), additively, across the enumerated slots. Configured
+  as a **dedicated `[projects.incubator]`** (repo_path = the incubator repo, recipients =
+  mentors/family via D5 routing). After D4, Horizon D is complete; Horizon E stays a recorded,
+  not-yet-built direction.
 
 ## Open questions / to settle before/while building
 

@@ -378,11 +378,13 @@ def test_dual_channel_preview_shows_both_blocks(tmp_path, env_and_mocks, capsys)
     cli.main(["report", "demo", "--config", str(toml)])
 
     out = capsys.readouterr().out
-    # One labeled preview block per channel — the user sees exactly what each
-    # platform will render. (The single combined confirm is exercised by the
-    # route/decline tests, where one answer covers both channels.)
-    assert "PREVIEW (discord)" in out
-    assert "PREVIEW (slack)" in out
+    # One labeled preview block per audience — the user sees exactly what each
+    # platform will render AND who receives it. With D5 the label names the channel
+    # and the recipients, so two audiences on the same channel never collide. (The
+    # single combined confirm is exercised by the route/decline tests, where one
+    # answer covers both channels.)
+    assert "PREVIEW (discord → Alex)" in out
+    assert "PREVIEW (slack → Sam)" in out
 
 
 def test_decline_aborts_every_channel(tmp_path, env_and_mocks):
@@ -1197,3 +1199,148 @@ def test_bot_missing_token_is_clean_error_and_never_runs(tmp_path, monkeypatch):
 
     assert code == 1
     assert ran == []
+
+
+# --- D5: per-recipient signals routing ----------------------------------------
+# These drive the full report pipeline (real repo + notes file, mocked LLM and
+# delivery) and assert that each recipient receives ONLY the sections their
+# `signals` filter subscribed to — and that the relay still gets the full report.
+
+
+def _write_signals_config(tmp_path, repo, *, notes_body="Working on it.", relay=False):
+    """Write a git+notes project with two disjointly-filtered Discord recipients.
+
+    Args:
+        tmp_path: per-test temp dir (also where the state db + notes file live).
+        repo: the git repo (the git collector's source of activity).
+        notes_body: text written to NOTES.md; "" leaves the notes signal idle
+            (file present but empty -> no notes activity, no error).
+        relay: when True, add an enabled [relay] table so the push path runs.
+
+    Returns:
+        Path to the written orion.toml.
+
+    Why:
+        D5's routing is only observable with >1 collector AND recipients that
+        subscribe to different slices. This keeps each test to the one variable it
+        flexes (notes idle vs active, relay on/off) instead of repeating TOML (DRY).
+        Alex subscribes to git only, Sam to notes only — disjoint, so a correctly
+        filtered run sends each exactly one section.
+    """
+    notes_file = tmp_path / "NOTES.md"
+    notes_file.write_text(notes_body)
+    relay_table = (
+        '[relay]\n'
+        'enabled = true\n'
+        'url = "https://relay.test/ingest"\n'
+        'token_env_var = "ORION_RELAY_TOKEN"\n\n'
+        if relay
+        else ""
+    )
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        {relay_table}[projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git", "notes"]
+        notes_file = "{notes_file.as_posix()}"
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+          signals = ["git"]
+
+          [[projects.demo.recipients]]
+          name = "Sam"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_SAM"
+          signals = ["notes"]
+        """
+    )
+    return toml
+
+
+def test_signals_route_disjoint_slices_to_each_recipient(tmp_path, env_and_mocks):
+    """Each recipient receives only the section their `signals` subscribed to.
+
+    Why this matters: this is the core D5 guarantee — a mentor who wants notes and a
+    teammate who wants code get DIFFERENT, filtered reports from one run. Alex (git
+    only) must see "Code activity" and not "Notes"; Sam (notes only) the reverse.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_DISCORD_WEBHOOK_SAM", "https://discord.test/sam")
+    use_summary(mp, "Did the code work.")
+    repo = _make_repo(tmp_path)
+    toml = _write_signals_config(tmp_path, repo, notes_body="A hand-written note.")
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+
+    # Index the two captured deliveries by their webhook URL.
+    by_url = {url: text for text, url in env_and_mocks["sent"]}
+    assert set(by_url) == {"https://discord.test/webhook", "https://discord.test/sam"}
+
+    alex = by_url["https://discord.test/webhook"]
+    sam = by_url["https://discord.test/sam"]
+    # Alex (git): the git section only.
+    assert "Code activity" in alex and "Did the code work." in alex
+    assert "Notes" not in alex and "A hand-written note." not in alex
+    # Sam (notes): the notes section only.
+    assert "Notes" in sam and "A hand-written note." in sam
+    assert "Code activity" not in sam and "Did the code work." not in sam
+
+
+def test_signals_idle_signal_means_recipient_gets_nothing(tmp_path, env_and_mocks):
+    """A recipient whose only subscribed signal was idle this run is not delivered to.
+
+    Why this matters: filtering must not invent or mis-route content. With notes
+    empty (no notes activity), Sam (notes only) has nothing to receive, so he gets
+    no message at all — while Alex (git) still gets his git report and the run
+    succeeds on Alex's delivery alone.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_DISCORD_WEBHOOK_SAM", "https://discord.test/sam")
+    repo = _make_repo(tmp_path)
+    # notes_body="" -> NOTES.md exists but is empty -> the notes signal is idle.
+    toml = _write_signals_config(tmp_path, repo, notes_body="")
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+
+    sent_urls = [url for _text, url in env_and_mocks["sent"]]
+    # Only Alex (git) received anything; Sam's idle notes filter sent him nothing.
+    assert sent_urls == ["https://discord.test/webhook"]
+
+
+def test_relay_receives_full_report_despite_per_recipient_filtering(tmp_path, env_and_mocks):
+    """The relay push carries the FULL report even when recipients see filtered slices.
+
+    Why this matters: D5 filters chat-channel delivery, not the dashboard's record —
+    the relay must still receive the complete report (both sections) so the hosted
+    view is whole, regardless of who subscribed to what.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_DISCORD_WEBHOOK_SAM", "https://discord.test/sam")
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    use_summary(mp, "Did the code work.")
+    pushes = _capture_relay(mp)
+    repo = _make_repo(tmp_path)
+    toml = _write_signals_config(tmp_path, repo, notes_body="A hand-written note.", relay=True)
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+
+    # Both recipients got their (filtered) slice...
+    assert len(env_and_mocks["sent"]) == 2
+    # ...but the single relay push carries BOTH sections — the complete report.
+    assert len(pushes) == 1
+    blob_json = pushes[0][0]
+    assert "Code activity" in blob_json and "Notes" in blob_json
+    assert "Did the code work." in blob_json and "A hand-written note." in blob_json

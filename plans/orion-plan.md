@@ -103,9 +103,11 @@ made, not after any particular horizon.
 | D4 | Incubator-as-fifth-signal (idea #1) — a new structured-lane collector (`collectors/incubator.py`) emitting idea-pipeline updates (new ideas + status transitions) from an `index.md` table; the first real test of the "modular signals" direction. Configured as a dedicated `[projects.incubator]`, routed to mentors/family via D5 | ✅ Shipped (2026-06-24) |
 | D5 | Lightweight audience-typed routing (idea #2) — per-recipient `signals` filter + per-audience compose grouping on today's named-recipient seam, no C3 identity. Each run composes one filtered message per distinct `(channel, signals)` audience; relay still gets the full report | ✅ Shipped (2026-06-24) |
 
-Small follow-ons (no separate phase): `graduate-idea` → calls `add-project` (idea #4 follow-on) —
-**✅ Shipped (2026-06-24)**; summarizer-prompt style sanity-check (idea #7, mostly done);
-relay-dashboard timezone configurable (KI-20 follow-up).
+Small follow-ons (no separate phase) — **all ✅ Shipped (2026-06-24)**: `graduate-idea` → calls
+`add-project` (idea #4 follow-on); summarizer-prompt clean-prose style (idea #7 — a prompt tune, not
+an inheritance mechanism); relay-dashboard timezone configurable via `relay-serve --timezone`
+(KI-20 follow-up). The last two were built in parallel via worktree-isolated agents (file-disjoint —
+see [docs/parallelization.md](../docs/parallelization.md)).
 
 **Horizon E — Coordination & visibility hub** *(long-range, aspirational/unvalidated; seams kept clean, not built)*
 

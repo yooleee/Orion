@@ -59,9 +59,18 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
   then **delegates to `add-project`** — so the preview-before-write, recipient resolution, repo
   inference, and re-load validation are all reused. It is read-only on the incubator file (it writes
   only `orion.toml`). Shares add-project's flags (`--like`, `--recipient`, `--print`, `--yes`, …).
+- **`orion relay-serve --timezone <zone>` (KI-20 follow-up).** The hosted dashboard's display zone,
+  previously hardcoded to `America/Los_Angeles`, is now configurable per relay process. The zone is
+  validated at startup (a typo fails cleanly, not with a traceback) and threaded through the renderers;
+  omitting the flag keeps the Pacific output byte-identical. The relay does not read `orion.toml`, so
+  the flag is the source.
 
 ### Changed
 
+- **Summarizer prose style (idea #7).** The summarizer system prompt now instructs the model to write
+  clean prose — no em-dashes, no semicolons, and no generic LLM filler — so progress summaries match
+  the project's Writing & Documentation Style. A lean one-line prompt tune (deliberately not a
+  doc-inheritance mechanism); applies to both share levels.
 - **OSS-readiness docs polish (D3).** README status line + blurb now reflect Horizons A–C shipped /
   Horizon D underway and surface `add-project` and `status`; a new "How it compares" section positions
   Orion honestly against incumbents (Gitmore, Gitrecap, dev-journal). `docs/new-project-setup.md` leads

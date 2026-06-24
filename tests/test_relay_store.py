@@ -15,15 +15,29 @@
 #                independence from orion — CP6 proves the real end-to-end contract.
 # =============================================================================
 
+import sqlite3
+
+import pytest
+
 from relay.store import (
     add_comment,
+    add_user,
+    bump_session_version,
     comments_for,
     comments_for_project,
     get,
+    get_user_by_id,
+    get_user_by_name,
+    get_user_by_verifier,
     history,
     ingest,
     list_projects,
+    list_users,
     open_relay_store,
+    projects_for_user,
+    record_admin_audit,
+    revoke_user,
+    update_last_login,
 )
 
 
@@ -305,3 +319,159 @@ def test_comments_for_project_unknown_or_caught_up_is_empty(tmp_path):
 
     assert comments_for_project(conn, "never-seen") == []
     assert comments_for_project(conn, "demo", since_id=last) == []
+
+
+# --- Multi-party access: users, scope, revocation, audit (Increment 1) ---------
+# These pin the per-user identity store the dashboard's auth/authZ build on: that a
+# user + scope round-trip, that uniqueness is enforced, that the stateless-revocation
+# levers (active + session_version) behave, and that a verifier never leaks via list.
+
+
+def _store(tmp_path):
+    """Open a fresh relay store (DRY across the user-store tests)."""
+    return open_relay_store(tmp_path / "relay.sqlite3")
+
+
+def test_add_user_round_trips_with_defaults_and_scope(tmp_path):
+    """A provisioned user comes back with its fields, default flags, and project scope.
+
+    Why this matters: this is the core identity record auth resolves on every login
+    and request; the active/session_version DEFAULTS (1/1) and the scope rows must be
+    exactly what add_user wrote.
+    """
+    conn = _store(tmp_path)
+    uid = add_user(
+        conn, "Alex", "verifier-alex", "viewer",
+        ["orion", "incubator"], "admin-token", "2026-06-24T00:00:00+00:00",
+    )
+    row = get_user_by_id(conn, uid)
+    assert row["name"] == "Alex"
+    assert row["role"] == "viewer"
+    assert row["active"] == 1            # default: active
+    assert row["session_version"] == 1   # default: first session generation
+    assert row["last_login_at"] is None  # not logged in yet
+    # Scope round-trips, sorted.
+    assert projects_for_user(conn, uid) == ["incubator", "orion"]
+
+
+def test_get_user_by_verifier_and_name_resolve_same_row(tmp_path):
+    """Login (by verifier) and CLI (by name) resolve to the same user.
+
+    Why this matters: auth looks up by verifier; admin ops look up by name. Both must
+    hit the one row so the two surfaces never disagree about who a user is.
+    """
+    conn = _store(tmp_path)
+    uid = add_user(conn, "Sam", "verifier-sam", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    assert get_user_by_verifier(conn, "verifier-sam")["id"] == uid
+    assert get_user_by_name(conn, "Sam")["id"] == uid
+
+
+def test_lookups_miss_return_none(tmp_path):
+    """Unknown verifier/id/name are a clean None, never an error.
+
+    Why this matters: a wrong key (no such verifier) or a dead session (deleted id)
+    must degrade to "not authenticated", which the server keys off a None.
+    """
+    conn = _store(tmp_path)
+    assert get_user_by_verifier(conn, "nope") is None
+    assert get_user_by_id(conn, 999) is None
+    assert get_user_by_name(conn, "ghost") is None
+
+
+def test_duplicate_name_is_rejected(tmp_path):
+    """A duplicate user name raises (UNIQUE), preventing an ambiguous second account.
+
+    Why this matters: name is the admin's handle for revoke/list; two "Alex"es would
+    make those ops ambiguous, so the store refuses it loudly.
+    """
+    conn = _store(tmp_path)
+    add_user(conn, "Alex", "verifier-1", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_user(conn, "Alex", "verifier-2", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+
+
+def test_duplicate_verifier_is_rejected(tmp_path):
+    """The same credential verifier cannot back two users (UNIQUE).
+
+    Why this matters: a verifier is the login key's fingerprint; sharing it across
+    users would make a single key authenticate as two identities.
+    """
+    conn = _store(tmp_path)
+    add_user(conn, "Alex", "same-verifier", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_user(conn, "Sam", "same-verifier", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+
+
+def test_list_users_omits_verifier_and_includes_scope(tmp_path):
+    """list_users returns scope + flags but NEVER the key verifier, ordered by name.
+
+    Why this matters: an admin listing must never surface credential material (even
+    hashed), and should show each user's scope. Ordering by name keeps it readable.
+    """
+    conn = _store(tmp_path)
+    add_user(conn, "Sam", "verifier-sam", "viewer", ["orion"], "admin-token", "2026-06-24T00:00:00+00:00")
+    add_user(conn, "Alex", "verifier-alex", "admin", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    users = list_users(conn)
+    assert [u["name"] for u in users] == ["Alex", "Sam"]  # sorted by name
+    assert all("key_verifier" not in u for u in users)    # verifier never exposed
+    sam = next(u for u in users if u["name"] == "Sam")
+    assert sam["projects"] == ["orion"] and sam["active"] is True
+
+
+def test_bump_session_version_increments(tmp_path):
+    """Bumping a user's session_version advances it (the stateless-logout lever).
+
+    Why this matters: the signed cookie embeds the session_version it was minted with;
+    bumping it is what makes an outstanding cookie stop validating on its next request.
+    """
+    conn = _store(tmp_path)
+    uid = add_user(conn, "Alex", "verifier-alex", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    bump_session_version(conn, uid)
+    assert get_user_by_id(conn, uid)["session_version"] == 2
+
+
+def test_revoke_user_deactivates_and_bumps_version_atomically(tmp_path):
+    """Revoking sets active=0 AND bumps session_version in one step.
+
+    Why this matters: revocation must both deny a future login (active=0) and kill any
+    live cookie (session_version bump); doing both leaves no window where one applies
+    but not the other.
+    """
+    conn = _store(tmp_path)
+    uid = add_user(conn, "Alex", "verifier-alex", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    revoke_user(conn, uid)
+    row = get_user_by_id(conn, uid)
+    assert row["active"] == 0 and row["session_version"] == 2
+
+
+def test_update_last_login_stamps_the_time(tmp_path):
+    """A login stamps last_login_at (an operational signal, not an auth gate).
+
+    Why this matters: the admin can see who actually uses their access and spot stale
+    grants; it starts NULL and is set on first login.
+    """
+    conn = _store(tmp_path)
+    uid = add_user(conn, "Alex", "verifier-alex", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
+    update_last_login(conn, uid, "2026-06-24T12:00:00+00:00")
+    assert get_user_by_id(conn, uid)["last_login_at"] == "2026-06-24T12:00:00+00:00"
+
+
+def test_record_admin_audit_appends_a_row(tmp_path):
+    """record_admin_audit writes an append-only trail row with JSON-encoded projects.
+
+    Why this matters: the multi-party model needs accountability — who provisioned or
+    revoked whom, with what scope — and it must be queryable after the fact.
+    """
+    conn = _store(tmp_path)
+    record_admin_audit(
+        conn, "admin-token", "create_user", "Alex", "viewer",
+        ["orion", "incubator"], "2026-06-24T00:00:00+00:00",
+    )
+    row = conn.execute(
+        "SELECT actor, action, target_user, role, projects FROM relay_admin_audit"
+    ).fetchone()
+    assert row["actor"] == "admin-token" and row["action"] == "create_user"
+    assert row["target_user"] == "Alex" and row["role"] == "viewer"
+    # projects is JSON-encoded for the TEXT column.
+    import json
+    assert json.loads(row["projects"]) == ["orion", "incubator"]

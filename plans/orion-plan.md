@@ -92,7 +92,7 @@ is the committed near-term band; Horizon **E** is a recorded direction with the 
 | ----- | ----- | ------ |
 | D1 | `orion add-project` — explicit, append-only config writer; cwd inference; onboarding | ✅ Shipped (2026-06-23) |
 | D2 | `orion status` — unreported-across-projects backlog/digest (idea #6; derivable from `report_history`, no new schema) | ✅ Shipped (2026-06-24) |
-| D3 | OSS-readiness polish — honest README positioning vs incumbents (Gitmore/Gitrecap/dev-journal), the ≤10-min setup test (G3), fix the absolute-path README assessment pointer, trim dogfood friction | 🔜 Next |
+| D3 | OSS-readiness polish — honest README positioning vs incumbents (Gitmore/Gitrecap/dev-journal), the ≤10-min setup test (G3), fix the absolute-path README assessment pointer, trim dogfood friction | ✅ Shipped (2026-06-24) |
 | D4 | Incubator-as-fifth-signal (idea #1) — a new collector emitting idea-pipeline updates; the first real test of the "modular signals" direction | 📋 Planned |
 | D5 | Lightweight audience-typed routing (idea #2) — tag recipients with the signal types they receive, on today's named-recipient seam. **Gate:** ship lightweight without full C3 identity, else defer to C3. Pairs with D4 (D5 is what makes D4 valuable) | 📋 Planned (gated) |
 
@@ -1022,6 +1022,26 @@ date`, plus how long since its last report. No new schema, no network, no LLM, n
   **397**. Verified by hand across the real config and a temp two-project workspace.
 - **Next in Horizon D:** D3 (OSS-readiness polish), then the D4/D5 incubator-signal + audience-routing
   pair.
+
+## D3 — OSS-readiness polish (2026-06-24)
+
+Docs-only pass making the public-facing docs match the shipped reality and positioning Orion honestly
+for an eventual open-source reader.
+
+- **Onboarding/staleness:** README status line + blurb now say A–C shipped / Horizon D underway and
+  surface `add-project` + `status`; `docs/new-project-setup.md` leads with `orion add-project` (hand-edit
+  kept as the alternative) plus an activation note and a `status` mention; the "2 runtime deps" claim
+  corrected to **3** (`anthropic`, `python-dotenv`, `tzdata`) across README / new-project-setup / CLAUDE.md.
+- **Positioning:** a new README "How it compares" section names the incumbents (Gitmore, Gitrecap,
+  dev-journal, async-standup bots) and states Orion's honest edge (four-signal incl. Claude Code
+  sessions, the two-way loop, own-your-data), framed as personal infrastructure + portfolio, not a
+  product launch. The broken `~/Developer/incubator/...` "Strategic assessment" pointer is removed
+  (it 404s for any cloner); the new section is self-contained.
+- **Verified:** ran the ≤10-min setup test for real — fresh venv → `pip install -e .` → `add-project`
+  → `check` → `status` in seconds, matching the docs (stopped before a real send). Suite unaffected (397).
+- **Deferred to a publish-prep pass:** scrubbing personal references (dad / family / a name /
+  `sar_hackathon`) from committed planning docs — honest historical context for now; revisit closer to
+  going public. **Next:** D4/D5 (incubator-signal + lightweight audience-typed routing).
 
 ## Open questions / to settle before/while building
 

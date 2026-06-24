@@ -12,23 +12,36 @@ git clone <your-orion-remote> orion
 cd orion
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -e .                # the two runtime deps: anthropic, python-dotenv
+pip install -e .                # 3 runtime deps: anthropic, python-dotenv, tzdata
 ```
+
+> After activating the venv, `orion ...` is on your PATH for this shell. `python -m orion ...`
+> is the identical, portable form used elsewhere in these docs.
 
 ## 2. Create your config and secrets
 
 Orion reads a **config** (`orion.toml`, paths + recipients, never secrets) and a
-gitignored **`.env`** (the secrets). Copy the examples and edit them:
+gitignored **`.env`** (the secrets).
+
+**Quickest path: let Orion scaffold the config.** From the `orion` directory, register the repo
+you want to track:
+
+```bash
+orion add-project myapp --repo-path /absolute/path/to/your/repo \
+  --recipient "Alex (supervisor):discord:ORION_DISCORD_WEBHOOK_ALEX"
+```
+
+It shows the stanza it will write, then appends it to `orion.toml` (creating the file if it does
+not exist). Each `--recipient` is `"Name:channel:ENV_VAR"`, the last field naming a `.env`
+variable. Run it from *inside* the target repo (passing `--config /path/to/orion/orion.toml`) and
+the name and repo path are inferred; use `--like <existing-project>` to copy another project's
+recipients. Full options: [Adding a project](../README.md#adding-a-project-add-project).
+
+**Or write it by hand.** Copy the example and edit `orion.toml`:
 
 ```bash
 cp orion.toml.example orion.toml
-cp .env.example .env
 ```
-
-In `orion.toml`, define one project — point `repo_path` at the local repo you want
-to report on, and name at least one recipient. The recipient names a `.env`
-variable (`webhook_env_var`); the webhook URL itself goes in `.env`, so the config
-stays shareable:
 
 ```toml
 [projects.myapp]
@@ -42,8 +55,14 @@ collectors = ["git"]                 # add "tasks"/"notes" later if you want
   webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
 ```
 
-In `.env`, fill in the matching webhook URL and (for the default Anthropic
-summarizer) your API key:
+The recipient names a `.env` variable (`webhook_env_var`). The webhook URL itself goes in `.env`,
+so the config stays shareable.
+
+**Either way, put the secrets in `.env`** (the config never holds them):
+
+```bash
+cp .env.example .env
+```
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
@@ -73,6 +92,9 @@ orion report myapp
 You'll see a **preview** of exactly what will be sent; confirm with `y` to deliver.
 Re-running immediately reports "no new activity" — each report only covers what's
 new since the last one.
+
+Run `orion status` any time to see, across all your projects, which have new activity waiting to
+report.
 
 > **Tip — skip a giant first report.** On an existing repo, that first `report` covers the
 > project's *entire* git history. To start tracking from **now** instead, run

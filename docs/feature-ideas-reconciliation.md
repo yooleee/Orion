@@ -19,7 +19,7 @@ Status: Reconciled into the roadmap 2026-06-23. Candidates to place, not work to
 # Meta-layer feature ideas — reconciliation + dogfood capture
 
 > Working doc. Source inputs: `docs/feature-ideas-meta-session.md` (the parked ideas),
-> `docs/post-dogfood-kickoff.md` and `docs/phase-c2-bots-kickoff.md` (the scoping/questions),
+> `docs/archive/post-dogfood-kickoff.md` and `docs/archive/phase-c2-bots-kickoff.md` (the scoping/questions),
 > and `plans/orion-plan.md` (the roadmap / source of truth). Line refs below are to
 > `plans/orion-plan.md` as of 2026-06-23.
 
@@ -28,7 +28,7 @@ Status: Reconciled into the roadmap 2026-06-23. Candidates to place, not work to
 ## 1. Dogfood capture (6/20–21 hackathon)
 
 First real dogfood: Orion used on the `sar_hackathon` project over the weekend. Answers to the
-four kickoff questions (`docs/post-dogfood-kickoff.md`):
+four kickoff questions (`docs/archive/post-dogfood-kickoff.md`):
 
 - **Did I reach for Orion?** Yes — for progress reporting on the hackathon project. Not as a
   to-do list (no `TODO.md` existed for it). A standout positive: the **`orion-session` skill
@@ -62,7 +62,7 @@ four kickoff questions (`docs/post-dogfood-kickoff.md`):
 - **Next-slice implication (record, do not act on here):** the dogfood points at **OSS-readiness /
   onboarding polish** as the most valuable next direction, *not* bot-deepening — the bot's
   reply-in-chat value is unproven (untested), not disproven. This **reverses the default lean**
-  listed in `docs/post-dogfood-kickoff.md`. The actual next-slice decision is a separate session.
+  listed in `docs/archive/post-dogfood-kickoff.md`. The actual next-slice decision is a separate session.
 
 ---
 

@@ -5,7 +5,7 @@ Responsible for: The operator-facing guide to the native Slack bot (C2-bots) —
                  what it does, the smallest-slice limits, the Slack-app setup, the
                  config, how to run it, and the threat model.
 Role in project: The how-to companion to the scoping doc
-                 (docs/phase-c2-bots-kickoff.md) and the build plan. Referenced from
+                 (docs/archive/phase-c2-bots-kickoff.md) and the build plan. Referenced from
                  orion.toml.example and .env.example.
 ========================================================================= -->
 
@@ -132,5 +132,5 @@ relay) is a documented future, not part of this slice.
   access-gated supervisor input, not the developer's own outbound secrets); the control on it is
   XSS-escaping on render, already in the relay.
 
-See [`docs/phase-c2-bots-kickoff.md`](phase-c2-bots-kickoff.md) for the scoping decision and the
+See [`docs/phase-c2-bots-kickoff.md`](archive/phase-c2-bots-kickoff.md) for the scoping decision and the
 dogfood capture sheet.

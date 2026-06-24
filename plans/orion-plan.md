@@ -93,7 +93,7 @@ is the committed near-term band; Horizon **E** is a recorded direction with the 
 | D1 | `orion add-project` — explicit, append-only config writer; cwd inference; onboarding | ✅ Shipped (2026-06-23) |
 | D2 | `orion status` — unreported-across-projects backlog/digest (idea #6; derivable from `report_history`, no new schema) | ✅ Shipped (2026-06-24) |
 | D3 | OSS-readiness polish — honest README positioning vs incumbents (Gitmore/Gitrecap/dev-journal), the ≤10-min setup test (G3), fix the absolute-path README assessment pointer, trim dogfood friction | ✅ Shipped (2026-06-24) |
-| D4 | Incubator-as-fifth-signal (idea #1) — a new collector emitting idea-pipeline updates; the first real test of the "modular signals" direction | 📋 Planned |
+| D4 | Incubator-as-fifth-signal (idea #1) — a new structured-lane collector (`collectors/incubator.py`) emitting idea-pipeline updates (new ideas + status transitions) from an `index.md` table; the first real test of the "modular signals" direction. Configured as a dedicated `[projects.incubator]`, routed to mentors/family via D5 | ✅ Shipped (2026-06-24) |
 | D5 | Lightweight audience-typed routing (idea #2) — per-recipient `signals` filter + per-audience compose grouping on today's named-recipient seam, no C3 identity. Each run composes one filtered message per distinct `(channel, signals)` audience; relay still gets the full report | ✅ Shipped (2026-06-24) |
 
 Small follow-ons (no separate phase): `graduate-idea` → calls `add-project` (idea #4 follow-on);
@@ -1043,7 +1043,7 @@ for an eventual open-source reader.
   `sar_hackathon`) from committed planning docs — honest historical context for now; revisit closer to
   going public. **Next:** D4/D5 (incubator-signal + lightweight audience-typed routing).
 
-## D4/D5 — D5 shipped, D4 next (2026-06-24)
+## D4/D5 — both shipped; Horizon D complete (2026-06-24)
 
 - **D5 SHIPPED (2026-06-24, this PR).** Per-recipient audience-typed routing on today's
   named-recipient model with **no identity/C3 work**: a `signals` filter is config-level *content
@@ -1064,13 +1064,27 @@ for an eventual open-source reader.
     3 CLI (disjoint slices routed, idle-signal recipient gets nothing, relay gets the full report).
     Verified by a real CLI run: a notes-only and a tasks-only recipient received different filtered
     previews from one run.
-- **D4 NEXT (separate PR):** a new structured-lane collector `collectors/incubator.py` reading the
-  incubator `index.md` table into `{idea: status}`; marker = sorted-JSON of that map (the tasks.py
-  pattern), `has_activity` = any new idea / status change, `raw_text` = transition lines. Wire it as a
-  fifth file-backed collector (`incubator_file`), additively, across the enumerated slots. Configured
-  as a **dedicated `[projects.incubator]`** (repo_path = the incubator repo, recipients =
-  mentors/family via D5 routing). After D4, Horizon D is complete; Horizon E stays a recorded,
-  not-yet-built direction.
+- **D4 SHIPPED (2026-06-24, separate PR).** A new structured-lane collector
+  `collectors/incubator.py` reads the incubator `index.md` table into a `{idea: status}` map.
+  What landed:
+  - The parser locates the **Idea / Status** columns by header (tolerates re-ordering, extra
+    columns, a missing pitch column) and identifies an idea by its title — unwrapping a
+    `[Title](path)` Markdown link. No table / no Idea+Status header is a valid empty pipeline, not
+    an error; a missing file raises `IncubatorError`.
+  - Delta logic mirrors `tasks.py`: `new_marker` = `json.dumps(current_map, sort_keys=True)`;
+    `has_activity` = any **new idea** or **status change**; removals are silent (like an unchecked
+    task). `raw_text` = "transitions + pitch" — `- New idea: Title (status)` with the one-line pitch
+    indented beneath, and `- Title: old → new` for a status move.
+  - Wired additively as the fifth collector across the enumerated slots: `SUPPORTED_COLLECTORS`,
+    `COLLECTOR_FILE_KEYS`, `ProjectConfig.incubator_file`, `_parse_project`, and in cli.py the import,
+    `_COLLECTOR_TITLES["incubator"] = "Idea pipeline"`, the `_collect_for` dispatch, and
+    `IncubatorError` in all three collector-error `except` clauses (report, status, baseline).
+  - Configured as a **dedicated `[projects.incubator]`** routed to mentors/family via D5 `signals`
+    (example in `orion.toml.example`).
+  - Tests: 10 collector unit (parse/delta/round-trip/link-identity/reordered-columns/removal/
+    missing-file/no-table) + 2 config + 1 end-to-end CLI. Verified against the **real**
+    `~/Developer/incubator/index.md`.
+- **Horizon D is now complete** (D1–D5 shipped). Horizon E stays a recorded, not-yet-built direction.
 
 ## Open questions / to settle before/while building
 

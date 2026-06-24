@@ -76,11 +76,15 @@ The 3–5 decisions that define the route — and, by implication, what we're **
 - **S4 — Security & privacy are permanent invariants.** Redact + preview-before-send + fail-closed,
   gaining an inbound validate/authorize side as interaction goes two-way. (The one non-negotiable;
   everything else above is stage-appropriate and expected to evolve.)
-- **S5 — Bidirectional (C2) shipped; native Slack/Discord bots are the next destination.** C2
-  (dashboard comments + the `orion comments` pull-back) is done, so the loop is two-way. Next we
-  deepen the *delivery surface* into genuine two-way — native bots where supervisors already are —
-  still inside the north star (richer loop, not multi-party yet). C3 (multi-party) and E2E stay
-  deferred behind seams. *(Decided 2026-06-19; kickoff: `docs/phase-c2-bots-kickoff.md`.)*
+- **S5 — Two-way (C2) shipped; next is OSS-readiness, then the local enhancements.** C2 is done —
+  dashboard comments + the `orion comments` pull-back, plus a native Slack bot. The pre-dogfood plan
+  was to deepen the chat surface next, but the **6/20–21 dogfood re-sequenced it**: onboarding
+  friction was the binding constraint, so **Horizon D leads with OSS-readiness** (`orion add-project`
+  shipped; `orion status` + setup polish next), then the reconciled local enhancements (incubator
+  signal + lightweight audience-typed routing). **Native Slack/Discord bot deepening is a demand-gated
+  chat-surface track** — a parallel surface to the dashboard, with channel features and a build/maintain
+  cost (Horizon E), not the immediate next. C3 (multi-party) and E2E stay deferred behind seams.
+  *(Re-sequenced 2026-06-24 on the dogfood; see `plans/orion-plan.md` Horizons D–E.)*
 
 ## Measures (watch + act)
 
@@ -88,7 +92,8 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   change (G3) · the supervisor-value signal (G2). Qualitative by design.
 - **Actions (what we do):** the **horizon phases** in `plans/orion-plan.md`. Done = the
   deploy-beyond-loopback relay + dashboard hardening (C1) and the C2 bidirectional pass (dashboard
-  comments + comment pull-back); next = the **native Slack/Discord bots** slice (`docs/phase-c2-bots-kickoff.md`).
+  comments + comment pull-back) and the native Slack bot; next = **OSS-readiness (Horizon D)** —
+  `orion status` + setup polish (re-sequenced on the 2026-06-24 dogfood review; see `plans/orion-plan.md`).
 
 ## The lens we carry (thought processes, not installed frameworks)
 
@@ -131,7 +136,7 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   resist drift into full task/calendar/sprint management. Decide the exact scope via discovery when it
   nears (would I actually use the planning side?).
 
-## Long-range vision (Horizon D+ — aspirational, unvalidated; seams kept clean, *not* built)
+## Long-range vision (Horizon E — aspirational, unvalidated; seams kept clean, *not* built)
 
 > Food for thought, explicitly **not** on the active roadmap — recorded only so early choices don't
 > quietly close the door. The seams it leans on (the portable blob, explicitly-named participants,

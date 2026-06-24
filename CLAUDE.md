@@ -24,8 +24,13 @@ architecture, phasing, and the decisions already settled.
   each. Only write code after the plan is acknowledged.
 - **Smallest reviewable unit.** If a phase is large, propose a breakdown into sub-units and
   checkpoint after each. Prefer more, smaller checkpoints over one big diff.
-- **Keep `plans/orion-plan.md` a living document.** When a decision is made or a design detail
-  changes, update the plan in the same session so it never drifts from the code.
+- **Keep `plans/orion-plan.md` a living document — the roadmap table is the canonical map.** When a
+  decision is made or a design detail changes, update the plan in the same session so it never drifts
+  from the code. In particular, the **"Roadmap (horizons & phases)" table** at the top is the
+  canonical map: re-sync it (update statuses, add rows for shipped/decided work, sketch forward bands
+  coarsely) **as part of finishing each slice** — a dated prose note below is the *detail record*,
+  **not** a substitute for updating the table. A stale map has coincided with slower progress; a
+  current map keeps the next step unambiguous.
 
 ## Hard constraints (specific to Orion)
 

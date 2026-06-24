@@ -309,3 +309,28 @@ def record_report(
         (project, summary, json.dumps(recipients), sent_at),
     )
     conn.commit()
+
+
+def get_last_report_time(conn: sqlite3.Connection, project: str) -> str | None:
+    """Return the timestamp of a project's most recent delivered report, or None.
+
+    Args:
+        conn: An open state connection.
+        project: The project name.
+
+    Returns:
+        The ISO 8601 UTC timestamp of the latest report_history row for the
+        project, or None if the project has never had a report delivered.
+
+    Why:
+        The `orion status` digest needs "when did I last report this project" to
+        show staleness. It is derivable from the existing append-only
+        report_history (MAX(sent_at)), so this needs no new schema — a read-only
+        query keeps the state store the single source of that fact. MAX over an
+        empty set yields one row holding NULL, so we map that to None.
+    """
+    row = conn.execute(
+        "SELECT MAX(sent_at) FROM report_history WHERE project = ?",
+        (project,),
+    ).fetchone()
+    return row[0] if row is not None else None

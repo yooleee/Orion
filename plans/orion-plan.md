@@ -91,7 +91,7 @@ is the committed near-term band; Horizon **E** is a recorded direction with the 
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
 | D1 | `orion add-project` — explicit, append-only config writer; cwd inference; onboarding | ✅ Shipped (2026-06-23) |
-| D2 | `orion status` — unreported-across-projects backlog/digest (idea #6; derivable from `report_history`, no new schema) | 🔜 Next |
+| D2 | `orion status` — unreported-across-projects backlog/digest (idea #6; derivable from `report_history`, no new schema) | ✅ Shipped (2026-06-24) |
 | D3 | OSS-readiness polish — honest README positioning vs incumbents (Gitmore/Gitrecap/dev-journal), the ≤10-min setup test (G3), fix the absolute-path README assessment pointer, trim dogfood friction | 🔜 Next |
 | D4 | Incubator-as-fifth-signal (idea #1) — a new collector emitting idea-pipeline updates; the first real test of the "modular signals" direction | 📋 Planned |
 | D5 | Lightweight audience-typed routing (idea #2) — tag recipients with the signal types they receive, on today's named-recipient seam. **Gate:** ship lightweight without full C3 identity, else defer to C3. Pairs with D4 (D5 is what makes D4 valuable) | 📋 Planned (gated) |
@@ -1005,6 +1005,23 @@ explicit, user-invoked writer — **`orion add-project`** — that previews befo
 - **Still hand-managed (out of scope):** secrets in `.env`; editing/removing existing projects;
   the `auto_send` opt-in. Calling `add-project` from the `graduate-idea` skill is an additive
   follow-up (the `--yes` entry point is in place).
+
+## D2 — `orion status` shipped (2026-06-24)
+
+The cross-project "what still needs reporting?" digest (idea #6) — a read-only command that lists,
+for every project, whether any signal has **new unreported activity** (`new: git`) or is `up to
+date`, plus how long since its last report. No new schema, no network, no LLM, nothing sent.
+
+- **Design:** reuses the report flow's own detector (`_collect_for` + `CollectorResult.has_activity`)
+  so status can never disagree with what a real `report` would find, and reads the last-report time
+  from `report_history` via a new `state.get_last_report_time` (`MAX(sent_at)`). Per-collector
+  fail-soft (a missing repo path shows `unreadable`, never crashes); exit 0 on success. Mirrors the
+  `projects`/`check` read-only command shape.
+- **Tests:** `tests/test_status.py` (never-reported → new; up-to-date after a report; new commit →
+  new again; fail-soft missing repo; multi-project tally) + a `get_last_report_time` unit test. Suite:
+  **397**. Verified by hand across the real config and a temp two-project workspace.
+- **Next in Horizon D:** D3 (OSS-readiness polish), then the D4/D5 incubator-signal + audience-routing
+  pair.
 
 ## Open questions / to settle before/while building
 

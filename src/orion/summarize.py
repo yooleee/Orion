@@ -61,7 +61,13 @@ _SYSTEM_BASE = (
     "- Never reproduce code, file contents, secrets, keys, or tokens, even if they "
     "appear in the input.\n"
     "- Be factual and grounded in the provided activity; do not invent work.\n"
-    "- Write in plain prose. No preamble like 'Here is the summary'."
+    "- Write in plain prose. No preamble like 'Here is the summary'.\n"
+    # Mirror the project's Writing & Documentation Style (clean prose) so summaries
+    # read like a person wrote them, not an LLM. This is a one-line prompt tune, NOT
+    # a doc-inheritance mechanism (see docs/feature-ideas-reconciliation.md #7).
+    "- Use clean prose: no em-dashes, no semicolons. Avoid generic LLM filler and "
+    "stock phrasings (e.g. 'delve', 'leverage' to mean 'use', 'seamless', "
+    "'it's worth noting')."
 )
 
 # The two share levels differ only in how much technical specificity they expose.

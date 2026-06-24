@@ -16,7 +16,9 @@
 > that is sequenced by the go-public decision rather than by dependency. This file looks **forward**
 > (design + phase plan).
 > For what actually shipped, see `[CHANGELOG.md](../CHANGELOG.md)`; for open cross-phase
-> concerns, see `[docs/known-issues.md](../docs/known-issues.md)`.
+> concerns, see `[docs/known-issues.md](../docs/known-issues.md)`; for which remaining work is
+> parallelizable vs. intertwined (the living coupling map), see
+> `[docs/parallelization.md](../docs/parallelization.md)`.
 >
 > **Strategy overlay:** the *why/what-success* layer above this roadmap — Objective, Goals,
 > differentiators, and deferred long-range directions — lives in

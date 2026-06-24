@@ -112,6 +112,13 @@ The 3–5 decisions that define the route — and, by implication, what we're **
     viability*; chiefly, "will this actually be used?"
   - **Focus = saying no** — each new capability is also a decision about what *not* to build now
     (why C3 and E2E stay deferred).
+- **Parallelization & coupling analysis — a recurring lens for brainstorming/analysis.** For any
+  examination, direction-weighing, or multi-piece scoping, map what could proceed *in parallel* vs.
+  what is *intertwined*. It serves three ends: **efficiency** (independent tracks can fan out to
+  agents), **architectural understanding** (a live coupling-vs-separability map), and **verification**
+  (coupling surfaces hidden dependencies and risk). A thought process carried into the "plan before
+  building" pass, not a framework. The living map is `[docs/parallelization.md](parallelization.md)`,
+  updated as the analysis shifts with the work.
 
 ## Direction under consideration (recorded, deferred — seams kept clean)
 

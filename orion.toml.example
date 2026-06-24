@@ -181,3 +181,7 @@ webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"   # names the .env key holding th
 #   channel = "discord"
 #   webhook_env_var = "ORION_DISCORD_WEBHOOK_MENTOR"
 #   signals = ["incubator"]                  # receives only idea-pipeline updates
+#
+# When an idea here reaches "graduated", turn it into its own tracked project with:
+#   python -m orion graduate-idea "<idea title>" --like orion
+# (reads this index, slugifies the title into a project name, then runs add-project).

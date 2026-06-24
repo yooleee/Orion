@@ -108,6 +108,28 @@ def collect(incubator_file: Path, prior_marker: str | None) -> CollectorResult:
     )
 
 
+def read_index(incubator_file: Path) -> dict[str, str]:
+    """Read the incubator index file and return its {idea title -> status} map.
+
+    Args:
+        incubator_file: Path to the incubator's Markdown index table.
+
+    Returns:
+        A dict mapping each idea's title (link text unwrapped) to its current status,
+        in file order. Empty when the file has no parseable idea table.
+
+    Why:
+        A small public entry point so other commands (notably `graduate-idea`) can ask
+        "what ideas/statuses are in the index right now?" WITHOUT re-implementing the
+        table parsing or reaching into the private `_parse_table`. It reuses the same
+        `_read` (so a missing/unreadable file raises the same `IncubatorError`) and the
+        same parser the collector uses, keeping ONE parsing path (DRY). The pitch map
+        the collector also needs is irrelevant here, so it is dropped.
+    """
+    statuses, _pitches = _parse_table(_read(incubator_file))
+    return statuses
+
+
 def _read(incubator_file: Path) -> str:
     """Read the incubator file as UTF-8, raising IncubatorError on any failure.
 

@@ -15,7 +15,12 @@ from pathlib import Path
 import pytest
 
 from orion.config import ConfigError, Recipient, get_project, load_config
-from orion.scaffold import parse_recipient_spec, render_project_stanza
+from orion.scaffold import (
+    PROJECT_NAME_RE,
+    parse_recipient_spec,
+    render_project_stanza,
+    slugify_project_name,
+)
 
 
 def _recipient() -> Recipient:
@@ -23,6 +28,39 @@ def _recipient() -> Recipient:
     return Recipient(
         name="Alex (supervisor)", channel="discord", webhook_env_var="ORION_DISCORD_ALEX"
     )
+
+
+# --- slugify_project_name -----------------------------------------------------
+
+
+def test_slugify_typical_idea_title():
+    """A normal idea title becomes a lowercase, hyphenated, valid project name.
+
+    Why: `graduate-idea` derives a default project name from an incubator idea title
+    that carries spaces/capitals a project name (a TOML bare key) cannot.
+    """
+    slug = slugify_project_name("VLM Photo Overlay")
+    assert slug == "vlm-photo-overlay"
+    assert PROJECT_NAME_RE.match(slug)  # the derived slug is always a valid name
+
+
+def test_slugify_collapses_punctuation_and_trims():
+    """Punctuation runs collapse to single hyphens and edges are trimmed.
+
+    Why: titles like "C++ Tool!" must not produce doubled or edge hyphens, which
+    would read poorly and (for edges) be ugly though still valid.
+    """
+    assert slugify_project_name("  C++  Tool! ") == "c-tool"
+
+
+def test_slugify_returns_none_when_nothing_valid():
+    """A title with no usable characters yields None (caller must ask for a name).
+
+    Why: returning None makes "couldn't derive a name" explicit, so the command can
+    require --name instead of silently producing an empty/invalid key.
+    """
+    assert slugify_project_name("!!!") is None
+    assert slugify_project_name("   ") is None
 
 
 # --- parse_recipient_spec -----------------------------------------------------

@@ -52,6 +52,13 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
   Enable it like any file-backed collector (`collectors = ["incubator"]`, `incubator_file = "…"`); the
   intended use is a dedicated `[projects.incubator]` routed to mentors/family via D5 `signals`
   (example in `orion.toml.example`). See `plans/orion-plan.md` "D4".
+- **`orion graduate-idea` (D4 follow-on).** Turn a **graduated** incubator idea into a tracked project
+  in one step: it reads the incubator index (from the configured incubator project, or
+  `--incubator-file`), matches the idea title case-insensitively, checks its status is `graduated`
+  (`--force` to override), derives the project name by slugifying the title (`--name` to override),
+  then **delegates to `add-project`** — so the preview-before-write, recipient resolution, repo
+  inference, and re-load validation are all reused. It is read-only on the incubator file (it writes
+  only `orion.toml`). Shares add-project's flags (`--like`, `--recipient`, `--print`, `--yes`, …).
 
 ### Changed
 

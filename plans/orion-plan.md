@@ -23,6 +23,12 @@
 
 ## Roadmap (horizons & phases)
 
+> **⚑ This table is the canonical map — keep it current.** Re-sync it (statuses, new rows for
+> shipped/decided work, coarse forward bands) **as part of finishing each slice**; the dated prose
+> sections below are the *detail record*, **not** a substitute for updating this table. Letting the
+> map lag reality has coincided with slower progress — a current map keeps the next step unambiguous.
+> (The `CLAUDE.md` living-doc rule, applied to this table specifically.)
+
 > **Numbering.** Phases are grouped into **horizons** (A, B, C, … and future D, …); numbering
 > is **horizon-scoped and restarts each horizon**, so a phase number never grows into unwieldy
 > double digits as the project runs on. **Horizon A keeps the original phase numbers unchanged,
@@ -53,11 +59,11 @@
 | B2    | Claude Code session skill — summarize a coding session and push it via `intake` (the session signal)                                                                                                                                    | ✅ Signed off (2026-06-16) |
 | B3    | Richer rendering — Slack Block Kit + Discord embeds, done together (KI-9); likely a small `ReportBlob`/`compose` change to carry structured sections                                                                                | ✅ Signed off (2026-06-17) |
 | B4    | Summarizer flexibility — provider-agnostic summarizer seam + optional local model (OpenAI-compatible). Per-step model choice **deferred** (one LLM step today; seam keeps it additive). Keeps the "lightest adequate model" default (Haiku) | ✅ Signed off (2026-06-17) |
-| B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary. **Gate evaluated 2026-06-17 → defer.**                       | ⏭️ Deferred → Horizon C    |
+| B5    | Scheduling *layer* — activity-gating, `report --all --due`, quiet hours, per-recipient cadence (KI-13). Built **only if** OS-delegation is outgrown; sits at the B→C boundary. **Gate evaluated 2026-06-17 → defer.**                       | ⏭️ Deferred → Horizon E1   |
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
 
-**Horizon C — Multi-party & hosted** *(the architectural pivot; coarse — sequenced by dependency, detail to firm up as it nears)*
+**Horizon C — Two-way & hosted** *(C1–C2 shipped; C3 — multi-party — deferred)*
 
 These converge into one horizon: bidirectional interaction (supervisors acting back) forces an
 always-on **listener**, which is what tips local-first → **hosted/hybrid**, which is where
@@ -66,14 +72,52 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | ✅ **Deployed (2026-06-19): live on Fly.io (Path B), HTTPS + dashboard Basic-auth, verified end to end** (local `intake` → relay → auth-gated dashboard). First slice = vendor-neutral relay + Path-B reference (loopback). Second slice (2026-06-18) = deploy beyond loopback (Basic-Auth + fail-closed guard + `--require-view-auth`) + dashboard hardening. Hosting **settled: Path B**; managed/Cloudflare + E2E deferred behind the seam. Dashboard *visual* maturation + KI-17 ride with C3 (supervisor-facing). |
-| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | 🚧 **First slice built (2026-06-19): dashboard comments on the deployed relay** — `POST /report/<id>/comment` gated by the full inbound checklist (view-secret auth · Origin/CSRF check · non-empty + length-capped validation · stored-XSS escaping on render), append-only flat plain-text comments with an optional self-entered name, 303 POST-redirect-GET. Auto-migrating `report_comments` table. Tested (auth/CSRF/validation/404/303 + escaping). Bots/native replies and authenticated identity (C3/KI-17) deferred. Scoped in [`docs/c2-kickoff.md`](../docs/c2-kickoff.md). **Deployed & verified live (2026-06-19):** `fly deploy`'d to the running relay; commented through the real dashboard both with and without a self-entered name — comments persisted across a page refresh and a full server restart (the volume DB auto-migrated the `report_comments` table). **Loop closed into the workflow (2026-06-19):** the comment pull-back — `orion comments <project>` pulls replies by project over a Bearer-authed `GET /api/comments`, a per-`(project, relay)` local watermark tracks unread, and the `orion-session` skill surfaces new replies after a report. All stdlib, no new deps. Tested (304 across py3.11–3.13 × macOS/Ubuntu/Windows, PR #10). Scoped in [`docs/phase-c2-kickoff.md`](../docs/phase-c2-kickoff.md). **Verified live (2026-06-19):** ran `orion comments` against the deployed relay (plain · `--json` · `--all`) and exercised the full `orion-session` skill flow end to end — delivered to both supervisors, pushed to the dashboard, and pulled a fresh supervisor reply back into the session. **Native-bots first slice built (2026-06-19): a Slack Socket Mode bot (`orion bot`) relays channel replies into the existing comment store via a new Bearer-authed `POST /api/comments`** — PRs #16–#19, `slack-bolt` optional/lazy, `pytest` 367. See the "C2-bots status" section below and [`docs/slack-bot.md`](../docs/slack-bot.md). |
+| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | ✅ Deployed (2026-06-19) — Fly.io (Path B), HTTPS + Basic-auth, verified end to end. Hosting settled: Path B (managed/Cloudflare + E2E deferred). Detail: "Phase C1 status" + "Hosting decision" below. |
+| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | ✅ Built (2026-06-19) — two slices, C2a + C2b below (full inbound checklist; all stdlib + optional `slack-bolt`). Detail: "C2-bots status" below + [`docs/phase-c2-kickoff.md`](../docs/phase-c2-kickoff.md), [`docs/slack-bot.md`](../docs/slack-bot.md). |
+| C2a | Dashboard comments + `orion comments` pull (Bearer GET, local watermark) | ✅ Built (2026-06-19) |
+| C2b | Native Slack bot (Socket Mode) → `POST /api/comments` → existing comment store | ✅ Built (2026-06-19) |
+| C2c | Native **Discord** bot (Gateway) — first steps of the chat-surface track (Horizon E) | 🔭 Deferred (demand-gated) |
+| C2d | Reply-targeting — bot sends the optional `report_id` (thread a reply to a specific report) | 🔭 Deferred (demand-gated) |
 | C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Deferred (a clean seam, not a destination now — committed only on real demand; the multi-party *product* leap). Home of E2E + KI-17 + per-recipient state. |
 
 
-Beyond Horizon C (a Horizon D, …) is deliberately not sketched yet — the discipline is to keep
+**Framing.** Orion is **personal infrastructure + a portfolio piece, with eventual open-source** as
+the real aspiration (a product direction is *not foreclosed*, but is not the goal now). Horizon **D**
+is the committed near-term band; Horizon **E** is a recorded direction with the seams kept clean —
+**not built**. Both stay coarse: sequenced by dependency, detail firms up as each nears.
+
+**Horizon D — OSS-readiness & local enhancements** *(the active near-term band)*
+
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| D1 | `orion add-project` — explicit, append-only config writer; cwd inference; onboarding | ✅ Shipped (2026-06-23) |
+| D2 | `orion status` — unreported-across-projects backlog/digest (idea #6; derivable from `report_history`, no new schema) | 🔜 Next |
+| D3 | OSS-readiness polish — honest README positioning vs incumbents (Gitmore/Gitrecap/dev-journal), the ≤10-min setup test (G3), fix the absolute-path README assessment pointer, trim dogfood friction | 🔜 Next |
+| D4 | Incubator-as-fifth-signal (idea #1) — a new collector emitting idea-pipeline updates; the first real test of the "modular signals" direction | 📋 Planned |
+| D5 | Lightweight audience-typed routing (idea #2) — tag recipients with the signal types they receive, on today's named-recipient seam. **Gate:** ship lightweight without full C3 identity, else defer to C3. Pairs with D4 (D5 is what makes D4 valuable) | 📋 Planned (gated) |
+
+Small follow-ons (no separate phase): `graduate-idea` → calls `add-project` (idea #4 follow-on);
+summarizer-prompt style sanity-check (idea #7, mostly done); relay-dashboard timezone configurable
+(KI-20 follow-up).
+
+**Horizon E — Coordination & visibility hub** *(long-range, aspirational/unvalidated; seams kept clean, not built)*
+
+Surface-plural, **two distinct tracks**: the **dashboard** is the primary structured-visibility
+surface; **Slack/Discord** are a parallel interaction surface that leverages chat-native channel
+features and carries a build-and-maintain cost. They diverge in architecture and are sequenced
+independently (chat = discussion · dashboard = structured overview · Orion = connective tissue + memory).
+
+| Phase | Track | Scope | Status |
+| ----- | ----- | ----- | ------ |
+| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range |
+| E2 | dashboard | Dashboard as meta-layer surface (idea #5) — portfolio map + idea pipeline + cross-project visibility | 🔭 Long-range |
+| E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range |
+| E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
+| E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
+
+C3 (multi-party identity) is the prerequisite seam under much of Horizon E. The discipline holds: keep
 the **seams** clean (the portable summary+metadata blob, explicitly-named participants, the
-provider-agnostic summarizer) so the next horizon stays additive rather than a rewrite.
+provider-agnostic summarizer) so each horizon stays additive rather than a rewrite.
 
 **Cross-cutting through every horizon:** security & privacy (redaction + preview, gaining an
 inbound validate/authorize side in C), open-source-friendly simple setup, cross-platform
@@ -822,7 +866,7 @@ URL accepts any host; Bearer auth + fail-soft + tests exist).
   *derived* forward-looking layer (milestones/sprints/due-dates/at-risk), governed by **reframing, not
   originating** (no data re-entry; Orion stays downstream even for planning). Converges with the
   deferred scheduling layer (**KI-13**) and Horizon C's stateful process.
-- **Long-range vision (Horizon D+, aspirational/unvalidated):** Orion as a *coordination/visibility*
+- **Long-range vision (Horizon E, aspirational/unvalidated):** Orion as a *coordination/visibility*
   layer (not an execution platform — complementary to Claude Code), **surface-plural** (native
   Slack/Discord *and* the dashboard), multi-project/cross-project. The inflection to watch is
   read-only → read-*write* dashboard.
@@ -934,7 +978,7 @@ read-only but an appended known-shape stanza needs no TOML *writer*). This is th
 dogfood's onboarding friction**, so fixing it the right way serves both. Touches a "hard constraint,"
 so it gets its own pass.
 
-## Config-write invariant refined — `orion add-project` shipped (2026-06-23)
+## D1 — Config-write invariant refined — `orion add-project` shipped (2026-06-23)
 
 Acting on the reconciliation above (idea #4 + the dogfood's #1 onboarding friction): the
 "Orion never writes config" rule is **refined, not removed**. The kept invariant is *config is

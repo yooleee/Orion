@@ -934,6 +934,34 @@ read-only but an appended known-shape stanza needs no TOML *writer*). This is th
 dogfood's onboarding friction**, so fixing it the right way serves both. Touches a "hard constraint,"
 so it gets its own pass.
 
+## Config-write invariant refined — `orion add-project` shipped (2026-06-23)
+
+Acting on the reconciliation above (idea #4 + the dogfood's #1 onboarding friction): the
+"Orion never writes config" rule is **refined, not removed**. The kept invariant is *config is
+never written as a side effect of a `report`/`intake`/`collect` run*. The new exception is one
+explicit, user-invoked writer — **`orion add-project`** — that previews before writing and is
+**append-only** (it never rewrites existing content, so hand-written entries and comments survive).
+
+- **Ergonomics:** run from inside a repo, it infers the project name (the directory) and
+  `repo_path` (the git top level), so `cd myproj && orion add-project --like orion` registers a
+  project in one line. Recipients come from `--like <project>` (copy an existing project's) and/or
+  `--recipient "Name:channel:ENV_VAR"`. Modes: `--print` (show, write nothing), default
+  preview+confirm, `--yes` (non-interactive — the entry point `graduate-idea` can call). Creates a
+  minimal `orion.toml` when absent, else appends; re-loads after writing to prove validity.
+- **Design:** a pure builder (`src/orion/scaffold.py`: `render_project_stanza`,
+  `parse_recipient_spec`) reusing `config.py`'s validators/constants, plus `cli.cmd_add_project`
+  for inference + I/O — mirroring the `hooks.build_hook_script` / `cmd_install_hook` split.
+  Dependency-free: stdlib has no TOML *writer*, but appending a known-shape stanza needs none
+  (values that would require escaping are rejected, not escaped). `auto_send` is always written
+  `false` — enabling unattended send stays a deliberate manual edit.
+- **Tests:** `tests/test_scaffold.py` (render round-trips through `load_config`) and
+  `tests/test_add_project.py` (create/append, `--like`/`--recipient`, cwd inference, the three
+  modes, every refuse-to-write error path). Suite: **391** (was 367). The `config.py` header now
+  states the refined invariant.
+- **Still hand-managed (out of scope):** secrets in `.env`; editing/removing existing projects;
+  the `auto_send` opt-in. Calling `add-project` from the `graduate-idea` skill is an additive
+  follow-up (the `--yes` entry point is in place).
+
 ## Open questions / to settle before/while building
 
 - **(Resolved, Phase 2, 2026-06-15) Push mechanism:** a **CLI command** (`orion intake <project>`, body via `--message` or stdin). No local HTTP endpoint — no network surface,

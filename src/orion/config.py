@@ -6,8 +6,11 @@
 # Role in project: The first step of every `orion report` run. Everything
 #                  downstream (collector, summarizer, delivery) reads from the
 #                  ProjectConfig this module produces.
-# Assumptions: Python 3.11+ for stdlib `tomllib`. The config is READ-ONLY here;
-#              Orion never writes it (that is why TOML's read-only nature is fine).
+# Assumptions: Python 3.11+ for stdlib `tomllib`. This module is READ-ONLY — it
+#              only loads and validates. Config is never written as a SIDE EFFECT
+#              of a run; the one writer is the explicit `orion add-project` command
+#              (scaffold.py + cli.cmd_add_project), which appends/creates and
+#              previews first. So `tomllib` having no writer is all this needs.
 # =============================================================================
 
 from __future__ import annotations

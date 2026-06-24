@@ -182,6 +182,35 @@ holds its webhook URL, and the URL lives only in `.env`.
 > Windows) — or as a single-quoted *literal* string — `repo_path = 'C:\Users\you\orion'`.
 > A double-quoted `"C:\Users\..."` will be misread because `\U` starts an escape.
 
+### Adding a project (`add-project`)
+
+You can edit `orion.toml` by hand (above), or let Orion scaffold the entry for you. From inside
+a repo:
+
+```bash
+python -m orion add-project --recipient "Mom:slack:ORION_SLACK_MOM"
+```
+
+This infers the project **name** from the directory and the **repo path** from the current git
+repo, then shows you the exact stanza and asks before writing. If `orion.toml` doesn't exist yet,
+it creates a minimal one; otherwise it **appends** (your existing entries and comments are left
+untouched). To reuse another project's recipients instead of typing them, copy them with
+`--like`:
+
+```bash
+cd ~/code/my-other-project
+python -m orion add-project --like orion        # same supervisors as the "orion" project
+```
+
+Each `--recipient` is `"Name:channel:ENV_VAR"`, where the last field **names** a `.env` variable
+(never the URL itself). Useful flags: `--print` shows the stanza and writes nothing; `--yes`
+skips the confirmation (for scripts); `--repo-path` / a positional name override the inferred
+values; `--collectors git,tasks,notes` (with `--tasks-file` / `--notes-file`) enable more signals.
+After it writes, set the named webhook URL(s) in `.env` and run `python -m orion check <name>`.
+
+This is the **only** command that writes the config, and only ever on your explicit request —
+`report`/`intake` never touch it.
+
 ### Summarizer backend
 
 The one step that calls an LLM — summarizing raw git activity — is configurable, but the
@@ -225,8 +254,9 @@ not a runtime's native API, and when that might change: see
 
 ### Inspecting your config
 
-Three **read-only** commands let you see what's configured (Orion never *writes* the config —
-you change it by editing `orion.toml`):
+Three **read-only** commands let you see what's configured (these never change it — the only
+command that *writes* the config is the explicit [`add-project`](#adding-a-project-add-project)
+above):
 
 ```bash
 python -m orion projects          # list every project: auto_send, share level, channels

@@ -254,7 +254,7 @@ not a runtime's native API, and when that might change: see
 
 ### Inspecting your config
 
-Three **read-only** commands let you see what's configured (these never change it — the only
+Four **read-only** commands let you see what's configured (these never change it — the only
 command that *writes* the config is the explicit [`add-project`](#adding-a-project-add-project)
 above):
 
@@ -262,7 +262,13 @@ above):
 python -m orion projects          # list every project: auto_send, share level, channels
 python -m orion show <project>    # one project's resolved config (paths, flags, recipients)
 python -m orion check             # validate the config and report send-readiness
+python -m orion status            # which projects have unreported activity, across the config
 ```
+
+`status` is the cross-project "what still needs reporting?" digest. For each project it shows
+whether any signal has **new activity since its last report** (e.g. `new: git`) or is `up to date`,
+plus how long ago you last reported it. It runs the same collection a real report does (read-only,
+no LLM, nothing sent), so it never disagrees with what `report` would find.
 
 `check` is a pre-flight gate: it validates the config, then reports whether each project is
 actually ready to send — the git repo path exists, each recipient's webhook secret is present,

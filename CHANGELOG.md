@@ -14,6 +14,26 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Horizon D — onboarding & visibility (2026-06-23 – 2026-06-24)
+
+Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon dogfood's #1 finding
+(onboarding friction) and the cross-project visibility gap.
+
+### Added
+
+- **`orion add-project`** — the first command that writes `orion.toml`, and the only one. Register a
+  project from inside its own directory in one step: it infers the name (the folder) and repo path
+  (the git top level), copies recipients from another project with `--like` or takes them via
+  `--recipient "Name:channel:ENV_VAR"`, previews the stanza, and appends it (never rewrites existing
+  content). Creates a minimal config when none exists. `--print` shows without writing; `--yes` is
+  non-interactive. This refines the "Orion never writes config" rule to "never as a *side effect* of a
+  run" — see [`plans/orion-plan.md`](plans/orion-plan.md) "D1". Dependency-free (stdlib has no TOML
+  writer; an appended known-shape stanza needs none).
+- **`orion status`** — a read-only, cross-project digest of what still needs reporting. Per project it
+  shows new unreported activity (`new: git`) or `up to date`, plus how long since the last report. It
+  reuses the report flow's activity detector so it can't disagree with a real `report`, and derives
+  the last-report time from `report_history` (no new schema). Fail-soft per collector; nothing is sent.
+
 ## C2-bots — native Slack bot: two-way in chat (2026-06-19)
 
 The next Horizon-C slice ([`docs/phase-c2-bots-kickoff.md`](docs/archive/phase-c2-bots-kickoff.md)): an

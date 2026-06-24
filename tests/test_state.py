@@ -9,12 +9,28 @@
 from orion.state import (
     _BUSY_TIMEOUT_SECONDS,
     get_comment_watermark,
+    get_last_report_time,
     get_marker,
     open_state,
     record_report,
     set_comment_watermark,
     set_marker,
 )
+
+
+def test_get_last_report_time(tmp_path):
+    """Returns None until a report is recorded, then the latest sent_at.
+
+    Why this matters: `orion status` reads this for staleness — None must mean
+    "never reported", and a second report must move the time forward (MAX(sent_at)),
+    while a different project stays None.
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert get_last_report_time(conn, "demo") is None
+    record_report(conn, "demo", "first", ["Alex"], "2026-06-01T10:00:00+00:00")
+    record_report(conn, "demo", "second", ["Alex"], "2026-06-02T10:00:00+00:00")
+    assert get_last_report_time(conn, "demo") == "2026-06-02T10:00:00+00:00"
+    assert get_last_report_time(conn, "other") is None
 
 
 def test_first_run_has_no_marker(tmp_path):

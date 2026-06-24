@@ -58,6 +58,7 @@ from orion.scaffold import parse_recipient_spec, render_project_stanza
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_comment_watermark,
+    get_last_report_time,
     get_marker,
     open_state,
     record_report,
@@ -375,6 +376,16 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show which projects have unreported activity across the config (read-only).",
+    )
+    status_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     baseline_parser = subparsers.add_parser(
         "baseline",
         help=(
@@ -511,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_show(args.project, Path(args.config))
     if args.command == "check":
         return cmd_check(Path(args.config))
+    if args.command == "status":
+        return cmd_status(Path(args.config))
     if args.command == "baseline":
         return cmd_baseline(args.project, Path(args.config))
     if args.command == "comments":
@@ -1247,6 +1260,106 @@ def cmd_add_project(
     env_vars = sorted({r.webhook_env_var for r in recipients})
     print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
     print(f"  Then: python -m orion check {project_name}")
+    return 0
+
+
+def _humanize_ago(iso_timestamp: str) -> str:
+    """Render how long ago an ISO 8601 UTC timestamp was, in coarse units.
+
+    Args:
+        iso_timestamp: An ISO 8601 timestamp string (as stored in report_history).
+
+    Returns:
+        A short relative phrase like "just now", "5 minutes ago", "3 hours ago",
+        or "2 days ago". Returns the input unchanged if it can't be parsed.
+
+    Why:
+        `orion status` is a staleness digest, and a relative age reads faster than
+        an absolute timestamp for "how overdue is this?". Coarse buckets are enough
+        — the point is a glanceable sense of recency, not precision.
+    """
+    try:
+        then = datetime.fromisoformat(iso_timestamp)
+    except ValueError:
+        return iso_timestamp
+    seconds = int((datetime.now(timezone.utc) - then).total_seconds())
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def cmd_status(config_path: Path) -> int:
+    """Show, across all projects, what has unreported activity (read-only).
+
+    Args:
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success (no activity is a valid outcome); 1 on a config
+        load error.
+
+    Why:
+        The cross-project "what still needs reporting?" digest (the gap noted as
+        "no unified orion status"). It reuses the report flow's own activity
+        detector (_collect_for + CollectorResult.has_activity), so it can never
+        disagree with what a real `report` would find, and reads the last-report
+        time from report_history — all read-only: no LLM, no send, no network.
+    """
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    conn = open_state(config.state_db)
+    projects = list(config.projects.values())
+    print(f"orion status — {len(projects)} project(s) in {config_path}:")
+
+    # Pad the project name column so the status reads as an aligned list.
+    name_width = max((len(p.name) for p in projects), default=0)
+    projects_with_activity = 0
+
+    for project in projects:
+        new_signals: list[str] = []
+        unreadable: list[str] = []
+        for collector_name in project.collectors:
+            prior = get_marker(conn, project.name, collector_name)
+            try:
+                # Reuse the exact report-flow detector — status must agree with what
+                # a real `report` would find. Read-only (git log/diff, file reads).
+                result = _collect_for(project, collector_name, prior)
+            except (GitError, TasksError, NotesError):
+                # Fail-soft: a collector we can't read yet (missing repo path, an
+                # uncreated notes file) must not crash the whole digest.
+                unreadable.append(collector_name)
+                continue
+            if result.has_activity:
+                new_signals.append(collector_name)
+
+        parts: list[str] = []
+        if new_signals:
+            parts.append(f"new: {', '.join(new_signals)}")
+            projects_with_activity += 1
+        if unreadable:
+            parts.append(f"unreadable: {', '.join(unreadable)}")
+        if not parts:
+            parts.append("up to date")
+        status = " · ".join(parts)
+
+        last_iso = get_last_report_time(conn, project.name)
+        when = "never reported" if last_iso is None else f"last report {_humanize_ago(last_iso)}"
+
+        print(f"  {project.name:<{name_width}}  {status}  · {when}")
+
+    print()
+    print(f"{projects_with_activity} of {len(projects)} project(s) have unreported activity.")
     return 0
 
 

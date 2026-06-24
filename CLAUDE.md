@@ -31,6 +31,14 @@ architecture, phasing, and the decisions already settled.
   coarsely) **as part of finishing each slice** — a dated prose note below is the *detail record*,
   **not** a substitute for updating the table. A stale map has coincided with slower progress; a
   current map keeps the next step unambiguous.
+- **Run a parallelization & coupling analysis for brainstorming / planning / analysis tasks.** When
+  the work is examining the project, weighing directions, or scoping multiple pieces (not a single
+  well-defined change), also map **what could proceed in parallel vs. what is intertwined**, as part
+  of the plan-before-building pass. It serves three ends: **efficiency** (independent tracks can fan
+  out to agents), **architectural understanding** (a live map of coupling vs. separability), and
+  **verification** (the coupling view surfaces hidden dependencies and risk). This is a carried
+  *thought-process*, not a framework — keep it lightweight. The living map lives in
+  `docs/parallelization.md`; update it when the analysis shifts as work lands.
 
 ## Hard constraints (specific to Orion)
 

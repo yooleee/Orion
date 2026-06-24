@@ -84,7 +84,10 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   signal + lightweight audience-typed routing). **Native Slack/Discord bot deepening is a demand-gated
   chat-surface track** — a parallel surface to the dashboard, with channel features and a build/maintain
   cost (Horizon E), not the immediate next. C3 (multi-party) and E2E stay deferred behind seams.
-  *(Re-sequenced 2026-06-24 on the dogfood; see `plans/orion-plan.md` Horizons D–E.)*
+  The **discrete go-public push** (license, personal-reference scrub, public CI, final sweep) is
+  consolidated in the **decision-gated Horizon P (Publish / OSS-launch)** — distinct from Horizon D's
+  OSS-readiness *polish*, and triggered by the publish decision rather than by dependency.
+  *(Re-sequenced 2026-06-24 on the dogfood; see `plans/orion-plan.md` Horizons D–E and P.)*
 
 ## Measures (watch + act)
 

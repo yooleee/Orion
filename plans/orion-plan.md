@@ -12,7 +12,9 @@
 > (Project Orion)").
 >
 > The **Roadmap** below is organized into **horizons** (A shipped · B next · C the
-> multi-party/hosted pivot, kept coarse). This file looks **forward** (design + phase plan).
+> multi-party/hosted pivot, kept coarse), plus a **decision-gated Horizon P (Publish / OSS-launch)**
+> that is sequenced by the go-public decision rather than by dependency. This file looks **forward**
+> (design + phase plan).
 > For what actually shipped, see `[CHANGELOG.md](../CHANGELOG.md)`; for open cross-phase
 > concerns, see `[docs/known-issues.md](../docs/known-issues.md)`.
 >
@@ -84,7 +86,10 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 **Framing.** Orion is **personal infrastructure + a portfolio piece, with eventual open-source** as
 the real aspiration (a product direction is *not foreclosed*, but is not the goal now). Horizon **D**
 is the committed near-term band; Horizon **E** is a recorded direction with the seams kept clean —
-**not built**. Both stay coarse: sequenced by dependency, detail firms up as each nears.
+**not built**. Both stay coarse: sequenced by dependency, detail firms up as each nears. **Horizon P
+(Publish / OSS-launch)** sits outside that dependency order: it is **decision-gated** — the discrete
+work to make the repo public, consolidated in one band and triggered when the go-public decision is
+made, not after any particular horizon.
 
 **Horizon D — OSS-readiness & local enhancements** *(the active near-term band)*
 
@@ -119,11 +124,32 @@ C3 (multi-party identity) is the prerequisite seam under much of Horizon E. The 
 the **seams** clean (the portable summary+metadata blob, explicitly-named participants, the
 provider-agnostic summarizer) so each horizon stays additive rather than a rewrite.
 
+**Horizon P — Publish / OSS-launch** *(decision-gated, order-flexible — triggered when going public)*
+
+The discrete, one-time push to make the repo publishable. Lettered **P** (not F) on purpose: A–E
+imply dependency order, but this band is **not** sequenced after E — it lands whenever the go-public
+decision is made (before, after, or partly parallel to E), the same demand/decision-gated idiom as
+B5 / C2c / C3. Open-source aspiration is the project's stated long-range goal (personal
+infrastructure + portfolio *with eventual open-source*); consolidating the launch work here keeps it
+from being interleaved into feature horizons, since it is largely independent of them. Kept coarse
+until the decision firms it up.
+
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| P1 | Personal-reference scrub — remove family / a name / `sar_hackathon` and any private paths from committed planning docs (the deferred D3 publish-prep item, now homed here) | 🔭 Decision-gated |
+| P2 | OSS scaffolding — `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates, Code of Conduct (the standard public-repo files Orion currently lacks) | 🔭 Decision-gated |
+| P3 | Public-repo hygiene / CI — CI suitable for a public, fork-friendly repo (ties to the Actions-quota cap), secret-scanning, branch protection | 🔭 Decision-gated |
+| P4 | Final readiness sweep — re-run the ≤10-min setup test from a clean clone, final README/docs pass, confirm no machine-local paths or secrets in any committed artifact | 🔭 Decision-gated |
+
+*The **continuous** "stay OSS-clean / simple setup" discipline stays cross-cutting (below); Horizon P
+is only the **one-time launch push**, not that ongoing hygiene.*
+
 **Cross-cutting through every horizon:** security & privacy (redaction + preview, gaining an
-inbound validate/authorize side in C), open-source-friendly simple setup, cross-platform
-portability, and cross-machine interoperability (UTF-8 / UTC-ISO-8601 / canonical `\n`, no
-machine-local paths in any cross-machine artifact). The rationale behind Horizon C lives in
-"Future direction & guiding principles" and "Cross-platform & future-direction rationale" below.
+inbound validate/authorize side in C), open-source-friendly simple setup (the *continuous* discipline;
+the *discrete* launch push is **Horizon P**), cross-platform portability, and cross-machine
+interoperability (UTF-8 / UTC-ISO-8601 / canonical `\n`, no machine-local paths in any cross-machine
+artifact). The rationale behind Horizon C lives in "Future direction & guiding principles" and
+"Cross-platform & future-direction rationale" below.
 
 ## Context
 
@@ -1042,6 +1068,8 @@ for an eventual open-source reader.
 - **Deferred to a publish-prep pass:** scrubbing personal references (dad / family / a name /
   `sar_hackathon`) from committed planning docs — honest historical context for now; revisit closer to
   going public. **Next:** D4/D5 (incubator-signal + lightweight audience-typed routing).
+  *(Update 2026-06-24: this scrub is now homed as **Horizon P, P1** — the decision-gated
+  Publish / OSS-launch band — rather than a loose deferred note.)*
 
 ## D4/D5 — both shipped; Horizon D complete (2026-06-24)
 

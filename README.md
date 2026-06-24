@@ -399,3 +399,7 @@ dependencies, secret-safe).
 Orion is built around leak prevention (see [Privacy & security](#privacy--security)). If you
 find a vulnerability, please **do not** open a public issue — follow the private disclosure
 process in [`SECURITY.md`](SECURITY.md).
+
+## Strategic assessment
+
+A point-in-time, external state-of-play and positioning review of Orion lives in the idea incubator at `~/Developer/incubator/assessments/orion.md`. It is a dated snapshot for direction and differentiation context, not a living project doc. Consult it when reconsidering scope or positioning, not for routine work.

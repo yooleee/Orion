@@ -885,6 +885,55 @@ command; Bearer write; redaction stays outbound-only.
 a first-class integration** as the bot becomes load-bearing — the seams keep that additive (build the
 interface, defer the implementation). **Dogfood (6/20–21)** remains a refinement input, not a gate.
 
+## Meta-layer feature ideas reconciled + dogfood captured (2026-06-23)
+
+The first real dogfood (6/20–21 hackathon, on `sar_hackathon`) and the seven feature ideas parked in
+[`docs/feature-ideas-meta-session.md`](../docs/feature-ideas-meta-session.md), reconciled against
+this roadmap. Full detail — per-idea verdicts, the config-write analysis, the focus-test — lives in
+[`docs/feature-ideas-reconciliation.md`](../docs/feature-ideas-reconciliation.md); the summary:
+
+**Dogfood:** used Orion for hackathon progress reporting (not as a to-do list). Value landed in **all
+three surfaces** — the `orion-session` skill, the dashboard history, and delivery + the comment loop
+(dad viewed reports and commented; replies pulled back via `orion comments`). #1 finding:
+**setup/onboarding friction** — no way to register a project from its own directory (`orion project
+<x>` needs it registered on the Orion side first), while the session skill "just works" from any
+directory. Dad asked for a **real dashboard login** (the Basic-Auth view credential doesn't persist).
+The **Slack bot was never exercised** (verification debt). Implication (recorded, not acted on):
+points at **OSS-readiness / onboarding polish** next, reversing the lean in
+[`docs/post-dogfood-kickoff.md`](../docs/post-dogfood-kickoff.md).
+
+**Reconciliation (verdict → placement):**
+
+- **#1 incubator-as-5th-signal** — *new signal on a planned principle* (modular signals, L921–929 —
+  the first real test of it). With #2, the strongest candidate.
+- **#2 audience-typed routing** — *adjacent: the C3 routing future made concrete* (per-supervisor
+  subscriptions, L71/L350–351; KI-11/17/1). Lands on the held-open "named recipients / participant
+  model" seam.
+- **#3 portfolio-aware `--all`** — *fold into the deferred `--due` / KI-13 filter*; not standalone.
+- **#4 graduate-idea → register project + intake event** — *kept whole*; motivates reconsidering the
+  config-write rule (below).
+- **#5 dashboard as meta-layer surface** — *deferred dashboard-expansion + light-planning-layer
+  (L821–828)*; the auth sub-piece now has a real external pull (dad).
+- **#6 `orion status` backlog view** — *genuinely new, cheap, low-risk* (derivable from
+  `report_history`, the gap named at L960); an OSS-readiness / QoL candidate.
+- **#7 summaries inherit Writing Style** — *mostly already done* (the `summarize.py` prompt + the
+  lean-directional preference); a one-line prompt-tuning todo, not an inheritance mechanism.
+
+**Strongest = the #1+#2 pair, with #2 enabling #1** — an incubator signal is worth building only
+because its updates target a *different audience* than git progress (the weekend pattern: supervisor
+gets commits/tasks; family/mentors get ideas). Placement-deciding open question for a later plan-mode
+pass: **can lightweight audience-typed routing ship onto today's named recipients (tag each with its
+signal types) WITHOUT the full C3 participant graph?** Yes → an early additive slice on the existing
+seam; needs authenticated identity → waits for C3.
+
+**Config-write rule — reconsider, don't remove (revised #4; its own plan-mode pass).** Keep the
+spirit (*no silent config mutation as a side effect of a `report`/`intake`/`collect` run*); relax the
+letter to allow a deliberate, explicit, user-invoked `orion add-project`-style command that
+**appends** a `[[projects]]` stanza (preview-before-write, dependency-free — stdlib `tomllib` is
+read-only but an appended known-shape stanza needs no TOML *writer*). This is the **same knot as the
+dogfood's onboarding friction**, so fixing it the right way serves both. Touches a "hard constraint,"
+so it gets its own pass.
+
 ## Open questions / to settle before/while building
 
 - **(Resolved, Phase 2, 2026-06-15) Push mechanism:** a **CLI command** (`orion intake <project>`, body via `--message` or stdin). No local HTTP endpoint — no network surface,

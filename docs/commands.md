@@ -20,7 +20,7 @@ orion comments myproject       # pull supervisor replies back to your machine
 
 | Command | What it does |
 |---|---|
-| `orion report <project>` | Collect activity (git/tasks/notes), summarize, **preview**, then send. The main command. |
+| `orion report <project>` | Collect activity (git/tasks/notes/incubator), summarize, **preview**, then send. The main command. |
 | `orion report --all --yes` | Report every project, non-interactive (for schedulers; only sends projects with `auto_send=true`). |
 | `orion intake <project> -m "…"` | Send a hand-written update (no LLM). Omit `-m` to type it on stdin. |
 | `orion comments <project>` | Pull supervisor replies from the relay (only new ones; advances your unread marker). |

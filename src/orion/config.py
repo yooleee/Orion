@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Allowed values, kept as named constants so validation and error messages share
 # one source of truth (DRY) and adding a value later is a one-line change.
 SHARE_LEVELS = ("high_level", "detailed")  # "high_level" sends no code diff (safest).
-SUPPORTED_COLLECTORS = ("git", "tasks", "notes")  # Phase 2: structured lane added.
+SUPPORTED_COLLECTORS = ("git", "tasks", "notes", "incubator")  # D4: incubator added.
 SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
 
 # Which chat platforms the native two-way bot can listen on (C2-bots). Slack
@@ -54,6 +54,7 @@ DEFAULT_SUMMARIZER_MODEL = "claude-haiku-4-5"
 COLLECTOR_FILE_KEYS = {
     "tasks": "tasks_file",  # a Markdown checklist (- [x] / - [ ])
     "notes": "notes_file",  # a hand-written "current note" file
+    "incubator": "incubator_file",  # an idea-pipeline Markdown table (index.md)
 }
 
 DEFAULT_STATE_DB = "orion.sqlite3"
@@ -130,6 +131,9 @@ class ProjectConfig:
             collector is not enabled. Resolved absolute at load time.
         notes_file: Path to the hand-written notes file, or None when the "notes"
             collector is not enabled. Resolved absolute at load time.
+        incubator_file: Path to the idea-pipeline Markdown table (an incubator's
+            index.md), or None when the "incubator" collector is not enabled.
+            Resolved absolute at load time.
         auto_send: Whether this project may be delivered WITHOUT the human preview
             during an unattended run. Defaults to False (opt-in). It only takes
             effect when the `report` command is also given `--yes`; on its own it
@@ -151,6 +155,7 @@ class ProjectConfig:
     recipients: tuple[Recipient, ...]
     tasks_file: Path | None = None
     notes_file: Path | None = None
+    incubator_file: Path | None = None
     auto_send: bool = False
 
 
@@ -782,6 +787,9 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
     notes_file = _parse_collector_file(
         body, "notes", collectors_raw, config_path, where
     )
+    incubator_file = _parse_collector_file(
+        body, "incubator", collectors_raw, config_path, where
+    )
 
     return ProjectConfig(
         name=name,
@@ -791,6 +799,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         recipients=recipients,
         tasks_file=tasks_file,
         notes_file=notes_file,
+        incubator_file=incubator_file,
         auto_send=auto_send,
     )
 

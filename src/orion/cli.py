@@ -32,6 +32,8 @@ from zoneinfo import ZoneInfo
 from orion.collectors import LANE_RAW, LANE_STRUCTURED
 from orion.collectors.git import GitError
 from orion.collectors.git import collect as collect_git
+from orion.collectors.incubator import IncubatorError
+from orion.collectors.incubator import collect as collect_incubator
 from orion.collectors.notes import NotesError
 from orion.collectors.notes import collect as collect_notes
 from orion.collectors.tasks import TasksError
@@ -75,6 +77,7 @@ _COLLECTOR_TITLES = {
     "git": "Code activity",
     "tasks": "Completed tasks",
     "notes": "Notes",
+    "incubator": "Idea pipeline",
 }
 
 
@@ -913,7 +916,7 @@ def _run_report(
         _relay_push(full_blob, relay_cfg)
         return STATUS_SENT
 
-    except (GitError, SummarizerError, TasksError, NotesError, SecretsError) as exc:
+    except (GitError, SummarizerError, TasksError, NotesError, IncubatorError, SecretsError) as exc:
         # Per-project, fail-soft: print a clean message and report FAILED so an
         # --all run can continue with the next project. SecretsError here is the
         # ANTHROPIC key fetch on the raw lane (the webhook fetch is handled inside
@@ -1398,7 +1401,7 @@ def cmd_status(config_path: Path) -> int:
                 # Reuse the exact report-flow detector — status must agree with what
                 # a real `report` would find. Read-only (git log/diff, file reads).
                 result = _collect_for(project, collector_name, prior)
-            except (GitError, TasksError, NotesError):
+            except (GitError, TasksError, NotesError, IncubatorError):
                 # Fail-soft: a collector we can't read yet (missing repo path, an
                 # uncreated notes file) must not crash the whole digest.
                 unreadable.append(collector_name)
@@ -1655,7 +1658,7 @@ def cmd_baseline(project_name: str, config_path: Path) -> int:
             # _collect_for returns the collector's CURRENT marker as new_marker,
             # regardless of whether there is activity — exactly what we baseline to.
             result = _collect_for(project, collector_name, prior)
-        except (GitError, TasksError, NotesError) as exc:
+        except (GitError, TasksError, NotesError, IncubatorError) as exc:
             # A collector that can't be read yet (e.g. a notes file not created) has
             # nothing to baseline — skip it rather than fail the whole command.
             print(f"  skipped {collector_name}: {exc}", file=sys.stderr)
@@ -2335,6 +2338,8 @@ def _collect_for(project: ProjectConfig, collector: str, prior: str | None):
         return collect_tasks(project.tasks_file, prior)
     if collector == "notes":
         return collect_notes(project.notes_file, prior)
+    if collector == "incubator":
+        return collect_incubator(project.incubator_file, prior)
     raise ConfigError(f"Unknown collector {collector!r}.")
 
 

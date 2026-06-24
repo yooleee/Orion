@@ -296,6 +296,56 @@ def test_notes_enabled_requires_notes_file(tmp_path):
         load_config(path)
 
 
+def test_incubator_enabled_requires_incubator_file(tmp_path):
+    """Enabling the incubator collector without an incubator_file is a ConfigError.
+
+    Why this matters: the same enabled-collector/file pairing guarantee as tasks and
+    notes — D4's fifth collector slots into the generic check, so a typo is caught at
+    load time naming `incubator_file`, not mid-run.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["incubator"]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="incubator_file"):
+        load_config(path)
+
+
+def test_incubator_collector_loads_and_resolves_file(tmp_path):
+    """An enabled incubator collector parses and resolves its file path.
+
+    Why this matters: pins that D4's collector is a real SUPPORTED_COLLECTORS entry
+    and that its file resolves like the other file-backed collectors (relative to
+    the config dir), so a `[projects.incubator]` stanza loads end to end.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.incubator]
+        repo_path = "/tmp/incubator"
+        collectors = ["incubator"]
+        incubator_file = "index.md"
+
+        [[projects.incubator.recipients]]
+        name = "Mentor"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_MENTOR"
+        """,
+    )
+    project = get_project(load_config(path), "incubator")
+    assert project.collectors == ("incubator",)
+    assert project.incubator_file == (tmp_path / "index.md").resolve()
+
+
 def test_collector_file_relative_resolved_to_config_dir(tmp_path):
     """A relative tasks_file resolves against the config file's directory.
 

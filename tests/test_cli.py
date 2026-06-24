@@ -1344,3 +1344,55 @@ def test_relay_receives_full_report_despite_per_recipient_filtering(tmp_path, en
     blob_json = pushes[0][0]
     assert "Code activity" in blob_json and "Notes" in blob_json
     assert "Did the code work." in blob_json and "A hand-written note." in blob_json
+
+
+# --- D4: incubator collector end-to-end ---------------------------------------
+
+
+def test_incubator_collector_end_to_end(tmp_path, env_and_mocks):
+    """A report for an incubator-only project delivers an 'Idea pipeline' section.
+
+    Why this matters: D4's full wiring — config -> _collect_for dispatch -> structured
+    passthrough (NO LLM) -> merge -> compose -> deliver -> per-recipient signal route —
+    must produce a readable idea-pipeline update, proving the fifth collector is fully
+    integrated. The recipient subscribes to `signals = ["incubator"]` (the dedicated
+    `[projects.incubator]` use the design intends), so this also exercises D5 routing.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    index = tmp_path / "index.md"
+    index.write_text(
+        "| Idea | Status | One-line pitch |\n"
+        "|------|--------|----------------|\n"
+        "| [VLM Photo Overlay](ideas/vlm.md) | refining | Annotate a photo |\n",
+        encoding="utf-8",
+    )
+    toml = tmp_path / "orion.toml"
+    # repo_path is required by config even though git isn't a collector here; it is
+    # never read because only the incubator collector runs. Point it at tmp_path.
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [projects.incubator]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["incubator"]
+        incubator_file = "{index.as_posix()}"
+
+          [[projects.incubator.recipients]]
+          name = "Mentor"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+          signals = ["incubator"]
+        """
+    )
+
+    _answer(mp, "y")
+    code = cli.main(["report", "incubator", "--config", str(toml)])
+    assert code == 0
+
+    # The mentor received exactly the idea-pipeline section (no LLM was involved).
+    assert len(env_and_mocks["sent"]) == 1
+    text, _url = env_and_mocks["sent"][0]
+    assert "Idea pipeline" in text
+    assert "New idea: VLM Photo Overlay (refining)" in text
+    assert "Annotate a photo" in text

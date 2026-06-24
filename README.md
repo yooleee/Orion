@@ -128,8 +128,8 @@ This runs the full pipeline for the named project (from `orion.toml`):
 2. **Redact** obvious secrets from the collected text.
 3. **Summarize** only the raw git activity with an LLM (the one step that calls out) — Claude
    Haiku 4.5 by default, or a model/provider of your choice including a local model (see
-   [Summarizer backend](#summarizer-backend)); structured signals (tasks, notes) are already
-   report-ready and skip the LLM.
+   [Summarizer backend](#summarizer-backend)); structured signals (tasks, notes, incubator) are
+   already report-ready and skip the LLM.
 4. **Merge** the signals into one report, **redact again** as a safety net, then **preview** it
    in your terminal (one block per channel when you have both Discord and Slack recipients).
 5. On your `y` confirmation, **deliver** to each recipient — rendered for their channel (a
@@ -183,9 +183,10 @@ state_db = "orion.sqlite3"        # relative paths resolve next to this file
 repo_path   = "/home/you/orion"   # local git repo to read
 share_level = "high_level"        # "high_level" (no code diff) | "detailed" (capped diff)
 auto_send   = false               # unattended-send opt-in; needs `--yes` too (see Scheduling)
-collectors  = ["git", "tasks", "notes"]   # any of: git, tasks, notes
+collectors  = ["git", "tasks", "notes"]   # any of: git, tasks, notes, incubator
 tasks_file  = "TODO.md"           # required when "tasks" is enabled (a Markdown checklist)
 notes_file  = "NOTES.md"          # required when "notes" is enabled (a hand-written update)
+# incubator_file = "index.md"     # required when "incubator" is enabled (an idea-pipeline table)
 
   [[projects.orion.recipients]]
   name            = "Alex (supervisor)"
@@ -240,8 +241,8 @@ This is the **only** command that writes the config, and only ever on your expli
 The one step that calls an LLM — summarizing raw git activity — is configurable, but the
 default needs no setup. With **no `[summarizer]` table**, Orion uses Anthropic's **Claude
 Haiku 4.5** (the lightest model adequate for the job). The choice is **global** (one
-summarizer for all projects); structured signals (tasks, notes, intake) never call an LLM
-either way.
+summarizer for all projects); structured signals (tasks, notes, incubator, intake) never call an
+LLM either way.
 
 To step up to a stronger Anthropic model (only if Haiku misses nuance on your real diffs):
 

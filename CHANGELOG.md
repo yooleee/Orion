@@ -42,6 +42,16 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
   existing named-recipient seam — **no per-recipient identity or state** (that stays deferred to C3).
   The hosted relay still receives the **full, unfiltered report**; only chat-channel delivery is
   filtered. An unknown or empty `signals` is rejected at load time. See `plans/orion-plan.md` "D5".
+- **Incubator signal (D4)** — a fifth collector, `collectors/incubator.py`, that reads an idea-pipeline
+  Markdown table (an incubator's `index.md`) and reports **new ideas** (with their one-line pitch) and
+  **status transitions** (`refining → validated`). Structured lane (no LLM), following the `tasks.py`
+  delta pattern: the marker is the full `{idea: status}` map as sorted-keys JSON, so an unchanged table
+  reports nothing. The parser locates the Idea/Status columns by header (tolerating re-ordered or extra
+  columns and a missing pitch column) and identifies an idea by its title, unwrapping a `[Title](path)`
+  link. A missing file is a clear `IncubatorError`; a file with no idea table is a valid empty pipeline.
+  Enable it like any file-backed collector (`collectors = ["incubator"]`, `incubator_file = "…"`); the
+  intended use is a dedicated `[projects.incubator]` routed to mentors/family via D5 `signals`
+  (example in `orion.toml.example`). See `plans/orion-plan.md` "D4".
 
 ### Changed
 

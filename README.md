@@ -8,12 +8,13 @@ delivers them to designated "supervisors" over Discord and Slack. Collectors rea
 files; only delivery makes an outbound call. Reports are previewed in your terminal before
 anything is sent.
 
-> **Status: Horizons A & B shipped; Horizon C (hosted) underway.** `orion report <project>` collects from each
+> **Status: Horizons A–C shipped, Horizon D (OSS-readiness) underway.** `orion report <project>` collects from each
 > enabled signal (git, tasks, notes), redacts secrets, summarizes only the raw git activity with
 > Claude (structured signals skip the LLM), previews the message, and on your confirmation
 > delivers it to each recipient's Discord **and/or** Slack webhook — then records what was sent so
 > the next run only covers what's new. `orion intake <project>` sends a pushed or hand-written
-> update. **Unattended scheduled digests** (`orion report --all --yes` from your OS scheduler;
+> update. `orion add-project` registers a new project from its own directory, and `orion status`
+> shows what is unreported across your projects. **Unattended scheduled digests** (`orion report --all --yes` from your OS scheduler;
 > see [Scheduling](#scheduling)), **event-driven git-hook triggers**
 > (see [Event-driven reports](#event-driven-reports-git-hooks)), and a **Claude Code session
 > skill** (see [below](#claude-code-session-skill)) are all available. Reports render as
@@ -21,6 +22,29 @@ anything is sent.
 > can additionally store reports and serve a **read-only web dashboard**
 > (see [Web dashboard](#web-dashboard-optional-local-relay)); a *hosted, shareable* dashboard is a
 > later horizon.
+
+## How it compares
+
+Orion is not the first tool that turns git activity into progress updates. Auto-report tools like
+[Gitmore](https://gitmore.io/) and [Gitrecap](https://www.gitrecap.com/) summarize commits and post
+to Slack, dev-journal builds standups from git plus shell history, and async-standup bots like
+[Geekbot](https://geekbot.com/) and Standuply prompt people and compile the replies. Each does part
+of what Orion does.
+
+What Orion combines that they mostly do not:
+
+- **Four signals, not just git.** It fuses git, a to-do/milestone checklist, hand-written notes, and
+  **Claude Code session summaries** (via a portable skill that works from any project), so an update
+  reflects the whole of what you did, including agentic work.
+- **A two-way loop.** Supervisors reply on the dashboard or in chat, and those replies come back to
+  where you work (`orion comments`). Most standup tools are one-way.
+- **Own your data.** Collection is local-first, the config is yours to read and edit, secrets stay in
+  a gitignored `.env`, and every report is previewed before anything leaves your machine. Most
+  alternatives are cloud SaaS.
+
+Honest framing: Orion is **personal infrastructure and a portfolio piece**, with open-sourcing as an
+aspiration rather than a product launch. No single feature here is novel. The combination, plus the
+agentic-native session integration, is the part that is genuinely uncommon.
 
 ## Supported platforms
 
@@ -49,7 +73,7 @@ python -m venv .venv
 source .venv/bin/activate       # macOS / Linux
 # .venv\Scripts\activate        # Windows (PowerShell or cmd)
 
-# 3. Install Orion (2 runtime deps: anthropic, python-dotenv)
+# 3. Install Orion (3 runtime deps: anthropic, python-dotenv, tzdata)
 python -m pip install -e .
 
 # 4. Provide secrets (gitignored — never committed)
@@ -405,7 +429,3 @@ dependencies, secret-safe).
 Orion is built around leak prevention (see [Privacy & security](#privacy--security)). If you
 find a vulnerability, please **do not** open a public issue — follow the private disclosure
 process in [`SECURITY.md`](SECURITY.md).
-
-## Strategic assessment
-
-A point-in-time, external state-of-play and positioning review of Orion lives in the idea incubator at `~/Developer/incubator/assessments/orion.md`. It is a dated snapshot for direction and differentiation context, not a living project doc. Consult it when reconsidering scope or positioning, not for routine work.

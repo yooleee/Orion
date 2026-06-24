@@ -34,6 +34,20 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
   reuses the report flow's activity detector so it can't disagree with a real `report`, and derives
   the last-report time from `report_history` (no new schema). Fail-soft per collector; nothing is sent.
 
+### Changed
+
+- **OSS-readiness docs polish (D3).** README status line + blurb now reflect Horizons A–C shipped /
+  Horizon D underway and surface `add-project` and `status`; a new "How it compares" section positions
+  Orion honestly against incumbents (Gitmore, Gitrecap, dev-journal). `docs/new-project-setup.md` leads
+  with `add-project` (hand-edit kept as the alternative). The runtime-deps count is corrected to 3
+  (`anthropic`, `python-dotenv`, `tzdata`).
+
+### Removed
+
+- The README "Strategic assessment" pointer to a private `~/Developer/incubator/...` path (it would
+  404 for anyone cloning the repo). The new "How it compares" section carries the positioning
+  self-contained.
+
 ## C2-bots — native Slack bot: two-way in chat (2026-06-19)
 
 The next Horizon-C slice ([`docs/phase-c2-bots-kickoff.md`](docs/archive/phase-c2-bots-kickoff.md)): an

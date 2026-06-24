@@ -103,4 +103,5 @@ architecture, phasing, and the decisions already settled.
   is fine since Orion never writes it); delivery uses stdlib **`urllib.request`** (one JSON
   POST needs no `requests`); the git payload to the LLM is a **hybrid** (commit messages +
   diffstat + a capped, secret-filtered diff, the diff only at `share_level = "detailed"`).
-  Net runtime dependencies: **2** (`anthropic`, `python-dotenv`).
+  Net runtime dependencies: **3** (`anthropic`, `python-dotenv`, and `tzdata` — data-only,
+  added later for portable timezone rendering on platforms without a system tz database).

@@ -73,7 +73,7 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | ✅ Deployed (2026-06-19) — Fly.io (Path B), HTTPS + Basic-auth, verified end to end. Hosting settled: Path B (managed/Cloudflare + E2E deferred). Detail: "Phase C1 status" + "Hosting decision" below. |
-| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | ✅ Built (2026-06-19) — two slices, C2a + C2b below (full inbound checklist; all stdlib + optional `slack-bolt`). Detail: "C2-bots status" below + [`docs/phase-c2-kickoff.md`](../docs/phase-c2-kickoff.md), [`docs/slack-bot.md`](../docs/slack-bot.md). |
+| C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | ✅ Built (2026-06-19) — two slices, C2a + C2b below (full inbound checklist; all stdlib + optional `slack-bolt`). Detail: "C2-bots status" below + [`docs/phase-c2-kickoff.md`](../docs/archive/phase-c2-kickoff.md), [`docs/slack-bot.md`](../docs/slack-bot.md). |
 | C2a | Dashboard comments + `orion comments` pull (Bearer GET, local watermark) | ✅ Built (2026-06-19) |
 | C2b | Native Slack bot (Socket Mode) → `POST /api/comments` → existing comment store | ✅ Built (2026-06-19) |
 | C2c | Native **Discord** bot (Gateway) — first steps of the chat-surface track (Horizon E) | 🔭 Deferred (demand-gated) |
@@ -770,7 +770,7 @@ slice* and are slated for a **next-phase planning/decision juncture right after 
   slice decided" below). C2 shipped (dashboard comments + the comment pull-back), so the pass decided
   the *next* slice: **native Discord/Slack bots**, with **C3-proper and E2E demand-gated** and the
   dogfood reframed as a **refinement input, not a gate**. The kickoff is
-  [`docs/phase-c2-bots-kickoff.md`](../docs/phase-c2-bots-kickoff.md); it supersedes the archived
+  [`docs/phase-c2-bots-kickoff.md`](../docs/archive/phase-c2-bots-kickoff.md); it supersedes the archived
   [`docs/archive/horizon-planning-kickoff.md`](../docs/archive/horizon-planning-kickoff.md) for the
   post-C2 state.
 
@@ -875,7 +875,7 @@ URL accepts any host; Bearer auth + fail-soft + tests exist).
 
 The post-C2 run of the horizon-planning juncture (supersedes the "Sequence — C2 next" snapshot from
 the 2026-06-18 pass, now that C2 is done). Detail and the dogfood capture sheet live in
-[`docs/phase-c2-bots-kickoff.md`](../docs/phase-c2-bots-kickoff.md).
+[`docs/phase-c2-bots-kickoff.md`](../docs/archive/phase-c2-bots-kickoff.md).
 
 - **Next slice DECIDED: native Discord/Slack bots.** Among {OSS-readiness polish, light
   planning/tracking layer, native bots}, native bots is next — it deepens the *delivery surface*
@@ -899,7 +899,7 @@ the 2026-06-18 pass, now that C2 is done). Detail and the dogfood capture sheet 
 ## C2-bots status (2026-06-19) — native Slack bot, first slice (built)
 
 The native-bots slice, built in four reviewable checkpoints (PRs #16–#19), `pytest` **367**. Scoped
-in [`docs/phase-c2-bots-kickoff.md`](../docs/phase-c2-bots-kickoff.md); operator guide in
+in [`docs/phase-c2-bots-kickoff.md`](../docs/archive/phase-c2-bots-kickoff.md); operator guide in
 [`docs/slack-bot.md`](../docs/slack-bot.md). The four open design questions settled thus:
 
 - **Platform / connection model — Slack, Socket Mode.** An *outbound* WebSocket → **no public inbound
@@ -944,7 +944,7 @@ three surfaces** — the `orion-session` skill, the dashboard history, and deliv
 directory. Dad asked for a **real dashboard login** (the Basic-Auth view credential doesn't persist).
 The **Slack bot was never exercised** (verification debt). Implication (recorded, not acted on):
 points at **OSS-readiness / onboarding polish** next, reversing the lean in
-[`docs/post-dogfood-kickoff.md`](../docs/post-dogfood-kickoff.md).
+[`docs/post-dogfood-kickoff.md`](../docs/archive/post-dogfood-kickoff.md).
 
 **Reconciliation (verdict → placement):**
 

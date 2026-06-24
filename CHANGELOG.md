@@ -16,7 +16,7 @@ see [`docs/known-issues.md`](docs/known-issues.md).
 
 ## C2-bots — native Slack bot: two-way in chat (2026-06-19)
 
-The next Horizon-C slice ([`docs/phase-c2-bots-kickoff.md`](docs/phase-c2-bots-kickoff.md)): an
+The next Horizon-C slice ([`docs/phase-c2-bots-kickoff.md`](docs/archive/phase-c2-bots-kickoff.md)): an
 always-on **Slack bot** so a supervisor's reply in a mapped channel lands in the **existing relay
 comment store** — visible on the dashboard and via `orion comments`, unchanged. Built in four
 reviewable checkpoints (PRs #16–#19). `pytest`: **367**. The first new runtime dependency
@@ -88,7 +88,7 @@ dashboard rendered **Pacific**, so the same report showed two different times. `
 Closes the C2 loop **into the developer's workflow**: supervisor replies that previously lived only
 on the dashboard are now pulled back to the machine where you work. The first C2 slice made the loop
 two-way *on the dashboard*; this increment surfaces those replies where you report. All stdlib, **no
-new dependencies**. `pytest`: **304**. See [`docs/phase-c2-kickoff.md`](docs/phase-c2-kickoff.md).
+new dependencies**. `pytest`: **304**. See [`docs/phase-c2-kickoff.md`](docs/archive/phase-c2-kickoff.md).
 
 ### Added
 

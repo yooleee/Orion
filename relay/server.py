@@ -32,8 +32,10 @@ import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .render import (
+    _DISPLAY_TZ,
     MAX_AUTHOR_CHARS,
     MAX_COMMENT_BODY_CHARS,
     render_index,
@@ -265,7 +267,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
             if path.startswith("/project/"):
                 # Decode the percent-encoded name back to the stored project string.
                 name = urllib.parse.unquote(path[len("/project/"):])
-                self._send_html(200, render_project(name, history(conn, name)))
+                self._send_html(
+                    200,
+                    render_project(name, history(conn, name), self.server.display_tz),
+                )
                 return
 
             if path.startswith("/report/"):
@@ -278,7 +283,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     return
                 # report is not None implies id_str was numeric, so int() is safe.
                 comments = comments_for(conn, int(id_str))
-                self._send_html(200, render_report(report, comments))
+                self._send_html(
+                    200, render_report(report, comments, self.server.display_tz)
+                )
                 return
 
             self._send_html(404, render_not_found(f"Unknown path {path!r}."))
@@ -849,12 +856,17 @@ class RelayServer(ThreadingHTTPServer):
         view_token: Optional shared secret for dashboard (GET) read auth via HTTP
             Basic. None (the default) leaves reads open — valid only for a loopback
             bind, which create_server() enforces with a fail-closed guard.
+        display_tz: The IANA zone the dashboard renders timestamps in. Defaults to
+            render.py's Pacific constant, so an operator who passes no --timezone gets
+            the historical California output unchanged.
 
     Why:
         Subclassing ThreadingHTTPServer to hold db_path/token is the clean way to
         make per-server config available to each request handler (handlers read it
-        via self.server). ThreadingHTTPServer handles each request on its own
-        (daemon) thread, so a slow request never blocks the next push.
+        via self.server). The display zone rides on the server object the same way,
+        so each per-request handler reads it via self.server.display_tz rather than a
+        module global. ThreadingHTTPServer handles each request on its own (daemon)
+        thread, so a slow request never blocks the next push.
     """
 
     # Inherited as True from ThreadingHTTPServer; stated for clarity so threads
@@ -862,13 +874,19 @@ class RelayServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(
-        self, server_address, db_path: Path, token: str, view_token: str | None = None
+        self,
+        server_address,
+        db_path: Path,
+        token: str,
+        view_token: str | None = None,
+        display_tz: ZoneInfo = _DISPLAY_TZ,
     ):
         # Set config before binding so it is available to any request handled after
         # serve_forever() starts.
         self.db_path = db_path
         self.token = token
         self.view_token = view_token
+        self.display_tz = display_tz
         super().__init__(server_address, _RelayHandler)
 
 
@@ -905,6 +923,7 @@ def create_server(
     token: str,
     view_token: str | None = None,
     require_view_auth: bool = False,
+    display_tz: ZoneInfo = _DISPLAY_TZ,
 ) -> RelayServer:
     """Build and bind a RelayServer (does not start serving).
 
@@ -920,6 +939,8 @@ def create_server(
             the reverse-proxy topology (relay on loopback, a proxy exposing it), where
             the host-based guard alone can't tell the dashboard is publicly reachable
             (KI-18). Off by default so local loopback dev stays password-free.
+        display_tz: The IANA zone the dashboard renders timestamps in. Defaults to the
+            Pacific constant, so an omitted --timezone keeps the historical output.
 
     Returns:
         A bound RelayServer. Its actual bound port is server.server_address[1]
@@ -954,7 +975,7 @@ def create_server(
             "secret: the read-only dashboard would be world-readable. Set a view "
             "secret (relay-serve --view-token-env) before binding beyond loopback."
         )
-    return RelayServer((host, port), db_path, token, view_token)
+    return RelayServer((host, port), db_path, token, view_token, display_tz)
 
 
 def serve(
@@ -964,6 +985,7 @@ def serve(
     token: str,
     view_token: str | None = None,
     require_view_auth: bool = False,
+    display_tz: ZoneInfo = _DISPLAY_TZ,
 ) -> None:
     """Run the relay server until interrupted (the blocking entry point).
 
@@ -976,6 +998,8 @@ def serve(
             create_server() when host is non-loopback (or require_view_auth is set).
         require_view_auth: Force the view secret even on a loopback bind (the
             reverse-proxy case; see create_server / KI-18).
+        display_tz: The IANA zone the dashboard renders timestamps in. Defaults to the
+            Pacific constant, so an omitted --timezone keeps the historical output.
 
     Returns:
         None. Blocks serving requests until Ctrl-C, then shuts down cleanly.
@@ -986,7 +1010,9 @@ def serve(
         that a non-loopback bind is protected; it handles Ctrl-C as a clean stop
         rather than a traceback.
     """
-    server = create_server(host, port, db_path, token, view_token, require_view_auth)
+    server = create_server(
+        host, port, db_path, token, view_token, require_view_auth, display_tz
+    )
     bound_host, bound_port = server.server_address
     # Surface read-auth state at startup — the operator's confirmation that a
     # world-reachable bind is gated (the fail-closed guard guarantees it is).

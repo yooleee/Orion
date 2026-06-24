@@ -18,6 +18,7 @@
 # =============================================================================
 
 import json
+from zoneinfo import ZoneInfo
 
 from orion import cli
 from orion.config import load_config
@@ -710,12 +711,15 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
     calls = []
+    # The recorder accepts the full serve() signature, including the trailing
+    # display_tz the timezone flag threads in (see test below); a fixed-arity stub
+    # would break the moment a new positional is added.
     monkeypatch.setattr(
         cli,
         "_load_relay_serve",
         lambda: (
-            lambda host, port, db_path, token, view_token, require_view_auth: calls.append(
-                (host, port, db_path, token, view_token, require_view_auth)
+            lambda host, port, db_path, token, view_token, require_view_auth, display_tz: calls.append(
+                (host, port, db_path, token, view_token, require_view_auth, display_tz)
             )
         ),
     )
@@ -732,13 +736,15 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     )
     assert code == 0
     assert len(calls) == 1
-    host, port, db_path, token, view_token, require_view_auth = calls[0]
+    host, port, db_path, token, view_token, require_view_auth, display_tz = calls[0]
     assert host == "127.0.0.1"
     assert port == 9999
     assert db_path == db
     assert token == "tok-123"
     assert view_token == "view-xyz"  # resolved from ORION_RELAY_VIEW_TOKEN
     assert require_view_auth is False  # flag absent -> default off
+    # --timezone omitted -> the Pacific default, validated into a ZoneInfo.
+    assert display_tz == ZoneInfo("America/Los_Angeles")
 
 
 def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
@@ -764,7 +770,8 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
         ]
     )
     assert code == 0
-    assert seen and seen[0][-1] is True  # require_view_auth is the final positional arg
+    # require_view_auth is the second-to-last positional arg (display_tz now trails it).
+    assert seen and seen[0][-2] is True
 
 
 def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
@@ -803,6 +810,58 @@ def test_relay_serve_missing_token_is_clean_error_and_never_serves(tmp_path, mon
     code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
     assert code == 1
     assert served == []  # never started serving
+
+
+def test_relay_serve_timezone_flag_threads_a_zoneinfo(tmp_path, monkeypatch):
+    """`--timezone <zone>` validates into a ZoneInfo and reaches serve() as that zone.
+
+    Why this matters: the relay does not read orion.toml, so the flag is the ONLY way
+    to set the dashboard's display zone (KI-20 follow-up). A flag that parses but is
+    dropped, or one passed through as a bare string, would silently leave timestamps
+    in Pacific. We pass a non-default zone and assert the exact ZoneInfo reaches
+    serve()'s final positional argument.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    seen = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: seen.append(a)))
+
+    code = cli.main(
+        [
+            "relay-serve",
+            "--host", "127.0.0.1",
+            "--timezone", "Europe/London",
+            "--config", str(tmp_path / "orion.toml"),
+        ]
+    )
+    assert code == 0
+    # display_tz is serve()'s last positional arg; it must be the constructed zone,
+    # not the raw string, so the renderer receives a ready-to-use ZoneInfo.
+    assert seen and seen[0][-1] == ZoneInfo("Europe/London")
+
+
+def test_relay_serve_invalid_timezone_is_a_clean_error_and_never_serves(tmp_path, monkeypatch):
+    """An unknown --timezone fails cleanly (exit 1) and never starts the server.
+
+    Why this matters: a typo'd zone must surface as a clear, named error — mirroring
+    config.py's _parse_display_timezone — rather than a raw ZoneInfoNotFoundError
+    traceback or (worse) a server that starts and renders confusing times. We prove
+    the exit code is 1 and that serve() is never reached.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    served = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: served.append(a)))
+
+    code = cli.main(
+        [
+            "relay-serve",
+            "--timezone", "Mars/Olympus_Mons",  # not a real IANA zone
+            "--config", str(tmp_path / "orion.toml"),
+        ]
+    )
+    assert code == 1
+    assert served == []  # validation failed before the server was launched
 
 
 # --- baseline + ORION_CONFIG (unit 4 friction fixes) --------------------------

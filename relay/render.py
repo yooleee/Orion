@@ -32,13 +32,17 @@ import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# The dashboard displays timestamps in California time. We pin a FIXED IANA zone
-# (not the server's local time, not the reader's) so the displayed time is the same
-# regardless of where the relay runs or who is viewing — and zoneinfo applies the
-# DST rules, so it reads PDT (UTC-7) in summer and PST (UTC-8) in winter
-# automatically. Created once at import (ZoneInfo is cached). Requires the `tzdata`
-# package on platforms without a system tz database (slim Docker, native Windows);
-# it is a declared dependency, so a missing-tzdata failure can't reach production.
+# The DEFAULT display zone. The dashboard pins a FIXED IANA zone (not the server's
+# local time, not the reader's) so the displayed time is the same regardless of where
+# the relay runs or who is viewing — and zoneinfo applies the DST rules, so it reads
+# PDT (UTC-7) in summer and PST (UTC-8) in winter automatically. This default is now
+# OVERRIDABLE per relay process (KI-20 follow-up): `orion relay-serve --timezone <zone>`
+# threads a chosen ZoneInfo down through the render functions. The constant remains the
+# fallback every render function defaults to, so omitting --timezone (and any direct
+# one-argument caller, e.g. the existing tests) keeps the Pacific output byte-identical.
+# Created once at import (ZoneInfo is cached). Requires the `tzdata` package on platforms
+# without a system tz database (slim Docker, native Windows); it is a declared dependency,
+# so a missing-tzdata failure can't reach production.
 _DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
 
 # Input limits for a supervisor comment (C2). They live HERE — the dependency-free
@@ -224,33 +228,37 @@ def _url(value: object) -> str:
     return urllib.parse.quote(str(value), safe="")
 
 
-def _format_ts(iso: str) -> str:
-    """Render a stored ISO-8601 timestamp as a readable California-time string.
+def _format_ts(iso: str, tz: ZoneInfo = _DISPLAY_TZ) -> str:
+    """Render a stored ISO-8601 timestamp as a readable string in the given zone.
 
     Args:
         iso: A stored timestamp string, e.g. "2026-06-18T14:32:00+00:00".
+        tz: The IANA zone to render the instant in. Defaults to the module's Pacific
+            constant, so a one-argument call (and an omitted --timezone) keeps the
+            historical California output unchanged.
 
     Returns:
-        A human-readable form like "Jun 18 2026, 07:32 PDT". If the input cannot
-        be parsed, the original string is returned UNCHANGED (fail-safe).
+        A human-readable form like "Jun 18 2026, 07:32 PDT" (the label reflects `tz`).
+        If the input cannot be parsed, the original string is returned UNCHANGED
+        (fail-safe).
 
     Why:
         Raw ISO strings are precise but noisy to read. We humanize them and display
-        them in California time (where the user and supervisors are). We convert to a
-        FIXED zone (America/Los_Angeles), NOT the server's local time and NOT the
-        reader's — so the displayed time is identical no matter where the relay runs
-        or who views it — and zoneinfo applies DST, so the abbreviation/offset is
-        correct year-round (PDT in summer, PST in winter; read live via tzname()).
-        The month uses a FIXED English table (strftime("%b") is locale-dependent, so
-        it is avoided); the tz abbreviation comes from the IANA data, not the locale,
-        so it too is stable. Failing safe (return the input) means a malformed or
-        unexpected timestamp degrades to the raw string rather than raising and
-        breaking the whole page render.
+        them in ONE fixed zone — the relay operator's configured zone (KI-20), Pacific
+        by default — NOT the server's local time and NOT the reader's, so the displayed
+        time is identical no matter where the relay runs or who views it. zoneinfo
+        applies DST, so the abbreviation/offset is correct year-round for that zone
+        (e.g. PDT in summer, PST in winter; read live via tzname()). The month uses a
+        FIXED English table (strftime("%b") is locale-dependent, so it is avoided); the
+        tz abbreviation comes from the IANA data, not the locale, so it too is stable.
+        Failing safe (return the input) means a malformed or unexpected timestamp
+        degrades to the raw string rather than raising and breaking the whole render.
     """
     try:
         # fromisoformat handles the stored "+00:00" offset; astimezone converts that
-        # absolute instant into California wall-clock time (DST applied by zoneinfo).
-        parsed = datetime.fromisoformat(iso).astimezone(_DISPLAY_TZ)
+        # absolute instant into the configured zone's wall-clock time (DST applied by
+        # zoneinfo for whichever zone `tz` names).
+        parsed = datetime.fromisoformat(iso).astimezone(tz)
     except (ValueError, TypeError):
         # Fail safe: an unparseable value is shown verbatim rather than crashing the
         # render. The caller still escapes it on the way into HTML.
@@ -272,26 +280,28 @@ def _format_ts(iso: str) -> str:
     )
 
 
-def _time_tag(iso: str) -> str:
-    """Wrap a stored timestamp in a <time> element: machine ISO + human Pacific text.
+def _time_tag(iso: str, tz: ZoneInfo = _DISPLAY_TZ) -> str:
+    """Wrap a stored timestamp in a <time> element: machine ISO + human zoned text.
 
     Args:
         iso: The stored ISO-8601 timestamp string.
+        tz: The IANA zone the visible text is rendered in (passed through to
+            _format_ts). Defaults to the module's Pacific constant.
 
     Returns:
-        '<time datetime="<escaped ISO>">escaped human Pacific time</time>'. Both the
+        '<time datetime="<escaped ISO>">escaped human zoned time</time>'. Both the
         attribute and the visible text are escaped via _esc.
 
     Why:
         The carrier for the relative-timestamp progressive enhancement. The visible
-        text is the absolute California time (_format_ts), so the page reads correctly
-        with NO JavaScript. The datetime attribute carries the machine-readable instant
-        so _PAGE_JS can compute a relative label ("2 days ago") in the browser without
-        re-parsing the human string. The raw ISO now appears in the page — but only
-        inside this machine-readable attribute, escaped — which is exactly its purpose;
-        the human-facing text is still the humanized form.
+        text is the absolute time in the configured zone (_format_ts), so the page
+        reads correctly with NO JavaScript. The datetime attribute carries the
+        machine-readable instant so _PAGE_JS can compute a relative label ("2 days
+        ago") in the browser without re-parsing the human string. The raw ISO appears
+        only inside this machine-readable attribute, escaped — which is exactly its
+        purpose; the human-facing text is still the humanized form.
     """
-    return f'<time datetime="{_esc(iso)}">{_esc(_format_ts(iso))}</time>'
+    return f'<time datetime="{_esc(iso)}">{_esc(_format_ts(iso, tz))}</time>'
 
 
 def _page(title: str, body_html: str) -> str:
@@ -370,12 +380,16 @@ def render_index(projects: list[dict]) -> str:
     return _page("Orion — projects", body)
 
 
-def render_project(project_name: str, reports: list[dict]) -> str:
+def render_project(
+    project_name: str, reports: list[dict], tz: ZoneInfo = _DISPLAY_TZ
+) -> str:
     """Render one project's report history, newest first.
 
     Args:
         project_name: The project the history is for (shown as the heading).
         reports: The history() output for that project (may be empty).
+        tz: The IANA zone each report's timestamp is rendered in (threaded down to
+            _time_tag). Defaults to the module's Pacific constant.
 
     Returns:
         A complete HTML page.
@@ -404,7 +418,7 @@ def render_project(project_name: str, reports: list[dict]) -> str:
         else:
             heft = f"{section_count} sections"
         items.append(
-            f'<li><a href="{_esc(href)}">{_time_tag(report["generated_at"])}</a> '
+            f'<li><a href="{_esc(href)}">{_time_tag(report["generated_at"], tz)}</a> '
             f"<span class='meta'>{_esc(report['lane'])} · "
             f"{_esc(report['share_level'])} · {_esc(heft)}</span></li>"
         )
@@ -412,7 +426,9 @@ def render_project(project_name: str, reports: list[dict]) -> str:
     return _page(f"Orion — {project_name}", body)
 
 
-def render_report(report: dict, comments: list[dict] | None = None) -> str:
+def render_report(
+    report: dict, comments: list[dict] | None = None, tz: ZoneInfo = _DISPLAY_TZ
+) -> str:
     """Render a single report: its metadata, its sections (or flat body), comments.
 
     Args:
@@ -421,6 +437,10 @@ def render_report(report: dict, comments: list[dict] | None = None) -> str:
         comments: The comments_for() list for this report (each a dict with author,
             body, created_at). Defaults to None → treated as empty, so existing
             one-argument callers/tests keep working (the comments section is additive).
+        tz: The IANA zone every timestamp on this page (generated_at, ingested_at, and
+            each comment's created_at) is rendered in. Defaults to the module's Pacific
+            constant. Kept after `comments` so existing positional one/two-argument
+            callers stay valid.
 
     Returns:
         A complete HTML page.
@@ -445,12 +465,12 @@ def render_report(report: dict, comments: list[dict] | None = None) -> str:
     meta = (
         "<p class='meta'>"
         f"Report #{_esc(report['id'])} · "
-        f"Generated {_time_tag(report['generated_at'])} · "
+        f"Generated {_time_tag(report['generated_at'], tz)} · "
         f"lane {_esc(report['lane'])} · "
         f"{_esc(report['share_level'])} · "
         f"{recipients} · "
         f"Orion {_esc(report['orion_version'])} · "
-        f"received {_time_tag(report['ingested_at'])}"
+        f"received {_time_tag(report['ingested_at'], tz)}"
         "</p>"
     )
 
@@ -474,7 +494,7 @@ def render_report(report: dict, comments: list[dict] | None = None) -> str:
         # No per-signal sections (e.g. an intake push): render the flat body.
         sections_html = f"<section><pre>{_esc(report['body'])}</pre></section>"
 
-    comments_html = _render_comments(report["id"], comments or [])
+    comments_html = _render_comments(report["id"], comments or [], tz)
 
     body = (
         f"{breadcrumb}\n<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}\n"
@@ -483,7 +503,9 @@ def render_report(report: dict, comments: list[dict] | None = None) -> str:
     return _page(f"Orion — {report['project']} report", body)
 
 
-def _render_comments(report_id: object, comments: list[dict]) -> str:
+def _render_comments(
+    report_id: object, comments: list[dict], tz: ZoneInfo = _DISPLAY_TZ
+) -> str:
     """Render the comments section: the existing thread plus the post form.
 
     Args:
@@ -491,6 +513,8 @@ def _render_comments(report_id: object, comments: list[dict]) -> str:
             (it is already trusted, but) escaped on the way into the href anyway.
         comments: The report's comments, oldest-first (comments_for's order). May be
             empty, in which case a friendly empty-state stands in for the list.
+        tz: The IANA zone each comment's created_at timestamp is rendered in (threaded
+            to _time_tag). Defaults to the module's Pacific constant.
 
     Returns:
         An HTML fragment (heading + list/empty-state + form), every dynamic value
@@ -514,7 +538,7 @@ def _render_comments(report_id: object, comments: list[dict]) -> str:
             who = comment["author"] if comment["author"] else "anonymous"
             items.append(
                 f'<li><span class="meta">{_esc(who)} · '
-                f'{_time_tag(comment["created_at"])}</span>'
+                f'{_time_tag(comment["created_at"], tz)}</span>'
                 f'<pre>{_esc(comment["body"])}</pre></li>'
             )
         thread_html = '<ul class="list comments">\n' + "\n".join(items) + "\n</ul>"

@@ -11,6 +11,8 @@
 #                  pinned at its source.
 # =============================================================================
 
+from zoneinfo import ZoneInfo
+
 from relay.render import (
     _format_ts,
     render_index,
@@ -265,6 +267,73 @@ def test_format_ts_fails_safe_on_garbage():
     string rather than crash the whole page render (fail-safe contract).
     """
     assert _format_ts("not-a-timestamp") == "not-a-timestamp"
+
+
+def test_format_ts_renders_in_a_configured_non_pacific_zone():
+    """A non-default tz argument renders the same instant in THAT zone, not Pacific.
+
+    Why this matters: this is the KI-20 follow-up — the display zone is configurable
+    per relay process (orion relay-serve --timezone). The SAME instant
+    ("2026-06-18T14:32:00+00:00", i.e. 14:32 UTC) must read differently per zone:
+    "Jun 18 2026, 14:32 UTC" in UTC and "Jun 18 2026, 15:32 BST" in London (summer,
+    DST -> +1), and neither equals the Pacific "07:32 PDT" the default produces. That
+    last inequality is the real assertion: a passed-in zone is genuinely used, not the
+    hardcoded module constant.
+    """
+    instant = "2026-06-18T14:32:00+00:00"
+    assert _format_ts(instant, ZoneInfo("UTC")) == "Jun 18 2026, 14:32 UTC"
+    # London in June is BST (UTC+1), so 14:32 UTC -> 15:32 BST.
+    assert _format_ts(instant, ZoneInfo("Europe/London")) == "Jun 18 2026, 15:32 BST"
+    # The configured zone genuinely overrides the Pacific default.
+    assert _format_ts(instant, ZoneInfo("UTC")) != _format_ts(instant)
+
+
+def test_format_ts_defaults_to_pacific_byte_for_byte():
+    """Omitting the tz argument is byte-identical to passing the Pacific zone.
+
+    Why this matters: the contract for the configurable-zone change is that existing
+    callers (and an omitted --timezone) keep the EXACT historical output. The
+    one-argument call must equal the explicit-Pacific call, instant for instant.
+    """
+    instant = "2026-06-18T14:32:00+00:00"
+    assert _format_ts(instant) == _format_ts(instant, ZoneInfo("America/Los_Angeles"))
+
+
+def test_render_report_renders_timestamps_in_a_configured_zone():
+    """render_report threads a non-default tz down into every timestamp it shows.
+
+    Why this matters: the zone must reach the actual view, not just the leaf helper —
+    server.py passes self.server.display_tz into render_report, so a London-configured
+    relay's report page must show generated_at/ingested_at in BST, and must NOT show
+    the Pacific label it would render by default.
+    """
+    html = render_report(
+        _report(
+            generated_at="2026-06-18T14:32:00+00:00",
+            ingested_at="2026-06-18T14:35:00+00:00",
+        ),
+        comments=None,
+        tz=ZoneInfo("Europe/London"),
+    )
+    assert "Jun 18 2026, 15:32 BST" in html  # generated_at in London time, not PDT
+    assert "Jun 18 2026, 15:35 BST" in html  # ingested_at in London time
+    assert "PDT" not in html  # the Pacific default is genuinely overridden
+
+
+def test_render_project_renders_timestamps_in_a_configured_zone():
+    """render_project threads a non-default tz down into each report's <time> text.
+
+    Why this matters: the history list is the other timestamped dashboard view, so the
+    same wiring must hold there — a UTC-configured relay shows the timeline in UTC, not
+    the hardcoded Pacific zone.
+    """
+    html = render_project(
+        "demo",
+        [_report(generated_at="2026-06-18T09:05:00+00:00")],
+        tz=ZoneInfo("UTC"),
+    )
+    assert "Jun 18 2026, 09:05 UTC" in html  # rendered in UTC, the configured zone
+    assert "PDT" not in html
 
 
 def test_report_wraps_timestamps_in_time_tags():

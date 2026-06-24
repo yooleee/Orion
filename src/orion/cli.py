@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 from orion.collectors import LANE_RAW, LANE_STRUCTURED
 from orion.collectors.git import GitError
 from orion.collectors.git import collect as collect_git
-from orion.collectors.incubator import IncubatorError
+from orion.collectors.incubator import IncubatorError, read_index
 from orion.collectors.incubator import collect as collect_incubator
 from orion.collectors.notes import NotesError
 from orion.collectors.notes import collect as collect_notes
@@ -57,7 +57,7 @@ from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
 from orion.report import ReportBlob, build_report, serialize_blob
-from orion.scaffold import parse_recipient_spec, render_project_stanza
+from orion.scaffold import parse_recipient_spec, render_project_stanza, slugify_project_name
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_comment_watermark,
@@ -348,6 +348,101 @@ def main(argv: list[str] | None = None) -> int:
         help="Write without the preview confirmation (for non-interactive callers).",
     )
 
+    # graduate-idea (D4 follow-on): register a graduated incubator idea as a project.
+    # It shares add-project's flags (it delegates to it) plus idea-specific ones.
+    graduate_parser = subparsers.add_parser(
+        "graduate-idea",
+        help="Register a graduated incubator idea as a new project (delegates to add-project).",
+    )
+    graduate_parser.add_argument(
+        "idea",
+        help="The incubator idea title to graduate (matched case-insensitively).",
+    )
+    graduate_parser.add_argument(
+        "--name",
+        default=None,
+        help="Project name (default: a slug derived from the idea title).",
+    )
+    graduate_parser.add_argument(
+        "--incubator",
+        default=None,
+        metavar="PROJECT",
+        help="Which incubator project's index to read (needed only if several exist).",
+    )
+    graduate_parser.add_argument(
+        "--incubator-file",
+        dest="incubator_file",
+        default=None,
+        help="Read the index from this path directly (overrides the config lookup).",
+    )
+    graduate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Graduate even if the idea's status is not 'graduated'.",
+    )
+    # The remaining flags mirror add-project (graduate-idea passes them straight through).
+    graduate_parser.add_argument(
+        "--repo-path",
+        dest="repo_path",
+        default=None,
+        help="Path to the git repo (default: the current repo's top level, else cwd).",
+    )
+    graduate_parser.add_argument(
+        "--like",
+        default=None,
+        metavar="PROJECT",
+        help="Copy recipients from this existing project.",
+    )
+    graduate_parser.add_argument(
+        "--recipient",
+        dest="recipients",
+        action="append",
+        default=[],
+        metavar='"Name:channel:ENV_VAR"',
+        help="Add a recipient (repeatable).",
+    )
+    graduate_parser.add_argument(
+        "--share-level",
+        dest="share_level",
+        choices=SHARE_LEVELS,
+        default="high_level",
+        help="How much git detail to expose (default: high_level).",
+    )
+    graduate_parser.add_argument(
+        "--collectors",
+        default="git",
+        help="Comma-separated signals to enable (default: git).",
+    )
+    graduate_parser.add_argument(
+        "--tasks-file",
+        dest="tasks_file",
+        default=None,
+        help="Path to the tasks checklist (required if 'tasks' is in --collectors).",
+    )
+    graduate_parser.add_argument(
+        "--notes-file",
+        dest="notes_file",
+        default=None,
+        help="Path to the notes file (required if 'notes' is in --collectors).",
+    )
+    graduate_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    graduate_parser.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="Print the stanza that would be written, and write nothing.",
+    )
+    graduate_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Write without the preview confirmation (for non-interactive callers).",
+    )
+
     # Read-only inspect commands (B6). They print config; they never write it.
     projects_parser = subparsers.add_parser(
         "projects",
@@ -510,6 +605,24 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_add_project(
             args.name,
             Path(args.config),
+            repo_path=args.repo_path,
+            like=args.like,
+            recipient_specs=args.recipients,
+            share_level=args.share_level,
+            collectors_csv=args.collectors,
+            tasks_file=args.tasks_file,
+            notes_file=args.notes_file,
+            print_only=args.print_only,
+            assume_yes=args.yes,
+        )
+    if args.command == "graduate-idea":
+        return cmd_graduate_idea(
+            args.idea,
+            Path(args.config),
+            name=args.name,
+            incubator=args.incubator,
+            incubator_file=args.incubator_file,
+            force=args.force,
             repo_path=args.repo_path,
             like=args.like,
             recipient_specs=args.recipients,
@@ -1327,6 +1440,176 @@ def cmd_add_project(
     print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
     print(f"  Then: python -m orion check {project_name}")
     return 0
+
+
+def _resolve_incubator_index(
+    config_path: Path, incubator_file: str | None, incubator: str | None
+) -> Path:
+    """Find the incubator index file to read for `graduate-idea`.
+
+    Args:
+        config_path: Path to orion.toml (used to locate the incubator project).
+        incubator_file: An explicit index path that, when given, wins outright.
+        incubator: The name of the project whose incubator index to use, when the
+            config has more than one incubator-collector project.
+
+    Returns:
+        The resolved, absolute path to the incubator index file.
+
+    Why:
+        `graduate-idea` reads ideas from the SAME index a configured incubator
+        project already points at, so the user doesn't repeat the path. An explicit
+        `--incubator-file` overrides (and lets the command work before any config
+        exists). Otherwise we find the project(s) whose collectors include
+        "incubator": exactly one is unambiguous; several require `--incubator <name>`;
+        none is a clear setup error. Raises ConfigError with an actionable message in
+        every ambiguous/empty case — the same fail-loud-at-the-edge style as the rest
+        of the CLI.
+    """
+    # An explicit path wins and needs no config — resolve like add-project's
+    # --repo-path: expand "~", and resolve a relative path against the cwd.
+    if incubator_file is not None:
+        path = Path(incubator_file).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        return path
+
+    if not config_path.exists():
+        raise ConfigError(
+            f"No config at {config_path} to find an incubator project in. Pass "
+            f"--incubator-file <path> to point at the index directly."
+        )
+    config = load_config(config_path)
+    incubator_projects = [
+        p for p in config.projects.values() if "incubator" in p.collectors
+    ]
+    if not incubator_projects:
+        raise ConfigError(
+            "No project enables the 'incubator' collector. Add one (see "
+            "orion.toml.example) or pass --incubator-file <path>."
+        )
+
+    if incubator is not None:
+        project = get_project(config, incubator)  # raises ConfigError if unknown
+        if "incubator" not in project.collectors or project.incubator_file is None:
+            raise ConfigError(
+                f"Project {incubator!r} does not enable the 'incubator' collector."
+            )
+        return project.incubator_file
+
+    if len(incubator_projects) > 1:
+        names = ", ".join(sorted(p.name for p in incubator_projects))
+        raise ConfigError(
+            f"Multiple projects enable the 'incubator' collector ({names}). "
+            f"Pass --incubator <name> to choose one."
+        )
+
+    # Exactly one — unambiguous. config validation guarantees its file is set.
+    return incubator_projects[0].incubator_file
+
+
+def cmd_graduate_idea(
+    idea: str,
+    config_path: Path,
+    *,
+    name: str | None,
+    incubator: str | None,
+    incubator_file: str | None,
+    force: bool,
+    repo_path: str | None,
+    like: str | None,
+    recipient_specs: list[str],
+    share_level: str,
+    collectors_csv: str,
+    tasks_file: str | None,
+    notes_file: str | None,
+    print_only: bool,
+    assume_yes: bool,
+) -> int:
+    """Graduate an incubator idea into a tracked project (idea #4 follow-on).
+
+    Args:
+        idea: The idea title to graduate (matched case-insensitively against the
+            incubator index).
+        config_path: Path to orion.toml.
+        name: Explicit project name; when None, derived by slugifying the idea title.
+        incubator: Which incubator project's index to read (when several exist).
+        incubator_file: Explicit index path override (wins over config lookup).
+        force: Graduate even if the idea's status is not "graduated".
+        repo_path, like, recipient_specs, share_level, collectors_csv, tasks_file,
+            notes_file, print_only, assume_yes: passed straight through to
+            cmd_add_project (graduate-idea only resolves the NAME; registration is
+            identical to add-project).
+
+    Returns:
+        Exit code: 0 on success or a declined preview; 1 on any error.
+
+    Why:
+        D4 made the incubator a signal; this closes the loop — when an idea reaches
+        "graduated", it becomes a real tracked project. It is deliberately a THIN
+        wrapper: it resolves the index, finds the idea, checks status, derives a name,
+        then DELEGATES to cmd_add_project so the config write, preview-before-write,
+        recipient resolution, repo inference, and re-load validation are reused, not
+        duplicated (DRY). It is read-only on the incubator file — the only thing it
+        writes is orion.toml, via add-project.
+    """
+    try:
+        index_path = _resolve_incubator_index(config_path, incubator_file, incubator)
+        statuses = read_index(index_path)  # {title -> status}; IncubatorError if unreadable
+    except (ConfigError, IncubatorError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # Match the idea case-insensitively, but keep the index's canonical title for the
+    # name slug and messages (so "vlm photo overlay" still graduates "VLM Photo Overlay").
+    matched = next((t for t in statuses if t.lower() == idea.strip().lower()), None)
+    if matched is None:
+        graduated = sorted(t for t, s in statuses.items() if s == "graduated")
+        if graduated:
+            hint = "Graduated ideas available: " + ", ".join(repr(t) for t in graduated) + "."
+        else:
+            hint = "No ideas currently have status 'graduated'."
+        print(
+            f"Error: idea {idea!r} not found in {index_path}. {hint}",
+            file=sys.stderr,
+        )
+        return 1
+
+    status = statuses[matched]
+    if status != "graduated" and not force:
+        print(
+            f"Error: idea {matched!r} has status {status!r}, not 'graduated'. "
+            f"Update the incubator index, or pass --force to graduate it anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Derive the project name from the idea title unless one was given explicitly.
+    project_name = name if name else slugify_project_name(matched)
+    if not project_name:
+        print(
+            f"Error: could not derive a project name from {matched!r}. "
+            f"Pass an explicit --name.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Graduating idea {matched!r} (status: {status}) → project {project_name!r}.")
+
+    # Delegate the actual registration — identical to `add-project`, name pre-filled.
+    return cmd_add_project(
+        project_name,
+        config_path,
+        repo_path=repo_path,
+        like=like,
+        recipient_specs=recipient_specs,
+        share_level=share_level,
+        collectors_csv=collectors_csv,
+        tasks_file=tasks_file,
+        notes_file=notes_file,
+        print_only=print_only,
+        assume_yes=assume_yes,
+    )
 
 
 def _humanize_ago(iso_timestamp: str) -> str:

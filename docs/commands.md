@@ -35,6 +35,7 @@ orion comments myproject       # pull supervisor replies back to your machine
 | `orion show <project>` | Show one project's resolved config (paths, share level, collectors, recipients). |
 | `orion baseline <project>` | Mark current state as already-reported **without sending** — so the next report covers only new activity (avoids dumping full history). |
 | `orion install-hook <project>` | Install a git hook so a push auto-reports. `--hook pre-push` (default) or `post-commit`; `--print` to review first, `--force` to overwrite. |
+| `orion graduate-idea "<idea>"` | Register a **graduated** incubator idea as a new project (delegates to `add-project`; name slugified from the title). `--force` to graduate a non-graduated idea, `--name` to override, `--incubator-file` to point at the index directly. |
 
 ## Two-way: the relay + the Slack bot
 

@@ -20,6 +20,7 @@
 import json
 
 from orion import cli
+from orion.config import load_config
 
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
@@ -1396,3 +1397,174 @@ def test_incubator_collector_end_to_end(tmp_path, env_and_mocks):
     assert "Idea pipeline" in text
     assert "New idea: VLM Photo Overlay (refining)" in text
     assert "Annotate a photo" in text
+
+
+# --- D4 follow-on: graduate-idea ----------------------------------------------
+# graduate-idea reads the incubator index, finds a graduated idea, and registers a
+# project for it by delegating to add-project. These tests need no LLM/delivery
+# mocks (the command only writes config) — they use --yes/--print to skip prompts.
+
+_GRAD_INDEX = (
+    "| Idea | Status | One-line pitch |\n"
+    "|------|--------|----------------|\n"
+    "| [VLM Photo Overlay](ideas/vlm.md) | graduated | Annotate a photo |\n"
+    "| [Recipe Sorter](ideas/rs.md) | refining | Sort recipes |\n"
+)
+
+
+def _write_index(tmp_path, body=_GRAD_INDEX):
+    """Write an incubator index file and return its path (DRY across these tests)."""
+    path = tmp_path / "index.md"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_graduate_idea_registers_graduated_idea(tmp_path):
+    """A graduated idea becomes a registered project (name slugified from the title).
+
+    Why this matters: this is the whole point of D4's follow-on — close the loop from
+    "idea reached graduated" to "tracked project", reusing add-project's write path.
+    """
+    index = _write_index(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = cli.main([
+        "graduate-idea", "VLM Photo Overlay",
+        "--incubator-file", str(index),
+        "--repo-path", str(tmp_path),
+        "--recipient", "Alex:discord:ORION_W_ALEX",
+        "--config", str(cfg), "--yes",
+    ])
+    assert code == 0
+    # The written config re-loads and contains the slugified project.
+    assert "vlm-photo-overlay" in load_config(cfg).projects
+
+
+def test_graduate_idea_refuses_non_graduated_without_force(tmp_path, capsys):
+    """An idea that is not 'graduated' is refused (and nothing is written).
+
+    Why this matters: the command's semantics are "graduate a graduated idea"; a
+    mistaken non-graduated target should fail loudly, not silently register.
+    """
+    index = _write_index(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = cli.main([
+        "graduate-idea", "Recipe Sorter",
+        "--incubator-file", str(index),
+        "--repo-path", str(tmp_path),
+        "--recipient", "Alex:discord:ORION_W_ALEX",
+        "--config", str(cfg), "--yes",
+    ])
+    assert code == 1
+    assert not cfg.exists()  # refused before delegating to the writer
+    assert "not 'graduated'" in capsys.readouterr().err
+
+
+def test_graduate_idea_force_allows_non_graduated(tmp_path):
+    """--force graduates an idea regardless of its status.
+
+    Why this matters: the override exists for the deliberate case; it must actually
+    bypass the status gate and register the project.
+    """
+    index = _write_index(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = cli.main([
+        "graduate-idea", "Recipe Sorter", "--force",
+        "--incubator-file", str(index),
+        "--repo-path", str(tmp_path),
+        "--recipient", "Alex:discord:ORION_W_ALEX",
+        "--config", str(cfg), "--yes",
+    ])
+    assert code == 0
+    assert "recipe-sorter" in load_config(cfg).projects
+
+
+def test_graduate_idea_not_found_lists_graduated(tmp_path, capsys):
+    """An unknown idea fails and names the graduated ideas that ARE available.
+
+    Why this matters: a typo'd title should be a one-glance fix, not a dead end —
+    mirroring get_project listing known projects.
+    """
+    index = _write_index(tmp_path)
+    code = cli.main([
+        "graduate-idea", "Nonexistent Idea",
+        "--incubator-file", str(index),
+        "--config", str(tmp_path / "orion.toml"),
+    ])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "not found" in err and "VLM Photo Overlay" in err
+
+
+def test_graduate_idea_name_override(tmp_path):
+    """--name overrides the derived slug.
+
+    Why this matters: the slug is a default, not a constraint; the user can choose
+    the project key explicitly.
+    """
+    index = _write_index(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = cli.main([
+        "graduate-idea", "VLM Photo Overlay", "--name", "vlm",
+        "--incubator-file", str(index),
+        "--repo-path", str(tmp_path),
+        "--recipient", "Alex:discord:ORION_W_ALEX",
+        "--config", str(cfg), "--yes",
+    ])
+    assert code == 0
+    projects = load_config(cfg).projects
+    assert "vlm" in projects and "vlm-photo-overlay" not in projects
+
+
+def test_graduate_idea_print_writes_nothing(tmp_path, capsys):
+    """--print shows the stanza (with the slugified name) and writes no config.
+
+    Why this matters: the review-before-write affordance carries through from
+    add-project; a --print run must never create the file.
+    """
+    index = _write_index(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = cli.main([
+        "graduate-idea", "VLM Photo Overlay",
+        "--incubator-file", str(index),
+        "--repo-path", str(tmp_path),
+        "--recipient", "Alex:discord:ORION_W_ALEX",
+        "--config", str(cfg), "--print",
+    ])
+    assert code == 0
+    assert not cfg.exists()
+    assert "[projects.vlm-photo-overlay]" in capsys.readouterr().out
+
+
+def test_graduate_idea_finds_incubator_project_from_config(tmp_path):
+    """With no --incubator-file, the index is found via the configured incubator project.
+
+    Why this matters: the intended use is a dedicated [projects.incubator]; the user
+    shouldn't repeat the index path. This also exercises --like copying recipients.
+    """
+    index = _write_index(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    cfg.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [projects.incubator]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["incubator"]
+        incubator_file = "{index.as_posix()}"
+
+          [[projects.incubator.recipients]]
+          name = "Mentor"
+          channel = "discord"
+          webhook_env_var = "ORION_W_MENTOR"
+        """
+    )
+    code = cli.main([
+        "graduate-idea", "VLM Photo Overlay",
+        "--like", "incubator",
+        "--repo-path", str(tmp_path),
+        "--config", str(cfg), "--yes",
+    ])
+    assert code == 0
+    project = load_config(cfg).projects["vlm-photo-overlay"]
+    # Recipients were copied from the incubator project via --like.
+    assert project.recipients[0].name == "Mentor"

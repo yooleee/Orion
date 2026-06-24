@@ -236,6 +236,22 @@ After it writes, set the named webhook URL(s) in `.env` and run `python -m orion
 This is the **only** command that writes the config, and only ever on your explicit request —
 `report`/`intake` never touch it.
 
+### Graduating an incubator idea (`graduate-idea`)
+
+If you track ideas with the `incubator` signal (a Markdown table of ideas + statuses), you can turn
+one that has reached **graduated** status into a real tracked project in one step. From inside the
+idea's new repo:
+
+```bash
+python -m orion graduate-idea "VLM Photo Overlay" --like orion
+```
+
+It reads the incubator index (from your configured incubator project, or `--incubator-file <path>`),
+checks the idea is `graduated`, derives the project name from the title (`vlm-photo-overlay`; override
+with `--name`), then hands off to `add-project` — so the preview, recipients, and write are identical.
+It only writes `orion.toml`; the incubator file is read-only. Use `--force` to graduate an idea that
+isn't marked graduated yet. (The same `--print` / `--yes` / collector flags as `add-project` apply.)
+
 ### Summarizer backend
 
 The one step that calls an LLM — summarizing raw git activity — is configurable, but the

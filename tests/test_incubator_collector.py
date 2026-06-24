@@ -17,7 +17,7 @@ import json
 import pytest
 
 from orion.collectors import LANE_STRUCTURED
-from orion.collectors.incubator import IncubatorError, collect
+from orion.collectors.incubator import IncubatorError, collect, read_index
 
 # A canonical table in the real index.md shape: an H1, prose, a "Status values"
 # line, then a 5-column table whose Idea cells are Markdown links. Tests build
@@ -203,6 +203,30 @@ def test_missing_file_raises_incubator_error(tmp_path):
     missing = tmp_path / "does-not-exist.md"
     with pytest.raises(IncubatorError):
         collect(missing, prior_marker=None)
+
+
+def test_read_index_returns_status_map(tmp_path):
+    """read_index returns the {idea title -> status} map for other commands to use.
+
+    Why this matters: `graduate-idea` reads the index via this public entry point
+    (rather than the private parser), so it must return the title→status map with
+    link text unwrapped, reusing the same parsing path the collector uses.
+    """
+    path = _write_incubator(tmp_path, _CANONICAL)
+    assert read_index(path) == {
+        "VLM Photo Overlay": "refining",
+        "Recipe Sorter": "raw",
+    }
+
+
+def test_read_index_missing_file_raises(tmp_path):
+    """read_index surfaces a missing file as IncubatorError (same contract as collect).
+
+    Why this matters: callers (graduate-idea) get one clean, catchable failure type
+    for a misconfigured/missing index path, not a raw OSError.
+    """
+    with pytest.raises(IncubatorError):
+        read_index(tmp_path / "nope.md")
 
 
 def test_no_table_is_empty_not_an_error(tmp_path):

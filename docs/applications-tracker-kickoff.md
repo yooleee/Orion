@@ -15,6 +15,42 @@ Role in project: A kickoff doc (like the archived phase/dashboard kickoffs). Rea
 
 # Kickoff: applications tracking via a status-aware "tracker" collector (E2 Inc 2.6)
 
+## ⚠ Carried-over bug (unrelated to this kickoff) — CSRF comment 403 still failing
+
+The relay CSRF comment fix from **PR #48** (this cycle) **did NOT resolve the bug**. The error is
+**identical after deploy**, so the earlier diagnosis was wrong and must be redone from scratch. This
+is a **live production breakage of the family comment loop** (supervisors can't reply on the
+dashboard), so it is worth fixing early. Sequence relative to the applications work as you see fit, but
+do not let it get lost.
+
+**Corrected evidence (from the user):**
+- The commenter (the user's dad) was on **Chrome**, not Safari. Chrome **does** send an `Origin`
+  header on same-origin form POSTs, so PR #48's "missing-`Origin` → `Referer` fallback" does not even
+  apply to his case. The Safari theory was wrong.
+- The error message is **exactly the same** after the deployed fix: "Request blocked by an origin
+  (CSRF) check."
+- It occurs at `https://orion-relay-horizon-c.fly.dev/report/25/comment`.
+
+**Leading hypothesis (verify empirically — do NOT assume again):** the check falls into the
+`_origin_error` branch (`relay/server.py`) that compares the request's `Origin` against the `Host`
+header, and behind Fly's proxy the `Host` the relay sees does not equal the public origin Chrome
+sends. The intended guard is `ORION_RELAY_PUBLIC_ORIGIN` (set in `fly.toml [env]` this cycle); if that
+var is **not actually live in the running Fly app**, the exact-origin match never runs and the brittle
+Host fallback fails. In short: the fix may simply not be deployed/effective, or `public_origin` is
+unset/mismatched in production.
+
+**First diagnostic steps (next session):**
+1. Confirm `ORION_RELAY_PUBLIC_ORIGIN` is actually set in the **running** app (e.g. `fly ssh console`
+   then inspect env, or `fly secrets list`). `fly.toml [env]` only takes effect on a deploy that
+   actually applied it.
+2. Temporarily log the inbound `Origin`, `Referer`, and `Host` on a 403 in `_handle_comment` /
+   `_origin_error`, reproduce on **Chrome**, and read the real values. That shows exactly which
+   comparison fails.
+3. Fix from the real values (likely: make `public_origin` reliably set, and/or trust Fly's forwarded
+   host/proto rather than the rewritten `Host`). Add a regression test for the real Chrome + proxy case.
+4. Verify live by commenting as admin on the actual dashboard, then update/delete the
+   `csrf-comment-bug-followup` memory.
+
 ## Why
 
 The checklist features shipped this cycle (Inc 2 live checklist signal, Inc 2.5 near-real-time

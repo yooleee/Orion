@@ -19,6 +19,10 @@
 #                  the macOS/Windows guarantee actually needs proving (and the
 #                  natural thing to run before a release or going public). Local
 #                  `pytest` stays the per-change source of truth either way.
+# Further cost trims: a `concurrency` group cancels superseded PR runs (rapid pushes
+#                  no longer pile up full job sets); the per-push/PR path runs ONE
+#                  Python (the 3.11 floor), not three; and docs-only changes skip CI
+#                  via `paths-ignore`. The full weekly/manual matrix is unchanged.
 # =============================================================================
 
 name: CI
@@ -26,7 +30,12 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skip CI on docs-only changes (markdown + the docs/plans trees). A change that
+    # ALSO touches code still runs — paths-ignore skips only when every changed file
+    # matches. Aligns with the tiered doc policy: a trivial docs commit needs no CI.
+    paths-ignore: ['**/*.md', '*.md', 'docs/**', 'plans/**']
   pull_request:
+    paths-ignore: ['**/*.md', '*.md', 'docs/**', 'plans/**']
   # Weekly full-matrix run (Mondays 06:00 UTC) — the cross-platform proof, kept
   # off the per-PR/per-push path so it can't drain the metered quota.
   schedule:
@@ -34,6 +43,14 @@ on:
   # Manual trigger for the full matrix on demand (e.g. before a release, after a
   # cross-platform-sensitive change, or before going public).
   workflow_dispatch:
+
+# Cancel a superseded PR run when a newer commit lands on the same branch — rapid
+# iteration otherwise runs several full job sets to completion. main pushes and the
+# scheduled/manual full matrix always finish (their results are the record), so only
+# pull_request runs are cancellable.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -49,7 +66,12 @@ jobs:
         # be an expression that evaluates to a JSON array, so we switch on the
         # triggering event here rather than duplicating the whole job.
         os: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
-        python-version: ["3.11", "3.12", "3.13"]
+        # Same event switch for Python: every supported version on the scheduled /
+        # manual full run, but only the SUPPORTED FLOOR (3.11) on each push/PR. Dev is
+        # on 3.12, so the floor catches "used a too-new feature" — the common
+        # cross-version bug — at one job instead of three. The weekly matrix still
+        # proves all three across all three OSes.
+        python-version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.11"]') }}
 
     steps:
       - uses: actions/checkout@v4

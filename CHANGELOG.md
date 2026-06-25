@@ -14,6 +14,44 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Dashboard portfolio overview — visibility surface, increment 1 (2026-06-25)
+
+The first slice of evolving the relay dashboard into a richer multi-project visibility and
+showcase surface — the project's founding intent (family/others can see what's being worked on
+and comment back, asynchronously, on a dashboard rather than chat). The home page becomes a
+cross-project portfolio instead of a flat list. Relay-local and additive: reuses report data
+already in the relay, no new blob fields, no schema change, no local-CLI/config changes,
+stdlib-only. Functional layout only — a dedicated aesthetic pass is deferred.
+
+### Changed
+
+- **The dashboard home (`GET /`) is now a portfolio overview.** One card per project showing
+  the project name (linking to its history), a one-line headline drawn from the latest report's
+  first line, the report count, and last activity as a relative time. Replaces the old flat
+  name + count + raw-timestamp list. Viewer scope is unchanged — a scoped family viewer still
+  sees only their granted projects' cards (the same `_allowed_projects` filter).
+
+### Added
+
+- **`latest_report_per_project()`** (`relay/store.py`) — one query returning each project plus
+  its latest report's id and body. "Latest" matches `history()`'s ordering (`generated_at DESC,
+  id DESC`), so the home's latest agrees with the project page's, even when a report is
+  backfilled out of generation order.
+- **`render_portfolio()` + `_headline()`** (`relay/render.py`) — the card render and a pure
+  first-non-empty-line extractor (truncates at ~100 chars with an ellipsis; omits the headline
+  when the body is empty). Replaces `render_index`. The headline is the report's own
+  (attacker-influenceable) body text, so it is `_esc`-escaped like every dynamic value. Lean
+  `.portfolio`/`.card` styling lives in `_PAGE_CSS`, so the hash-based CSP auto-tracks it.
+
+### Tests
+
+- `pytest`: **533** (+12). Store tests pin the latest-by-`generated_at` rule (incl. a
+  backfill-ordering case proving consistency with `history()`); render tests cover the card,
+  headline truncation/escaping/empty-fallback, and `_headline` boundaries; a live-server test
+  asserts a project's latest first line appears on `/` end to end. The CSP contract test stays
+  green after `_PAGE_CSS` changed (auto-recompute). Verified eyes-on in a real browser:
+  multi-project cards, correct latest-report headlines, working relative times, no CSP violation.
+
 ## Dashboard security hardening — CSP + headers (2026-06-24)
 
 A small, `relay/`-local hardening slice following C3 Increment 1, which put a login-gated,

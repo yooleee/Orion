@@ -46,9 +46,9 @@ from .render import (
     MAX_COMMENT_BODY_CHARS,
     PAGE_CSS_HASH,
     PAGE_JS_HASH,
-    render_index,
     render_login,
     render_not_found,
+    render_portfolio,
     render_project,
     render_report,
 )
@@ -63,7 +63,7 @@ from .store import (
     get_user_by_verifier,
     history,
     ingest,
-    list_projects,
+    latest_report_per_project,
     list_users,
     open_relay_store,
     projects_for_user,
@@ -487,10 +487,16 @@ class _RelayHandler(BaseHTTPRequestHandler):
             allowed = self._allowed_projects(conn, principal)
 
             if path == "/":
-                projects = list_projects(conn)
+                # The portfolio home: each project plus its latest report (id + body),
+                # so the cards can show a one-line headline and link straight in. Scope
+                # filtering is unchanged — the same per-project `in allowed` predicate the
+                # index used, applied before render, so a viewer sees only granted cards.
+                projects = latest_report_per_project(conn)
                 if allowed is not None:
                     projects = [p for p in projects if p["project"] in allowed]
-                self._send_html(200, render_index(projects))
+                self._send_html(
+                    200, render_portfolio(projects, self.server.display_tz)
+                )
                 return
 
             if path.startswith("/project/"):

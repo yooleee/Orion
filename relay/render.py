@@ -148,6 +148,18 @@ button {
   border-radius: var(--radius); padding: 0.5rem 1.1rem;
 }
 button:hover { filter: brightness(1.05); }
+/* Portfolio home: one card per project. FUNCTIONAL layout only — enough that cards read
+   as distinct, scannable units; a dedicated aesthetic pass comes later. Reuses the
+   surface/border/radius tokens so light and dark both work with no new colors. */
+ul.portfolio { list-style: none; padding: 0; margin: 1.25rem 0 0; display: grid; gap: 0.75rem; }
+@media (min-width: 560px) { ul.portfolio { grid-template-columns: 1fr 1fr; } }
+ul.portfolio li.card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); padding: 0.9rem 1rem;
+}
+li.card h2 { margin: 0 0 0.3rem; font-size: 1.05rem; }
+li.card .headline { margin: 0 0 0.4rem; }
+li.card .meta { display: block; }
 """.strip()
 
 # A single, static progressive-enhancement script. It rewrites each <time datetime>
@@ -384,20 +396,66 @@ def _page(title: str, body_html: str) -> str:
     )
 
 
-def render_index(projects: list[dict]) -> str:
-    """Render the dashboard home: every project with reports, most recent first.
+# Max characters for a portfolio card's headline excerpt before it is truncated. ~100
+# keeps a card to roughly one line and rarely cuts a real first line; defined once here so
+# the truncation point is a single source of truth the render test can assert against.
+_HEADLINE_MAX_CHARS = 100
+
+
+def _headline(body: str, limit: int = _HEADLINE_MAX_CHARS) -> str:
+    """Extract a one-line headline from a report body for a portfolio card.
 
     Args:
-        projects: The list_projects() output — dicts of project/report_count/
-            latest_generated_at.
+        body: The report's full body text (may be multi-line, or empty).
+        limit: Max characters before truncation. Defaults to _HEADLINE_MAX_CHARS.
+
+    Returns:
+        The first non-empty line, stripped and truncated to `limit` characters with a
+        trailing "…" when it was longer. Returns "" when the body has no non-empty line,
+        so the caller can OMIT the headline rather than render a blank one.
+
+    Why:
+        The portfolio home shows each project's latest update at a glance, and the
+        report's own first line is the most honest one-liner available (no invented text).
+        Keeping it to one line keeps a card scannable. Truncation is a presentation choice,
+        so it lives in the render layer (the store query stays content-agnostic). The
+        empty-string fallback means a report with no usable body simply drops the headline
+        line — honest over decorative.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            # Add the ellipsis only when we actually cut text (a first line exactly `limit`
+            # long is shown whole). One "…" char keeps the rendered length predictable.
+            if len(stripped) > limit:
+                return stripped[:limit].rstrip() + "…"
+            return stripped
+    return ""
+
+
+def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
+    """Render the dashboard home: a portfolio card per project, most recent first.
+
+    Args:
+        projects: The latest_report_per_project() output — dicts of project /
+            report_count / latest_generated_at / latest_report_id / latest_body.
+        tz: The IANA zone each project's last-activity time is rendered in (threaded to
+            _time_tag). Defaults to the module's Pacific constant.
 
     Returns:
         A complete HTML page.
 
     Why:
-        The entry point a viewer lands on. An empty list renders a friendly
-        empty-state rather than a bare page, so a fresh relay (nothing pushed yet)
-        explains itself instead of looking broken.
+        The cross-project "see everything at once" home — the showcase a viewer (a family
+        member, or the developer) lands on. Each project is a card: the name links to the
+        project history (the existing /project/<name> route), with a one-line headline from
+        its latest report, the report count, and the last-activity time (rendered as a
+        relative label by the inline JS). An empty list renders a friendly empty-state, so
+        a fresh relay explains itself instead of looking broken. EVERY dynamic value — the
+        name, the headline, the count — is routed through _esc, because the headline is the
+        report's own (attacker-influenceable) body text: escaping is what keeps stored
+        content inert. This REPLACES the old flat-list index; it carries the latest report's
+        body so the home can summarize, which the index could not.
     """
     if not projects:
         body = (
@@ -407,16 +465,25 @@ def render_index(projects: list[dict]) -> str:
         )
         return _page("Orion — projects", body)
 
-    items = []
+    cards = []
     for project in projects:
         name = project["project"]
         href = "/project/" + _url(name)
-        items.append(
-            f'<li><a href="{_esc(href)}">{_esc(name)}</a> '
-            f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
-            f"last {_esc(project['latest_generated_at'])}</span></li>"
+        # The headline is the latest report's first line; omit the line entirely when the
+        # body has no usable content (honest fallback — never a blank/placeholder line).
+        headline = _headline(project["latest_body"])
+        headline_html = (
+            f"<p class='headline'>{_esc(headline)}</p>\n" if headline else ""
         )
-    body = "<h1>Projects</h1>\n<ul class='list'>\n" + "\n".join(items) + "\n</ul>"
+        cards.append(
+            '<li class="card">'
+            f'<h2><a href="{_esc(href)}">{_esc(name)}</a></h2>\n'
+            f"{headline_html}"
+            f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
+            f"last {_time_tag(project['latest_generated_at'], tz)}</span>"
+            "</li>"
+        )
+    body = "<h1>Projects</h1>\n<ul class='portfolio'>\n" + "\n".join(cards) + "\n</ul>"
     return _page("Orion — projects", body)
 
 

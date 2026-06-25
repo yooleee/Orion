@@ -878,6 +878,23 @@ def test_admin_index_shows_all_projects(tmp_path):
         assert "alpha" in html and "beta" in html
 
 
+def test_portfolio_home_shows_each_projects_latest_headline(tmp_path):
+    """The home page shows each project's latest-report first line as a headline (end to end).
+
+    Why this matters: this is the whole point of the portfolio home — at a glance, a viewer
+    sees not just project names but a one-line "what's happening" per project. It exercises
+    the full new path end to end: ingest -> latest_report_per_project -> render_portfolio ->
+    the rendered home. We use the real blob (body "Shipped the relay seam."), so a passing
+    assert proves the latest body actually reaches the card.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        _ingest_project(base_url, "alpha")
+        code, html = _get(base_url, "/")  # open loopback relay serves the home directly
+        assert code == 200
+        assert "alpha" in html  # the project card
+        assert "Shipped the relay seam." in html  # its latest report's first line
+
+
 def test_viewer_in_scope_project_is_200_out_of_scope_is_404(tmp_path):
     """A viewer reaches a granted project (200) but an ungranted one is 404 (hidden).
 

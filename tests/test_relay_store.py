@@ -31,6 +31,7 @@ from relay.store import (
     get_user_by_verifier,
     history,
     ingest,
+    latest_report_per_project,
     list_projects,
     list_users,
     open_relay_store,
@@ -177,6 +178,75 @@ def test_list_projects_counts_and_orders_by_latest(tmp_path):
     assert by_name["alpha"]["report_count"] == 2
     assert by_name["beta"]["report_count"] == 1
     assert by_name["alpha"]["latest_generated_at"] == "2026-06-18T09:00:00+00:00"
+
+
+def test_latest_report_per_project_carries_count_and_latest_body(tmp_path):
+    """latest_report_per_project() returns each project's newest report id+body, ordered.
+
+    Why this matters: this backs the portfolio HOME. Unlike list_projects (count +
+    timestamp only), it must also surface the LATEST report's id and body so the home can
+    show a one-line headline and link to that report. We ingest two reports for 'alpha'
+    (varying the body so we can tell which one is returned) and one more-recent for 'beta',
+    then check the counts, the project order (most-recent first), and that 'alpha' carries
+    its SECOND report's body — the newest by generated_at.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    a1 = _blob("alpha", generated_at="2026-06-18T08:00:00+00:00")
+    a1["body"] = "First alpha update."
+    ingest(conn, a1, "2026-06-18T08:00:01+00:00")
+    a2 = _blob("alpha", generated_at="2026-06-18T09:00:00+00:00")
+    a2["body"] = "Second alpha update."
+    latest_alpha_id = ingest(conn, a2, "2026-06-18T09:00:01+00:00")
+    b1 = _blob("beta", generated_at="2026-06-18T12:00:00+00:00")
+    b1["body"] = "Beta update."
+    ingest(conn, b1, "2026-06-18T12:00:01+00:00")
+
+    rows = latest_report_per_project(conn)
+
+    assert [r["project"] for r in rows] == ["beta", "alpha"]  # beta most recent
+    by_name = {r["project"]: r for r in rows}
+    assert by_name["alpha"]["report_count"] == 2
+    assert by_name["beta"]["report_count"] == 1
+    # alpha resolves to its NEWEST report (by generated_at) — id and body both.
+    assert by_name["alpha"]["latest_report_id"] == latest_alpha_id
+    assert by_name["alpha"]["latest_body"] == "Second alpha update."
+    assert by_name["alpha"]["latest_generated_at"] == "2026-06-18T09:00:00+00:00"
+
+
+def test_latest_report_per_project_matches_history_when_ingest_order_differs(tmp_path):
+    """The "latest" report agrees with history()[0] even if a later-ingested report is OLDER.
+
+    Why this matters: "newest" must mean newest by generated_at (tie-broken by id), the
+    SAME rule history() uses — not simply the last-ingested row. Here a backfilled report
+    (ingested second, but with an EARLIER generated_at) must NOT win. If the query used
+    MAX(id) it would pick the backfill and disagree with the project page's history()[0];
+    this pins that they stay consistent.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # Ingested FIRST but generated LATER — this is the true newest.
+    newer = _blob("demo", generated_at="2026-06-18T10:00:00+00:00")
+    newer["body"] = "The newest update."
+    ingest(conn, newer, "2026-06-18T10:00:01+00:00")
+    # Ingested SECOND but generated EARLIER (a backfill) — must NOT be chosen as latest.
+    older = _blob("demo", generated_at="2026-06-18T07:00:00+00:00")
+    older["body"] = "An older, backfilled update."
+    ingest(conn, older, "2026-06-18T11:00:00+00:00")
+
+    rows = latest_report_per_project(conn)
+    assert len(rows) == 1
+    # Same report history() would return first — consistency between the two views.
+    assert rows[0]["latest_body"] == history(conn, "demo")[0]["body"]
+    assert rows[0]["latest_body"] == "The newest update."
+
+
+def test_latest_report_per_project_empty_store_is_empty(tmp_path):
+    """An empty store yields an empty list (a fresh relay's portfolio shows nothing).
+
+    Why this matters: a brand-new relay with no pushes must render a clean empty-state,
+    not error — so the helper returns [] rather than raising.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert latest_report_per_project(conn) == []
 
 
 # --- C2: report comments (append-only, flat) ----------------------------------

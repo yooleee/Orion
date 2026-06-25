@@ -246,6 +246,68 @@ def list_projects(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
+    """Summarize every project plus its single latest report, most recent first.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        A list of dicts, one per project that has reports, each:
+        {"project", "report_count", "latest_generated_at", "latest_report_id",
+        "latest_body"}, ordered with the most recently active project first.
+
+    Why:
+        This backs the dashboard's portfolio HOME — a cross-project "see everything at
+        once" overview that, unlike list_projects (count + timestamp only), also carries
+        the latest report's id and body so the home can show a one-line headline per
+        project and link straight to that report. It is a SEPARATE helper rather than a
+        widening of list_projects: list_projects has its own documented contract and
+        callers, and keeping the two apart means neither's shape drifts under the other.
+
+        "Latest" is defined EXACTLY as history() defines newest — ORDER BY generated_at
+        DESC, id DESC — so the home's latest report agrees with the project page's
+        history()[0]. The id tiebreak matters when two reports share a generated_at
+        second (or arrive out of generation order): picking MAX(id) alone would select
+        the latest-INGESTED, which can differ from the latest-GENERATED; the correlated
+        subquery below picks the row history() would call first, keeping the two views
+        consistent. report_count comes from a grouped COUNT joined on project. The outer
+        ORDER BY puts the freshest project on top — what a viewer glancing at the
+        portfolio wants first (generated_at is an ISO-8601 UTC string, so a lexical sort
+        is also chronological).
+    """
+    rows = conn.execute(
+        """
+        SELECT r.project,
+               cnt.report_count,
+               r.id           AS latest_report_id,
+               r.body         AS latest_body,
+               r.generated_at AS latest_generated_at
+        FROM relay_reports r
+        JOIN (SELECT project, COUNT(*) AS report_count
+              FROM relay_reports GROUP BY project) cnt
+          ON cnt.project = r.project
+        WHERE r.id = (
+            SELECT id FROM relay_reports r2
+            WHERE r2.project = r.project
+            ORDER BY generated_at DESC, id DESC
+            LIMIT 1
+        )
+        ORDER BY r.generated_at DESC, r.project ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "project": row["project"],
+            "report_count": row["report_count"],
+            "latest_generated_at": row["latest_generated_at"],
+            "latest_report_id": row["latest_report_id"],
+            "latest_body": row["latest_body"],
+        }
+        for row in rows
+    ]
+
+
 def history(conn: sqlite3.Connection, project: str) -> list[dict]:
     """Return all stored reports for one project, newest first.
 

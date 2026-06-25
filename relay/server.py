@@ -298,6 +298,59 @@ def mint_key() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _checklist_items_error(checklist: object) -> str | None:
+    """Return None when `checklist` is a valid list of {text, done} items, else a reason.
+
+    Args:
+        checklist: The candidate value (untrusted) — expected to be a list of objects
+            each with a string `text` and a boolean `done`.
+
+    Returns:
+        None when the shape is valid; otherwise a short human-readable 400 reason.
+
+    Why:
+        Both the report ingest (`_validate_blob`, where the checklist is OPTIONAL) and
+        the dedicated checklist push (`_validate_checklist_request`, where it is
+        REQUIRED) need the SAME item-shape check — the exact shape get_checklist decodes
+        and the renderer unpacks. Factoring it here keeps that one rule in one place
+        (DRY) so the two endpoints can never validate the items differently.
+    """
+    if not isinstance(checklist, list):
+        return "field 'checklist' must be a list"
+    for item in checklist:
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("text"), str)
+            and isinstance(item.get("done"), bool)
+        ):
+            return "each checklist item must be an object with string 'text' and boolean 'done'"
+    return None
+
+
+def _validate_checklist_request(payload: object) -> str | None:
+    """Check a parsed payload against the checklist-push contract (POST /checklist).
+
+    Args:
+        payload: The JSON-parsed request body (any type — untrusted input).
+
+    Returns:
+        None when the payload is a valid `{project, checklist}` request; otherwise a
+        short human-readable 400 reason.
+
+    Why:
+        The checklist-only push is an untrusted inbound surface like /ingest, so it
+        validates shape BEFORE storing. Unlike the blob's optional checklist, here the
+        checklist is REQUIRED (the request exists to set it), and `project` must be a
+        non-empty string (it is the upsert key). The item shape reuses the shared helper.
+    """
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    project = payload.get("project")
+    if not isinstance(project, str) or not project.strip():
+        return "field 'project' must be a non-empty string"
+    return _checklist_items_error(payload.get("checklist"))
+
+
 def _validate_blob(payload: object) -> str | None:
     """Check a parsed payload against the portable blob contract.
 
@@ -344,20 +397,13 @@ def _validate_blob(payload: object) -> str | None:
 
     # checklist is OPTIONAL (E2 Inc 2): a producer without the feature omits it
     # entirely, exactly like the vestigial source_marker is not required. So we only
-    # validate it WHEN PRESENT. When present it must be a list of {text: str, done:
-    # bool} objects — the shape get_checklist decodes and the renderer unpacks — so a
-    # malformed checklist is a clean 400 here, never a later crash in store/render.
+    # validate it WHEN PRESENT, via the shared item-shape helper. A malformed checklist
+    # is a clean 400 here, never a later crash in store/render.
     checklist = payload.get("checklist")
     if checklist is not None:
-        if not isinstance(checklist, list):
-            return "field 'checklist' must be a list when present"
-        for item in checklist:
-            if not (
-                isinstance(item, dict)
-                and isinstance(item.get("text"), str)
-                and isinstance(item.get("done"), bool)
-            ):
-                return "each checklist item must be an object with string 'text' and boolean 'done'"
+        items_error = _checklist_items_error(checklist)
+        if items_error is not None:
+            return items_error
 
     return None
 
@@ -527,7 +573,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     return
                 self._send_html(
                     200,
-                    render_project(name, history(conn, name), self.server.display_tz),
+                    render_project(
+                        name,
+                        history(conn, name),
+                        self.server.display_tz,
+                        checklist=get_checklist(conn, name),
+                    ),
                 )
                 return
 
@@ -593,6 +644,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/ingest":
             self._handle_ingest()
+            return
+
+        if path == "/checklist":
+            self._handle_checklist_push()
             return
 
         if path == "/api/comments":
@@ -679,6 +734,63 @@ class _RelayHandler(BaseHTTPRequestHandler):
             file=sys.stderr,
         )
         self._send_json(201, {"id": new_id})
+
+    def _handle_checklist_push(self) -> None:
+        """Authenticate, validate, and upsert a project's live checklist (POST /checklist).
+
+        Why:
+            The dedicated checklist-only push: it sets a project's current checklist on
+            the dashboard WITHOUT creating a report, so an edit to the local tasks_file
+            can reach the dashboard in near-real-time (driven by `orion checklist-push
+            --watch`). It reuses the ingest Bearer token (same machine-to-machine push
+            credential) and the SAME upsert the report path calls — it simply skips the
+            report row. The flow mirrors _handle_ingest's guard sequence; the payload is
+            the smaller `{project, checklist}` instead of a full blob.
+        """
+        # 1) Authenticate first (same Bearer token as /ingest) — nothing about the
+        # payload is touched until the caller is authorized.
+        auth_error = self._auth_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Read and JSON-parse the body.
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+
+        # 3) Validate the {project, checklist} shape BEFORE storing.
+        error = _validate_checklist_request(payload)
+        if error is not None:
+            self._send_json(400, {"error": error})
+            return
+
+        # 4) Upsert this project's live checklist, stamped with the relay's receive
+        # clock (same provenance meaning as a report's ingested_at). One fresh
+        # connection per request keeps each sqlite handle on its own thread.
+        conn = open_relay_store(self.server.db_path)
+        try:
+            upsert_checklist(
+                conn, payload["project"], payload["checklist"], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        count = len(payload["checklist"])
+        print(
+            f"[relay] updated checklist for project {payload['project']!r} "
+            f"({count} item(s))",
+            file=sys.stderr,
+        )
+        # 200 (not 201): an upsert of existing per-project state, not a created resource.
+        self._send_json(200, {"updated": payload["project"], "items": count})
 
     def _handle_comment(self, report_id: int) -> None:
         """Store one supervisor comment on a report (POST /report/<id>/comment, C2).

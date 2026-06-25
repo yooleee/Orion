@@ -96,6 +96,67 @@ def push(blob_json: str, url: str, token: str, *, timeout: float = 10.0) -> None
         raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
 
 
+def push_checklist(
+    relay_url: str,
+    project: str,
+    checklist: list,
+    token: str,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """POST a project's current checklist to a relay's /checklist endpoint.
+
+    Args:
+        relay_url: The relay's configured URL (the [relay] table's `url`, e.g. an
+            ".../ingest" URL); the /checklist endpoint is derived from it.
+        project: The project the checklist belongs to (the upsert key on the relay).
+        checklist: The current checklist as a list of {"text": str, "done": bool}
+            dicts — ALREADY redacted by the caller (the privacy net runs before this).
+        token: The Bearer token authenticating the push (the SAME ingest credential),
+            sent as `Authorization: Bearer <token>`.
+        timeout: Seconds to wait for the request before failing.
+
+    Returns:
+        None. Raises DeliveryError on any non-2xx response or network failure.
+
+    Why:
+        The transport for the dedicated checklist-only push — it sets the project's
+        live checklist on the dashboard WITHOUT a report, enabling near-real-time
+        updates as the local tasks_file is edited. Like push(), it is pure transport:
+        the caller owns that the item texts are redacted; this only encodes the small
+        {project, checklist} payload and POSTs it with the auth header. We derive the
+        endpoint with urljoin (exactly as pull_comments derives /api/comments), so a
+        relay URL configured as ".../ingest" still resolves to ".../checklist".
+        DeliveryError unifies every failure mode so the CLI command / watch loop can
+        report it and carry on.
+    """
+    endpoint = urllib.parse.urljoin(relay_url, "/checklist")
+    data = json.dumps({"project": project, "checklist": checklist}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": _USER_AGENT,
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            # The checklist endpoint returns 200 (an upsert); accept any 2xx.
+            if not (200 <= status < 300):
+                raise DeliveryError(f"Relay checklist push returned HTTP {status}.")
+    except urllib.error.HTTPError as exc:
+        raise DeliveryError(
+            f"Relay checklist push returned HTTP {exc.code}: {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+
 def pull_comments(
     relay_url: str,
     token: str,

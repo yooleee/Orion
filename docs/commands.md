@@ -44,6 +44,7 @@ orion comments myproject       # pull supervisor replies back to your machine
 | Command | What it does |
 |---|---|
 | `orion relay-serve` | Run the relay locally (ingest endpoint + read-only dashboard) on `127.0.0.1:8787`. Needs `ORION_RELAY_TOKEN` in `.env`. Blocks until Ctrl-C. |
+| `orion checklist-push <project>` | Push the project's **current checklist** to the relay dashboard **without a report** (needs `checklist = true` + an enabled `[relay]`). Add `--watch` for near-real-time: it polls `tasks_file` and pushes on every change until Ctrl-C (`--interval` seconds, default 3). |
 | `orion bot` | Run the always-on **Slack bot**: a reply in a mapped channel becomes a comment on that project's latest report. Blocks until Ctrl-C. |
 
 **`orion bot` prerequisites:** `pip install orion[slack-bot]`, an enabled `[relay]` **and** `[bot]` in

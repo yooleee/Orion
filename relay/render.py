@@ -509,7 +509,10 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
 
 
 def render_project(
-    project_name: str, reports: list[dict], tz: ZoneInfo = _DISPLAY_TZ
+    project_name: str,
+    reports: list[dict],
+    tz: ZoneInfo = _DISPLAY_TZ,
+    checklist: list[dict] | None = None,
 ) -> str:
     """Render one project's report history, newest first.
 
@@ -518,19 +521,29 @@ def render_project(
         reports: The history() output for that project (may be empty).
         tz: The IANA zone each report's timestamp is rendered in (threaded down to
             _time_tag). Defaults to the module's Pacific constant.
+        checklist: The project's live checklist (get_checklist() output) or None. When
+            present and non-empty, a "Current checklist" block is rendered ABOVE the
+            history. Defaulted/last so existing callers are unaffected.
 
     Returns:
         A complete HTML page.
 
     Why:
         The middle view: pick a project, see its timeline of reports, click into one.
-        An empty list (an unknown project, or one that has never pushed) is a clean
-        empty-state, not a 404 — we cannot cheaply tell "never existed" from "no
-        reports yet", and both mean the same thing to a viewer.
+        It is ALSO the persistent home for the project's live checklist — the surface a
+        viewer keeps open to watch near-real-time edits tick over — so the checklist
+        renders above the timeline, and even when there are no reports yet (the
+        checklist is current state, independent of report history). An empty reports
+        list is a clean empty-state, not a 404 — we cannot cheaply tell "never existed"
+        from "no reports yet", and both mean the same thing to a viewer.
     """
     heading = f"<h1>{_esc(project_name)}</h1>"
+    # The live checklist sits above the history (or the empty-state); _render_checklist
+    # returns "" when the project has no checklist, which the join below drops.
+    checklist_html = _render_checklist(checklist)
     if not reports:
-        body = heading + "\n<p class='empty'>No reports for this project yet.</p>"
+        empty = "<p class='empty'>No reports for this project yet.</p>"
+        body = "\n".join(part for part in (heading, checklist_html, empty) if part)
         return _page(f"Orion — {project_name}", body)
 
     items = []
@@ -550,7 +563,8 @@ def render_project(
             f"<span class='meta'>{_esc(report['lane'])} · "
             f"{_esc(report['share_level'])} · {_esc(heft)}</span></li>"
         )
-    body = heading + "\n<ul class='list'>\n" + "\n".join(items) + "\n</ul>"
+    history_html = "<ul class='list'>\n" + "\n".join(items) + "\n</ul>"
+    body = "\n".join(part for part in (heading, checklist_html, history_html) if part)
     return _page(f"Orion — {project_name}", body)
 
 

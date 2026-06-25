@@ -19,6 +19,12 @@ primary_region = "sjc"   # pick one near you / your supervisors: `fly platform r
 [build]
   dockerfile = "Dockerfile"
 
+# Non-secret config. ORION_RELAY_PUBLIC_ORIGIN is the canonical public URL the dashboard is
+# reached at; the relay checks the comment form's Origin/Referer against it (CSRF), instead of
+# trusting the proxy-rewritten Host header. CHANGE this to match your own `app` name above.
+[env]
+  ORION_RELAY_PUBLIC_ORIGIN = "https://orion-relay-horizon-c.fly.dev"
+
 # Fly terminates HTTPS and forwards to the container's port 8787. The relay binds
 # 0.0.0.0:8787 (the Dockerfile entrypoint), so the fail-closed guard REQUIRES the
 # view secret on that non-loopback bind — a misconfigured deploy refuses to start.

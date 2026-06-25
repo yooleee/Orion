@@ -1431,32 +1431,53 @@ class _RelayHandler(BaseHTTPRequestHandler):
         """Return None if the request is same-origin, else a 403 reason string.
 
         Returns:
-            None when an Origin header is present and its host (netloc) equals the
-            request's Host header; otherwise a short reason — Origin missing, or
-            Origin not matching Host.
+            None when the request's origin — taken from the Origin header, or the
+            Referer header's origin when Origin is absent — matches the expected origin;
+            otherwise a short reason string.
 
         Why:
-            The comment POST is now authenticated by the session cookie, which the
-            browser AUTO-SENDS on every request to this origin — including one a
-            malicious third-party page triggers (classic CSRF). The Origin check is the
-            primary defense (SameSite=Lax on the cookie is a second layer). When a
-            canonical public origin is configured (the deployed HTTPS URL), we require
-            the Origin to equal it EXACTLY — scheme+host+port — rather than merely match
-            the Host header, which a client can set and a proxy rewrites (Codex's
-            don't-blind-trust-Host point). On a loopback dev relay with none configured,
-            we fall back to comparing the Origin's netloc against Host.
+            The comment POST is authenticated by the session cookie, which the browser
+            AUTO-SENDS on every request to this origin — including one a malicious
+            third-party page triggers (classic CSRF). Verifying the request's origin is
+            the primary defense (SameSite=Lax on the cookie is a second layer).
+
+            We check the Origin header FIRST, then fall back to the Referer header's
+            origin. The fallback exists because some browsers (notably Safari) OMIT
+            Origin on a SAME-origin form POST, so requiring Origin alone rejected
+            legitimate comments with a "CSRF" 403 — the bug this fixes. OWASP's CSRF
+            guidance is explicitly "verify Origin OR Referer": a cross-site attacker
+            cannot forge a Referer that points at our origin (the browser sets it from
+            the real page URL), and if BOTH headers are absent we still fail closed.
+
+            When a canonical public origin is configured (the deployed HTTPS URL), we
+            require an EXACT match — scheme+host+port — rather than trusting the Host
+            header, which a client can set and a proxy rewrites (Codex's
+            don't-blind-trust-Host point). Set ORION_RELAY_PUBLIC_ORIGIN on any deploy
+            behind a TLS proxy (e.g. Fly) so this check is deterministic. On a loopback
+            dev relay with none configured, we fall back to matching the origin's netloc
+            against the Host header.
         """
-        origin = self.headers.get("Origin")
-        if not origin:
-            return "missing Origin header"
+        # Prefer the Origin header. When it is absent, fall back to the Referer's
+        # origin: reduce the Referer (a full URL with a path) to scheme://netloc so both
+        # paths below compare the same shape. Both absent ⇒ fail closed.
+        candidate = self.headers.get("Origin")
+        if not candidate:
+            referer = self.headers.get("Referer")
+            if not referer:
+                return "missing Origin and Referer headers"
+            parsed = urllib.parse.urlparse(referer)
+            if not parsed.scheme or not parsed.netloc:
+                return "malformed Referer header"
+            candidate = f"{parsed.scheme}://{parsed.netloc}"
+
         if self.server.public_origin:
             # Exact canonical-origin match (trailing slash ignored). Nothing about the
             # request (Host, proxy headers) is trusted — only the configured value.
-            if origin.rstrip("/") != self.server.public_origin.rstrip("/"):
-                return "Origin does not match the configured public origin"
+            if candidate.rstrip("/") != self.server.public_origin.rstrip("/"):
+                return "origin does not match the configured public origin"
             return None
-        if urllib.parse.urlparse(origin).netloc != self.headers.get("Host", ""):
-            return "Origin does not match Host"
+        if urllib.parse.urlparse(candidate).netloc != self.headers.get("Host", ""):
+            return "origin does not match Host"
         return None
 
     def _read_raw_body(self) -> bytes | None:

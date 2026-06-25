@@ -27,6 +27,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import urllib.parse
 from datetime import datetime
@@ -187,6 +189,44 @@ _PAGE_JS = """
   }
 })();
 """.strip()
+
+
+def _csp_hash(content: str) -> str:
+    """Return the CSP hash-source token 'sha256-<b64>' for an inline block's bytes.
+
+    Args:
+        content: The EXACT text that appears between a <style>/<script> tag pair —
+            i.e. the _PAGE_CSS or _PAGE_JS constant. A hash-based CSP hashes the bytes
+            a browser finds between the tags, so this must be the same string _page()
+            emits, byte for byte (confirmed: the constants are .strip()ed and _page
+            inserts them with no surrounding whitespace).
+
+    Returns:
+        A CSP hash-source token like "sha256-47DEQpj8HBSa...", ready to drop into a
+        style-src/script-src directive (the caller wraps it in single quotes).
+
+    Why:
+        A hash-based CSP lets the dashboard's ONE inline <style> and ONE inline
+        <script> run without the blanket 'unsafe-inline' escape hatch: the policy
+        allowlists each block by the SHA-256 of its content. Deriving the hash HERE,
+        at import, from the SAME constant the markup renders means the policy and the
+        page can never drift — change the CSS/JS and the hash recomputes with it, so a
+        stale policy can never silently block the dashboard's own assets. SHA-256 is
+        the weakest digest CSP Level 3 accepts; the encoding is standard base64 (with
+        +/ and = padding), which is what the spec mandates — NOT the URL-safe variant
+        used for cookie values elsewhere in the relay.
+    """
+    digest = hashlib.sha256(content.encode("utf-8")).digest()
+    return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+
+# The CSP hash-source tokens for the two inline blocks _page() emits, computed once at
+# import from the same constants the markup uses. server.py imports these to build a
+# Content-Security-Policy that allowlists exactly this page's <style>/<script> and
+# nothing else. Exposed (no leading underscore) because they are part of render.py's
+# contract WITH server.py — the security boundary spans both modules.
+PAGE_CSS_HASH = _csp_hash(_PAGE_CSS)
+PAGE_JS_HASH = _csp_hash(_PAGE_JS)
 
 
 def _esc(value: object) -> str:

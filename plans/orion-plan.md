@@ -106,7 +106,9 @@ revoke, admin-token gated), and the `relay-user add` / `list` / `revoke` CLI. Th
 secrets join the existing `ORION_RELAY_VIEW_TOKEN` (now the bootstrap-admin login key, not HTTP Basic):
 `ORION_RELAY_SESSION_KEY`, `ORION_RELAY_USER_PEPPER`, `ORION_RELAY_ADMIN_TOKEN`. The increment ladder ahead:
 2 = contribute/write access, 3 = guest/demo mode, then subscriptions/routing. The C2 dashboard's HTTP-Basic
-read auth is superseded by the cookie login.
+read auth is superseded by the cookie login. **Follow-on hardening slice shipped (2026-06-24):** a hash-based
+Content-Security-Policy + standard security headers on every dashboard response (relay-local, no behavior
+change), resolving **KI-19**.
 
 
 **Framing.** Orion is **personal infrastructure + a portfolio piece, with eventual open-source** as

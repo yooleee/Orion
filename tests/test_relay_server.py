@@ -30,7 +30,7 @@ import pytest
 
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
-from relay.render import MAX_COMMENT_BODY_CHARS
+from relay.render import MAX_COMMENT_BODY_CHARS, PAGE_CSS_HASH, PAGE_JS_HASH
 from relay.server import (
     _SESSION_COOKIE_NAME,
     AuthConfig,
@@ -739,6 +739,85 @@ def test_secure_cookie_only_when_hosted(tmp_path):
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         _, headers, _ = _post_login(base_url, _VIEW)
         assert "secure" not in headers.get("Set-Cookie", "").lower()
+
+
+# --- Hardening: Content-Security-Policy + standard security response headers ----
+#
+# The dashboard is internet-facing and renders user-influenced text (comments, project
+# names), so every HTML response carries a hash-based CSP plus the standard hardening
+# headers. These drive a live relay and read the response headers directly (the _get
+# helper drops them), the same manual-request pattern the redirect test uses.
+
+
+def _get_headers(base_url, path, *, cookie=None):
+    """GET `path` and return (status, headers, text); redirects NOT followed.
+
+    Args:
+        base_url: the server's base URL.
+        path: the request path.
+        cookie: optional session-cookie value, sent as the dashboard credential.
+
+    Why:
+        The header-presence tests need the response HEADERS, which _get discards (it
+        returns only code + text). This mirrors _post_login's manual-request pattern:
+        build the request directly and return response.headers, with a no-redirect
+        opener so the gate's 303 -> /login surfaces here instead of being auto-followed.
+    """
+    headers = {}
+    if cookie is not None:
+        headers["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
+    req = urllib.request.Request(base_url + path, headers=headers, method="GET")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=5) as response:
+            return response.status, response.headers, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read().decode("utf-8")
+
+
+def test_dashboard_html_carries_csp_and_security_headers(tmp_path):
+    """A dashboard HTML GET sends the CSP (with BOTH inline hashes) and the standard headers.
+
+    Why this matters: the dashboard is internet-facing and renders attacker-influenceable
+    text, so a Content-Security-Policy and the standard hardening headers are the
+    defense-in-depth the surface warrants. The CSP must name BOTH inline-block hashes —
+    omit either and the policy would block the page's own CSS/JS — and lock down framing;
+    nosniff, Referrer-Policy, and the legacy X-Frame-Options must ride the HTML response.
+    """
+    # An open loopback relay (no view secret, no users) serves the index directly, so
+    # this is a plain HTML 200 — no login needed to inspect the response headers.
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, headers, _ = _get_headers(base_url, "/")
+        assert status == 200
+        csp = headers.get("Content-Security-Policy")
+        assert csp is not None
+        # The policy allowlists exactly the two inline blocks the page renders.
+        assert f"'{PAGE_CSS_HASH}'" in csp
+        assert f"'{PAGE_JS_HASH}'" in csp
+        assert "default-src 'self'" in csp
+        assert "frame-ancestors 'none'" in csp
+        assert headers.get("X-Content-Type-Options") == "nosniff"
+        assert headers.get("Referrer-Policy") == "no-referrer"
+        assert headers.get("X-Frame-Options") == "DENY"
+
+
+def test_hsts_only_when_hosted(tmp_path):
+    """Strict-Transport-Security is sent in a hosted HTTPS posture, absent on a loopback dev relay.
+
+    Why this matters: HSTS forbids plain http to the origin — essential once HTTPS-exposed,
+    but it would wedge a bare http loopback dev relay (the browser would then refuse to
+    connect over http). So it must track the hosted signal (secure_cookie), exactly like
+    the cookie's Secure attribute, not be hardcoded. Mirrors test_secure_cookie_only_when_hosted.
+    """
+    # Hosted posture (behind TLS): HSTS is sent.
+    hosted = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, secure_cookie=True)
+    with _running_relay(tmp_path, auth=hosted) as (base_url, _db):
+        _, headers, _ = _get_headers(base_url, "/")
+        assert "max-age=63072000" in headers.get("Strict-Transport-Security", "")
+    # Plain loopback dev (the default): no HSTS, so plain http to the relay still works.
+    with _running_relay(tmp_path) as (base_url, _db):
+        _, headers, _ = _get_headers(base_url, "/")
+        assert headers.get("Strict-Transport-Security") is None
 
 
 # --- C3: authZ scoping — a viewer sees only granted projects (decision A: 404) ---

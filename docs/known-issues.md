@@ -279,7 +279,19 @@ Deferred).
   is considered. Pairs with the deferred "static CSS asset" option (the dashboard-maturation pass
   chose inline + light JS over static assets).
 - **Severity:** low
-- **Status:** Deferred (by-design for now; revisit if/when a CSP is added).
+- **Status:** **Resolved (2026-06-24)** — the dashboard now sends a **hash-based**
+  Content-Security-Policy on every HTML response, plus the standard security headers. Rather than
+  the nonce-per-request or static-asset routes this entry sketched, the inline blocks are
+  allowlisted by the SHA-256 of their content: `relay/render.py` computes the hash of `_PAGE_CSS`
+  and `_PAGE_JS` at import (`PAGE_CSS_HASH` / `PAGE_JS_HASH`) from the SAME constants `_page()`
+  renders, and `relay/server.py` builds the policy (`default-src 'self'`; `style-src` / `script-src`
+  `'self'` + the matching hash; `base-uri 'none'`; `form-action 'self'`; `frame-ancestors 'none'`;
+  `object-src 'none'`) from them. Deriving the hash from the constant means the policy can never
+  drift from the markup (a render-side contract test pins this), so no `unsafe-inline` is needed and
+  the inline-asset choice (the C1 stance) is kept intact. Alongside the CSP: `X-Content-Type-Options:
+  nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` (HTML), and HSTS when
+  HTTPS-exposed. Verified eyes-on against the rendered page (styling and the relative-time JS both
+  run with no CSP violation).
 
 ## KI-20 — Delivered Slack/Discord messages still timestamp in UTC, dashboard now in Pacific
 

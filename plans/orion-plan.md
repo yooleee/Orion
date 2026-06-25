@@ -67,7 +67,7 @@
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
 
-**Horizon C — Two-way & hosted** *(C1–C2 shipped; C3 multi-party — Increment 1 built, in review)*
+**Horizon C — Two-way & hosted** *(C1–C2 shipped; C3 multi-party — Increment 1 shipped + deployed)*
 
 These converge into one horizon: bidirectional interaction (supervisors acting back) forces an
 always-on **listener**, which is what tips local-first → **hosted/hybrid**, which is where
@@ -76,7 +76,7 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 
 | Phase | Scope                                                                                                                                                                                          | Status            |
 | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | ✅ Deployed (2026-06-19) — Fly.io (Path B), HTTPS + Basic-auth, verified end to end. Hosting settled: Path B (managed/Cloudflare + E2E deferred). Detail: "Phase C1 status" + "Hosting decision" below. |
+| C1    | Web dashboard (read) + hosted/hybrid relay — collection stays local; delivery/presentation move hosted along the portable report/intake blob seam                                              | ✅ Deployed (2026-06-19) — Fly.io (Path B), HTTPS, verified end to end. (The dashboard's HTTP-Basic read auth was **superseded by C3's per-user cookie login**, 2026-06-25.) Hosting settled: Path B (managed/Cloudflare + E2E deferred). Detail: "Phase C1 status" + "Hosting decision" below. |
 | C2    | Bidirectional replies — supervisors comment back (dashboard first; native Discord/Slack threads as a richer add-on); brings inbound validation + authorization                                 | ✅ Built (2026-06-19) — two slices, C2a + C2b below (full inbound checklist; all stdlib + optional `slack-bolt`). Detail: "C2-bots status" below + [`docs/phase-c2-kickoff.md`](../docs/archive/phase-c2-kickoff.md), [`docs/slack-bot.md`](../docs/slack-bot.md). |
 | C2a | Dashboard comments + `orion comments` pull (Bearer GET, local watermark) | ✅ Built (2026-06-19) |
 | C2b | Native Slack bot (Socket Mode) → `POST /api/comments` → existing comment store | ✅ Built (2026-06-19) |
@@ -88,8 +88,8 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 **C3 status (Increment 1 — multi-party access, shipped + deployed 2026-06-25).** A deliberate decision to
 bring multi-party identity/access into the dashboard now, integrated from the start, rather than bolted on
 later. The driver is real near-term dogfooding: share a project's state with a helper or supervisor, control
-who sees which project, and a guest/showcase view for the portfolio. This moves C3 from "deferred / demand-
-gated" to **actively building, in small reviewed increments**. Settled with the user: auth is **per-user keys
+who sees which project, and a guest/showcase view for the portfolio. This moved C3 from "deferred / demand-
+gated" to **built in small reviewed increments** — Increment 1 is now shipped + deployed. Settled with the user: auth is **per-user keys
 + scopes** (server-minted high-entropy keys, no passwords, no OAuth, stdlib-only). A Codex `/second-opinion`
 hardened the design (independent secrets for session signing / key pepper / admin token, never derived from
 the view or ingest tokens; the signed cookie carries only id + version + expiry with role and scope re-read

@@ -49,6 +49,7 @@ def test_blank_secret_treated_as_missing(monkeypatch):
         get_required("ORION_TEST_SECRET")
 
 
+@pytest.mark.real_dotenv  # this test exercises the genuine python-dotenv loader
 def test_load_secrets_finds_env_next_to_config_from_any_cwd(tmp_path, monkeypatch):
     """load_secrets(config) loads the .env beside the config, regardless of CWD.
 
@@ -78,6 +79,7 @@ def test_load_secrets_finds_env_next_to_config_from_any_cwd(tmp_path, monkeypatc
         os.environ.pop(key, None)
 
 
+@pytest.mark.real_dotenv  # this test exercises the genuine python-dotenv loader
 def test_load_secrets_does_not_override_the_real_environment(tmp_path, monkeypatch):
     """A value already set in the environment wins over the .env file.
 

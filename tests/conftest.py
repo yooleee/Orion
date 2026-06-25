@@ -14,12 +14,140 @@
 #                  (`from conftest import _make_repo, ...`).
 # =============================================================================
 
+import os
+import socket
 import subprocess
 
 import pytest
 
 from orion import cli
 from orion.compose import _render_preview
+
+# =============================================================================
+# Test isolation: no real network, no real .env bleeding into the test process
+# -----------------------------------------------------------------------------
+# Two session/function-wide guards make the suite leak-proof BY CONSTRUCTION rather
+# than by every test remembering to mock its sender:
+#   1. _block_external_network — any non-loopback socket connect raises, so no test
+#      can ever transmit a real secret (a real webhook / Anthropic / relay call). The
+#      relay's own tests connect only to 127.0.0.1, which stays allowed.
+#   2. _isolate_secrets — neutralizes orion.secrets.load_dotenv so the real project
+#      .env (which python-dotenv would find by searching up from the CWD) never loads
+#      into os.environ, and scrubs any Orion/Anthropic secret already present. Tests
+#      set exactly the env they need via monkeypatch.setenv; the few that genuinely
+#      exercise real .env discovery opt out with @pytest.mark.real_dotenv.
+# Background: the real .env was bleeding into os.environ during tests (e.g. a leaked
+# ORION_RELAY_VIEW_TOKEN once broke an unrelated test). The network guard is the actual
+# security boundary; the env scrub is hygiene + test correctness.
+# =============================================================================
+
+# The secret env-var prefixes Orion uses. Any var with these prefixes is a credential
+# (API key, webhook URL, relay token) that must never be inherited from the real
+# environment into a test — tests set what they need explicitly.
+_SECRET_ENV_PREFIXES = ("ORION_", "ANTHROPIC_")
+
+_REAL_SOCKET_CONNECT = socket.socket.connect
+
+
+def _is_loopback_address(address) -> bool:
+    """True when a socket address targets loopback (always allowed in tests).
+
+    Args:
+        address: The address passed to socket.connect — a (host, port) tuple for
+            AF_INET/AF_INET6, or a str/other for AF_UNIX etc.
+
+    Returns:
+        True for loopback hosts (127.0.0.0/8, ::1, localhost) and non-IP addresses
+        (e.g. AF_UNIX paths, which never reach the external network); False otherwise.
+
+    Why:
+        The relay tests run a real ThreadingHTTPServer on 127.0.0.1 and connect to it,
+        so loopback must work. Anything else is a real external host — the thing we
+        block. Non-tuple addresses can't be an external TCP target, so we allow them
+        rather than crash on an unexpected shape.
+    """
+    if not isinstance(address, tuple) or not address:
+        return True
+    host = address[0]
+    if host in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
+        return True
+    return isinstance(host, str) and host.startswith("127.")
+
+
+def _loopback_only_connect(self, address):
+    """A socket.connect replacement that blocks any non-loopback target.
+
+    Why:
+        This is the structural security guarantee: even a future test that forgets to
+        mock its sender cannot transmit a real secret, because the connection to the
+        external host is refused before any bytes are sent. A clear OSError points the
+        author at the fix (mock the sender / HTTP client).
+    """
+    if _is_loopback_address(address):
+        return _REAL_SOCKET_CONNECT(self, address)
+    raise OSError(
+        f"Test network guard blocked an outbound connection to {address!r}. "
+        "Tests must not make real external calls — mock the sender or HTTP client."
+    )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _block_external_network():
+    """Block every non-loopback socket connection for the whole test session.
+
+    Why:
+        Makes leaking a real secret impossible by construction. urllib/http.client all
+        funnel through socket.connect, so patching it once covers every sender. The
+        full suite makes zero non-loopback connections (verified), so this changes no
+        behavior — it only fails closed if a real call is ever introduced.
+    """
+    socket.socket.connect = _loopback_only_connect
+    try:
+        yield
+    finally:
+        socket.socket.connect = _REAL_SOCKET_CONNECT
+
+
+@pytest.fixture(autouse=True)
+def _isolate_secrets(request, monkeypatch):
+    """Stop the real .env / environment secrets from reaching tests.
+
+    Args:
+        request: pytest's request, used to honor the `real_dotenv` opt-out marker.
+        monkeypatch: function-scoped, so every change is undone after each test.
+
+    Why:
+        orion.secrets.load_secrets calls python-dotenv's load_dotenv(), which searches
+        up from the CWD and finds the REAL project .env, loading its credentials into
+        os.environ for the rest of the process (load_dotenv mutates os.environ directly,
+        so it isn't auto-undone). We no-op that seam so a normal run never loads the real
+        .env, and we scrub any Orion/Anthropic secret already present so a value bled by
+        an earlier opted-out test (or exported in the shell) can't leak in either. Tests
+        that genuinely exercise real .env discovery (test_secrets.py) mark themselves
+        `real_dotenv` to keep the real loader.
+    """
+    # Scrub pre-existing secrets first (runs before env_and_mocks and the test body, so
+    # anything a test sets afterward still wins).
+    for key in list(os.environ):
+        if key.startswith(_SECRET_ENV_PREFIXES):
+            monkeypatch.delenv(key, raising=False)
+    # Neutralize the real .env load unless the test opted out.
+    if request.node.get_closest_marker("real_dotenv") is None:
+        monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+
+
+def pytest_configure(config):
+    """Register the `real_dotenv` marker (opt out of the load_dotenv no-op).
+
+    Why:
+        A handful of tests in test_secrets.py verify load_secrets' real .env discovery,
+        so they need the genuine python-dotenv loader. Declaring the marker here keeps
+        `pytest --strict-markers` clean and documents the escape hatch.
+    """
+    config.addinivalue_line(
+        "markers",
+        "real_dotenv: use the real python-dotenv loader (opt out of the conftest no-op).",
+    )
 
 
 def _run(repo, *args):

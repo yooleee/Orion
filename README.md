@@ -337,9 +337,26 @@ relay, which you can browse at `http://127.0.0.1:8787` (projects → history →
 push is **fail-soft** — a relay that is down or misconfigured never blocks or fails a delivered
 report. By default the relay binds **loopback only** (`127.0.0.1`), so the dashboard is for your
 own machine. To give a **supervisor** a real URL, you can **deploy it beyond loopback** (Docker or
-a reverse proxy, with dashboard read-auth + TLS) — see
+a reverse proxy, with TLS and per-user login) — see
 [**docs/deployment.md**](docs/deployment.md). For the local walkthrough, see
 [**docs/new-project-setup.md**](docs/new-project-setup.md).
+
+**Multi-party access (per-user login).** When the dashboard is shared, each viewer signs in with
+their own **access key** rather than a shared password. An admin provisions users with the
+`relay-user` CLI, which talks to the running relay:
+
+```bash
+orion relay-user add alex --role viewer --project my-app   # prints a one-time access key
+orion relay-user list                                       # who has access, and their scope
+orion relay-user revoke alex                                # cut off access immediately
+```
+
+Each user gets a role (`admin` sees everything and provisions; `viewer` is limited to the projects
+you grant) and a persistent, revocable login session. A `viewer` sees only their granted projects;
+anything else returns "not found", so they cannot even learn that other projects exist. This needs
+three extra secrets in the relay's `.env` (`ORION_RELAY_SESSION_KEY`, `ORION_RELAY_USER_PEPPER`,
+`ORION_RELAY_ADMIN_TOKEN`) and an `admin_token_env_var` in the `[relay]` table — see
+[**docs/deployment.md**](docs/deployment.md).
 
 ## Scheduling
 

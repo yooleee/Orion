@@ -14,6 +14,68 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## C3 — multi-party dashboard access, Increment 1 (2026-06-24 – 2026-06-25)
+
+Brings per-user identity and access control into the relay dashboard (the C3 multi-party
+"watershed"), integrated from the start rather than bolted on later. The driver is real
+dogfooding: share a project's state with a helper or supervisor, control who sees which
+project, and a guest/showcase view. Built in two stacked PRs (#39 access foundation, #40
+provisioning). Stdlib-only, no new dependencies. A Codex `/second-opinion` hardened the design.
+
+### Added
+
+- **Per-user login + sessions.** The dashboard is now gated by a per-user **login key** and a
+  signed, stateless **session cookie** (`GET`/`POST /login`, `GET /logout`), replacing the C2
+  shared-view HTTP Basic prompt. The cookie carries only an id, a version, and an expiry
+  (`HttpOnly; SameSite=Lax; Secure` when hosted); the user's role and project scope are re-read
+  from the database on every request, so a change applies immediately. Sessions persist across
+  restarts and expire server-side (`--session-days`, default 30).
+- **Roles + per-project read scope.** Two roles today: `admin` (sees all projects, provisions
+  users) and `viewer` (scoped). A viewer sees only granted projects on the index, and any project
+  or report outside their scope returns **404** so its existence stays hidden. Default-deny: a
+  viewer with no grants sees nothing.
+- **Stateless revocation.** Revoking a user deactivates them and bumps a `session_version` in one
+  step, so their key stops logging in and any cookie already in a browser dies on its next request,
+  with no server-side session store.
+- **Relay admin API.** `POST /api/users` (provision: mint a key once, store only its peppered
+  verifier, audit), `GET /api/users` (roster, no credential material), and `POST /api/users/revoke`,
+  all authenticated by the SEPARATE admin token. An append-only `relay_admin_audit` trail records
+  who provisioned or revoked whom.
+- **`relay-user add` / `list` / `revoke`** — the admin CLI over that API. `add` prints the new
+  user's access key **once** (it is never stored or retrievable later); `list` shows roles, status,
+  and scope (no credentials); `revoke` cuts off access immediately.
+- **Three independent relay secrets** (each its own `.env` variable, never derived from one
+  another or from the ingest/view tokens): `ORION_RELAY_SESSION_KEY` (cookie signing),
+  `ORION_RELAY_USER_PEPPER` (key verifier), `ORION_RELAY_ADMIN_TOKEN` (provisioning). An optional
+  `[relay].admin_token_env_var` config field names the last one.
+
+### Changed
+
+- **`ORION_RELAY_VIEW_TOKEN` is repurposed, not removed.** It is no longer an HTTP Basic password.
+  It is now the **legacy bootstrap-admin login key**, usable to log in only while no users have been
+  provisioned (or with an explicit `--allow-legacy-admin` opt-in). It still gates the dashboard and
+  still satisfies the fail-closed guard that a non-loopback bind must carry a read secret.
+- **`relay-serve` fails closed** when the dashboard is access-gated (a view token or an admin token
+  is set) but the session secrets are missing, rather than serving a login that could never work.
+
+### Tests
+
+- `pytest`: **505** (relay server + admin API, the cookie/crypto core, the `relay-user` CLI, and
+  config parsing). Verified eyes-on against a live relay: login → cookie → scoped view, logout,
+  tampered/expired/revoked cookie rejection, the full `relay-user` add → login → revoke lifecycle,
+  the ingest token rejected at `/api/users`, and no secret in any log line.
+
+### Notes
+
+- Hardening folded in from the Codex `/second-opinion`: independent secrets (bound blast radius),
+  trust the DB not the cookie (no privilege rides in a forgeable/stale cookie), a peppered key
+  verifier (a DB leak alone cannot test candidate keys), the gated/deprecated legacy admin, and a
+  canonical-`Origin` CSRF check (do not blind-trust `Host`). A slow KDF is intentionally not used:
+  the keys are server-minted and ≥256-bit random, so there is nothing to brute-force.
+- Increment-1 non-goals (named seams, not built): contributor/write access, a guest/demo role,
+  self-service signup, per-recipient delivery state, and upgrading the comment author to the
+  authenticated identity (KI-17).
+
 ## Horizon D — onboarding & visibility (2026-06-23 – 2026-06-24)
 
 Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon dogfood's #1 finding

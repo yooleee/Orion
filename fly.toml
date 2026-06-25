@@ -5,9 +5,12 @@
 # front of it. CHANGE `app` to your own globally-unique name before deploying.
 #
 # Secrets are NOT in this file — set them with `fly secrets set` (see
-# docs/deployment.md). The relay needs two:
-#   ORION_RELAY_TOKEN       — ingest Bearer token (must match your local [relay] config)
-#   ORION_RELAY_VIEW_TOKEN  — dashboard Basic-auth password (any username)
+# docs/deployment.md). The relay needs:
+#   ORION_RELAY_TOKEN        — ingest Bearer token (must match your local [relay] config)
+#   ORION_RELAY_VIEW_TOKEN   — bootstrap-admin login key + the non-loopback bind guard
+#   ORION_RELAY_SESSION_KEY  — signs the dashboard login session cookie
+#   ORION_RELAY_USER_PEPPER  — hashes stored login-key verifiers
+#   ORION_RELAY_ADMIN_TOKEN  — provisioning API (`relay-user`), independent of the ingest token
 # =============================================================================
 
 app = "orion-relay-horizon-c"

@@ -83,7 +83,11 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   shipped; `orion status` + setup polish next), then the reconciled local enhancements (incubator
   signal + lightweight audience-typed routing). **Native Slack/Discord bot deepening is a demand-gated
   chat-surface track** — a parallel surface to the dashboard, with channel features and a build/maintain
-  cost (Horizon E), not the immediate next. C3 (multi-party) and E2E stay deferred behind seams.
+  cost (Horizon E), not the immediate next. **C3 (multi-party) is now being built incrementally** (a
+  2026-06-25 re-sequencing): Increment 1 — dashboard-integrated identity and access (per-user login keys,
+  roles, per-project scope, sessions, the `relay-user` admin CLI) — is built and in review, driven by real
+  sharing/collaboration/showcase needs rather than a far-off product leap. The broader C3 product layer
+  (subscriptions, routing) and E2E stay deferred behind the same seams.
   The **discrete go-public push** (license, personal-reference scrub, public CI, final sweep) is
   consolidated in the **decision-gated Horizon P (Publish / OSS-launch)** — distinct from Horizon D's
   OSS-readiness *polish*, and triggered by the publish decision rather than by dependency.

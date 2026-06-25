@@ -31,8 +31,10 @@ orion comments myproject       # pull supervisor replies back to your machine
 | Command | What it does |
 |---|---|
 | `orion check` | Validate the config and send-readiness (`.env` secrets present). Read-only — sends nothing. |
+| `orion status` | Show which projects have **unreported activity** across the config. Read-only — sends nothing. |
 | `orion projects` | List every project defined in the config. |
 | `orion show <project>` | Show one project's resolved config (paths, share level, collectors, recipients). |
+| `orion add-project [name]` | Register a new project in `orion.toml` (**the only command that writes config**). Name defaults to the repo directory. `--recipient "Name:channel:ENV_VAR"` (repeatable), `--like <project>` to copy recipients, `--repo-path`, `--share-level`, `--collectors git,tasks,notes`, `--tasks-file`/`--notes-file`; `--print` to preview the stanza, `--yes` to skip confirmation. |
 | `orion baseline <project>` | Mark current state as already-reported **without sending** — so the next report covers only new activity (avoids dumping full history). |
 | `orion install-hook <project>` | Install a git hook so a push auto-reports. `--hook pre-push` (default) or `post-commit`; `--print` to review first, `--force` to overwrite. |
 | `orion graduate-idea "<idea>"` | Register a **graduated** incubator idea as a new project (delegates to `add-project`; name slugified from the title). `--force` to graduate a non-graduated idea, `--name` to override, `--incubator-file` to point at the index directly. |
@@ -46,6 +48,21 @@ orion comments myproject       # pull supervisor replies back to your machine
 
 **`orion bot` prerequisites:** `pip install orion[slack-bot]`, an enabled `[relay]` **and** `[bot]` in
 `orion.toml`, and the Slack tokens in `.env`. Full setup: [`docs/slack-bot.md`](slack-bot.md).
+
+## Dashboard user management (`relay-user`)
+
+Provision and manage who can log into the relay dashboard. These talk to a running relay's
+`/api/users` endpoint over HTTP, authenticated with the **separate** admin token
+(`admin_token_env_var` in `[relay]`, e.g. `ORION_RELAY_ADMIN_TOKEN` in `.env`) — never the
+ingest token. Full auth model: [`docs/dashboard-auth.md`](dashboard-auth.md).
+
+| Command | What it does |
+|---|---|
+| `orion relay-user add <name>` | Provision a user and print their access key **once** (it's never retrievable later, only revocable). `--role viewer` (default) or `--role admin`. |
+| `orion relay-user add <name> --role viewer --project a --project b` | A **viewer** scoped to specific projects (`--project` repeatable). A viewer with no projects sees nothing. |
+| `orion relay-user add <name> --role admin` | An **admin** sees **all** projects (present and future). The role does not grant user-provisioning — that stays gated on the admin token. |
+| `orion relay-user list` | List users with role, status (active/revoked), scope, and last login. Shows **no** credential material. |
+| `orion relay-user revoke <name>` | Revoke a user: deactivate their key and force-log-out any live session. |
 
 ## Handy flags
 

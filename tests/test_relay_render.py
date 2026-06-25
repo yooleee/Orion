@@ -20,8 +20,9 @@ from relay.render import (
     PAGE_CSS_HASH,
     PAGE_JS_HASH,
     _format_ts,
-    render_index,
+    _headline,
     render_not_found,
+    render_portfolio,
     render_project,
     render_report,
 )
@@ -58,18 +59,92 @@ def _report(**overrides):
 # --- content / structure ------------------------------------------------------
 
 
-def test_index_lists_projects_with_links():
-    """The index shows each project name and links to its project page.
+def _pcard(**overrides):
+    """A portfolio-row dict (latest_report_per_project's shape) with defaults, overridable.
+
+    Why:
+        render_portfolio reads five fields per project; defaulting them keeps each test to
+        the one field it exercises (e.g. inject _XSS into just latest_body) instead of
+        restating the whole dict (DRY) — the same pattern as _report/_comment below.
+    """
+    row = {
+        "project": "demo",
+        "report_count": 3,
+        "latest_generated_at": "2026-06-18T00:00:00+00:00",
+        "latest_report_id": 1,
+        "latest_body": "Shipped the seam.",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_portfolio_lists_projects_with_links():
+    """The portfolio home shows each project name and links to its project page.
 
     Why this matters: the home view's whole job is to be the jump-off point —
     the project name must appear and its link must point at /project/<name>.
     """
-    html = render_index(
-        [{"project": "demo", "report_count": 3, "latest_generated_at": "2026-06-18T00:00:00+00:00"}]
-    )
+    html = render_portfolio([_pcard(project="demo", report_count=3)])
     assert "demo" in html
     assert 'href="/project/demo"' in html
     assert "3 report(s)" in html
+
+
+def test_portfolio_shows_latest_report_headline():
+    """Each card shows the first line of its latest report's body as a headline.
+
+    Why this matters: the headline is what makes the home a glanceable showcase — a
+    family member should read "what's happening" per project without clicking in. We use
+    only the report's OWN first line (no invented text).
+    """
+    html = render_portfolio([_pcard(latest_body="Deployed the dashboard.\nmore detail here")])
+    assert "Deployed the dashboard." in html
+    assert "more detail here" not in html  # only the FIRST line becomes the headline
+
+
+def test_portfolio_headline_truncates_a_long_first_line():
+    """A first line longer than the cap is truncated with an ellipsis.
+
+    Why this matters: a card must stay roughly one line to remain scannable; an overlong
+    first line is cut rather than blowing out the layout.
+    """
+    long_line = "x" * 250
+    html = render_portfolio([_pcard(latest_body=long_line)])
+    assert "…" in html  # truncation marker present
+    assert ("x" * 250) not in html  # the full overlong line never renders
+
+
+def test_portfolio_headline_is_escaped():
+    """A malicious latest-report body is escaped in the card headline (stored-XSS guard).
+
+    Why this matters: the headline is the report's OWN body text, which is
+    attacker-influenceable (a commit message can contain "<script>"). It must render as
+    inert text, exactly like every other dynamic value on the dashboard.
+    """
+    html = render_portfolio([_pcard(latest_body=_XSS)])
+    assert _XSS not in html  # never appears as a live tag
+    assert "&lt;script&gt;" in html
+
+
+def test_portfolio_omits_headline_when_body_is_empty():
+    """A card whose latest body has no usable line renders no headline element.
+
+    Why this matters: the honest fallback is to drop the headline, not show a blank or
+    placeholder line — a report with an empty body simply has no one-liner to show.
+    """
+    html = render_portfolio([_pcard(latest_body="   \n  \n")])
+    assert "class='headline'" not in html  # the headline paragraph is omitted entirely
+
+
+def test_portfolio_wraps_last_activity_in_a_time_tag():
+    """Each card's last-activity time is a <time datetime> element (for the relative-time JS).
+
+    Why this matters: the home shows "2 days ago" via the inline enhancement, which only
+    applies to <time datetime> nodes — so the card must emit one (an upgrade over the old
+    index's raw timestamp string).
+    """
+    html = render_portfolio([_pcard(latest_generated_at="2026-06-18T00:00:00+00:00")])
+    assert '<time datetime="2026-06-18T00:00:00+00:00">' in html
 
 
 def test_project_lists_reports_linking_to_each_report():
@@ -114,13 +189,13 @@ def test_report_without_sections_renders_the_flat_body():
 # --- empty states -------------------------------------------------------------
 
 
-def test_index_empty_state():
-    """An index with no projects renders a friendly empty-state, not a bare page.
+def test_portfolio_empty_state():
+    """A portfolio with no projects renders a friendly empty-state, not a bare page.
 
     Why this matters: a fresh relay (nothing pushed yet) should explain itself
     rather than look broken.
     """
-    html = render_index([])
+    html = render_portfolio([])
     assert "No reports yet" in html
 
 
@@ -172,18 +247,45 @@ def test_report_participant_name_is_escaped():
     assert "&lt;script&gt;" in html
 
 
-def test_index_project_name_is_escaped():
-    """A malicious project name is escaped in the index (text AND its href).
+def test_portfolio_project_name_is_escaped():
+    """A malicious project name is escaped in the portfolio (text AND its href).
 
     Why this matters: the project name appears both as link text and inside the
     href; both must be safe. The percent-encoded href must not contain a raw "<",
     and the visible text must be escaped.
     """
-    html = render_index(
-        [{"project": _XSS, "report_count": 1, "latest_generated_at": "2026-06-18T00:00:00+00:00"}]
-    )
+    html = render_portfolio([_pcard(project=_XSS, report_count=1)])
     assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
+
+
+def test_headline_takes_first_non_empty_line():
+    """_headline skips leading blank lines and returns the first line with content.
+
+    Why this matters: a report body may start with blank lines; the headline should be the
+    first MEANINGFUL line, stripped, not an empty string from a leading newline.
+    """
+    assert _headline("\n  \nReal first line\nsecond") == "Real first line"
+
+
+def test_headline_empty_body_returns_empty_string():
+    """_headline on a body with no content returns "" so the caller omits the headline.
+
+    Why this matters: the omit-the-line fallback depends on "" signalling "nothing to
+    show" — an all-whitespace body must collapse to the empty string, not a blank line.
+    """
+    assert _headline("   \n\n  ") == ""
+
+
+def test_headline_truncates_only_past_the_limit():
+    """_headline truncates with an ellipsis past the cap, but leaves a boundary-length line whole.
+
+    Why this matters: the truncation must be off-by-one-correct — a line EXACTLY at the cap
+    is shown in full (no ellipsis), and only a longer line is cut. Pins the boundary.
+    """
+    exact = "a" * 10
+    assert _headline(exact, limit=10) == exact  # exactly at the cap: untouched
+    assert _headline("a" * 11, limit=10) == "a" * 10 + "…"  # one over: truncated
 
 
 def test_not_found_message_is_escaped():

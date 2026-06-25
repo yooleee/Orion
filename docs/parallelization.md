@@ -13,8 +13,9 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-24 (after Horizons A–D shipped; D follow-ons + Horizon E + deferred C-track
-ahead). Excludes Horizon P, which is decision-gated launch work._
+_Last synced: 2026-06-25 (after the dashboard CSP/headers hardening and **E2 Inc 1 — portfolio
+overview** shipped; E2 ladder + D follow-ons + deferred C-track ahead). Excludes Horizon P, which is
+decision-gated launch work._
 
 ## Remaining buildable inventory + file footprint
 
@@ -24,13 +25,17 @@ ahead). Excludes Horizon P, which is decision-gated launch work._
   C2d reply-targeting (`bot/`; uses existing `relay/server` `report_id`); C3 multi-party identity
   (broad: `config` participant graph, `report.py` author field / KI-17, `relay/` auth+identity, `state`).
 - **Horizon E:** E1 light planning layer (`state` new tables, `config`, a planning module, `cli`,
-  `relay/render`); E2 dashboard meta-layer (`relay/` render/store/server; builds on D4 + cross-project);
-  E3 enriched chat bots (`bot/`); E4 cross-project coordination (broad); E5 read-write dashboard
-  (`relay/` write paths + auth — the watershed).
+  `relay/render`); **E2 dashboard-visibility track — now building incrementally:** Inc 1 portfolio
+  overview ✅ shipped (purely `relay/` render+store+server — the clean relay-only seam); Inc 2 surface
+  the to-do/milestone signal **spans the relay⟂CLI seam** (local `collectors/` + `report.serialize_blob`
+  blob field + `relay/store` column + `relay/render`) — a vertical slice through the whole pipeline, not
+  a relay-only change; Inc 3 forward-looking layer **≡ E1 ≡ B5** (forward-state). E3 enriched chat bots
+  (`bot/`); E4 cross-project coordination (broad); E5 read-write dashboard (`relay/` write paths + auth —
+  the watershed).
 - **Independent KIs (small):** KI-5 compose unknown-channel raise (`compose.py`, keep in sync with
-  `cli._sender_for`); KI-8 vestigial state cleanup (`state.py` + `report.py` migration); KI-19 dashboard
-  CSP/nonce (`relay/render.py`). KI-4 is an eval experiment (not code). KI-6/7/10/11/14/16 are
-  by-design "build only on demand."
+  `cli._sender_for`); KI-8 vestigial state cleanup (`state.py` + `report.py` migration). (KI-19 dashboard
+  CSP ✅ resolved 2026-06-24 — hash-based CSP + headers.) KI-4 is an eval experiment (not code).
+  KI-6/7/10/11/14/16 are by-design "build only on demand."
 - **B5 scheduling layer / KI-13:** deferred → converges with E1 (both need Orion's own forward state).
 
 ## The two structural facts that drive everything
@@ -49,12 +54,17 @@ ahead). Excludes Horizon P, which is decision-gated launch work._
 - **C2c → C2d** — reply-targeting needs a bot to exist.
 - **E1 ≡ B5** — both need "Orion's own forward state"; build together, not as two parallel tracks.
 - **E2 → D4 (done) + cross-project data**; **E5 → C3** (write paths + auth).
+- **E2 Inc 1 (portfolio overview) was relay-only** (Tier-1, the clean seam — shipped). **E2 Inc 2
+  (checklist signal) is NOT** — it is a vertical slice spanning local `collectors/` → blob → `relay/`
+  store+render, so it serializes against the `report.serialize_blob` contract and the relay schema; build
+  it as one coordinated slice, not a relay-only change. **E2 Inc 3 ≡ E1 ≡ B5** (Tier 3, forward-state).
 
 ## Three tiers of parallelizability
 
 - **Tier 1 — safe to parallelize now (independent, ~no file overlap):** the relay-track vs CLI-track
   split; the three D follow-ons (mutually file-disjoint — only `graduate-idea` touches `cli.py`);
-  independent KI fixes (KI-5, KI-8, KI-19, KI-20).
+  independent KI fixes (KI-5, KI-8). (E2 Inc 1 portfolio overview was a clean Tier-1 relay-only slice —
+  shipped.)
 - **Tier 2 — parallel *within* a phase (intra-phase fan-out):** module + its unit tests by one agent
   while another drafts docs (the cli/config wiring is the serial tail); multi-file sweeps by file;
   read-only fan-out (exploration, multi-dimension review, adversarial verification) is always safe.

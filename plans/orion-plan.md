@@ -135,7 +135,7 @@ an inheritance mechanism); relay-dashboard timezone configurable via `relay-serv
 (KI-20 follow-up). The last two were built in parallel via worktree-isolated agents (file-disjoint —
 see [docs/parallelization.md](../docs/parallelization.md)).
 
-**Horizon E — Coordination & visibility hub** *(long-range, aspirational/unvalidated; seams kept clean, not built)*
+**Horizon E — Coordination & visibility hub** *(mostly long-range; the **dashboard-visibility track is now validated and being built incrementally** — see E2)*
 
 Surface-plural, **two distinct tracks**: the **dashboard** is the primary structured-visibility
 surface; **Slack/Discord** are a parallel interaction surface that leverages chat-native channel
@@ -145,7 +145,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
 | E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range |
-| E2 | dashboard | Dashboard as meta-layer surface (idea #5) — portfolio map + idea pipeline + cross-project visibility | 🔭 Long-range |
+| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview home) shipped 2026-06-25.** Validated by the founding family-visibility intent + personal use (not the dogfood, which tested reporting). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
 | E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
@@ -153,6 +153,28 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 C3 (multi-party identity) is the prerequisite seam under much of Horizon E. The discipline holds: keep
 the **seams** clean (the portable summary+metadata blob, explicitly-named participants, the
 provider-agnostic summarizer) so each horizon stays additive rather than a rewrite.
+
+**E2 dashboard-visibility track — validated + incremental ladder (decided 2026-06-25).** The
+post-hardening planning juncture surfaced that the dashboard's value isn't just progress reports: the
+user wants it as the **one place to see all projects/progress at once, viewable by family** who
+comment and give direction — the project's *founding intent*, now homed on the dashboard because
+family isn't on Slack/Discord. That is real, present demand (personal use → which is exactly what
+makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "aspirational" to
+**built in small reviewed increments**, the same idiom C3 followed. The ladder:
+- **Inc 1 — portfolio overview home (✅ shipped 2026-06-25).** `GET /` is a cross-project card view
+  (name → history, latest-report headline, count, relative last-activity), reusing existing relay
+  data; relay-local, additive, CSP-safe. Family access uses **existing scoped viewer logins** (no
+  guest-view build).
+- **Inc 2 — surface the to-do/milestone checklist signal.** A full-pipeline change (collector → blob
+  field → store column → render), since structured item data is flattened to prose today. Depth
+  target: **mirror the current checklist** (done + open items from the existing file; stays
+  *reframing, not originating*).
+- **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
+  the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
+- **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
+  family today), and non-project/non-code items (e.g. applications) via `intake` or a new collector
+  (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is **parked** — secondary to the
+  dashboard. **Function before looks:** a dedicated dashboard *aesthetic* pass is its own later slice.
 
 **Horizon P — Publish / OSS-launch** *(decision-gated, order-flexible — triggered when going public)*
 

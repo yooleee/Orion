@@ -1217,6 +1217,7 @@ def _post_comment(
     body="Nice work.",
     cookie=None,
     origin="__match__",
+    referer=None,
 ):
     """POST a comment form and return (status, headers, text), without following 303.
 
@@ -1231,6 +1232,9 @@ def _post_comment(
             server's own base URL, so its host matches the request Host (a same-origin
             request). None omits the header; any other string is sent verbatim to
             exercise a cross-origin rejection.
+        referer: the Referer header. None omits it (the default). "__match__" sends a
+            Referer under the server's own base URL; any other string is sent verbatim.
+            Used to exercise the Origin-absent / Referer-fallback CSRF path.
 
     Why:
         Centralizes the form-POST plumbing (urlencoding, the session cookie, Origin, and
@@ -1248,6 +1252,11 @@ def _post_comment(
         headers["Origin"] = base_url
     elif origin is not None:
         headers["Origin"] = origin
+    if referer == "__match__":
+        # A same-origin Referer: a real page URL under our own origin (with a path).
+        headers["Referer"] = base_url + f"/report/{report_id}"
+    elif referer is not None:
+        headers["Referer"] = referer
     req = urllib.request.Request(
         base_url + f"/report/{report_id}/comment",
         data=data,
@@ -1325,19 +1334,66 @@ def test_comment_cross_origin_is_403_and_stores_nothing(tmp_path):
         assert comments_for(conn, report_id) == []
 
 
-def test_comment_missing_origin_is_403(tmp_path):
-    """A logged-in comment POST with NO Origin header is rejected 403.
+def test_comment_missing_origin_and_referer_is_403(tmp_path):
+    """A logged-in comment POST with NEITHER Origin nor Referer is rejected 403.
 
-    Why this matters: the CSRF guard requires Origin to be present AND matching — a
-    request that omits it entirely (as some forged cross-site flows do) must fail
-    closed, not be treated as same-origin by default. A valid session isolates the Origin
+    Why this matters: the CSRF guard verifies Origin OR Referer. A request that omits
+    BOTH gives us nothing to check against our origin, so it must fail closed rather
+    than be treated as same-origin by default. A valid session isolates the origin
     check as the thing under test.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         report_id = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(base_url, report_id, cookie=cookie, origin=None)
+        status, _, _ = _post_comment(
+            base_url, report_id, cookie=cookie, origin=None, referer=None
+        )
         assert status == 403
+
+
+def test_comment_missing_origin_with_matching_referer_is_allowed(tmp_path):
+    """A same-origin comment that omits Origin but sends a matching Referer succeeds.
+
+    Why this matters: this is the BUG FIX. Some browsers (notably Safari) omit the
+    Origin header on a same-origin form POST, so requiring Origin alone rejected a
+    legitimate logged-in admin's comment with a "CSRF" 403. The Referer fallback accepts
+    the request when the Referer's origin matches ours — a cross-site attacker cannot
+    forge that. We assert the comment is accepted (303) and actually stored.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, headers, _ = _post_comment(
+            base_url, report_id, cookie=cookie, body="Looks great!",
+            origin=None, referer="__match__",
+        )
+        assert status == 303
+        assert headers.get("Location") == f"/report/{report_id}"
+
+        conn = open_relay_store(db)
+        stored = comments_for(conn, report_id)
+        assert len(stored) == 1
+        assert stored[0]["body"] == "Looks great!"
+
+
+def test_comment_missing_origin_with_foreign_referer_is_403(tmp_path):
+    """A comment that omits Origin and sends a FOREIGN Referer is rejected 403.
+
+    Why this matters: the Referer fallback must not become a CSRF hole. A request whose
+    Referer points at someone else's origin is exactly the cross-site case the guard
+    exists to stop, so it stays a 403 even with a valid session and nothing is stored.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, _, _ = _post_comment(
+            base_url, report_id, cookie=cookie,
+            origin=None, referer="https://evil.example/report/1",
+        )
+        assert status == 403
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
 
 
 def test_comment_on_missing_report_is_404(tmp_path):

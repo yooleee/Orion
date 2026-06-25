@@ -66,6 +66,17 @@ The ingest token must match what your **local** `[relay].token_env_var` resolves
 admin token is named by your local `[relay].admin_token_env_var`. Keep all five independent
 (do not reuse one value for another) — they bound separate blast radii and rotate separately.
 
+**Also set `ORION_RELAY_PUBLIC_ORIGIN` when you deploy behind a TLS proxy (Fly, Caddy, any
+reverse proxy).** This is NOT a secret. It is the canonical public URL the dashboard is
+reached at, for example `https://orion-relay-horizon-c.fly.dev`. The relay uses it for the
+comment form's CSRF origin check: with it set, the check compares the browser's Origin (or
+Referer) against this exact value, instead of falling back to the request's `Host` header,
+which a proxy can rewrite. Because it is not a secret it can go straight in `fly.toml` under
+`[env]` (it already is in this repo's `fly.toml`), or be passed with `-e` on `docker run`.
+If you leave it unset, comments still work on a direct loopback bind, but a proxied deploy is
+more robust with it set. (The comment CSRF guard also accepts a same-origin `Referer` when a
+browser omits `Origin`, so omitting this no longer breaks comments on browsers like Safari.)
+
 ### Provision the first users
 
 After the relay is up and reachable, create accounts from your local machine (the

@@ -14,8 +14,9 @@
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
 _Last synced: 2026-06-25 (after the dashboard CSP/headers hardening, **E2 Inc 1 — portfolio
-overview** shipped, and **E2 Inc 2 — live checklist signal** built + locally verified [PR pending];
-E2 Inc 3 + D follow-ons + deferred C-track ahead). Excludes Horizon P, which is
+overview** shipped, **E2 Inc 2 — live checklist signal** shipped [PR #47], and **E2 Inc 2.5 —
+near-real-time checklist push** built + locally verified [PR pending]; E2 Inc 3 + D follow-ons +
+deferred C-track ahead). Excludes Horizon P, which is
 decision-gated launch work._
 
 ## Remaining buildable inventory + file footprint
@@ -28,10 +29,13 @@ decision-gated launch work._
 - **Horizon E:** E1 light planning layer (`state` new tables, `config`, a planning module, `cli`,
   `relay/render`); **E2 dashboard-visibility track — now building incrementally:** Inc 1 portfolio
   overview ✅ shipped (purely `relay/` render+store+server — the clean relay-only seam); Inc 2 surface
-  the to-do/milestone signal ✅ **built (PR pending)** — the predicted **relay⟂CLI vertical slice** held
+  the to-do/milestone signal ✅ **shipped (PR #47)** — the predicted **relay⟂CLI vertical slice** held
   (local `collectors/tasks.snapshot` + `report.serialize_blob` blob field + `relay/store` new
   `relay_project_checklists` **table** [project-level live, not a per-report column → no DB migration] +
-  `relay/server` validation/upsert + `relay/render` badge+block); Inc 3 forward-looking layer **≡ E1 ≡
+  `relay/server` validation/upsert + `relay/render` badge+block); Inc 2.5 near-real-time checklist push
+  ✅ **built (PR pending)** — same relay⟂CLI seam (a `POST /checklist` endpoint + `delivery/relay`
+  client + a `cli` `checklist-push`/`--watch` poll command + a project-page render), all additive on
+  Inc 2's store/helpers; Inc 3 forward-looking layer **≡ E1 ≡
   B5** (forward-state). E3 enriched chat bots
   (`bot/`); E4 cross-project coordination (broad); E5 read-write dashboard (`relay/` write paths + auth —
   the watershed).

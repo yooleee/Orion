@@ -396,6 +396,111 @@ def test_malformed_checklist_is_400_and_stores_nothing(tmp_path):
         assert get_checklist(conn, "demo") is None  # and no checklist row either
 
 
+# --- POST /checklist: the dedicated checklist-only push (near-real-time) ----------
+# This endpoint upserts a project's live checklist WITHOUT a report, so an edited
+# tasks_file can reach the dashboard between reports. It reuses the ingest Bearer token.
+
+
+def _checklist_body(project="demo", items=None):
+    """Serialize a {project, checklist} push body. items defaults to one of each state."""
+    if items is None:
+        items = [{"text": "Wire it", "done": True}, {"text": "Render it", "done": False}]
+    return json.dumps({"project": project, "checklist": items}).encode("utf-8")
+
+
+def test_checklist_push_upserts_without_a_report(tmp_path):
+    """A valid POST /checklist stores the project's checklist and returns 200, no report.
+
+    Why this matters: this is the core of the near-real-time path — the checklist
+    reaches the dashboard with NO report row created. We push, assert 200, and confirm
+    get_checklist returns the items while the reports table stays empty.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        status, body = _post(base_url, _checklist_body(), path="/checklist")
+        assert status == 200
+        assert json.loads(body) == {"updated": "demo", "items": 2}
+
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") == [
+            {"text": "Wire it", "done": True},
+            {"text": "Render it", "done": False},
+        ]
+        assert list_projects(conn) == []  # no report row was created
+
+
+def test_checklist_push_replaces_prior_checklist(tmp_path):
+    """A second /checklist push replaces the project's checklist (current state).
+
+    Why this matters: the live checklist is current state, so each push overwrites the
+    last. We push, then push a different list, and assert only the second survives.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _post(base_url, _checklist_body(items=[{"text": "Old", "done": False}]), path="/checklist")
+        _post(base_url, _checklist_body(items=[{"text": "New", "done": True}]), path="/checklist")
+
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") == [{"text": "New", "done": True}]
+
+
+def test_checklist_push_malformed_is_400_and_stores_nothing(tmp_path):
+    """A malformed checklist item (non-bool 'done') is 400 and stores nothing.
+
+    Why this matters: /checklist is an untrusted surface; a bad payload must be a clean
+    400 at validation, never a later store/render crash.
+    """
+    bad = _checklist_body(items=[{"text": "x", "done": "yes"}])
+    with _running_relay(tmp_path) as (base_url, db):
+        status, body = _post(base_url, bad, path="/checklist")
+        assert status == 400
+        assert "checklist" in json.loads(body)["error"]
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") is None
+
+
+def test_checklist_push_missing_project_is_400(tmp_path):
+    """A /checklist push with no project field is rejected 400.
+
+    Why this matters: project is the upsert key; without it there is nothing to key the
+    checklist on, so the request is invalid by contract.
+    """
+    body = json.dumps({"checklist": [{"text": "x", "done": False}]}).encode("utf-8")
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, resp = _post(base_url, body, path="/checklist")
+        assert status == 400
+        assert "project" in json.loads(resp)["error"]
+
+
+def test_checklist_push_wrong_token_is_401(tmp_path):
+    """A /checklist push with the wrong Bearer token is 401 and stores nothing.
+
+    Why this matters: the endpoint reuses the ingest credential, so the same auth gate
+    applies — an unauthenticated push must not write a checklist.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        status, _ = _post(base_url, _checklist_body(), token="wrong", path="/checklist")
+        assert status == 401
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") is None
+
+
+def test_push_checklist_client_round_trips_through_the_relay(tmp_path):
+    """The push_checklist CLIENT posts a checklist the relay accepts and stores.
+
+    Why this matters: this pins the client+server contract end to end — the exact call
+    local Orion makes (delivery.relay.push_checklist) reaches /checklist, authenticates,
+    and lands in the store as the live checklist. If the client's path/payload/auth ever
+    drift from the endpoint, this breaks.
+    """
+    from orion.delivery.relay import push_checklist
+
+    items = [{"text": "Ship it", "done": True}, {"text": "Polish", "done": False}]
+    with _running_relay(tmp_path) as (base_url, db):
+        # base_url is the relay root; the client derives /checklist via urljoin.
+        push_checklist(base_url, "demo", items, _TOKEN)
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") == items
+
+
 def test_wrong_token_is_401_invalid_and_stores_nothing(tmp_path):
     """A valid body with the WRONG token is rejected 401 ("invalid token"), not stored.
 
@@ -544,6 +649,24 @@ def test_dashboard_index_then_project_then_report(tmp_path):
         assert code == 200
         assert "Code activity" in report_html
         assert "Shipped the seam." in report_html
+
+
+def test_project_page_shows_the_live_checklist(tmp_path):
+    """A checklist pushed via /checklist appears on the project page (the watch surface).
+
+    Why this matters: this pins the CP2 end-to-end path — a near-real-time checklist
+    push lands in the store and the project page renders it, even though no report-page
+    visit is needed. We push a checklist (no report), GET /project/demo, and assert the
+    block and an item render.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, _ = _post(base_url, _checklist_body(), path="/checklist")
+        assert status == 200
+
+        code, project_html = _get(base_url, "/project/demo")
+        assert code == 200
+        assert "Current checklist" in project_html
+        assert "Wire it" in project_html  # an item from _checklist_body's default
 
 
 def test_dashboard_unknown_report_id_is_404(tmp_path):

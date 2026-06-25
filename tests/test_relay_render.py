@@ -291,6 +291,62 @@ def test_project_empty_state():
     assert "No reports for this project yet" in html
 
 
+def test_project_renders_live_checklist_block():
+    """The project page shows the live checklist block (the near-real-time watch surface).
+
+    Why this matters: the project page is the persistent home a viewer keeps open to
+    watch checklist edits land. We pass the get_checklist() shape and assert the block,
+    its count, and both items render with their done/open state.
+    """
+    checklist = [
+        {"text": "Wire it", "done": True},
+        {"text": "Render it", "done": False},
+    ]
+    html = render_project(
+        "demo", [_report(id=7)], checklist=checklist
+    )
+    assert "Current checklist" in html
+    assert "1/2 done" in html
+    assert "Wire it" in html
+    assert "Render it" in html
+
+
+def test_project_shows_checklist_even_with_no_reports():
+    """The checklist block renders on a project page that has no reports yet.
+
+    Why this matters: the live checklist is current state, independent of report
+    history. A project being watched before its first report must still show its
+    checklist (and the empty-state note for the timeline below it).
+    """
+    html = render_project("demo", [], checklist=[{"text": "Plan", "done": False}])
+    assert "Current checklist" in html
+    assert "Plan" in html
+    assert "No reports for this project yet" in html  # timeline empty-state still shown
+
+
+def test_project_omits_checklist_when_none_or_empty():
+    """No checklist block renders when the project has none (None) or it is empty.
+
+    Why this matters: the block is additive — a project without the feature must look
+    exactly as before, with no stray "Current checklist" heading.
+    """
+    assert "Current checklist" not in render_project("demo", [_report()], checklist=None)
+    assert "Current checklist" not in render_project("demo", [_report()], checklist=[])
+    # And the default call (no checklist arg) is unaffected — back-compat.
+    assert "Current checklist" not in render_project("demo", [_report()])
+
+
+def test_project_checklist_item_text_is_escaped():
+    """A checklist item's text is HTML-escaped on the project page (XSS guard).
+
+    Why this matters: checklist items are user text reaching a new surface; a task
+    named "<script>..." must render inert here exactly as on the report page.
+    """
+    html = render_project("demo", [_report()], checklist=[{"text": _XSS, "done": False}])
+    assert "&lt;script&gt;" in html
+    assert "<script>alert" not in html
+
+
 # --- XSS: every dynamic value must be escaped ---------------------------------
 
 

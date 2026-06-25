@@ -168,8 +168,8 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   (name → history, latest-report headline, count, relative last-activity), reusing existing relay
   data; relay-local, additive, CSP-safe. Family access uses **existing scoped viewer logins** (no
   guest-view build).
-- **Inc 2 — surface the to-do/milestone checklist signal (✅ BUILT + locally verified 2026-06-25; PR
-  pending).** A full-pipeline change (collector → blob field → store table → render), since structured
+- **Inc 2 — surface the to-do/milestone checklist signal (✅ SHIPPED 2026-06-25, PR #47 merged).**
+  A full-pipeline change (collector → blob field → store table → render), since structured
   item data is flattened to prose today. Depth target met: **mirror the current checklist** (done + open
   items from the existing file; stays *reframing, not originating*). **Decisions taken this session
   (override the kickoff's default-leans):** (1) a **project-level LIVE checklist** — the relay holds one
@@ -179,10 +179,18 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   block** (CSP-safe, escaped). The full checklist is captured by a new `tasks.snapshot()` that reads the
   same file *independently* of the retrospective `collect()` (so the "newly completed" report behavior is
   untouched) and rides on `full_blob` only (the relay payload), redacted per item. **Known limitation
-  (honest):** it updates on the **report push**, not the instant `tasks_file` changes — a no-activity run
-  pushes nothing. A dedicated checklist-only push (CLI command + relay endpoint) is the clean additive
-  seam left for later. Eyes-on confirmed badge + done/open block + escaping + CSP against a local relay;
-  live-Fly confirmation follows merge + deploy.
+  (honest):** it updated on the **report push**, not the instant `tasks_file` changes — addressed by
+  Inc 2.5 below. Eyes-on confirmed badge + done/open block + escaping + CSP against a local relay.
+- **Inc 2.5 — near-real-time checklist edit tracking (✅ BUILT + locally verified 2026-06-25; PR
+  pending).** Realizes the dedicated checklist-only-push seam Inc 2 left open, so a `tasks_file` edit
+  reaches the dashboard between reports. Adds: a Bearer-authed **`POST /checklist`** relay endpoint
+  (reuses the ingest token; upserts via the existing `upsert_checklist`, no report row), a
+  `push_checklist` client, and an **`orion checklist-push <project>`** command with a **`--watch`** poll
+  loop (stdlib content-compare, ~3s; pushes only on change). Render reach extended: the live checklist
+  now also shows on the **project page** (the persistent watch surface), reusing the `_render_checklist`
+  helper (no new CSS → CSP unchanged). Redaction holds on the new lane via a shared `_redacted_checklist`.
+  Decided: poll, not `watchdog` (stdlib/minimal-dep); event-watching + an `--all` watcher are additive
+  later. Eyes-on confirmed the one-shot/watch push and the project-page render against a local relay.
 - **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
   the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for

@@ -21,7 +21,7 @@ import json
 from zoneinfo import ZoneInfo
 
 from orion import cli
-from orion.config import load_config
+from orion.config import get_project, load_config
 
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
@@ -731,6 +731,161 @@ def test_relay_push_carries_redacted_live_checklist(tmp_path, env_and_mocks):
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
     # And the secret never appears anywhere in the pushed payload.
     assert "AKIAIOSFODNN7EXAMPLE" not in blob_json
+
+
+# --- checklist-push: the dedicated checklist-only push + --watch (near-real-time) ---
+
+
+def _capture_checklist_pushes(mp):
+    """Monkeypatch cli.push_checklist to record (url, project, checklist, token) calls.
+
+    Why: the command/watch loop call push_checklist as their only outbound effect; an
+    in-memory recorder lets each test assert on the exact payload without any network.
+    """
+    pushes = []
+    mp.setattr(
+        cli,
+        "push_checklist",
+        lambda url, project, checklist, token: pushes.append(
+            (url, project, checklist, token)
+        ),
+    )
+    return pushes
+
+
+def _checklist_config(tmp_path, *, checklist=True, relay_enabled=True):
+    """Write an orion.toml with a checklist-enabled project + a [relay] table.
+
+    Why: the checklist-push tests share the same shape (a tasks project + a relay);
+    this keeps each test to the one knob (checklist on/off, relay on/off) it varies.
+    """
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = {str(relay_enabled).lower()}
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tasks"]
+        tasks_file = "TODO.md"
+        checklist = {str(checklist).lower()}
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_mocks):
+    """`checklist-push <project>` pushes the full open+done checklist, items redacted.
+
+    Why this matters: this is the one-shot near-real-time primitive end to end. No
+    report is generated — it reads tasks_file directly, redacts each item (a secret in
+    an item name must be scrubbed), and pushes via push_checklist with the relay url +
+    token. We assert the exact payload and that the secret never leaves the machine.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text(
+        "- [x] Wire the relay\n"
+        "- [ ] Render the dashboard\n"
+        "- [ ] Rotate AKIAIOSFODNN7EXAMPLE\n",
+        encoding="utf-8",
+    )
+    toml = _checklist_config(tmp_path)
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+
+    url, project, checklist, token = pushes[0]
+    assert url == "https://relay.test/ingest"  # the client derives /checklist from it
+    assert project == "demo"
+    assert token == "relay-secret"
+    assert checklist[0] == {"text": "Wire the relay", "done": True}
+    assert checklist[1] == {"text": "Render the dashboard", "done": False}
+    # The secret-bearing item is present (open) but scrubbed — the privacy net holds on
+    # this lane too (shared _redacted_checklist).
+    assert checklist[2]["done"] is False
+    assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
+
+
+def test_checklist_push_requires_checklist_enabled(tmp_path, env_and_mocks):
+    """`checklist-push` on a project without `checklist = true` errors, pushes nothing.
+
+    Why this matters: the command is opt-in like the report-path checklist; a project
+    that has not enabled it should get a clear, fixable message, not a silent push.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+    (tmp_path / "TODO.md").write_text("- [ ] Something\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path, checklist=False)
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 1
+    assert pushes == []
+
+
+def test_checklist_push_requires_relay_enabled(tmp_path, env_and_mocks):
+    """`checklist-push` with no enabled [relay] errors, pushes nothing.
+
+    Why this matters: the checklist push targets the dashboard relay; without one
+    enabled there is nowhere to push, so it must fail clearly rather than no-op.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+    (tmp_path / "TODO.md").write_text("- [ ] Something\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path, relay_enabled=False)
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 1
+    assert pushes == []
+
+
+def test_watch_tick_pushes_on_change_and_skips_when_unchanged(tmp_path, env_and_mocks):
+    """_watch_tick pushes when the checklist changed and skips when it did not.
+
+    Why this matters: this is the watch loop's core rule, made testable without an
+    infinite loop. Content-compare means a tick with no real change performs no push
+    (no relay traffic), while an actual edit triggers exactly one push of the new state.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    pushes = _capture_checklist_pushes(mp)
+    todo = tmp_path / "TODO.md"
+    todo.write_text("- [ ] First\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path)
+    project = get_project(load_config(toml), "demo")
+    relay_cfg = load_config(toml).relay
+
+    # First tick (no prior push): the current state is pushed.
+    last, pushed = cli._watch_tick(project, relay_cfg, "tok", None)
+    assert pushed is True
+    assert last == [{"text": "First", "done": False}]
+    assert len(pushes) == 1
+
+    # Second tick, file unchanged: no push, same baseline returned.
+    last, pushed = cli._watch_tick(project, relay_cfg, "tok", last)
+    assert pushed is False
+    assert len(pushes) == 1  # unchanged → no new push
+
+    # Edit the file: the next tick pushes the new checklist.
+    todo.write_text("- [x] First\n- [ ] Second\n", encoding="utf-8")
+    last, pushed = cli._watch_tick(project, relay_cfg, "tok", last)
+    assert pushed is True
+    assert last == [{"text": "First", "done": True}, {"text": "Second", "done": False}]
+    assert len(pushes) == 2
 
 
 def test_relay_error_is_non_fatal(tmp_path, env_and_mocks):

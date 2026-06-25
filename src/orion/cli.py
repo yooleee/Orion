@@ -24,6 +24,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ from orion.delivery.relay import (
     list_users as relay_list_users,
     pull_comments,
     push as relay_push,
+    push_checklist,
     revoke_user as relay_revoke_user,
 )
 from orion.delivery.slack import send as slack_send
@@ -221,6 +223,33 @@ def main(argv: list[str] | None = None) -> int:
             "(for unattended/scheduled runs). Projects without auto_send are "
             "skipped, never sent. Without --yes, every run previews as usual."
         ),
+    )
+
+    checklist_parser = subparsers.add_parser(
+        "checklist-push",
+        help="Push a project's current checklist to the relay (no report); --watch for live updates.",
+    )
+    checklist_parser.add_argument(
+        "project", help="Project name as defined in orion.toml (must enable `checklist`)."
+    )
+    checklist_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    checklist_parser.add_argument(
+        "--watch",
+        action="store_true",
+        help=(
+            "Run a foreground loop that polls the tasks_file and pushes the checklist "
+            "whenever it changes, until Ctrl-C (near-real-time edit tracking)."
+        ),
+    )
+    checklist_parser.add_argument(
+        "--interval",
+        type=float,
+        default=3.0,
+        help="Seconds between polls in --watch mode (default: 3.0).",
     )
 
     intake_parser = subparsers.add_parser(
@@ -689,6 +718,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
     if args.command == "intake":
         return cmd_intake(args.project, Path(args.config), args.message, args.yes)
+    if args.command == "checklist-push":
+        return cmd_checklist_push(
+            args.project, Path(args.config), args.watch, args.interval
+        )
     if args.command == "install-hook":
         return cmd_install_hook(
             args.project, Path(args.config), args.hook, args.print_only, args.force
@@ -1036,17 +1069,8 @@ def _run_report(
         # None when the project has no checklist enabled, which omits it from the wire.
         checklist: tuple[ChecklistItem, ...] | None = None
         if project.checklist and project.tasks_file is not None:
-            redacted_items: list[ChecklistItem] = []
-            for item in snapshot_tasks(project.tasks_file):
-                scrub = redact(item.text)
-                redaction_hits += scrub.hit_count
-                # A secret inside an item name is replaced with a placeholder (not
-                # dropped), so the item still shows with its done-state. We skip an
-                # item only if its text is empty AFTER redaction (the whole label was
-                # a secret), to avoid emitting a blank checklist row.
-                safe_text = scrub.text.strip()
-                if safe_text:
-                    redacted_items.append(ChecklistItem(text=safe_text, done=item.done))
+            redacted_items, checklist_hits = _redacted_checklist(project)
+            redaction_hits += checklist_hits
             checklist = tuple(redacted_items)
 
         full_blob = build_report(
@@ -1170,6 +1194,195 @@ def _run_report(
         # _deliver); setup-time config/secrets errors are caught by the caller.
         print(f"Error reporting {project.name!r}: {exc}", file=sys.stderr)
         return STATUS_FAILED
+
+
+def _redacted_checklist(project: ProjectConfig) -> tuple[list[ChecklistItem], int]:
+    """Snapshot a project's current checklist and redact each item's text.
+
+    Args:
+        project: The project to read; its tasks_file is read via the tasks snapshot.
+
+    Returns:
+        A (items, hits) pair: the redacted ChecklistItem list (an item whose text is
+        ENTIRELY a secret — empty after redaction — is dropped to avoid a blank row),
+        and the count of secrets scrubbed across all items. Returns ([], 0) when the
+        project has no tasks_file.
+
+    Why:
+        BOTH the report push (_run_report) and the dedicated checklist push
+        (cmd_checklist_push / its watch loop) must apply the SAME redaction to checklist
+        item texts before they leave the machine — the non-negotiable privacy net.
+        Factoring it here means that guarantee lives in ONE place and cannot drift
+        between the two lanes.
+    """
+    items: list[ChecklistItem] = []
+    hits = 0
+    if project.tasks_file is None:
+        return items, hits
+    for item in snapshot_tasks(project.tasks_file):
+        scrub = redact(item.text)
+        hits += scrub.hit_count
+        # A secret inside an item name is replaced with a placeholder (not dropped), so
+        # the item still shows with its done-state. We skip an item only if its text is
+        # empty AFTER redaction (the whole label was a secret), to avoid a blank row.
+        safe_text = scrub.text.strip()
+        if safe_text:
+            items.append(ChecklistItem(text=safe_text, done=item.done))
+    return items, hits
+
+
+def _checklist_payload(project: ProjectConfig) -> list[dict]:
+    """The project's redacted checklist as the wire payload (list of {text, done}).
+
+    Why:
+        The relay push and the watch loop both need the checklist in the exact JSON
+        shape push_checklist sends. Deriving it here (over _redacted_checklist) keeps
+        the redaction-then-serialize step in one place and gives the watch loop a value
+        it can compare across ticks to detect changes.
+    """
+    items, _hits = _redacted_checklist(project)
+    return [{"text": item.text, "done": item.done} for item in items]
+
+
+def _watch_tick(
+    project: ProjectConfig, relay_cfg: RelayConfig, token: str, last_pushed: list | None
+) -> tuple[list[dict], bool]:
+    """One watch iteration: snapshot the checklist and push it only if it changed.
+
+    Args:
+        project: The project being watched.
+        relay_cfg: The relay config (url to push to).
+        token: The relay ingest Bearer token.
+        last_pushed: The payload pushed on the previous successful tick, or None on the
+            first tick (so the first snapshot always pushes).
+
+    Returns:
+        A (payload, pushed) pair: the current checklist payload, and whether THIS tick
+        pushed it (True when it differed from last_pushed). On no change, returns
+        (last_pushed, False) and performs no network call.
+
+    Why:
+        Factoring one iteration out of the loop makes the "push on change, skip when
+        unchanged" rule unit-testable without an infinite loop. Content-compare (rather
+        than file mtime) is robust to how editors save and self-dedupes a touch that
+        did not actually change the checklist. May raise DeliveryError (the loop treats
+        that as transient and retries next tick).
+    """
+    payload = _checklist_payload(project)
+    if payload == last_pushed:
+        return last_pushed, False
+    push_checklist(relay_cfg.url, project.name, payload, token)
+    return payload, True
+
+
+def _watch_checklist(
+    project: ProjectConfig, relay_cfg: RelayConfig, token: str, interval: float
+) -> int:
+    """Poll the project's tasks_file and push the checklist whenever it changes.
+
+    Args:
+        project: The project to watch (its tasks_file is polled).
+        relay_cfg: The relay config (push target).
+        token: The relay ingest Bearer token.
+        interval: Seconds between polls.
+
+    Returns:
+        0 on a clean Ctrl-C stop.
+
+    Why:
+        The near-real-time mechanism: push once at startup, then re-read every
+        `interval` seconds and push only when the redacted checklist changed. Polling
+        (not OS filesystem events) is stdlib-only and identical on every platform; a
+        few-second interval is near-real-time for a human editing a checklist. One
+        project per process, mirroring relay-serve/bot as single foreground commands. A
+        transient relay failure is reported and retried on the next tick rather than
+        killing the watch.
+    """
+    print(
+        f"Watching {project.tasks_file} for {project.name!r} "
+        f"(every {interval:g}s; Ctrl-C to stop)...",
+        file=sys.stderr,
+    )
+    last_pushed: list | None = None
+    try:
+        while True:
+            try:
+                last_pushed, pushed = _watch_tick(project, relay_cfg, token, last_pushed)
+                if pushed:
+                    print(
+                        f"Pushed checklist for {project.name!r} "
+                        f"({len(last_pushed)} item(s)).",
+                        file=sys.stderr,
+                    )
+            except DeliveryError as exc:
+                # Don't kill the watch on a transient failure (relay briefly down): keep
+                # last_pushed unchanged so the next tick retries the same payload.
+                print(f"Push failed (will retry): {exc}", file=sys.stderr)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nStopped watching.", file=sys.stderr)
+        return 0
+
+
+def cmd_checklist_push(
+    project_name: str, config_path: Path, watch: bool, interval: float
+) -> int:
+    """Push a project's current checklist to the relay (one-shot, or a --watch loop).
+
+    Args:
+        project_name: The project whose checklist to push.
+        config_path: Path to orion.toml.
+        watch: When True, run a foreground poll loop that pushes on every change to the
+            project's tasks_file until interrupted; when False, push once and exit.
+        interval: Seconds between polls in --watch mode.
+
+    Returns:
+        Process exit code: 0 on success / clean stop, 1 on a setup or delivery error.
+
+    Why:
+        The dedicated checklist-only push (E2 Inc 2 follow-up): it updates ONLY the
+        project's live checklist on the dashboard — no report — so a tasks_file edit can
+        reach the dashboard in near-real-time. It reuses the report path's redaction
+        (_redacted_checklist) and the relay's ingest token, and requires the project to
+        have `checklist` enabled (with a tasks_file) and an enabled [relay].
+    """
+    try:
+        config = load_config(config_path)
+        load_secrets(config_path)
+        project = get_project(config, project_name)
+        relay_cfg = config.relay
+        if not relay_cfg.enabled:
+            raise ConfigError(
+                f"checklist-push needs an enabled [relay] in {config_path} — it pushes "
+                f"the checklist to the dashboard relay."
+            )
+        if not project.checklist:
+            raise ConfigError(
+                f"Project {project.name!r} does not enable `checklist`. Set "
+                f"`checklist = true` (with the 'tasks' collector) to push its checklist."
+            )
+        if project.tasks_file is None:
+            raise ConfigError(
+                f"Project {project.name!r} has no tasks_file to read a checklist from."
+            )
+        token = get_required(relay_cfg.token_env_var)
+    except (ConfigError, SecretsError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if watch:
+        return _watch_checklist(project, relay_cfg, token, interval)
+
+    # One-shot: push the current checklist once. A delivery failure is fatal here
+    # (unlike the watch loop, which retries), so the user sees a non-zero exit.
+    try:
+        payload = _checklist_payload(project)
+        push_checklist(relay_cfg.url, project.name, payload, token)
+    except DeliveryError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Pushed checklist for {project.name!r} ({len(payload)} item(s)).")
+    return 0
 
 
 def cmd_intake(

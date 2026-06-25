@@ -48,6 +48,7 @@ from orion.config import (
     SummarizerConfig,
     get_project,
     load_config,
+    load_relay_config,
 )
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
@@ -2497,9 +2498,11 @@ def _load_relay_admin(config_path: Path) -> tuple[str, str]:
         provisioning must not ride on the push credential. Reading the secret here, in the
         CLI, matches every other command; a missing one is named by get_required, never printed.
     """
-    config = load_config(config_path)
+    # Use the focused relay-only loader: provisioning needs the [relay] table but NOT a
+    # local project list, so an admin-only operator (runs the relay, reports elsewhere)
+    # isn't blocked by full load_config's "defines no projects" requirement.
+    relay_cfg = load_relay_config(config_path)
     load_secrets(config_path)
-    relay_cfg = config.relay
     if not relay_cfg.enabled:
         raise ConfigError(
             f"no relay is enabled in {config_path}. Enable the [relay] table "

@@ -11,13 +11,20 @@
 #                return a canned response (or raise) — mirrors test_delivery.py.
 # =============================================================================
 
+import io
 import json
 import urllib.error
 
 import pytest
 
 from orion.delivery import DeliveryError
-from orion.delivery.relay import pull_comments, push
+from orion.delivery.relay import (
+    create_user,
+    list_users,
+    pull_comments,
+    push,
+    revoke_user,
+)
 
 
 class _FakeResponse:
@@ -239,3 +246,134 @@ def test_pull_unparseable_body_becomes_delivery_error(monkeypatch):
 
     with pytest.raises(DeliveryError):
         pull_comments("https://relay.test/ingest", "tok", "demo", 0)
+
+
+# --- C3 admin API client: create_user / list_users / revoke_user -----------------
+#
+# The provisioning client backing `relay-user`. These mirror the push/pull tests:
+# urlopen is monkeypatched so we assert the derived admin URL, the SEPARATE admin
+# Bearer token, the request method/body, and that a relay error is surfaced (with its
+# JSON {"error": ...} detail lifted) as DeliveryError — all without a real relay.
+
+
+def test_create_user_posts_to_derived_admin_url_with_admin_bearer(monkeypatch):
+    """create_user derives /api/users from the ingest URL and POSTs name/role/projects.
+
+    Why this matters: the caller passes the one configured (ingest) URL; the admin client
+    must derive the /api/users endpoint from it, send the SEPARATE admin token as Bearer,
+    POST the fields as JSON, and return the parsed response (which carries the one-time key).
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        body = json.dumps(
+            {"id": 1, "name": "alice", "role": "viewer", "projects": ["demo"], "key": "RAWKEY"}
+        ).encode("utf-8")
+        return _FakeReadResponse(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = create_user(
+        "https://relay.test/ingest", "admin-secret", "alice", "viewer", ["demo"]
+    )
+
+    # The admin URL is derived from the ingest URL (path replaced, host kept).
+    assert captured["url"] == "https://relay.test/api/users"
+    assert captured["method"] == "POST"
+    assert captured["authorization"] == "Bearer admin-secret"  # the ADMIN token
+    assert captured["body"] == {"name": "alice", "role": "viewer", "projects": ["demo"]}
+    # The parsed response (including the one-time key) is returned to the caller.
+    assert result["key"] == "RAWKEY"
+
+
+def test_create_user_http_error_lifts_relay_error_message(monkeypatch):
+    """A relay 4xx with a JSON {"error": ...} body surfaces that detail in the DeliveryError.
+
+    Why this matters: a CLI failure must be actionable — a duplicate name (409) should read
+    as "a user named 'alice' already exists", not a bare "HTTP 409". We confirm the lifted
+    message includes both the status and the relay's reason.
+    """
+    def fake_urlopen(request, timeout=None):
+        body = io.BytesIO(b'{"error": "a user named \'alice\' already exists"}')
+        raise urllib.error.HTTPError(
+            request.full_url, 409, "Conflict", hdrs=None, fp=body
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(DeliveryError) as exc:
+        create_user("https://relay.test/ingest", "admin-secret", "alice", "viewer", [])
+    msg = str(exc.value)
+    assert "409" in msg and "already exists" in msg
+
+
+def test_list_users_gets_derived_admin_url_with_admin_bearer(monkeypatch):
+    """list_users GETs the derived /api/users with the admin Bearer and returns the roster.
+
+    Why this matters: the read half of the admin client must hit the same derived endpoint
+    with the admin token and a GET (no body), and parse the {"users": [...]} response.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["has_body"] = request.data is not None
+        body = json.dumps({"users": [{"name": "alice", "role": "viewer"}]}).encode("utf-8")
+        return _FakeReadResponse(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = list_users("https://relay.test/ingest", "admin-secret")
+
+    assert captured["url"] == "https://relay.test/api/users"
+    assert captured["method"] == "GET"
+    assert captured["has_body"] is False  # a GET sends no body
+    assert captured["authorization"] == "Bearer admin-secret"
+    assert result == {"users": [{"name": "alice", "role": "viewer"}]}
+
+
+def test_revoke_user_posts_to_derived_revoke_url(monkeypatch):
+    """revoke_user POSTs the name to the derived /api/users/revoke with the admin Bearer.
+
+    Why this matters: revoke is a privileged state change on its own endpoint; the client
+    must target /api/users/revoke (not /api/users), send the name, and use the admin token.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeReadResponse(json.dumps({"name": "alice", "revoked": True}).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = revoke_user("https://relay.test/ingest", "admin-secret", "alice")
+
+    assert captured["url"] == "https://relay.test/api/users/revoke"
+    assert captured["method"] == "POST"
+    assert captured["authorization"] == "Bearer admin-secret"
+    assert captured["body"] == {"name": "alice"}
+    assert result == {"name": "alice", "revoked": True}
+
+
+def test_admin_connection_error_becomes_delivery_error(monkeypatch):
+    """A network failure on an admin call (relay down) becomes DeliveryError.
+
+    Why this matters: an unreachable relay during provisioning must surface as a clean,
+    catchable DeliveryError the CLI reports and exits 1 on — not a raw traceback.
+    """
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(DeliveryError):
+        list_users("https://relay.test/ingest", "admin-secret")

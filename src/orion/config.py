@@ -204,6 +204,12 @@ class RelayConfig:
             the push. The token itself never lives in the config — same env-var
             indirection as a recipient's webhook_env_var, so the shareable config
             carries no secret. Empty when disabled; required when enabled.
+        admin_token_env_var: NAME of the .env variable holding the SEPARATE admin token
+            the `relay-user` provisioning commands authenticate with (C3). Independent
+            of the ingest token (the ingest token must not create users), so it is its
+            own env-var name. OPTIONAL even when the relay is enabled: a push-only relay
+            needs no provisioning, so this is empty unless the operator runs `relay-user`,
+            which fails with a clear error when it is unset.
 
     Why:
         C1 adds one outbound seam: "serialize the blob + a token → POST to a URL."
@@ -211,12 +217,14 @@ class RelayConfig:
         like [summarizer] is one summarizer) is the smallest surface that turns the
         push on; a per-project relay stays an additive change later. Keeping the
         token as an env-var name (not the value) preserves the privacy rule that
-        secrets never enter orion.toml.
+        secrets never enter orion.toml. C3's admin token follows the SAME env-var-name
+        indirection, added as an optional field so existing configs are unaffected.
     """
 
     enabled: bool
     url: str
     token_env_var: str
+    admin_token_env_var: str = ""
 
 
 @dataclass(frozen=True)
@@ -581,8 +589,26 @@ def _parse_relay(raw: object, config_path: Path) -> RelayConfig:
         )
     _validate_env_var_name(token_env_var.strip(), "token_env_var", where)
 
+    # admin_token_env_var is OPTIONAL (provisioning is a separate, opt-in capability):
+    # absent -> "" (the relay-user commands then error clearly if invoked). When present
+    # it must be a legal env-var name, validated like token_env_var so a typo fails at
+    # load time rather than at provisioning time.
+    admin_token_env_var = raw.get("admin_token_env_var", "")
+    if not isinstance(admin_token_env_var, str):
+        raise ConfigError(
+            f"{where} has invalid admin_token_env_var={admin_token_env_var!r}. "
+            "Expected the NAME of a .env variable, e.g. "
+            'admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN".'
+        )
+    admin_token_env_var = admin_token_env_var.strip()
+    if admin_token_env_var:
+        _validate_env_var_name(admin_token_env_var, "admin_token_env_var", where)
+
     return RelayConfig(
-        enabled=True, url=url.strip(), token_env_var=token_env_var.strip()
+        enabled=True,
+        url=url.strip(),
+        token_env_var=token_env_var.strip(),
+        admin_token_env_var=admin_token_env_var,
     )
 
 

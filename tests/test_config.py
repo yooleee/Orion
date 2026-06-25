@@ -933,6 +933,81 @@ def test_relay_token_env_var_rejects_a_pasted_value(tmp_path):
     assert leaked not in msg  # the secret must NOT be echoed back
 
 
+def test_relay_admin_token_env_var_parses(tmp_path):
+    """An enabled relay with admin_token_env_var parses it onto the RelayConfig (C3).
+
+    Why this matters: the `relay-user` provisioning commands read the admin token's
+    env-var NAME from here, so it must survive parsing verbatim (whitespace-trimmed),
+    exactly like token_env_var.
+    """
+    config = load_config(
+        _write(
+            tmp_path,
+            """
+            [relay]
+            enabled = true
+            url = "http://127.0.0.1:8787/ingest"
+            token_env_var = "ORION_RELAY_TOKEN"
+            admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
+            """
+            + _DEMO_PROJECT,
+        )
+    )
+
+    assert config.relay.admin_token_env_var == "ORION_RELAY_ADMIN_TOKEN"
+
+
+def test_relay_admin_token_env_var_optional_defaults_empty(tmp_path):
+    """An enabled relay WITHOUT admin_token_env_var defaults it to "" (provisioning off).
+
+    Why this matters: provisioning is an opt-in capability separate from pushing — a
+    push-only relay needs no admin token. So omitting it must NOT fail config load; it
+    leaves the field empty, and a `relay-user` command then errors clearly only if invoked.
+    """
+    config = load_config(
+        _write(
+            tmp_path,
+            """
+            [relay]
+            enabled = true
+            url = "http://127.0.0.1:8787/ingest"
+            token_env_var = "ORION_RELAY_TOKEN"
+            """
+            + _DEMO_PROJECT,
+        )
+    )
+
+    assert config.relay.enabled is True
+    assert config.relay.admin_token_env_var == ""  # absent -> empty, not an error
+
+
+def test_relay_admin_token_env_var_rejects_a_pasted_value(tmp_path):
+    """A token VALUE in admin_token_env_var (not the NAME) is rejected, without echoing it.
+
+    Why this matters: the same footgun as token_env_var — pasting the admin secret where
+    the env-var NAME belongs. It must fail at config load with a clear message naming the
+    key, and must never print the secret back. The sample has a leading digit + hyphen,
+    which a legal env-var name cannot contain.
+    """
+    leaked = "9XyZb-adminTokenValue_not_a_name_AAAA"
+    path = _write(
+        tmp_path,
+        f"""
+        [relay]
+        enabled = true
+        url = "https://relay.example.com/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+        admin_token_env_var = "{leaked}"
+        """
+        + _DEMO_PROJECT,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    msg = str(exc.value)
+    assert "admin_token_env_var" in msg
+    assert leaked not in msg  # the secret must NOT be echoed back
+
+
 def test_recipient_webhook_env_var_rejects_a_pasted_url(tmp_path):
     """A webhook URL pasted into `webhook_env_var` (not the variable name) is rejected,
     without echoing it.

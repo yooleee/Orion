@@ -193,14 +193,25 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   Decided: poll, not `watchdog` (stdlib/minimal-dep); event-watching + an `--all` watcher are additive
   later. Eyes-on confirmed the one-shot/watch push and the project-page render against a local relay,
   then shipped to the live Fly relay 2026-06-25.
-- **⚠ Not yet in use (honest, 2026-06-25):** Inc 2 + 2.5 are live, but the user has **no `tasks_file`
-  configured** on any project, so the checklist surfaces are built ahead of an actual configured use.
-  The first concrete candidate is an **applications to-do list** (in a separate `applications` directory)
-  the user wants to track — which maps to the deferred "non-project/non-code items" seam below and may
-  need a light setup (a project pointing at that dir, possibly **non-git**, with `checklist = true`).
-  Wiring one real `tasks_file` is the natural next practical step to exercise what was built.
+- **⚠ Not yet in use (honest, 2026-06-25):** Inc 2 + 2.5 are live, but **no project has a `tasks_file`**,
+  so the checklist surfaces are built ahead of an actual configured use. The first real workload — an
+  **applications tracker** (`/Users/yoolee/Developer/applications/to_do.md`) — turned out to use rich
+  `- **Status:** …` fields + deadline **tables**, not `[ ]`/`[x]` checkboxes, so the shipped `tasks`
+  collector reads nothing from it. The user chose to build a richer status-aware collector rather than
+  reformat the file → **Inc 2.6 below**, kickoff written.
+- **Inc 2.6 — status-aware "tracker" collector + `tasks_file` bootstrapping (🔭 next; kickoff written
+  2026-06-25).** A new collector that reads the applications tracker's native format (per-application
+  `Status` → done/open, optionally the deadline tables) so it tracks without reformatting; the
+  applications project setup (tasks/checklist, **no git**); and **family-as-dashboard-viewers**
+  provisioning (`relay-user`) — the real "share with family" path now that the **Alex/Sam discord/slack
+  recipients are on-hold placeholders** and chat delivery is paused. Sibling idea (defer or parallel):
+  **default `tasks_file` on attach**, with content **derived from each project's roadmap** (for Orion,
+  this file) — the same "rich doc → checklist signal" capability as the collector. The tracker's real
+  **deadlines** make it the natural on-ramp to Inc 3. Kickoff:
+  [`docs/applications-tracker-kickoff.md`](../docs/applications-tracker-kickoff.md).
 - **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
   the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
+  Inc 2.6's deadline parsing is its likely on-ramp.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via
   `intake` or a new collector (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is
@@ -1227,9 +1238,12 @@ the Horizon E table + ladder above are canonical):
   behind the Fly proxy. **Verify live by commenting as admin, ideally on Safari.**
 
 **Honest status:** the checklist features are live but **no project has a `tasks_file` configured yet**,
-so nothing is actually being tracked. The flagged real candidate is an **applications to-do list** (a
-separate `applications` dir) — see the "Not yet in use" note in the E2 ladder; wiring it (possibly a
-non-git project) is the next practical step.
+so nothing is actually being tracked. The first real candidate — an **applications tracker** — was
+scoped this session and found to use rich `Status` fields + deadline tables (not checkboxes), so it
+needs a status-aware collector rather than a reformat. Deferred to **E2 Inc 2.6** with a kickoff
+written ([`docs/applications-tracker-kickoff.md`](../docs/applications-tracker-kickoff.md)); see the
+Inc 2.6 entry in the E2 ladder. Also recorded there: the **Alex/Sam recipients are on-hold
+discord/slack placeholders** (chat paused), and family supervision is now **via the dashboard**.
 
 ## Open questions / to settle before/while building
 

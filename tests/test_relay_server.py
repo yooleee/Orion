@@ -30,7 +30,16 @@ import pytest
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
 from relay.render import MAX_COMMENT_BODY_CHARS
-from relay.server import _is_loopback, create_server
+from relay.server import (
+    _b64url_encode,
+    _is_loopback,
+    _sign,
+    create_server,
+    key_verifier,
+    make_session_value,
+    mint_key,
+    verify_session_value,
+)
 from relay.store import (
     add_comment,
     comments_for,
@@ -1187,3 +1196,117 @@ def test_api_comment_post_does_not_disturb_other_routes(tmp_path):
         payload = json.loads(raw)
         assert [c["body"] for c in payload["comments"]] == ["loop"]
         assert payload["comments"][0]["report_id"] == report_id
+
+
+# --- Multi-party auth: session-cookie + key-verifier crypto (Increment 1) ------
+# Pure-function tests for the signed stateless session cookie and the peppered key
+# verifier. These are the cryptographic core of the new auth, so they're pinned in
+# isolation (no running server): a valid token round-trips, and every way a token can
+# be wrong (tampered, expired, wrong key, wrong format) is rejected.
+
+_SKEY = b"test-session-signing-key-32-bytes!!"
+_PEPPER = b"test-user-pepper-secret"
+
+
+def test_session_cookie_round_trips():
+    """A freshly minted cookie verifies and returns its exact claims.
+
+    Why this matters: this is the happy path every authenticated request depends on —
+    the claims (sub, sv, exp) must survive sign→verify intact so the request path can
+    resolve the user and check revocation.
+    """
+    value = make_session_value(_SKEY, user_id=7, session_version=3, issued_at=1000, expires_at=2000)
+    claims = verify_session_value(_SKEY, value, now=1500)
+    assert claims is not None
+    assert claims["sub"] == 7 and claims["sv"] == 3 and claims["exp"] == 2000 and claims["v"] == 1
+
+
+def test_session_cookie_tampered_signature_is_rejected():
+    """Flipping any byte of the signature fails verification (HMAC integrity).
+
+    Why this matters: the signature is what makes the stateless cookie unforgeable;
+    a mutated signature must never validate.
+    """
+    value = make_session_value(_SKEY, 7, 1, 1000, 2000)
+    payload_b64, sig = value.split(".", 1)
+    tampered = f"{payload_b64}.{sig[:-1]}{'A' if sig[-1] != 'A' else 'B'}"
+    assert verify_session_value(_SKEY, tampered, now=1500) is None
+
+
+def test_session_cookie_tampered_payload_is_rejected():
+    """Editing the claims (e.g. escalating sub) without re-signing fails.
+
+    Why this matters: an attacker must not be able to swap in a different user id /
+    session_version while keeping a stale signature.
+    """
+    value = make_session_value(_SKEY, 7, 1, 1000, 2000)
+    _, sig = value.split(".", 1)
+    forged_payload = _b64url_encode(b'{"v":1,"sub":1,"iat":1000,"exp":2000,"sv":1}')
+    assert verify_session_value(_SKEY, f"{forged_payload}.{sig}", now=1500) is None
+
+
+def test_session_cookie_expired_is_rejected_server_side():
+    """A token past its `exp` is rejected even if otherwise valid (server-side expiry).
+
+    Why this matters: expiry is enforced from the signed payload, not just the cookie's
+    Max-Age, so a browser that keeps the cookie past expiry still cannot use it.
+    """
+    value = make_session_value(_SKEY, 7, 1, 1000, 2000)
+    assert verify_session_value(_SKEY, value, now=2001) is None  # now > exp
+    assert verify_session_value(_SKEY, value, now=2000) is not None  # exactly at exp still valid
+
+
+def test_session_cookie_wrong_key_is_rejected():
+    """A token signed with a different key does not verify (key isolation).
+
+    Why this matters: rotating the signing key must invalidate every outstanding
+    cookie, and a token forged under any other key must fail.
+    """
+    value = make_session_value(_SKEY, 7, 1, 1000, 2000)
+    assert verify_session_value(b"a-different-signing-key", value, now=1500) is None
+
+
+def test_session_cookie_unknown_format_version_is_rejected():
+    """A correctly-signed token with an unknown format version is rejected.
+
+    Why this matters: bumping the format version must invalidate every old cookie at
+    once; the version gate is what makes that rotation possible.
+    """
+    payload_b64 = _b64url_encode(b'{"v":999,"sub":7,"iat":1000,"exp":2000,"sv":1}')
+    value = f"{payload_b64}.{_sign(_SKEY, payload_b64)}"  # validly signed, wrong v
+    assert verify_session_value(_SKEY, value, now=1500) is None
+
+
+def test_session_cookie_garbage_is_rejected():
+    """Malformed cookie values are rejected without raising.
+
+    Why this matters: hostile or corrupt cookie input must degrade to "not
+    authenticated", never crash the request handler.
+    """
+    for junk in ["", "no-dot", "a.b.c", "....", "%%%.%%%"]:
+        assert verify_session_value(_SKEY, junk, now=1500) is None
+
+
+def test_key_verifier_is_deterministic_and_secret_dependent():
+    """The verifier is stable per (pepper, key) and changes with either.
+
+    Why this matters: login recomputes the verifier from the presented key and looks
+    it up, so it must be deterministic; and a DB leak (verifier) without the pepper
+    must not let an attacker recompute/test candidate keys.
+    """
+    v = key_verifier(_PEPPER, "the-raw-key")
+    assert v == key_verifier(_PEPPER, "the-raw-key")          # deterministic
+    assert v != key_verifier(_PEPPER, "a-different-key")      # key-dependent
+    assert v != key_verifier(b"different-pepper", "the-raw-key")  # pepper-dependent
+    assert len(v) == 64  # SHA-256 hex
+
+
+def test_mint_key_is_high_entropy_and_unique():
+    """Minted keys are long, URL-safe, and unique across calls.
+
+    Why this matters: the login credential's whole security rests on its entropy —
+    server-minted ≥256-bit randomness is why no slow KDF is needed.
+    """
+    keys = {mint_key() for _ in range(50)}
+    assert len(keys) == 50  # no collisions
+    assert all(len(k) >= 40 for k in keys)  # token_urlsafe(32) is ~43 chars

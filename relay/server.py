@@ -24,12 +24,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import ipaddress
 import json
+import secrets
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timezone
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -91,6 +95,165 @@ _UNAUTHORIZED_HTML = (
     "<h1>401 — authentication required</h1>"
     "<p>This Orion dashboard requires a username and password.</p></html>"
 )
+
+# --- Multi-party auth: session-cookie + key-verifier crypto (Increment 1) ------
+# Pure, module-level helpers so the cryptographic core is testable without a server.
+# The session cookie is STATELESS and SIGNED: it carries only a tiny claims payload
+# (format version, user id, issued/expiry times, the user's session_version) and an
+# HMAC over it. It deliberately carries NO role/name/scope — those are re-read from
+# the DB on every request, so a privilege never rides in a forgeable/stale cookie and
+# revocation (active=0 / session_version bump) takes effect immediately. The signing
+# key, the user-key pepper, and the admin token are all INDEPENDENT secrets (never
+# derived from or shared with each other or the view/ingest tokens) per the Codex
+# /second-opinion: sharing a secret widens blast radius and couples unrelated rotations.
+_SESSION_COOKIE_NAME = "orion_session"
+_SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at once
+
+
+def _b64url_encode(raw: bytes) -> str:
+    """URL-safe base64 WITHOUT padding (cookie-value safe: no '=', '/', '+').
+
+    Why:
+        Cookie values must avoid characters that need quoting (';', '=', space).
+        URL-safe base64 already avoids '/'+'+'; stripping the '=' padding removes the
+        last problematic char, and _b64url_decode re-adds it, so the round-trip is exact.
+    """
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    """Inverse of _b64url_encode: re-pad then URL-safe base64 decode.
+
+    Why:
+        base64 needs the input length to be a multiple of 4; we stripped the padding
+        on encode, so we restore it here. `validate=True` rejects stray characters so a
+        tampered cookie segment fails to decode rather than decoding to garbage.
+    """
+    padded = text + "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(padded)
+
+
+def _sign(session_key: bytes, message: str) -> str:
+    """Return the base64url HMAC-SHA256 of `message` under `session_key`.
+
+    Why:
+        One place computes the signature, so make_session_value and verify_session_value
+        can never disagree on the algorithm. HMAC-SHA256 with a high-entropy key is the
+        standard, stdlib-only way to make a stateless token unforgeable.
+    """
+    digest = hmac.new(session_key, message.encode("ascii"), hashlib.sha256).digest()
+    return _b64url_encode(digest)
+
+
+def make_session_value(
+    session_key: bytes,
+    user_id: int,
+    session_version: int,
+    issued_at: int,
+    expires_at: int,
+) -> str:
+    """Build a signed session-cookie value `payload_b64.signature_b64`.
+
+    Args:
+        session_key: The independent HMAC signing key (bytes).
+        user_id: The authenticated user's id (the cookie's `sub`); 0 is the reserved
+            sentinel for the legacy bootstrap admin (no relay_users row).
+        session_version: The user's current session_version at mint time; the request
+            path rejects the cookie once this no longer matches the DB (revocation).
+        issued_at: Unix seconds the token was minted.
+        expires_at: Unix seconds the token expires (also enforced server-side).
+
+    Returns:
+        The cookie value string.
+
+    Why:
+        Claims are compact, sorted JSON so the signed bytes are deterministic. Only the
+        five claims are included — never role/name/projects — so authority always comes
+        from the live DB, not the cookie.
+    """
+    payload = {
+        "v": _SESSION_FORMAT_VERSION,
+        "sub": user_id,
+        "iat": issued_at,
+        "exp": expires_at,
+        "sv": session_version,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    payload_b64 = _b64url_encode(payload_json.encode("utf-8"))
+    return f"{payload_b64}.{_sign(session_key, payload_b64)}"
+
+
+def verify_session_value(session_key: bytes, value: str, now: int) -> dict | None:
+    """Verify a session-cookie value and return its claims, or None if invalid.
+
+    Args:
+        session_key: The HMAC signing key (bytes).
+        value: The cookie value (`payload_b64.signature_b64`).
+        now: Current Unix seconds, for the expiry check.
+
+    Returns:
+        The decoded claims dict when the signature verifies, the format version is
+        known, and the token has not expired; otherwise None.
+
+    Why:
+        Order matters: verify the HMAC FIRST (constant-time, on the raw b64 segment)
+        before decoding the payload, so a tampered/forged token is rejected without
+        trusting any of its bytes. We reject an unknown `v` (format rotation) and an
+        elapsed `exp` (server-side expiry, independent of the cookie's Max-Age, so a
+        browser keeping the cookie past expiry still fails). This returns only the
+        claims; checking `sv` against the DB and `active` is the request path's job.
+    """
+    try:
+        payload_b64, signature = value.split(".", 1)
+    except (ValueError, AttributeError):
+        return None
+    if not hmac.compare_digest(signature, _sign(session_key, payload_b64)):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(payload_b64))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("v") != _SESSION_FORMAT_VERSION:
+        return None
+    exp = payload.get("exp")
+    if not isinstance(exp, int) or exp < now:
+        return None
+    return payload
+
+
+def key_verifier(user_pepper: bytes, raw_key: str) -> str:
+    """Compute the stored verifier for a login key: HMAC-SHA256(pepper, key), hex.
+
+    Args:
+        user_pepper: The independent server-side pepper (bytes).
+        raw_key: The user's raw login key.
+
+    Returns:
+        The hex verifier stored in relay_users.key_verifier.
+
+    Why:
+        Peppering (HMAC with a server secret) means a database leak ALONE cannot test
+        candidate keys — an attacker also needs the pepper, which lives only in the
+        relay's env, not the DB. A slow KDF (bcrypt/argon2) is unnecessary here because
+        the keys are server-minted, ≥256-bit random (not human passwords), so there is
+        nothing to brute-force; this was confirmed by the Codex /second-opinion.
+    """
+    return hmac.new(user_pepper, raw_key.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def mint_key() -> str:
+    """Mint a fresh high-entropy login key (URL-safe, ~256 bits).
+
+    Returns:
+        A new random key string, shown to the operator ONCE at provisioning and never
+        stored (only its verifier is).
+
+    Why:
+        secrets.token_urlsafe(32) draws 32 cryptographically-random bytes (~256 bits),
+        far beyond brute-force, and the URL-safe alphabet makes it easy to copy/paste
+        into a login form. Centralized so provisioning and any test mint the same shape.
+    """
+    return secrets.token_urlsafe(32)
 
 
 def _validate_blob(payload: object) -> str | None:

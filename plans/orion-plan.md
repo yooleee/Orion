@@ -82,10 +82,10 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 | C2b | Native Slack bot (Socket Mode) → `POST /api/comments` → existing comment store | ✅ Built (2026-06-19) |
 | C2c | Native **Discord** bot (Gateway) — first steps of the chat-surface track (Horizon E) | 🔭 Deferred (demand-gated) |
 | C2d | Reply-targeting — bot sends the optional `report_id` (thread a reply to a specific report) | 🔭 Deferred (demand-gated) |
-| C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | ⏳ **Increment 1 built (2026-06-25, in review — PRs #39/#40):** dashboard-integrated identity + authZ — per-user login keys, roles (admin/viewer), per-project read scope, signed cookie sessions (login/logout + stateless revocation), and a `relay-user` provisioning CLI over a relay admin API. Subscriptions/routing, per-recipient state, E2E, and KI-17 (author identity) remain ahead. Detail: "C3 status (Increment 1)" below. |
+| C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | ✅ **Increment 1 SHIPPED + DEPLOYED (2026-06-25):** merged to `main` (PRs #39, #43, #41, #42; #43 replaced #40) and live at `orion-relay-horizon-c.fly.dev`. Dashboard-integrated identity + authZ — per-user login keys, roles (admin/viewer), per-project read scope, signed cookie sessions (login/logout + stateless revocation), a `relay-user` provisioning CLI over a relay admin API, and authenticated comment authorship. Subscriptions/routing, per-recipient state, E2E, and KI-17's report-submitter half remain ahead (the comment half shipped). Detail: "C3 status (Increment 1)" below. |
 
 
-**C3 status (Increment 1 — multi-party access, built 2026-06-25, in review).** A deliberate decision to
+**C3 status (Increment 1 — multi-party access, shipped + deployed 2026-06-25).** A deliberate decision to
 bring multi-party identity/access into the dashboard now, integrated from the start, rather than bolted on
 later. The driver is real near-term dogfooding: share a project's state with a helper or supervisor, control
 who sees which project, and a guest/showcase view for the portfolio. This moves C3 from "deferred / demand-

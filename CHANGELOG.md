@@ -19,8 +19,10 @@ see [`docs/known-issues.md`](docs/known-issues.md).
 Brings per-user identity and access control into the relay dashboard (the C3 multi-party
 "watershed"), integrated from the start rather than bolted on later. The driver is real
 dogfooding: share a project's state with a helper or supervisor, control who sees which
-project, and a guest/showcase view. Built in two stacked PRs (#39 access foundation, #40
-provisioning). Stdlib-only, no new dependencies. A Codex `/second-opinion` hardened the design.
+project, and a guest/showcase view. Built in four stacked PRs (#39 access foundation, #43
+provisioning [replaced #40], #41 follow-ons, #42 test isolation), merged to `main` and **deployed
+to production** at `orion-relay-horizon-c.fly.dev`. Stdlib-only, no new dependencies. A Codex
+`/second-opinion` hardened the design.
 
 ### Added
 

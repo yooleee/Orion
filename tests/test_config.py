@@ -1008,6 +1008,64 @@ def test_relay_admin_token_env_var_rejects_a_pasted_value(tmp_path):
     assert leaked not in msg  # the secret must NOT be echoed back
 
 
+def test_load_relay_config_parses_relay_without_any_projects(tmp_path):
+    """load_relay_config returns the [relay] table from a config that has NO projects.
+
+    Why this matters: the `relay-user` commands talk only to the relay, so they must load
+    the relay config from a config that legitimately has no `[projects.<name>]` (an
+    admin-only operator). Full load_config would raise "defines no projects"; this focused
+    loader must not, while still validating the [relay] table identically.
+    """
+    from orion.config import load_relay_config
+
+    path = _write(
+        tmp_path,
+        """
+        [relay]
+        enabled = true
+        url = "http://127.0.0.1:8787/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+        admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
+        """,
+    )  # NOTE: no [projects.*] table at all
+
+    # Full load_config rejects the no-projects config...
+    with pytest.raises(ConfigError, match="no projects"):
+        load_config(path)
+
+    # ...but the focused relay loader parses the [relay] table fine.
+    relay = load_relay_config(path)
+    assert relay.enabled is True
+    assert relay.url == "http://127.0.0.1:8787/ingest"
+    assert relay.admin_token_env_var == "ORION_RELAY_ADMIN_TOKEN"
+
+
+def test_load_relay_config_still_validates_the_relay_table(tmp_path):
+    """load_relay_config applies the SAME [relay] validation as full load_config.
+
+    Why this matters: skipping the project requirement must not skip relay validation — a
+    pasted secret in admin_token_env_var (the NAME field) must still fail loudly, without
+    echoing the value.
+    """
+    from orion.config import load_relay_config
+
+    leaked = "9XyZ-pasted-admin-secret-not-a-name"
+    path = _write(
+        tmp_path,
+        f"""
+        [relay]
+        enabled = true
+        url = "http://127.0.0.1:8787/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+        admin_token_env_var = "{leaked}"
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_relay_config(path)
+    assert "admin_token_env_var" in str(exc.value)
+    assert leaked not in str(exc.value)
+
+
 def test_recipient_webhook_env_var_rejects_a_pasted_url(tmp_path):
     """A webhook URL pasted into `webhook_env_var` (not the variable name) is rejected,
     without echoing it.

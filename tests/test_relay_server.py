@@ -1087,6 +1087,7 @@ def test_comment_is_stored_and_redirects(tmp_path):
         report_id = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users yet)
 
+        # The typed author "Alex" is deliberately ignored in favor of the session identity.
         status, headers, _ = _post_comment(
             base_url, report_id, author="Alex", body="Ship it.", cookie=cookie
         )
@@ -1096,7 +1097,7 @@ def test_comment_is_stored_and_redirects(tmp_path):
         conn = open_relay_store(db)
         stored = comments_for(conn, report_id)
         assert len(stored) == 1
-        assert stored[0]["author"] == "Alex"
+        assert stored[0]["author"] == "legacy-admin"  # authenticated identity, not "Alex"
         assert stored[0]["body"] == "Ship it."
 
 
@@ -1225,14 +1226,55 @@ def test_comment_appears_on_the_report_page(tmp_path):
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         report_id = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
+        # The typed name is ignored; the comment is attributed to the session identity.
         _post_comment(
             base_url, report_id, author="Reviewer", body="Looks solid.", cookie=cookie
         )
 
         code, html = _get(base_url, f"/report/{report_id}", cookie=cookie)
         assert code == 200
-        assert "Reviewer" in html
+        assert "legacy-admin" in html  # the authenticated byline, not the typed "Reviewer"
         assert "Looks solid." in html
+
+
+def test_comment_uses_authenticated_identity_not_form_field(tmp_path):
+    """A logged-in viewer's comment is attributed to their account name, ignoring the form.
+
+    Why this matters: identity must not be spoofable. A provisioned viewer who submits a
+    comment with a different name in the form field is still recorded under their OWN
+    authenticated name — the form value is dropped. This is the accountability property the
+    multi-party identity unblocks (KI-17, comment half).
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        report_id = _ingest_project(base_url, "alpha")
+        _provision_user(db, "alice", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+
+        # Try to post as "someone-else"; the server must override with "alice".
+        status, _, _ = _post_comment(
+            base_url, report_id, author="someone-else", body="my note", cookie=cookie
+        )
+        assert status == 303
+
+        conn = open_relay_store(db)
+        stored = comments_for(conn, report_id)
+        assert [(c["author"], c["body"]) for c in stored] == [("alice", "my note")]
+
+
+def test_comment_in_open_mode_uses_the_typed_name(tmp_path):
+    """With no session (open/loopback), the typed free-text name is used as the author.
+
+    Why this matters: the authenticated-identity override applies only when there IS an
+    identity. On a bare loopback relay with no login, there is no account to attribute to,
+    so the optional typed name stands — preserving the zero-friction local-dev behavior.
+    """
+    with _running_relay(tmp_path) as (base_url, db):  # no view token, no users -> open
+        report_id = _ingest_one(base_url)
+        status, _, _ = _post_comment(base_url, report_id, author="Casey", body="local note")
+        assert status == 303
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id)[0]["author"] == "Casey"
 
 
 # --- C2 pull-back: GET /api/comments (Bearer-authed machine JSON) ----------------

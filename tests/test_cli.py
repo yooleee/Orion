@@ -1148,21 +1148,40 @@ def test_comments_pull_failure_does_not_advance_watermark(tmp_path, monkeypatch)
 # the config/secrets/error gates — never on a real relay.
 
 
-def _write_relay_admin_config(tmp_path, repo, *, enabled=True, with_admin=True):
+def _write_relay_admin_config(tmp_path, repo, *, enabled=True, with_admin=True, with_project=True):
     """Write an orion.toml whose [relay] table optionally has admin_token_env_var.
 
     Args:
         tmp_path: per-test temp dir.
-        repo: path to the git repo for the demo project.
+        repo: path to the git repo for the demo project (ignored when with_project=False).
         enabled: whether the [relay] table is enabled.
         with_admin: whether to include admin_token_env_var (the provisioning gate).
+        with_project: whether to include a [projects.demo] table. When False the config
+            has ONLY a [relay] table — the admin-only operator case relay-user must
+            support (full load_config would reject it for having no projects).
 
     Why:
-        The relay-user tests vary exactly two dimensions — relay enabled, and whether an
-        admin token env var is configured — so this keeps each test to its case (DRY).
+        The relay-user tests vary a few dimensions — relay enabled, whether an admin token
+        env var is configured, and whether any local project exists — so this keeps each
+        test to its case (DRY).
     """
     admin_line = (
         '        admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"\n' if with_admin else ""
+    )
+    project_block = (
+        f"""
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git"]
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+        if with_project
+        else ""
     )
     toml = tmp_path / "orion.toml"
     toml.write_text(
@@ -1173,16 +1192,7 @@ def _write_relay_admin_config(tmp_path, repo, *, enabled=True, with_admin=True):
         enabled = {str(enabled).lower()}
         url = "https://relay.test/ingest"
         token_env_var = "ORION_RELAY_TOKEN"
-{admin_line}
-        [projects.demo]
-        repo_path = "{repo.as_posix()}"
-        share_level = "high_level"
-        collectors = ["git"]
-
-          [[projects.demo.recipients]]
-          name = "Alex"
-          channel = "discord"
-          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+{admin_line}{project_block}
         """
     )
     return toml
@@ -1423,6 +1433,31 @@ def test_relay_user_revoke_unknown_user_is_clean_error(tmp_path, monkeypatch, ca
     code = cli.main(["relay-user", "revoke", "ghost", "--config", str(toml)])
     assert code == 1
     assert "404" in capsys.readouterr().err
+
+
+def test_relay_user_works_with_relay_only_config_no_projects(tmp_path, monkeypatch, capsys):
+    """`relay-user` runs against a config that has ONLY a [relay] table (no projects).
+
+    Why this matters: provisioning talks only to the relay; an admin-only operator who
+    runs the relay but reports from elsewhere may have no local `[projects.<name>]`. Full
+    load_config would reject that with "defines no projects"; relay-user uses the focused
+    relay-only loader, so it must succeed here where a normal command would not.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    toml = _write_relay_admin_config(tmp_path, None, with_project=False)
+
+    # Sanity: a normal command (which uses full load_config) DOES reject this config...
+    assert cli.main(["projects", "--config", str(toml)]) == 1
+
+    # ...but relay-user works.
+    seen = []
+    monkeypatch.setattr(
+        cli, "relay_list_users", lambda url, token, **k: seen.append(url) or {"users": []}
+    )
+    code = cli.main(["relay-user", "list", "--config", str(toml)])
+    assert code == 0
+    assert seen == ["https://relay.test/ingest"]
 
 
 def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys):

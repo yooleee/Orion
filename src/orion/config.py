@@ -369,6 +369,40 @@ def load_config(path: Path) -> Config:
     )
 
 
+def load_relay_config(path: Path) -> RelayConfig:
+    """Load ONLY the [relay] table from the config, without requiring any projects.
+
+    Args:
+        path: Path to the TOML config file.
+
+    Returns:
+        The validated RelayConfig (enabled / url / token_env_var / admin_token_env_var).
+
+    Raises:
+        ConfigError: when the file is missing or unparseable, or the [relay] table is
+            invalid (the same validation full load_config applies to it).
+
+    Why:
+        The `relay-user` admin commands talk only to the relay; they need the [relay]
+        table but NOT a local project list. Reusing full load_config would reject a
+        config that legitimately has no `[projects.<name>]` (an admin-only operator who
+        runs the relay but reports from elsewhere) with an unrelated "defines no projects"
+        error. This reads the same TOML and runs the same `_parse_relay` validator, so the
+        relay config is validated identically — just without the project requirement.
+    """
+    if not path.exists():
+        raise ConfigError(
+            f"Config file not found: {path}\n"
+            f"Copy orion.toml.example to {path.name} and edit it."
+        )
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Could not parse {path}: {exc}") from exc
+    return _parse_relay(raw.get("relay"), path)
+
+
 def _parse_display_timezone(raw: object, config_path: Path) -> str:
     """Validate the optional top-level `display_timezone` into a known IANA zone (KI-20).
 

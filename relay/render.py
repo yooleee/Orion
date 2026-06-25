@@ -427,7 +427,10 @@ def render_project(
 
 
 def render_report(
-    report: dict, comments: list[dict] | None = None, tz: ZoneInfo = _DISPLAY_TZ
+    report: dict,
+    comments: list[dict] | None = None,
+    tz: ZoneInfo = _DISPLAY_TZ,
+    author_name: str | None = None,
 ) -> str:
     """Render a single report: its metadata, its sections (or flat body), comments.
 
@@ -441,6 +444,11 @@ def render_report(
             each comment's created_at) is rendered in. Defaults to the module's Pacific
             constant. Kept after `comments` so existing positional one/two-argument
             callers stay valid.
+        author_name: The logged-in viewer's authenticated name, or None when there is no
+            session (open/loopback mode). When set, the comment form shows "commenting as
+            <name>" and omits the free-text name field, because the server attributes the
+            comment to this identity (it cannot be self-asserted). Keyword-only and last
+            so existing positional callers are unaffected.
 
     Returns:
         A complete HTML page.
@@ -494,7 +502,7 @@ def render_report(
         # No per-signal sections (e.g. an intake push): render the flat body.
         sections_html = f"<section><pre>{_esc(report['body'])}</pre></section>"
 
-    comments_html = _render_comments(report["id"], comments or [], tz)
+    comments_html = _render_comments(report["id"], comments or [], tz, author_name)
 
     body = (
         f"{breadcrumb}\n<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}\n"
@@ -504,7 +512,10 @@ def render_report(
 
 
 def _render_comments(
-    report_id: object, comments: list[dict], tz: ZoneInfo = _DISPLAY_TZ
+    report_id: object,
+    comments: list[dict],
+    tz: ZoneInfo = _DISPLAY_TZ,
+    author_name: str | None = None,
 ) -> str:
     """Render the comments section: the existing thread plus the post form.
 
@@ -515,6 +526,10 @@ def _render_comments(
             empty, in which case a friendly empty-state stands in for the list.
         tz: The IANA zone each comment's created_at timestamp is rendered in (threaded
             to _time_tag). Defaults to the module's Pacific constant.
+        author_name: The logged-in viewer's authenticated name, or None for no session.
+            When set, the form shows "commenting as <name>" and omits the free-text name
+            field (the server attributes the comment to this identity). When None (open
+            mode), the optional name field is shown as before.
 
     Returns:
         An HTML fragment (heading + list/empty-state + form), every dynamic value
@@ -548,10 +563,22 @@ def _render_comments(
     # The id is trusted (an int from the store), but encode + escape it anyway so the
     # action attribute is built by the same safe path as every other dynamic href.
     action = _esc("/report/" + _url(report_id) + "/comment")
+    # Logged in: show the authenticated identity and drop the name field (the server
+    # attributes the comment to this identity, so a typed name would be ignored). Open
+    # mode: keep the optional free-text name field. The name is escaped — defense, even
+    # though it comes from the store, since it is rendered into the page.
+    if author_name:
+        name_block = (
+            f'<p class="meta">Commenting as <strong>{_esc(author_name)}</strong>.</p>\n'
+        )
+    else:
+        name_block = (
+            '<p><label>Name (optional)<br>'
+            f'<input type="text" name="author" maxlength="{MAX_AUTHOR_CHARS}"></label></p>\n'
+        )
     form = (
         f'<form method="post" action="{action}">\n'
-        '<p><label>Name (optional)<br>'
-        f'<input type="text" name="author" maxlength="{MAX_AUTHOR_CHARS}"></label></p>\n'
+        f'{name_block}'
         '<p><label>Comment<br>'
         f'<textarea name="body" rows="4" required '
         f'maxlength="{MAX_COMMENT_BODY_CHARS}"></textarea></label></p>\n'

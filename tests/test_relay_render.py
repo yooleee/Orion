@@ -474,6 +474,43 @@ def test_report_renders_the_comment_form():
     assert "<textarea" in html
 
 
+def test_comment_form_shows_name_field_when_not_logged_in():
+    """With no author_name (open mode), the form offers the optional free-text name field.
+
+    Why this matters: on a bare loopback relay there is no identity, so a commenter may
+    type a name — the form must still present that input, preserving today's behavior.
+    """
+    html = render_report(_report(id=7), comments=[])  # author_name defaults to None
+    assert 'name="author"' in html
+    assert "Commenting as" not in html
+
+
+def test_comment_form_shows_identity_and_drops_name_field_when_logged_in():
+    """With author_name set, the form shows "Commenting as <name>" and no name input.
+
+    Why this matters: a logged-in viewer's comment is attributed to their authenticated
+    identity server-side, so the form must reflect that — it shows who they are commenting
+    as and removes the free-text name field, which would otherwise be silently ignored.
+    """
+    html = render_report(_report(id=7), comments=[], author_name="alice")
+    assert "Commenting as" in html
+    assert "alice" in html
+    assert 'name="author"' not in html  # the free-text name field is gone
+    assert "<textarea" in html          # the comment body field remains
+
+
+def test_comment_form_escapes_the_authenticated_name():
+    """The authenticated name is escaped when rendered into the form (defense).
+
+    Why this matters: even though the name comes from the store, it is rendered into the
+    page, so it must go through the same escaping as every other dynamic value — a name
+    with markup characters must never become live HTML.
+    """
+    html = render_report(_report(id=7), comments=[], author_name='<script>x</script>')
+    assert "<script>x</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
 def test_report_comments_empty_state():
     """A report with no comments shows a friendly empty-state, not a blank section.
 

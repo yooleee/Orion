@@ -177,3 +177,164 @@ def pull_comments(
         # A 2xx with a body we can't parse means the relay and client disagree on the
         # contract — treat it as a transport failure, not a silent empty result.
         raise DeliveryError("Relay returned an unparseable comments response.") from exc
+
+
+# --- C3 admin API client: provisioning over HTTP (backs the relay-user CLI) -------
+# These call the relay's admin endpoints with the SEPARATE admin token (never the
+# ingest token). Unlike push/pull (fail-soft background calls), these back explicit
+# `relay-user` commands, so a failure should surface clearly — we still raise
+# DeliveryError, but the CLI treats it as a hard error (print + exit 1), and we lift the
+# relay's own JSON {"error": ...} message into the exception so the operator sees the
+# real reason (e.g. "a user named 'alice' already exists") rather than a bare status.
+
+
+def _admin_error_message(exc: urllib.error.HTTPError) -> str:
+    """Build a human-readable message from a failed admin-API response.
+
+    Args:
+        exc: The HTTPError raised for a non-2xx admin response.
+
+    Returns:
+        A message like "Relay returned HTTP 409: a user named 'alice' already exists",
+        lifting the relay's JSON {"error": ...} detail when present, else just the status.
+
+    Why:
+        The admin endpoints answer errors as JSON {"error": "..."}; surfacing that detail
+        (rather than a bare "HTTP 409") makes a CLI failure actionable. Reading the body
+        can itself fail (already consumed, non-JSON) — we degrade to the status line
+        rather than masking the original error with a parsing exception.
+    """
+    detail = ""
+    try:
+        body = json.loads(exc.read().decode("utf-8"))
+        if isinstance(body, dict) and isinstance(body.get("error"), str):
+            detail = f": {body['error']}"
+    except (ValueError, UnicodeDecodeError, OSError):
+        pass
+    return f"Relay returned HTTP {exc.code}{detail}"
+
+
+def _admin_request(
+    method: str,
+    url: str,
+    admin_token: str,
+    payload: dict | None,
+    timeout: float,
+) -> dict:
+    """Make one authenticated admin-API request and return the parsed JSON response.
+
+    Args:
+        method: "GET" or "POST".
+        url: The fully-resolved admin endpoint URL.
+        admin_token: The admin Bearer token (independent of the ingest token).
+        payload: The JSON request body for a POST, or None for a GET (no body).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed JSON response dict.
+
+    Raises:
+        DeliveryError on any non-2xx response (with the relay's error detail), a network
+        failure, or an unparseable body.
+
+    Why:
+        The three admin client calls share identical plumbing (Bearer admin auth, the
+        User-Agent, the same error mapping), so it lives in one helper (DRY). It mirrors
+        push/pull's urllib + DeliveryError shape so the whole relay client reads alike.
+    """
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"User-Agent": _USER_AGENT, "Authorization": f"Bearer {admin_token}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise DeliveryError(_admin_error_message(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise DeliveryError("Relay returned an unparseable response.") from exc
+
+
+def create_user(
+    relay_url: str,
+    admin_token: str,
+    name: str,
+    role: str,
+    projects: list[str],
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    """Provision a relay user and return the response including the one-time key (C3).
+
+    Args:
+        relay_url: The configured relay URL (the [relay] `url`, e.g. ".../ingest"); the
+            admin path is derived from it, same as pull_comments derives /api/comments.
+        admin_token: The admin Bearer token (from .env via `admin_token_env_var`).
+        name: The new user's unique handle.
+        role: "viewer" or "admin".
+        projects: The viewer's allowed project names (ignored server-side for an admin).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 201 response: {id, name, role, projects, key} — `key` is the raw login
+        key, shown this once.
+
+    Why:
+        Mirrors push()'s transport but POSTs to the derived /api/users admin route. The
+        raw key comes straight back to the caller (the CLI prints it once); it is never
+        stored or logged here.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users")
+    return _admin_request(
+        "POST",
+        url,
+        admin_token,
+        {"name": name, "role": role, "projects": list(projects)},
+        timeout,
+    )
+
+
+def list_users(relay_url: str, admin_token: str, *, timeout: float = 10.0) -> dict:
+    """Fetch the relay's user roster (no credential material) for `relay-user list` (C3).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"users": [ {id, name, role, active, ...}, ... ]}. The
+        relay omits key_verifier by construction, so no credential material is returned.
+
+    Why:
+        The read half of the admin client, mirroring create_user's transport with a GET.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users")
+    return _admin_request("GET", url, admin_token, None, timeout)
+
+
+def revoke_user(
+    relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
+) -> dict:
+    """Revoke a relay user (deactivate + force-logout) for `relay-user revoke` (C3).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The user to revoke.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name": <name>, "revoked": true}.
+
+    Why:
+        The third admin client call. The relay does the deactivate + session-version bump
+        atomically, so a successful return means the user is force-logged-out everywhere.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/revoke")
+    return _admin_request("POST", url, admin_token, {"name": name}, timeout)

@@ -255,8 +255,12 @@ Deferred).
   (plus a config switch for optional anonymity) is a clean later add, not a rewrite. Surfaced from
   real dashboard feedback (2026-06-18) so it isn't lost.
 - **Severity:** low
-- **Status:** Deferred → Horizon C3 (add with the multi-party identity model; make accountability
-  configurable, not forced).
+- **Status:** Partly unblocked by C3 Increment 1 (2026-06-25). The multi-party **identity**
+  infrastructure now exists: viewers log in, and a session carries an authenticated user (id + role).
+  What remains is wiring that identity into the data — stamping an authenticated `author`/`submitter`
+  on a comment (today still a free-text label) and, later, on the report blob, with a config switch
+  for optional anonymity. That is now a clean additive step on top of the sessions, not new
+  infrastructure. Still deferred within C3 (a later increment), explicitly out of Increment 1's scope.
 
 ## KI-19 — Dashboard serves inline CSS/JS; no Content-Security-Policy yet
 

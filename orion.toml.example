@@ -59,13 +59,19 @@ state_db = "orion.sqlite3"
 # `url` is the relay's ingest endpoint. `token_env_var` names a .env variable
 # holding the Bearer token the push is authenticated with — the token itself lives
 # in .env, never here (same indirection as a recipient's webhook_env_var).
-# NOTE: the dashboard's READ secret is a SERVE-side concern, not a field here — it is
-# set on the machine running `orion relay-serve` (ORION_RELAY_VIEW_TOKEN in its .env),
-# and is REQUIRED before the relay can bind beyond loopback. See .env.example.
+# `admin_token_env_var` (optional) names the .env variable holding the relay ADMIN token,
+# used by `orion relay-user add/list/revoke` to provision dashboard users. It is separate
+# from token_env_var (the ingest token must not be able to create users). Omit it if you
+# do not provision per-user accounts.
+# NOTE: the dashboard's login/session secrets are SERVE-side concerns, not fields here —
+# they are set on the machine running `orion relay-serve` (ORION_RELAY_VIEW_TOKEN,
+# ORION_RELAY_SESSION_KEY, ORION_RELAY_USER_PEPPER, ORION_RELAY_ADMIN_TOKEN in its .env).
+# A view token is REQUIRED before the relay can bind beyond loopback. See .env.example.
 # [relay]
-# enabled       = true
-# url           = "http://127.0.0.1:8787/ingest"
-# token_env_var = "ORION_RELAY_TOKEN"
+# enabled             = true
+# url                 = "http://127.0.0.1:8787/ingest"
+# token_env_var       = "ORION_RELAY_TOKEN"
+# admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
 
 # OPTIONAL native Slack bot (C2-bots) — two-way in chat. When enabled and run with
 # `orion bot`, a supervisor's reply in a mapped Slack channel is relayed into that

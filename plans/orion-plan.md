@@ -67,7 +67,7 @@
 | B6    | CLI ergonomics — **read-only** config-inspect commands (`projects`/`show`/`check`) for visibility/discoverability. Orion still never *writes* config (hand-edited TOML stays the way to change it). Closes KI-15                 | ✅ Signed off (2026-06-16) |
 
 
-**Horizon C — Two-way & hosted** *(C1–C2 shipped; C3 — multi-party — deferred)*
+**Horizon C — Two-way & hosted** *(C1–C2 shipped; C3 multi-party — Increment 1 built, in review)*
 
 These converge into one horizon: bidirectional interaction (supervisors acting back) forces an
 always-on **listener**, which is what tips local-first → **hosted/hybrid**, which is where
@@ -82,7 +82,31 @@ always-on **listener**, which is what tips local-first → **hosted/hybrid**, wh
 | C2b | Native Slack bot (Socket Mode) → `POST /api/comments` → existing comment store | ✅ Built (2026-06-19) |
 | C2c | Native **Discord** bot (Gateway) — first steps of the chat-surface track (Horizon E) | 🔭 Deferred (demand-gated) |
 | C2d | Reply-targeting — bot sends the optional `report_id` (thread a reply to a specific report) | 🔭 Deferred (demand-gated) |
-| C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | 🔭 Deferred (a clean seam, not a destination now — committed only on real demand; the multi-party *product* leap). Home of E2E + KI-17 + per-recipient state. |
+| C3    | Multi-party: identity, subscriptions & authorization — a participant graph (not an implicit "me"), per-supervisor per-project/task/todo subscriptions (the routing future), and access control | ⏳ **Increment 1 built (2026-06-25, in review — PRs #39/#40):** dashboard-integrated identity + authZ — per-user login keys, roles (admin/viewer), per-project read scope, signed cookie sessions (login/logout + stateless revocation), and a `relay-user` provisioning CLI over a relay admin API. Subscriptions/routing, per-recipient state, E2E, and KI-17 (author identity) remain ahead. Detail: "C3 status (Increment 1)" below. |
+
+
+**C3 status (Increment 1 — multi-party access, built 2026-06-25, in review).** A deliberate decision to
+bring multi-party identity/access into the dashboard now, integrated from the start, rather than bolted on
+later. The driver is real near-term dogfooding: share a project's state with a helper or supervisor, control
+who sees which project, and a guest/showcase view for the portfolio. This moves C3 from "deferred / demand-
+gated" to **actively building, in small reviewed increments**. Settled with the user: auth is **per-user keys
++ scopes** (server-minted high-entropy keys, no passwords, no OAuth, stdlib-only). A Codex `/second-opinion`
+hardened the design (independent secrets for session signing / key pepper / admin token, never derived from
+the view or ingest tokens; the signed cookie carries only id + version + expiry with role and scope re-read
+from the DB each request; stateless revocation via `active` + `session_version`; a peppered key verifier; a
+gated, deprecated legacy view-key admin; canonical-Origin CSRF). Scoping calls: out-of-scope resources return
+**404** (hide existence, since the audience may include guests); CSRF is Origin + `SameSite` now with a signed
+token deferred; revocation ships in Increment 1.
+
+What Increment 1 delivers (two stacked PRs): a per-user store (`relay_users` / `relay_user_projects` /
+`relay_admin_audit`), signed session cookies + a peppered key verifier, `/login` and `/logout` with DB-driven
+authentication and stateless revocation, a gated legacy bootstrap admin, per-project authZ on every route
+(admin sees all, a viewer is scoped, out-of-scope is 404), a relay admin API (`POST`/`GET /api/users` +
+revoke, admin-token gated), and the `relay-user add` / `list` / `revoke` CLI. Three new independent env
+secrets join the existing `ORION_RELAY_VIEW_TOKEN` (now the bootstrap-admin login key, not HTTP Basic):
+`ORION_RELAY_SESSION_KEY`, `ORION_RELAY_USER_PEPPER`, `ORION_RELAY_ADMIN_TOKEN`. The increment ladder ahead:
+2 = contribute/write access, 3 = guest/demo mode, then subscriptions/routing. The C2 dashboard's HTTP-Basic
+read auth is superseded by the cookie login.
 
 
 **Framing.** Orion is **personal infrastructure + a portfolio piece, with eventual open-source** as

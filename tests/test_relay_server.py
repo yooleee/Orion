@@ -60,6 +60,9 @@ _VIEW = "test-view-secret"
 # running-relay helper builds a default AuthConfig from them so login works end to end.
 _SKEY = b"test-session-signing-key-32-bytes!!"
 _PEPPER = b"test-user-pepper-secret"
+# The independent admin/provisioning token (POST/GET /api/users). Distinct from the
+# ingest token (_TOKEN) on purpose — the ingest token must NOT be able to create users.
+_ADMIN = "test-admin-token"
 
 
 @contextmanager
@@ -1675,6 +1678,270 @@ def test_api_comment_post_does_not_disturb_other_routes(tmp_path):
         payload = json.loads(raw)
         assert [c["body"] for c in payload["comments"]] == ["loop"]
         assert payload["comments"][0]["report_id"] == report_id
+
+
+# --- C3 (PR B): the admin API — POST/GET /api/users + revoke (admin-token gated) -
+#
+# The remote provisioning surface backing `relay-user`. Authed with the SEPARATE admin
+# token (never the ingest token — the ingest token must not create users), it mints a
+# per-user key (returned ONCE), lists users without credential material, and revokes
+# (deactivate + force-logout). These tests pin the independent-secret gate, the field
+# validation, that a created key actually logs in end to end, and that revoke is instant.
+
+
+def _admin_auth():
+    """An AuthConfig with provisioning ENABLED (admin token set), for the admin-API tests.
+
+    Why:
+        The admin API is off unless an admin token is configured. This bundles the
+        session secrets (so a created user can then log in end to end) with the admin
+        token, the posture a real provisioning-enabled relay runs with.
+    """
+    return AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, admin_token=_ADMIN)
+
+
+def _admin_post(base_url, path, obj, *, token=_ADMIN):
+    """POST a JSON object to an admin route; return (status, parsed-or-raw).
+
+    Why:
+        Centralizes the admin JSON-POST plumbing (Bearer admin token + JSON body) so each
+        test states only the fields it exercises. Reuses _post; decodes the JSON response
+        when possible, else returns the raw text.
+    """
+    status, raw = _post(
+        base_url, json.dumps(obj).encode("utf-8"), token=token, path=path
+    )
+    try:
+        return status, json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return status, raw.decode("utf-8")
+
+
+def test_create_user_returns_key_once_and_user_can_login(tmp_path):
+    """POST /api/users mints a user + key; that key logs the user in end to end.
+
+    Why this matters: this is provisioning's whole job — an admin creates a scoped user
+    and gets back a one-time key that actually works. We assert the 201 echoes the stored
+    identity (name/role/scope), returns a high-entropy key, and that the SAME key then
+    authenticates a real login (proving mint -> verifier -> login round-trips).
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        status, payload = _admin_post(
+            base_url, "/api/users", {"name": "alice", "role": "viewer", "projects": ["demo"]}
+        )
+        assert status == 201
+        assert payload["name"] == "alice"
+        assert payload["role"] == "viewer"
+        assert payload["projects"] == ["demo"]
+        key = payload["key"]
+        assert key and len(key) >= 40  # high-entropy minted key
+        # The returned key authenticates a real login (end to end).
+        assert _login(base_url, key) is not None
+
+
+def test_create_user_rejects_the_ingest_token(tmp_path):
+    """The INGEST token cannot create users — provisioning needs the admin token (401).
+
+    Why this matters: independent secrets are the core hardening — whoever can push
+    reports (the ingest token) must NOT be able to mint users. We present the ingest token
+    and require a 401, no user created, and the admin token never echoed.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        status, payload = _admin_post(
+            base_url, "/api/users", {"name": "mallory"}, token=_TOKEN
+        )
+        assert status == 401
+        assert _ADMIN not in json.dumps(payload)  # admin token never leaked
+
+        conn = open_relay_store(db)
+        assert conn.execute("SELECT COUNT(*) FROM relay_users").fetchone()[0] == 0
+
+
+def test_create_user_absent_token_is_401(tmp_path):
+    """A create request with no Authorization header is refused 401, nothing created.
+
+    Why this matters: provisioning is never open by omission — a missing credential is
+    refused just like a wrong one, before any user is minted.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        status, _ = _admin_post(base_url, "/api/users", {"name": "x"}, token=None)
+        assert status == 401
+        conn = open_relay_store(db)
+        assert conn.execute("SELECT COUNT(*) FROM relay_users").fetchone()[0] == 0
+
+
+def test_create_user_when_provisioning_disabled_is_401(tmp_path):
+    """With NO admin token configured, the create endpoint refuses every request (401).
+
+    Why this matters: provisioning is OFF unless an admin token is set, so a relay that
+    never enabled it cannot be coaxed into minting users — even by a client guessing a
+    token. The default _running_relay has no admin token.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):  # no admin token
+        status, _ = _admin_post(base_url, "/api/users", {"name": "x"}, token=_ADMIN)
+        assert status == 401
+
+
+def test_create_user_duplicate_name_is_409_and_does_not_clobber(tmp_path):
+    """Creating a second user with an existing name is a 409 — the first is untouched.
+
+    Why this matters: a duplicate name must NOT overwrite the existing user's key or scope
+    (that would silently change who can log in). We create "alice", attempt a second
+    "alice", and require a 409 with still exactly one alice in the store.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        assert _admin_post(base_url, "/api/users", {"name": "alice"})[0] == 201
+        status, _ = _admin_post(base_url, "/api/users", {"name": "alice"})
+        assert status == 409
+
+        conn = open_relay_store(db)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM relay_users WHERE name = 'alice'"
+        ).fetchone()[0]
+        assert count == 1
+
+
+def test_create_user_invalid_role_is_400(tmp_path):
+    """A role outside the allowlist is rejected 400 (no unvalidated role reaches the store).
+
+    Why this matters: relay_users.role is an open enum, so the endpoint — not the DB — is
+    the gate. An unknown role like "superuser" must be a clean 400, never a stored value
+    that later code might mis-handle as privileged.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        status, _ = _admin_post(
+            base_url, "/api/users", {"name": "x", "role": "superuser"}
+        )
+        assert status == 400
+
+
+def test_create_user_missing_name_is_400(tmp_path):
+    """A create payload without a non-empty name is rejected 400.
+
+    Why this matters: name is the unique handle every later op (login lookup, revoke)
+    keys on, so an absent or blank one is a client error caught at the boundary.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        assert _admin_post(base_url, "/api/users", {"role": "viewer"})[0] == 400
+        assert _admin_post(base_url, "/api/users", {"name": "   "})[0] == 400
+
+
+def test_create_admin_role_user_sees_all_projects(tmp_path):
+    """A provisioned admin (not the legacy key) logs in and sees every project.
+
+    Why this matters: role "admin" must grant all-access through the SAME _allowed_projects
+    path the legacy admin uses — proving the provisioned-admin path is real, not a special
+    case of the bootstrap key. We create an admin, log in with its key, and see both projects.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        _ingest_project(base_url, "alpha")
+        _ingest_project(base_url, "beta")
+        _, payload = _admin_post(base_url, "/api/users", {"name": "root", "role": "admin"})
+        cookie = _login(base_url, payload["key"])
+        code, html = _get(base_url, "/", cookie=cookie)
+        assert code == 200
+        assert "alpha" in html and "beta" in html
+
+
+def test_list_users_excludes_credential_material(tmp_path):
+    """GET /api/users lists users with their scope but NEVER any credential material.
+
+    Why this matters: an admin listing must not surface the key_verifier (even hashed) or
+    the raw key. We create a scoped user and confirm the listing shows name/role/projects
+    but neither 'key' nor 'key_verifier'.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        _admin_post(base_url, "/api/users", {"name": "alice", "projects": ["demo"]})
+        code, body = _get(base_url, "/api/users", bearer=_ADMIN)
+        assert code == 200
+        users = json.loads(body)["users"]
+        assert [u["name"] for u in users] == ["alice"]
+        assert users[0]["projects"] == ["demo"]
+        assert "key" not in users[0] and "key_verifier" not in users[0]
+
+
+def test_list_users_requires_admin_token(tmp_path):
+    """GET /api/users with the ingest token (not the admin token) is refused 401.
+
+    Why this matters: the listing is part of the admin surface, gated by the same separate
+    admin token — the ingest token must not read the user roster.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        code, body = _get(base_url, "/api/users", bearer=_TOKEN)
+        assert code == 401
+        assert _ADMIN not in body
+
+
+def test_revoke_user_forces_logout_and_blocks_relogin(tmp_path):
+    """POST /api/users/revoke deactivates a user: their cookie dies and the key stops working.
+
+    Why this matters: revocation is a settled Increment-1 requirement (decision C). A
+    revoke must be INSTANT — a session already in a browser stops on its next request AND
+    the key can no longer log in. We provision, log in, revoke, then confirm both.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        _, payload = _admin_post(
+            base_url, "/api/users", {"name": "bob", "projects": ["demo"]}
+        )
+        key = payload["key"]
+        cookie = _login(base_url, key)
+        assert _get(base_url, "/", cookie=cookie)[0] == 200  # works before revoke
+
+        status, r = _admin_post(base_url, "/api/users/revoke", {"name": "bob"})
+        assert status == 200 and r["revoked"] is True
+
+        assert _get(base_url, "/", cookie=cookie)[0] == 303  # live cookie force-logged-out
+        assert _login(base_url, key) is None  # key no longer authenticates
+
+
+def test_revoke_unknown_user_is_404(tmp_path):
+    """Revoking a name that does not exist is a clean 404.
+
+    Why this matters: a typo'd or already-deleted name must be a clear not-found, not a
+    crash — the admin gets an actionable error.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        assert _admin_post(base_url, "/api/users/revoke", {"name": "ghost"})[0] == 404
+
+
+def test_revoke_requires_admin_token(tmp_path):
+    """Revoke with the ingest token (not the admin token) is refused 401, user untouched.
+
+    Why this matters: revocation is a privileged state change, gated by the admin token.
+    The ingest token must not be able to revoke anyone.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _admin_post(base_url, "/api/users", {"name": "bob"})
+        status, _ = _admin_post(
+            base_url, "/api/users/revoke", {"name": "bob"}, token=_TOKEN
+        )
+        assert status == 401
+        # bob is still active.
+        conn = open_relay_store(db)
+        assert conn.execute(
+            "SELECT active FROM relay_users WHERE name = 'bob'"
+        ).fetchone()[0] == 1
+
+
+def test_admin_actions_write_audit_rows(tmp_path):
+    """Create and revoke each append an admin-audit row (the accountability trail).
+
+    Why this matters: a multi-party access model needs a record of who provisioned/revoked
+    whom. We create then revoke a user and confirm both actions are logged with the actor,
+    action verb, and target.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _admin_post(base_url, "/api/users", {"name": "carol", "role": "viewer", "projects": ["demo"]})
+        _admin_post(base_url, "/api/users/revoke", {"name": "carol"})
+
+        conn = open_relay_store(db)
+        rows = conn.execute(
+            "SELECT actor, action, target_user FROM relay_admin_audit ORDER BY id"
+        ).fetchall()
+        assert [(r["actor"], r["action"], r["target_user"]) for r in rows] == [
+            ("admin-token", "create_user", "carol"),
+            ("admin-token", "revoke_user", "carol"),
+        ]
 
 
 # --- Multi-party auth: session-cookie + key-verifier crypto (Increment 1) ------

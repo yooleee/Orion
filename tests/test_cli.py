@@ -1139,6 +1139,292 @@ def test_comments_pull_failure_does_not_advance_watermark(tmp_path, monkeypatch)
     assert calls == [("demo", 0)]
 
 
+# --- `orion relay-user` admin CLI (C3 / PR B) ---------------------------------
+#
+# These pin the provisioning commands WITHOUT a running relay: the admin client
+# functions (cli.relay_create_user / relay_list_users / relay_revoke_user) are
+# monkeypatched to recorders, so the tests assert on the args the CLI resolves (relay
+# URL + admin token + parsed flags), the printed output (incl. the one-time key), and
+# the config/secrets/error gates — never on a real relay.
+
+
+def _write_relay_admin_config(tmp_path, repo, *, enabled=True, with_admin=True):
+    """Write an orion.toml whose [relay] table optionally has admin_token_env_var.
+
+    Args:
+        tmp_path: per-test temp dir.
+        repo: path to the git repo for the demo project.
+        enabled: whether the [relay] table is enabled.
+        with_admin: whether to include admin_token_env_var (the provisioning gate).
+
+    Why:
+        The relay-user tests vary exactly two dimensions — relay enabled, and whether an
+        admin token env var is configured — so this keeps each test to its case (DRY).
+    """
+    admin_line = (
+        '        admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"\n' if with_admin else ""
+    )
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = {str(enabled).lower()}
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+{admin_line}
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git"]
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def test_relay_user_add_provisions_and_prints_key_once(tmp_path, monkeypatch, capsys):
+    """`relay-user add` resolves URL+admin token+flags, calls the client, prints the key.
+
+    Why this matters: this is provisioning's CLI contract — the command must read the
+    relay URL and the SEPARATE admin token from config/.env, pass the parsed name/role/
+    projects to the client, and surface the returned one-time key with a copy-it-now
+    warning (it cannot be retrieved later).
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+
+    def fake_create(url, token, name, role, projects, **_kw):
+        calls.append((url, token, name, role, projects))
+        return {"id": 1, "name": name, "role": role, "projects": projects, "key": "RAWKEY-123"}
+
+    monkeypatch.setattr(cli, "relay_create_user", fake_create)
+
+    code = cli.main(
+        ["relay-user", "add", "alice", "--role", "viewer", "--project", "demo",
+         "--config", str(toml)]
+    )
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "alice", "viewer", ["demo"])]
+    out = capsys.readouterr().out
+    assert "alice" in out
+    assert "RAWKEY-123" in out
+    assert "once" in out.lower()  # the shown-once warning
+
+
+def test_relay_user_add_threads_multiple_projects(tmp_path, monkeypatch, capsys):
+    """Repeated --project flags accumulate into the projects list passed to the client.
+
+    Why this matters: a viewer can be scoped to several projects; each --project must
+    append, so the client receives the full ordered list — not just the last one.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    seen = []
+    monkeypatch.setattr(
+        cli,
+        "relay_create_user",
+        lambda url, token, name, role, projects, **k: seen.append(projects)
+        or {"name": name, "role": role, "projects": projects, "key": "K"},
+    )
+
+    code = cli.main(
+        ["relay-user", "add", "bob", "--project", "alpha", "--project", "beta",
+         "--config", str(toml)]
+    )
+    assert code == 0
+    assert seen == [["alpha", "beta"]]
+
+
+def test_relay_user_add_disabled_relay_is_clean_error(tmp_path, monkeypatch):
+    """With the relay disabled, `relay-user add` errors cleanly and never calls the client.
+
+    Why this matters: provisioning targets a relay; a disabled [relay] is an actionable
+    config error (exit 1), not a crash, and no request is attempted.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo, enabled=False)
+
+    made = []
+    monkeypatch.setattr(cli, "relay_create_user", lambda *a, **k: made.append(a) or {})
+    code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
+    assert code == 1
+    assert made == []  # never attempted a request
+
+
+def test_relay_user_add_without_admin_token_env_var_is_clean_error(tmp_path, monkeypatch):
+    """With no admin_token_env_var configured, `relay-user add` errors and never calls out.
+
+    Why this matters: provisioning needs the SEPARATE admin token; a [relay] that lacks
+    admin_token_env_var (push-only) must produce a clear error telling the operator to add
+    it, not a confusing failure later.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo, with_admin=False)
+
+    made = []
+    monkeypatch.setattr(cli, "relay_create_user", lambda *a, **k: made.append(a) or {})
+    code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
+    assert code == 1
+    assert made == []
+
+
+def test_relay_user_add_missing_admin_secret_is_clean_error(tmp_path, monkeypatch):
+    """With admin_token_env_var configured but unset in .env, the command errors cleanly.
+
+    Why this matters: a configured-but-unset admin token is a SecretsError naming the
+    variable — caught before any request, so a forgotten secret is a clear fix, not a 401.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("ORION_RELAY_ADMIN_TOKEN", raising=False)  # configured but unset
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    made = []
+    monkeypatch.setattr(cli, "relay_create_user", lambda *a, **k: made.append(a) or {})
+    code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
+    assert code == 1
+    assert made == []
+
+
+def test_relay_user_add_delivery_error_is_clean_exit(tmp_path, monkeypatch, capsys):
+    """A relay error (e.g. a duplicate name 409) surfaces as a clean exit 1 with its message.
+
+    Why this matters: a duplicate name must read as an actionable message, not a traceback.
+    The client raises DeliveryError with the relay's lifted reason; the CLI prints it and
+    exits 1.
+    """
+    from orion.delivery import DeliveryError
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_create_user",
+        lambda *a, **k: (_ for _ in ()).throw(
+            DeliveryError("Relay returned HTTP 409: a user named 'alice' already exists")
+        ),
+    )
+    code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "409" in err and "already exists" in err
+
+
+def test_relay_user_list_prints_roster(tmp_path, monkeypatch, capsys):
+    """`relay-user list` prints each user's role, status, and scope.
+
+    Why this matters: the operational view must show who has access and what they can see,
+    drawn from the client's roster response (which carries no credential material).
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_list_users",
+        lambda url, token, **k: {
+            "users": [
+                {"name": "alice", "role": "viewer", "active": True,
+                 "projects": ["demo"], "last_login_at": None},
+                {"name": "root", "role": "admin", "active": True,
+                 "projects": [], "last_login_at": "2026-06-24T10:00:00+00:00"},
+            ]
+        },
+    )
+    code = cli.main(["relay-user", "list", "--config", str(toml)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "alice" in out and "viewer" in out and "demo" in out
+    assert "root" in out and "admin" in out
+
+
+def test_relay_user_list_empty_is_friendly(tmp_path, monkeypatch, capsys):
+    """An empty roster prints a friendly 'no users yet' line, exit 0.
+
+    Why this matters: a fresh relay with no users is a normal state, not an error — the
+    command should say so plainly rather than print nothing.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(cli, "relay_list_users", lambda url, token, **k: {"users": []})
+    code = cli.main(["relay-user", "list", "--config", str(toml)])
+    assert code == 0
+    assert "No relay users" in capsys.readouterr().out
+
+
+def test_relay_user_revoke_calls_client_and_confirms(tmp_path, monkeypatch, capsys):
+    """`relay-user revoke <name>` calls the client with the resolved URL+token+name.
+
+    Why this matters: revocation is the settled Inc-1 safety valve; the command must thread
+    the name to the client and confirm the deactivation to the operator.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_revoke_user",
+        lambda url, token, name, **k: calls.append((url, token, name))
+        or {"name": name, "revoked": True},
+    )
+    code = cli.main(["relay-user", "revoke", "alice", "--config", str(toml)])
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "alice")]
+    assert "Revoked" in capsys.readouterr().out
+
+
+def test_relay_user_revoke_unknown_user_is_clean_error(tmp_path, monkeypatch, capsys):
+    """Revoking an unknown name surfaces the relay's 404 as a clean exit 1.
+
+    Why this matters: a typo'd name must be an actionable message, not a crash.
+    """
+    from orion.delivery import DeliveryError
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_revoke_user",
+        lambda *a, **k: (_ for _ in ()).throw(
+            DeliveryError("Relay returned HTTP 404: no user named 'ghost'")
+        ),
+    )
+    code = cli.main(["relay-user", "revoke", "ghost", "--config", str(toml)])
+    assert code == 1
+    assert "404" in capsys.readouterr().err
+
+
 def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys):
     """With $ORION_CONFIG set and --config omitted, commands resolve the env-pointed config.
 

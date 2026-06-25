@@ -29,6 +29,7 @@ import hmac
 import ipaddress
 import json
 import secrets
+import sqlite3
 import sys
 import time
 import urllib.parse
@@ -51,16 +52,21 @@ from .render import (
 )
 from .store import (
     add_comment,
+    add_user,
     comments_for,
     comments_for_project,
     get,
     get_user_by_id,
+    get_user_by_name,
     get_user_by_verifier,
     history,
     ingest,
     list_projects,
+    list_users,
     open_relay_store,
     projects_for_user,
+    record_admin_audit,
+    revoke_user,
     update_last_login,
 )
 
@@ -103,6 +109,17 @@ _REQUIRED_STR_FIELDS = (
 # /second-opinion: sharing a secret widens blast radius and couples unrelated rotations.
 _SESSION_COOKIE_NAME = "orion_session"
 _SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at once
+
+# Roles an admin may PROVISION today. relay_users.role is an open enum
+# (contributor/guest are reserved for later increments), but only these two are
+# creatable now, so the provisioning endpoint allowlists them and 400s anything else —
+# an unvalidated role string must never become a stored value.
+_PROVISIONABLE_ROLES = ("admin", "viewer")
+
+# Actor label written to the admin audit trail for token-driven provisioning. The admin
+# API authenticates with a shared admin token (not a named identity), so the trail
+# records the token role rather than a person — enough to attribute the action.
+_ADMIN_ACTOR = "admin-token"
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -407,6 +424,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/comments":
             self._handle_api_comments()
             return
+        # The admin API (provisioning) is authed with the SEPARATE admin token, not the
+        # ingest token or a browser session — routed here so it never trips the cookie gate.
+        if path == "/api/users":
+            self._handle_list_users()
+            return
 
         # The login surface is reachable WITHOUT a session — you must get here to log in.
         if path == "/login":
@@ -508,6 +530,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/api/comments":
             self._handle_api_comment_post()
+            return
+
+        # Admin API (admin-token authed, NOT the ingest token): provision + revoke users.
+        if path == "/api/users":
+            self._handle_create_user()
+            return
+        if path == "/api/users/revoke":
+            self._handle_revoke_user()
             return
 
         if path == "/login":
@@ -867,6 +897,193 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(201, {"id": new_id, "report_id": report_id})
 
+    def _handle_create_user(self) -> None:
+        """Provision a user and return their raw login key ONCE (POST /api/users).
+
+        Body fields:
+          - name     (required): the user's unique display name / handle.
+          - role     (optional): "viewer" (default) or "admin"; allowlisted.
+          - projects (optional): project names the viewer is scoped to (ignored for an
+            admin, which sees all). Defaults to [].
+
+        The inbound-security checklist, IN ORDER (mirrors _handle_api_comment_post):
+          1. Auth — the ADMIN token (NOT the ingest token); 401 otherwise, before the body.
+          2. Read + parse — 1 MB cap, then JSON; non-object/invalid -> 400.
+          3. Validate — name non-empty str; role in the allowlist; projects a list of str.
+          4. Mint + store — a fresh ≥256-bit key, store only its peppered verifier, write
+             an audit row; a duplicate name is a 409 (never clobbers an existing user).
+          5. Respond 201 with {id, name, role, projects, key} — the raw key shown ONCE.
+
+        Why:
+            This is the only way a user is created, and the raw key exists only in this
+            response: it is minted here, stored as a verifier (never in cleartext), and
+            NEVER logged. Returning it once is the whole "shown once at creation" model.
+            A duplicate name must not overwrite the existing user's credential/scope (that
+            would silently change who can log in), so the UNIQUE(name) collision is
+            surfaced as a 409, not a clobber.
+        """
+        # 1) Admin auth FIRST — validate nothing until authorized; only the admin token
+        # passes (the ingest token does not), and a missing admin config is refused.
+        auth_error = self._auth_admin_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Read + JSON-parse the body (1 MB cap inside _read_raw_body).
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "payload must be a JSON object"})
+            return
+
+        # 3) Validate. name required non-empty; role allowlisted; projects a list of str.
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            self._send_json(400, {"error": "field 'name' must be a non-empty string"})
+            return
+        name = name.strip()
+        role = payload.get("role", "viewer")
+        if role not in _PROVISIONABLE_ROLES:
+            self._send_json(
+                400,
+                {"error": f"field 'role' must be one of {list(_PROVISIONABLE_ROLES)}"},
+            )
+            return
+        projects = payload.get("projects", [])
+        if not isinstance(projects, list) or not all(
+            isinstance(p, str) for p in projects
+        ):
+            self._send_json(400, {"error": "field 'projects' must be a list of strings"})
+            return
+        # Normalize: strip, drop blanks, dedupe (preserving order) — a scope should not
+        # carry whitespace-only or duplicate project names into the store.
+        projects = list(dict.fromkeys(p.strip() for p in projects if p.strip()))
+
+        # The pepper is required to compute the verifier. cmd_relay_serve fails closed
+        # when the admin token is set without it, so this is a defensive guard only.
+        if self.server.user_pepper is None:
+            self._send_json(500, {"error": "server is missing the user pepper"})
+            return
+
+        # 4) Mint a fresh key, store ONLY its peppered verifier + scope, audit. The raw
+        # key lives in a local just long enough to return it; it is never logged.
+        raw_key = mint_key()
+        verifier = key_verifier(self.server.user_pepper, raw_key)
+        conn = open_relay_store(self.server.db_path)
+        try:
+            try:
+                user_id = add_user(
+                    conn, name, verifier, role, projects, _ADMIN_ACTOR, _utc_now_iso()
+                )
+            except sqlite3.IntegrityError:
+                # UNIQUE(name) (or an astronomically-unlikely verifier collision): a user
+                # by this name already exists. Refuse rather than clobber their access.
+                self._send_json(409, {"error": f"a user named {name!r} already exists"})
+                return
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "create_user", name, role, projects, _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        # 5) Return the raw key ONCE — the only place it ever appears.
+        self._send_json(
+            201,
+            {"id": user_id, "name": name, "role": role, "projects": projects, "key": raw_key},
+        )
+
+    def _handle_list_users(self) -> None:
+        """Return all users (without credential material) as JSON (GET /api/users).
+
+        The inbound-security checklist:
+          1. Auth — the ADMIN token; 401 otherwise, before any query.
+          2. Query + respond — {"users": [...]} from list_users (which excludes
+             key_verifier by construction).
+
+        Why:
+            Backs `relay-user list`. list_users deliberately omits key_verifier, so this
+            admin view can never surface credential material (even hashed). Admin-token
+            gated like the rest of the provisioning surface.
+        """
+        auth_error = self._auth_admin_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            users = list_users(conn)
+        finally:
+            conn.close()
+        self._send_json(200, {"users": users})
+
+    def _handle_revoke_user(self) -> None:
+        """Revoke a user by name: deactivate + force-logout (POST /api/users/revoke).
+
+        Body fields:
+          - name (required): the user to revoke.
+
+        The inbound-security checklist, IN ORDER:
+          1. Auth — the ADMIN token; 401 otherwise, before the body.
+          2. Read + parse — 1 MB cap, JSON object; non-object/invalid -> 400.
+          3. Validate — name a non-empty string.
+          4. Resolve + revoke — 404 if no such user; else revoke_user (active=0 +
+             session_version bump, atomically) and write an audit row.
+          5. Respond 200 {name, revoked: true}.
+
+        Why:
+            Revocation is a settled Increment-1 requirement (decision C): "grant but
+            can't revoke" is an unacceptable gap for sharing. revoke_user does the
+            deactivation AND the session-version bump in one UPDATE, so the user's future
+            logins are denied and any cookie already in a browser stops working on its
+            next request — instant, stateless force-logout. Audited like creation.
+        """
+        auth_error = self._auth_admin_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "payload must be a JSON object"})
+            return
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            self._send_json(400, {"error": "field 'name' must be a non-empty string"})
+            return
+        name = name.strip()
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            revoke_user(conn, user["id"])
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "revoke_user", name, user["role"], [], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "revoked": True})
+
     def _auth_error(self) -> str | None:
         """Return None if the request is authorized, else a 401 reason string.
 
@@ -890,6 +1107,32 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return "missing or malformed Authorization header (expected 'Bearer <token>')"
         if not hmac.compare_digest(header[len(prefix):], self.server.token):
             return "invalid token"
+        return None
+
+    def _auth_admin_error(self) -> str | None:
+        """Return None if the request bears the ADMIN token, else a reason string.
+
+        Returns:
+            None when a valid `Bearer <admin_token>` is present; otherwise a short
+            message (provisioning disabled / missing header / wrong token).
+
+        Why:
+            Provisioning is gated by the SEPARATE admin token, never the ingest token —
+            "the ingest token must NOT create users" (Codex hardening: independent
+            secrets bound the blast radius). So this compares ONLY against
+            self.server.admin_token, constant-time (hmac.compare_digest), and never
+            against self.server.token — a client holding the ingest token therefore
+            cannot provision. When no admin token is configured, provisioning is OFF and
+            every request is refused. The admin token is never echoed in any message.
+        """
+        if self.server.admin_token is None:
+            return "provisioning is disabled (no admin token configured)"
+        header = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not header.startswith(prefix):
+            return "missing or malformed Authorization header (expected 'Bearer <token>')"
+        if not hmac.compare_digest(header[len(prefix):], self.server.admin_token):
+            return "invalid admin token"
         return None
 
     def _read_session_cookie(self) -> str | None:

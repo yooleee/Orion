@@ -51,7 +51,13 @@ from orion.config import (
 )
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
-from orion.delivery.relay import pull_comments, push as relay_push
+from orion.delivery.relay import (
+    create_user as relay_create_user,
+    list_users as relay_list_users,
+    pull_comments,
+    push as relay_push,
+    revoke_user as relay_revoke_user,
+)
 from orion.delivery.slack import send as slack_send
 from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
@@ -617,6 +623,65 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    # `relay-user` is a command GROUP with add/list/revoke subcommands — the admin-side
+    # provisioning CLI that talks to a running relay's /api/users endpoint over HTTP
+    # (authenticated with the SEPARATE admin token). It is the only nested-subcommand
+    # group in the CLI; every other command is flat.
+    relay_user_parser = subparsers.add_parser(
+        "relay-user",
+        help="Manage relay dashboard users: provision, list, and revoke per-user access keys.",
+    )
+    relay_user_subs = relay_user_parser.add_subparsers(
+        dest="relay_user_command", required=True
+    )
+
+    ru_add = relay_user_subs.add_parser(
+        "add", help="Provision a new user and print their one-time access key."
+    )
+    ru_add.add_argument("name", help="The user's unique display name / handle.")
+    ru_add.add_argument(
+        "--role",
+        choices=("viewer", "admin"),
+        default="viewer",
+        help="The user's role (default: viewer). An admin sees all projects.",
+    )
+    ru_add.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        dest="projects",
+        metavar="PROJECT",
+        help=(
+            "A project this viewer may see (repeatable: --project a --project b). "
+            "Ignored for an admin (which sees all). A viewer with none sees nothing."
+        ),
+    )
+    ru_add.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_list = relay_user_subs.add_parser(
+        "list", help="List the relay's users (no credential material is shown)."
+    )
+    ru_list.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_revoke = relay_user_subs.add_parser(
+        "revoke",
+        help="Revoke a user: deactivate their key and force-log-out any live session.",
+    )
+    ru_revoke.add_argument("name", help="The user to revoke (by name).")
+    ru_revoke.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "report":
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
@@ -687,6 +752,15 @@ def main(argv: list[str] | None = None) -> int:
             session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
         )
+    if args.command == "relay-user":
+        if args.relay_user_command == "add":
+            return cmd_relay_user_add(
+                args.name, args.role, args.projects, Path(args.config)
+            )
+        if args.relay_user_command == "list":
+            return cmd_relay_user_list(Path(args.config))
+        if args.relay_user_command == "revoke":
+            return cmd_relay_user_revoke(args.name, Path(args.config))
     return 1  # Unreachable: subparsers are required.
 
 
@@ -2399,6 +2473,159 @@ def cmd_relay_serve(
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _load_relay_admin(config_path: Path) -> tuple[str, str]:
+    """Load the relay URL + admin token for a `relay-user` command.
+
+    Args:
+        config_path: Path to orion.toml (its sibling .env holds the admin token).
+
+    Returns:
+        A (relay_url, admin_token) pair: the relay's base URL (from [relay] url) and the
+        admin Bearer token (read from .env via admin_token_env_var).
+
+    Raises:
+        ConfigError: when no relay is enabled, or [relay] has no admin_token_env_var.
+        SecretsError: when the named admin-token env variable is unset.
+
+    Why:
+        The three relay-user commands share the same prerequisites — an enabled relay,
+        a configured admin-token env var, and the secret itself — so resolving them lives
+        in one place (DRY). The admin token is SEPARATE from the ingest token (token_env_var):
+        provisioning must not ride on the push credential. Reading the secret here, in the
+        CLI, matches every other command; a missing one is named by get_required, never printed.
+    """
+    config = load_config(config_path)
+    load_secrets(config_path)
+    relay_cfg = config.relay
+    if not relay_cfg.enabled:
+        raise ConfigError(
+            f"no relay is enabled in {config_path}. Enable the [relay] table "
+            "(url + token_env_var + admin_token_env_var) to manage relay users."
+        )
+    if not relay_cfg.admin_token_env_var:
+        raise ConfigError(
+            f"[relay] in {config_path} has no admin_token_env_var. Add it (the .env "
+            "variable holding the relay admin token, e.g. "
+            'admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN") to manage relay users.'
+        )
+    admin_token = get_required(relay_cfg.admin_token_env_var)
+    return relay_cfg.url, admin_token
+
+
+def cmd_relay_user_add(
+    name: str, role: str, projects: list[str], config_path: Path
+) -> int:
+    """Provision a relay user and print their one-time access key (`relay-user add`).
+
+    Args:
+        name: The new user's unique handle.
+        role: "viewer" or "admin".
+        projects: Project names a viewer may see (ignored for an admin).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request
+        (e.g. a duplicate name → the relay's 409, surfaced as a clear message).
+
+    Why:
+        The admin-facing half of provisioning: it calls the relay's POST /api/users with
+        the admin token and prints the returned key ONCE. The key is shown here (to the
+        operator who created it) deliberately — that is the only time it exists in the
+        clear; it is never stored or logged. We print a copy-it-now warning so the operator
+        knows it cannot be retrieved later (only its verifier is stored).
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_create_user(relay_url, admin_token, name, role, projects)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Provisioned user {result['name']!r} (role: {result['role']}).")
+    scope = result.get("projects") or []
+    if result["role"] == "admin":
+        print("  Scope: all projects (admin).")
+    elif scope:
+        print(f"  Scope: {', '.join(scope)}")
+    else:
+        print("  Scope: none yet — grant projects so this viewer can see anything.")
+    print()
+    print("  Access key (shown ONCE — copy it now; it cannot be retrieved later):")
+    print(f"    {result['key']}")
+    return 0
+
+
+def cmd_relay_user_list(config_path: Path) -> int:
+    """List the relay's users with role, status, and scope (`relay-user list`).
+
+    Args:
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success (including an empty roster); 1 on a config/secrets error
+        or a failed request.
+
+    Why:
+        The operational view: who has access, what they can see, and who has been revoked.
+        It calls GET /api/users, which returns NO credential material (no verifier, no
+        key), so a listing can never surface a secret.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_list_users(relay_url, admin_token)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    users = result.get("users", [])
+    if not users:
+        print("No relay users provisioned yet.")
+        return 0
+    for user in users:
+        status = "active" if user.get("active") else "REVOKED"
+        if user["role"] == "admin":
+            scope = "all (admin)"
+        else:
+            scope = ", ".join(user.get("projects") or []) or "none"
+        last_login = user.get("last_login_at") or "never"
+        print(
+            f"{user['name']}  [{user['role']}, {status}]  "
+            f"scope: {scope}  last login: {last_login}"
+        )
+    return 0
+
+
+def cmd_relay_user_revoke(name: str, config_path: Path) -> int:
+    """Revoke a relay user: deactivate + force-logout (`relay-user revoke`).
+
+    Args:
+        name: The user to revoke.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request
+        (e.g. an unknown name → the relay's 404, surfaced as a clear message).
+
+    Why:
+        Revocation is a settled Increment-1 requirement: an admin must be able to cut off
+        access immediately. It calls POST /api/users/revoke, where the relay deactivates
+        the user and bumps their session_version atomically — so the key stops logging in
+        AND any cookie already in a browser dies on its next request.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_revoke_user(relay_url, admin_token, name)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Revoked user {name!r}: their key is deactivated and any live session is "
+        "logged out."
+    )
     return 0
 
 

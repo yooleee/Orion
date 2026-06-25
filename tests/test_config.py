@@ -209,6 +209,83 @@ def test_auto_send_invalid_type_raises(tmp_path):
         load_config(path)
 
 
+def test_checklist_true_with_tasks_collector_parses(tmp_path):
+    """`checklist = true` parses to True when the `tasks` collector is enabled.
+
+    Why this matters: the live-checklist toggle is read from tasks_file, so the
+    happy path is "tasks enabled + checklist on." We pin that this valid pairing
+    resolves to a real boolean True (config does not check the file exists yet).
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git", "tasks"]
+        tasks_file = "TODO.md"
+        checklist = true
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.checklist is True
+
+
+def test_checklist_true_without_tasks_collector_raises(tmp_path):
+    """`checklist = true` without the `tasks` collector is a clear ConfigError.
+
+    Why this matters: the live checklist has no source unless the `tasks` collector
+    (which resolves tasks_file) is enabled. We reject the contradiction at load time
+    with a fixable message rather than discovering it as an empty/crashing read later.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git"]
+        checklist = true
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="checklist"):
+        load_config(path)
+
+
+def test_checklist_invalid_type_raises(tmp_path):
+    """A non-boolean checklist is rejected rather than coerced.
+
+    Why this matters: like auto_send, this is a switch that exposes user content
+    (open/planned items) to the dashboard, so it must not be truthy-by-accident. A
+    string "yes" or int 1 is caught by isinstance(x, bool) at load time.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git", "tasks"]
+        tasks_file = "TODO.md"
+        checklist = "yes"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="checklist"):
+        load_config(path)
+
+
 def test_no_recipients_raises(tmp_path):
     """A project with no recipients is rejected — delivery would be impossible.
 

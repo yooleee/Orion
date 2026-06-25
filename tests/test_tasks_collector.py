@@ -14,7 +14,7 @@ import json
 import pytest
 
 from orion.collectors import LANE_STRUCTURED
-from orion.collectors.tasks import TasksError, collect
+from orion.collectors.tasks import ChecklistItem, TasksError, collect, snapshot
 
 
 def _write_tasks(tmp_path, text):
@@ -154,3 +154,100 @@ def test_missing_file_raises_tasks_error(tmp_path):
     missing = tmp_path / "nope.md"
     with pytest.raises(TasksError, match="not found"):
         collect(missing, prior_marker=None)
+
+
+# --- snapshot(): the LIVE checklist read (E2 Inc 2) -------------------------------
+# snapshot() is a SEPARATE read from collect(): it reports the FULL current checklist
+# (open + done) for the dashboard's live view, not a delta. These tests pin that it
+# captures both states in file order AND that it does not disturb collect()'s
+# retrospective behavior (the kickoff's hard invariant).
+
+
+def test_snapshot_captures_open_and_done_in_file_order(tmp_path):
+    """snapshot() returns every item — open and done — preserving file order.
+
+    Why this matters: the dashboard's "live checklist" must show what is done AND
+    what is still open/planned. Unlike collect(), which deliberately drops "[ ]"
+    items, snapshot() carries both with their done-state, in the order they appear so
+    the rendered list reads like the user's file.
+    """
+    path = _write_tasks(
+        tmp_path,
+        "# TODO\n"
+        "- [x] Build collector contract\n"
+        "- [ ] Slack delivery\n"
+        "- [X] Add intake command\n"
+        "* [ ] Wire the dashboard\n",
+    )
+    items = snapshot(path)
+
+    assert items == (
+        ChecklistItem(text="Build collector contract", done=True),
+        ChecklistItem(text="Slack delivery", done=False),
+        ChecklistItem(text="Add intake command", done=True),  # uppercase [X] is done
+        ChecklistItem(text="Wire the dashboard", done=False),  # `*` bullet recognized
+    )
+
+
+def test_snapshot_dedupes_by_text_first_wins(tmp_path):
+    """A repeated item text collapses to its first occurrence (identity-by-text).
+
+    Why this matters: snapshot() mirrors collect()'s documented identity model
+    (KI-6) — an item is identified by its text — so two identical lines must not
+    render twice. First occurrence (and its done-state) wins.
+    """
+    path = _write_tasks(
+        tmp_path,
+        "- [ ] Duplicate\n- [x] Duplicate\n",
+    )
+    items = snapshot(path)
+    assert items == (ChecklistItem(text="Duplicate", done=False),)
+
+
+def test_snapshot_ignores_non_checklist_lines(tmp_path):
+    """Prose, headings, and plain bullets are not checklist items.
+
+    Why this matters: a tasks file is real Markdown with prose around the boxes;
+    only "- [ ]"/"- [x]" lines are checklist items, everything else is skipped.
+    """
+    path = _write_tasks(
+        tmp_path,
+        "# Heading\nSome prose.\n- A plain bullet\n- [ ] Real item\n",
+    )
+    assert snapshot(path) == (ChecklistItem(text="Real item", done=False),)
+
+
+def test_snapshot_missing_file_returns_empty_not_error(tmp_path):
+    """A missing/unreadable tasks file yields () — it must never break a report.
+
+    Why this matters: the checklist is additive context that rides on a report. If
+    it could raise (the way collect() does), a misconfigured path would abort the
+    report the user actually asked for. snapshot() fails soft instead.
+    """
+    missing = tmp_path / "nope.md"
+    assert snapshot(missing) == ()
+
+
+def test_snapshot_does_not_disturb_collect_delta(tmp_path):
+    """collect() and snapshot() read the same file independently and agree.
+
+    Why this matters: this is the kickoff's hard invariant — adding the live
+    checklist must NOT regress the retrospective "newly completed" path. Here both
+    run on one file: collect() still reports only the done item as new, while
+    snapshot() reports the full open+done list. They neither share nor mutate state.
+    """
+    path = _write_tasks(
+        tmp_path,
+        "- [x] Done thing\n- [ ] Open thing\n",
+    )
+    delta = collect(path, prior_marker=None)
+    live = snapshot(path)
+
+    # Retrospective path is unchanged: only the completed item, as prose.
+    assert delta.raw_text == "- Done thing"
+    assert json.loads(delta.new_marker) == ["Done thing"]
+    # Live path: both items, with state.
+    assert live == (
+        ChecklistItem(text="Done thing", done=True),
+        ChecklistItem(text="Open thing", done=False),
+    )

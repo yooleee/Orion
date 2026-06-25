@@ -36,8 +36,9 @@ from orion.collectors.incubator import IncubatorError, read_index
 from orion.collectors.incubator import collect as collect_incubator
 from orion.collectors.notes import NotesError
 from orion.collectors.notes import collect as collect_notes
-from orion.collectors.tasks import TasksError
+from orion.collectors.tasks import ChecklistItem, TasksError
 from orion.collectors.tasks import collect as collect_tasks
+from orion.collectors.tasks import snapshot as snapshot_tasks
 from orion.compose import ComposedMessage, compose
 from orion.config import (
     SHARE_LEVELS,
@@ -1024,8 +1025,38 @@ def _run_report(
         # the same sections, filtered.
         generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         lane = LANE_RAW if any_raw_lane else LANE_STRUCTURED
+
+        # --- Capture the project's LIVE checklist (E2 Inc 2), if enabled ---
+        # A SEPARATE read of tasks_file from the tasks collector's delta: it carries
+        # the FULL current checklist (open + done) to the dashboard's live view. It
+        # rides on full_blob ONLY (the relay payload); the per-audience chat blobs
+        # below are unaffected (chat enrichment is out of scope). Each item's text
+        # passes through redact() — the structured-lane safety net the privacy rule
+        # requires — before it leaves the machine, and its hits join the run's count.
+        # None when the project has no checklist enabled, which omits it from the wire.
+        checklist: tuple[ChecklistItem, ...] | None = None
+        if project.checklist and project.tasks_file is not None:
+            redacted_items: list[ChecklistItem] = []
+            for item in snapshot_tasks(project.tasks_file):
+                scrub = redact(item.text)
+                redaction_hits += scrub.hit_count
+                # A secret inside an item name is replaced with a placeholder (not
+                # dropped), so the item still shows with its done-state. We skip an
+                # item only if its text is empty AFTER redaction (the whole label was
+                # a secret), to avoid emitting a blank checklist row.
+                safe_text = scrub.text.strip()
+                if safe_text:
+                    redacted_items.append(ChecklistItem(text=safe_text, done=item.done))
+            checklist = tuple(redacted_items)
+
         full_blob = build_report(
-            project, safe_body, lane, "", generated_at, sections=tuple(full_pairs)
+            project,
+            safe_body,
+            lane,
+            "",
+            generated_at,
+            sections=tuple(full_pairs),
+            checklist=checklist,
         )
 
         # --- Group recipients into audiences and compose one filtered message

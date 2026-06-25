@@ -25,9 +25,30 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from orion.collectors import LANE_STRUCTURED, CollectorResult
+
+
+@dataclass(frozen=True)
+class ChecklistItem:
+    """One checklist item: its text and whether it is checked off.
+
+    Args:
+        text: The item's text (the part after the "[ ]"/"[x]" box), stripped.
+        done: True when the box is checked ("[x]"/"[X]"), False when open ("[ ]").
+
+    Why:
+        snapshot() reports the FULL current checklist (open + done), unlike collect()
+        which reports only newly-completed items as prose. A tiny named record (rather
+        than a bare (text, bool) tuple) makes the done-state explicit at every use site
+        and leaves a clean seam for a later additive field (e.g. a section/heading
+        group) without churning positional unpacking everywhere.
+    """
+
+    text: str
+    done: bool
 
 
 class TasksError(Exception):
@@ -45,6 +66,13 @@ class TasksError(Exception):
 # (case-insensitive), then the item text. We capture only the text (group 1).
 # Unchecked items ("[ ]") deliberately do NOT match — only completions are signal.
 _COMPLETED_RE = re.compile(r"^\s*[-*]\s+\[[xX]\]\s+(.+?)\s*$")
+
+# A checklist line in EITHER state — the same bullet+box shape as _COMPLETED_RE, but
+# the box captures a space (open) OR x/X (done), so snapshot() can report the full
+# current checklist. Group 1 is the box content; group 2 is the item text. Kept as a
+# SEPARATE pattern from _COMPLETED_RE (not a generalization of it) so the retrospective
+# collect() path is untouched — the two only need to AGREE on what a checklist line is.
+_ITEM_RE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.+?)\s*$")
 
 
 def collect(tasks_file: Path, prior_marker: str | None) -> CollectorResult:
@@ -106,6 +134,49 @@ def collect(tasks_file: Path, prior_marker: str | None) -> CollectorResult:
         new_marker=new_marker,
         has_activity=has_activity,
     )
+
+
+def snapshot(tasks_file: Path) -> tuple[ChecklistItem, ...]:
+    """Read the FULL current checklist (open + done) as structured items.
+
+    Args:
+        tasks_file: Path to the Markdown checklist (resolved absolute by config).
+
+    Returns:
+        The checklist items in FILE ORDER, de-duplicated by text, each carrying its
+        done-state. Empty tuple when the file is missing/unreadable or has no items.
+
+    Why:
+        This is the dashboard's "live checklist" read — current state, NOT a delta —
+        so it captures both open "[ ]" and done "[x]" items. It is a SEPARATE read of
+        the same file from collect(): keeping them apart means the retrospective
+        "newly completed" reporting (and its marker) is provably unchanged by this
+        feature. We tolerate a missing/unreadable file by returning () rather than
+        raising, so attaching a checklist can never break report generation — the
+        checklist is additive context, not a hard dependency of the report.
+        De-duplication by text mirrors collect()'s identity model (KI-6): an item is
+        identified by its text, so two identical lines collapse to one (first wins).
+    """
+    try:
+        text = _read(tasks_file)
+    except TasksError:
+        # Fail soft: a checklist we cannot read simply does not appear on the
+        # dashboard; it must never abort the report the user actually asked for.
+        return ()
+
+    items: list[ChecklistItem] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        match = _ITEM_RE.match(line)
+        if match is None:
+            continue
+        box, item_text = match.group(1), match.group(2).strip()
+        if not item_text or item_text in seen:
+            continue
+        seen.add(item_text)
+        # The box is one of " ", "x", or "X"; normalize case for the done check.
+        items.append(ChecklistItem(text=item_text, done=box.lower() == "x"))
+    return tuple(items)
 
 
 def _read(tasks_file: Path) -> str:

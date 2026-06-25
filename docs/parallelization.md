@@ -13,8 +13,9 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-25 (after the dashboard CSP/headers hardening and **E2 Inc 1 — portfolio
-overview** shipped; E2 ladder + D follow-ons + deferred C-track ahead). Excludes Horizon P, which is
+_Last synced: 2026-06-25 (after the dashboard CSP/headers hardening, **E2 Inc 1 — portfolio
+overview** shipped, and **E2 Inc 2 — live checklist signal** built + locally verified [PR pending];
+E2 Inc 3 + D follow-ons + deferred C-track ahead). Excludes Horizon P, which is
 decision-gated launch work._
 
 ## Remaining buildable inventory + file footprint
@@ -27,9 +28,11 @@ decision-gated launch work._
 - **Horizon E:** E1 light planning layer (`state` new tables, `config`, a planning module, `cli`,
   `relay/render`); **E2 dashboard-visibility track — now building incrementally:** Inc 1 portfolio
   overview ✅ shipped (purely `relay/` render+store+server — the clean relay-only seam); Inc 2 surface
-  the to-do/milestone signal **spans the relay⟂CLI seam** (local `collectors/` + `report.serialize_blob`
-  blob field + `relay/store` column + `relay/render`) — a vertical slice through the whole pipeline, not
-  a relay-only change; Inc 3 forward-looking layer **≡ E1 ≡ B5** (forward-state). E3 enriched chat bots
+  the to-do/milestone signal ✅ **built (PR pending)** — the predicted **relay⟂CLI vertical slice** held
+  (local `collectors/tasks.snapshot` + `report.serialize_blob` blob field + `relay/store` new
+  `relay_project_checklists` **table** [project-level live, not a per-report column → no DB migration] +
+  `relay/server` validation/upsert + `relay/render` badge+block); Inc 3 forward-looking layer **≡ E1 ≡
+  B5** (forward-state). E3 enriched chat bots
   (`bot/`); E4 cross-project coordination (broad); E5 read-write dashboard (`relay/` write paths + auth —
   the watershed).
 - **Independent KIs (small):** KI-5 compose unknown-channel raise (`compose.py`, keep in sync with

@@ -160,6 +160,14 @@ ul.portfolio li.card {
 li.card h2 { margin: 0 0 0.3rem; font-size: 1.05rem; }
 li.card .headline { margin: 0 0 0.4rem; }
 li.card .meta { display: block; }
+li.card .checklist-badge { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.875rem; }
+/* Live checklist (E2 Inc 2): current open/done items on the report page. Function-first,
+   reusing the muted/accent tokens; the glyph carries state, the class adds the styling. */
+ul.checklist { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+ul.checklist li { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.25rem 0; }
+ul.checklist li .box { color: var(--muted); }
+ul.checklist li.done .box { color: var(--accent); }
+ul.checklist li.done .task { text-decoration: line-through; color: var(--muted); }
 """.strip()
 
 # A single, static progressive-enhancement script. It rewrites each <time datetime>
@@ -475,10 +483,23 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
         headline_html = (
             f"<p class='headline'>{_esc(headline)}</p>\n" if headline else ""
         )
+        # "X/Y done" checklist badge (E2 Inc 2) — shown only when this project has a
+        # live checklist with at least one item. .get() (not []) so a portfolio dict
+        # without the counts still renders; `if total` omits the badge for both the
+        # no-checklist case (None) and an enabled-but-empty one (0/0) — a project
+        # without the feature looks exactly as it did before.
+        done = project.get("checklist_done")
+        total = project.get("checklist_total")
+        checklist_html = (
+            f"<p class='checklist-badge'>{_esc(done)}/{_esc(total)} done</p>\n"
+            if total
+            else ""
+        )
         cards.append(
             '<li class="card">'
             f'<h2><a href="{_esc(href)}">{_esc(name)}</a></h2>\n'
             f"{headline_html}"
+            f"{checklist_html}"
             f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
             f"last {_time_tag(project['latest_generated_at'], tz)}</span>"
             "</li>"
@@ -533,11 +554,54 @@ def render_project(
     return _page(f"Orion — {project_name}", body)
 
 
+def _render_checklist(checklist: list[dict] | None) -> str:
+    """Render the project's live checklist (open + done) as a titled block, or ''.
+
+    Args:
+        checklist: The get_checklist() result — a list of {"text", "done"} dicts in
+            file order — or None when the project has no live checklist. An empty list
+            also renders nothing (an enabled-but-empty checklist is not worth a block).
+
+    Returns:
+        An HTML <section> with a "Current checklist (X/Y done)" heading and a list of
+        items (done items struck through via a CSS class), or "" when there is nothing
+        to show.
+
+    Why:
+        This is the dashboard's "live checklist" view — current state, not a delta. The
+        done/open state is carried BOTH as a CSS class (for styling) AND as a leading
+        glyph in the markup, so the state is legible even if the stylesheet is blocked
+        (function before looks, accessibility). EVERY item text is escaped — checklist
+        items are arbitrary user text — so a "<script>" in a task name renders inert.
+    """
+    if not checklist:
+        return ""
+
+    total = len(checklist)
+    done = sum(1 for item in checklist if item.get("done"))
+    rows = []
+    for item in checklist:
+        is_done = bool(item.get("done"))
+        # "done"/"open" drives the strikethrough; the glyph conveys state without CSS.
+        cls = "done" if is_done else "open"
+        box = "✓" if is_done else "○"  # ✓ (done) / ○ (open)
+        rows.append(
+            f'<li class="{cls}"><span class="box">{box}</span>'
+            f'<span class="task">{_esc(item["text"])}</span></li>'
+        )
+    return (
+        "<section class='checklist'><h2>Current checklist "
+        f"<span class='meta'>({_esc(done)}/{_esc(total)} done)</span></h2>\n"
+        "<ul class='checklist'>\n" + "\n".join(rows) + "\n</ul></section>"
+    )
+
+
 def render_report(
     report: dict,
     comments: list[dict] | None = None,
     tz: ZoneInfo = _DISPLAY_TZ,
     author_name: str | None = None,
+    checklist: list[dict] | None = None,
 ) -> str:
     """Render a single report: its metadata, its sections (or flat body), comments.
 
@@ -556,6 +620,9 @@ def render_report(
             <name>" and omits the free-text name field, because the server attributes the
             comment to this identity (it cannot be self-asserted). Keyword-only and last
             so existing positional callers are unaffected.
+        checklist: The project's live checklist (get_checklist() output) or None. When
+            present and non-empty, a "Current checklist" block is rendered after the
+            report's sections. Defaulted/last so existing callers are unaffected.
 
     Returns:
         A complete HTML page.
@@ -609,11 +676,15 @@ def render_report(
         # No per-signal sections (e.g. an intake push): render the flat body.
         sections_html = f"<section><pre>{_esc(report['body'])}</pre></section>"
 
+    # The live checklist is project-level CURRENT STATE shown as context after the
+    # report's own content (renders nothing when the project has no checklist).
+    checklist_html = _render_checklist(checklist)
+
     comments_html = _render_comments(report["id"], comments or [], tz, author_name)
 
     body = (
         f"{breadcrumb}\n<h1>{_esc(report['project'])}</h1>\n{meta}\n{sections_html}\n"
-        f"{comments_html}"
+        f"{checklist_html}\n{comments_html}"
     )
     return _page(f"Orion — {report['project']} report", body)
 

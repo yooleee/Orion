@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass
 
 from orion import __version__
+from orion.collectors.tasks import ChecklistItem
 from orion.config import ProjectConfig
 
 
@@ -46,6 +47,12 @@ class ReportBlob:
             composer renders `body` as one section. `body` stays the canonical
             redacted text and the plain-text fallback, so anything that only needs
             a string keeps working.
+        checklist: The project's CURRENT checklist (open + done items) as of this
+            report, or None when the project has no checklist enabled. This is the
+            dashboard's "live checklist" signal — current state, not a delta — and is
+            OPTIONAL: None means "omit from the wire entirely" (a producer without the
+            feature), while an empty tuple means "checklist enabled, but no items" (a
+            meaningful state that should clear any stale live checklist on the relay).
 
     Why:
         Bundling everything needed to send AND to advance state into one frozen
@@ -65,6 +72,10 @@ class ReportBlob:
     # Defaulted last so existing positional construction stays valid; () is an
     # immutable default, safe on a frozen dataclass.
     sections: tuple[tuple[str, str], ...] = ()
+    # Optional and defaulted None so every existing call site and stored/round-tripped
+    # blob stays valid; None vs () carries the "feature off" vs "enabled but empty"
+    # distinction documented above.
+    checklist: tuple[ChecklistItem, ...] | None = None
 
 
 def build_report(
@@ -74,6 +85,7 @@ def build_report(
     source_marker: str,
     generated_at: str,
     sections: tuple[tuple[str, str], ...] = (),
+    checklist: tuple[ChecklistItem, ...] | None = None,
 ) -> ReportBlob:
     """Assemble a ReportBlob from a project and a finished body.
 
@@ -86,6 +98,9 @@ def build_report(
         sections: The ordered (title, body) sections the body was assembled from,
             each already twice-redacted. Defaults to empty for callers (like
             `intake`) that have only a single body and no per-signal sections.
+        checklist: The project's current checklist (already redacted), or None when
+            the project has no checklist enabled. Defaulted so existing call sites
+            are unchanged.
 
     Returns:
         A populated ReportBlob.
@@ -94,8 +109,8 @@ def build_report(
         This is intentionally lane-agnostic: Phase 2's structured collectors call
         it with the same signature, passing their already-formatted text as body.
         Centralizing assembly means participant extraction and version stamping
-        happen in exactly one place. `sections` is additive (defaulted) so every
-        existing call site keeps working unchanged.
+        happen in exactly one place. `sections` and `checklist` are additive
+        (defaulted) so every existing call site keeps working unchanged.
     """
     participants = tuple(r.name for r in project.recipients)
     return ReportBlob(
@@ -108,6 +123,7 @@ def build_report(
         generated_at=generated_at,
         orion_version=__version__,
         sections=sections,
+        checklist=checklist,
     )
 
 
@@ -119,8 +135,10 @@ def serialize_blob(blob: ReportBlob) -> str:
             ordered `sections` pairs) are converted to JSON arrays.
 
     Returns:
-        A JSON string carrying all eight blob fields. Keys are sorted so the same
-        blob always serializes to the same bytes (deterministic wire format).
+        A JSON string carrying the blob's fields. Keys are sorted so the same blob
+        always serializes to the same bytes (deterministic wire format). The optional
+        `checklist` key is present only when the blob carries one (None → omitted),
+        keeping it back-compatible with receivers that predate the field.
 
     Why:
         This is the single, explicit definition of Orion's portable report contract
@@ -147,6 +165,15 @@ def serialize_blob(blob: ReportBlob) -> str:
         # a two-element list and preserve section order (the list itself is ordered).
         "sections": [[title, body] for title, body in blob.sections],
     }
+    # Optional field: emit it ONLY when the producer attached a checklist. None ⇒
+    # omit the key entirely (a producer without the feature), so a receiver that
+    # predates the field is unaffected; an empty list ⇒ "enabled but no items", a
+    # real state the relay uses to clear a stale live checklist. Each item is a named
+    # {text, done} object (not a positional pair) so the done-state reads explicitly.
+    if blob.checklist is not None:
+        payload["checklist"] = [
+            {"text": item.text, "done": item.done} for item in blob.checklist
+        ]
     # sort_keys → byte-stable output for a given blob; the seam needs a predictable
     # wire format more than it needs human-friendly field order.
     return json.dumps(payload, sort_keys=True)

@@ -14,9 +14,9 @@
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
 _Last synced: 2026-06-25 (after the dashboard CSP/headers hardening, **E2 Inc 1 — portfolio
-overview** shipped, **E2 Inc 2 — live checklist signal** shipped [PR #47], and **E2 Inc 2.5 —
-near-real-time checklist push** built + locally verified [PR pending]; E2 Inc 3 + D follow-ons +
-deferred C-track ahead). Excludes Horizon P, which is
+overview**, **E2 Inc 2 — live checklist signal** [PR #47], **E2 Inc 2.5 — near-real-time checklist
+push** [PR #49], and a **relay CSRF comment-bug fix** [PR #48] — all shipped + deployed; E2 Inc 3 +
+D follow-ons + deferred C-track ahead). Excludes Horizon P, which is
 decision-gated launch work._
 
 ## Remaining buildable inventory + file footprint
@@ -33,7 +33,7 @@ decision-gated launch work._
   (local `collectors/tasks.snapshot` + `report.serialize_blob` blob field + `relay/store` new
   `relay_project_checklists` **table** [project-level live, not a per-report column → no DB migration] +
   `relay/server` validation/upsert + `relay/render` badge+block); Inc 2.5 near-real-time checklist push
-  ✅ **built (PR pending)** — same relay⟂CLI seam (a `POST /checklist` endpoint + `delivery/relay`
+  ✅ **shipped (PR #49)** — same relay⟂CLI seam (a `POST /checklist` endpoint + `delivery/relay`
   client + a `cli` `checklist-push`/`--watch` poll command + a project-page render), all additive on
   Inc 2's store/helpers; Inc 3 forward-looking layer **≡ E1 ≡
   B5** (forward-state). E3 enriched chat bots

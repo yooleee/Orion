@@ -1,13 +1,16 @@
 <!-- =========================================================================
-docs/dashboard-checklist-signal-kickoff.md
+docs/archive/dashboard-checklist-signal-kickoff.md
 ---------------------------------------------------------------------------
+STATUS: DONE — E2 Inc 2 (live checklist signal) shipped in PR #47 and Inc 2.5
+                 (near-real-time checklist push) in PR #49, both deployed 2026-06-25.
+                 Archived for the historical record. See the E2 ladder + the
+                 "E2 Inc 2 + 2.5 shipped" note in plans/orion-plan.md.
 Responsible for: The kickoff for E2 Increment 2 — surfacing the to-do/milestone
                  CHECKLIST signal on the relay dashboard (the next rung after the
                  portfolio overview, Inc 1).
 Role in project: A kickoff doc (like the archived phase kickoffs and the
-                 dashboard-hardening kickoff). Read it at the start of the next
-                 session, THEN do a plan-mode scoping pass — unlike the hardening
-                 slice, this one has real design decisions to settle before code.
+                 dashboard-hardening kickoff). It drove the Inc 2 plan-mode scoping
+                 pass — this one had real design decisions to settle before code.
                  Roadmap: plans/orion-plan.md "Horizon E" table + the E2 ladder note.
                  Access model: docs/dashboard-auth.md. Deploy: docs/deployment.md.
 ========================================================================= -->

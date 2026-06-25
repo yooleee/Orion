@@ -148,7 +148,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
 | E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range — reached as **E2 Inc 3** (the forward-state ladder) |
-| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview home) shipped 2026-06-25; Inc 2 (live checklist signal) BUILT + locally verified 2026-06-25 (PR pending, not yet merged/deployed).** Validated by the founding family-visibility intent + personal use (not the dogfood, which tested reporting). Ladder below. |
+| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), and Inc 2.5 (near-real-time checklist push, PR #49) all SHIPPED + deployed 2026-06-25.** Validated by the founding family-visibility intent + personal use (not the dogfood, which tested reporting). Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
 | E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
@@ -180,9 +180,10 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   same file *independently* of the retrospective `collect()` (so the "newly completed" report behavior is
   untouched) and rides on `full_blob` only (the relay payload), redacted per item. **Known limitation
   (honest):** it updated on the **report push**, not the instant `tasks_file` changes — addressed by
-  Inc 2.5 below. Eyes-on confirmed badge + done/open block + escaping + CSP against a local relay.
-- **Inc 2.5 — near-real-time checklist edit tracking (✅ BUILT + locally verified 2026-06-25; PR
-  pending).** Realizes the dedicated checklist-only-push seam Inc 2 left open, so a `tasks_file` edit
+  Inc 2.5 below. Shipped to the live Fly relay 2026-06-25. Kickoff archived at
+  [`docs/archive/dashboard-checklist-signal-kickoff.md`](../docs/archive/dashboard-checklist-signal-kickoff.md).
+- **Inc 2.5 — near-real-time checklist edit tracking (✅ SHIPPED 2026-06-25, PR #49 merged + deployed).**
+  Realizes the dedicated checklist-only-push seam Inc 2 left open, so a `tasks_file` edit
   reaches the dashboard between reports. Adds: a Bearer-authed **`POST /checklist`** relay endpoint
   (reuses the ingest token; upserts via the existing `upsert_checklist`, no report row), a
   `push_checklist` client, and an **`orion checklist-push <project>`** command with a **`--watch`** poll
@@ -190,13 +191,21 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   now also shows on the **project page** (the persistent watch surface), reusing the `_render_checklist`
   helper (no new CSS → CSP unchanged). Redaction holds on the new lane via a shared `_redacted_checklist`.
   Decided: poll, not `watchdog` (stdlib/minimal-dep); event-watching + an `--all` watcher are additive
-  later. Eyes-on confirmed the one-shot/watch push and the project-page render against a local relay.
+  later. Eyes-on confirmed the one-shot/watch push and the project-page render against a local relay,
+  then shipped to the live Fly relay 2026-06-25.
+- **⚠ Not yet in use (honest, 2026-06-25):** Inc 2 + 2.5 are live, but the user has **no `tasks_file`
+  configured** on any project, so the checklist surfaces are built ahead of an actual configured use.
+  The first concrete candidate is an **applications to-do list** (in a separate `applications` directory)
+  the user wants to track — which maps to the deferred "non-project/non-code items" seam below and may
+  need a light setup (a project pointing at that dir, possibly **non-git**, with `checklist = true`).
+  Wiring one real `tasks_file` is the natural next practical step to exercise what was built.
 - **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
   the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
-  family today), and non-project/non-code items (e.g. applications) via `intake` or a new collector
-  (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is **parked** — secondary to the
-  dashboard. **Function before looks:** a dedicated dashboard *aesthetic* pass is its own later slice.
+  family today), and non-project/non-code items (e.g. **the applications to-do list above**) via
+  `intake` or a new collector (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is
+  **parked** — secondary to the dashboard. **Function before looks:** a dedicated dashboard *aesthetic*
+  pass is its own later slice.
 
 **Horizon P — Publish / OSS-launch** *(decision-gated, order-flexible — triggered when going public)*
 
@@ -1190,6 +1199,37 @@ for an eventual open-source reader.
   building incrementally** (E2 Inc 1 — portfolio overview home — shipped 2026-06-25; see the Horizon E
   table and its ladder note). Its other tracks — chat/bots (E3) and the read-write inflection (E5) —
   stay recorded, not built.
+
+## E2 Inc 2 + 2.5 shipped + a relay CSRF fix (2026-06-25)
+
+Three changes landed on `main` and were deployed to the live Fly relay this session (detail record;
+the Horizon E table + ladder above are canonical):
+
+- **E2 Inc 2 — live checklist signal (PR #47).** The to-do/milestone checklist now reaches the
+  dashboard: a full pipeline (`collectors/tasks.snapshot` → optional `checklist` blob field → a new
+  project-level `relay_project_checklists` table, upserted → a portfolio-card "X/Y done" badge + a
+  report-page "Current checklist" block). Project-level **live** model (one current row per project, not
+  a per-report snapshot); opt-in per-project `checklist` toggle (requires the `tasks` collector);
+  reframing-only; CSP-safe; each item redacted. The new table is created by `CREATE TABLE IF NOT EXISTS`
+  so it needed **no migration** on the deployed DB.
+- **E2 Inc 2.5 — near-real-time checklist push (PR #49).** The dedicated checklist-only push so a
+  `tasks_file` edit reaches the dashboard between reports: a Bearer-authed `POST /checklist` endpoint
+  (reuses the ingest token + `upsert_checklist`, no report row), a `delivery/relay.push_checklist`
+  client, an `orion checklist-push <project>` command with a `--watch` poll loop (stdlib content-compare,
+  pushes only on change), and the live checklist now also on the **project page** (the watch surface).
+  Decided poll over `watchdog` (stdlib/minimal-dep). Redaction shared with the report path via
+  `_redacted_checklist`.
+- **Relay CSRF comment-bug fix (PR #48).** A logged-in admin's comment got a 403 ("blocked by an origin
+  (CSRF) check") because `_origin_error` treated a missing `Origin` header as a hard failure, and some
+  browsers (Safari) omit `Origin` on same-origin form POSTs. Fix: a `Referer` fallback (OWASP "verify
+  Origin OR Referer"; `SameSite=Lax` still covers the cross-site threat), plus documenting + setting
+  `ORION_RELAY_PUBLIC_ORIGIN` (`fly.toml [env]` + `docs/deployment.md`) so the check is deterministic
+  behind the Fly proxy. **Verify live by commenting as admin, ideally on Safari.**
+
+**Honest status:** the checklist features are live but **no project has a `tasks_file` configured yet**,
+so nothing is actually being tracked. The flagged real candidate is an **applications to-do list** (a
+separate `applications` dir) — see the "Not yet in use" note in the E2 ladder; wiring it (possibly a
+non-git project) is the next practical step.
 
 ## Open questions / to settle before/while building
 

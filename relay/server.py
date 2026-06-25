@@ -24,12 +24,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import ipaddress
 import json
+import secrets
 import sys
+import time
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,6 +44,7 @@ from .render import (
     MAX_AUTHOR_CHARS,
     MAX_COMMENT_BODY_CHARS,
     render_index,
+    render_login,
     render_not_found,
     render_project,
     render_report,
@@ -48,10 +54,14 @@ from .store import (
     comments_for,
     comments_for_project,
     get,
+    get_user_by_id,
+    get_user_by_verifier,
     history,
     ingest,
     list_projects,
     open_relay_store,
+    projects_for_user,
+    update_last_login,
 )
 
 # Reject a Content-Length larger than this outright. A report blob is a few KB; 1 MB
@@ -81,16 +91,164 @@ _REQUIRED_STR_FIELDS = (
     "orion_version",
 )
 
-# Minimal body for a 401 on a dashboard (GET) route. Browsers show their own
-# Basic-auth login dialog on a 401 + WWW-Authenticate header and only render this
-# body if the user cancels, so it stays deliberately tiny — and self-contained in
-# server.py, leaving render.py (the dashboard view layer) untouched.
-_UNAUTHORIZED_HTML = (
-    "<!doctype html><html lang='en'><meta charset='utf-8'>"
-    "<title>Orion — authentication required</title>"
-    "<h1>401 — authentication required</h1>"
-    "<p>This Orion dashboard requires a username and password.</p></html>"
-)
+# --- Multi-party auth: session-cookie + key-verifier crypto (Increment 1) ------
+# Pure, module-level helpers so the cryptographic core is testable without a server.
+# The session cookie is STATELESS and SIGNED: it carries only a tiny claims payload
+# (format version, user id, issued/expiry times, the user's session_version) and an
+# HMAC over it. It deliberately carries NO role/name/scope — those are re-read from
+# the DB on every request, so a privilege never rides in a forgeable/stale cookie and
+# revocation (active=0 / session_version bump) takes effect immediately. The signing
+# key, the user-key pepper, and the admin token are all INDEPENDENT secrets (never
+# derived from or shared with each other or the view/ingest tokens) per the Codex
+# /second-opinion: sharing a secret widens blast radius and couples unrelated rotations.
+_SESSION_COOKIE_NAME = "orion_session"
+_SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at once
+
+
+def _b64url_encode(raw: bytes) -> str:
+    """URL-safe base64 WITHOUT padding (cookie-value safe: no '=', '/', '+').
+
+    Why:
+        Cookie values must avoid characters that need quoting (';', '=', space).
+        URL-safe base64 already avoids '/'+'+'; stripping the '=' padding removes the
+        last problematic char, and _b64url_decode re-adds it, so the round-trip is exact.
+    """
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    """Inverse of _b64url_encode: re-pad then URL-safe base64 decode.
+
+    Why:
+        base64 needs the input length to be a multiple of 4; we stripped the padding
+        on encode, so we restore it here. `validate=True` rejects stray characters so a
+        tampered cookie segment fails to decode rather than decoding to garbage.
+    """
+    padded = text + "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(padded)
+
+
+def _sign(session_key: bytes, message: str) -> str:
+    """Return the base64url HMAC-SHA256 of `message` under `session_key`.
+
+    Why:
+        One place computes the signature, so make_session_value and verify_session_value
+        can never disagree on the algorithm. HMAC-SHA256 with a high-entropy key is the
+        standard, stdlib-only way to make a stateless token unforgeable.
+    """
+    digest = hmac.new(session_key, message.encode("ascii"), hashlib.sha256).digest()
+    return _b64url_encode(digest)
+
+
+def make_session_value(
+    session_key: bytes,
+    user_id: int,
+    session_version: int,
+    issued_at: int,
+    expires_at: int,
+) -> str:
+    """Build a signed session-cookie value `payload_b64.signature_b64`.
+
+    Args:
+        session_key: The independent HMAC signing key (bytes).
+        user_id: The authenticated user's id (the cookie's `sub`); 0 is the reserved
+            sentinel for the legacy bootstrap admin (no relay_users row).
+        session_version: The user's current session_version at mint time; the request
+            path rejects the cookie once this no longer matches the DB (revocation).
+        issued_at: Unix seconds the token was minted.
+        expires_at: Unix seconds the token expires (also enforced server-side).
+
+    Returns:
+        The cookie value string.
+
+    Why:
+        Claims are compact, sorted JSON so the signed bytes are deterministic. Only the
+        five claims are included — never role/name/projects — so authority always comes
+        from the live DB, not the cookie.
+    """
+    payload = {
+        "v": _SESSION_FORMAT_VERSION,
+        "sub": user_id,
+        "iat": issued_at,
+        "exp": expires_at,
+        "sv": session_version,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    payload_b64 = _b64url_encode(payload_json.encode("utf-8"))
+    return f"{payload_b64}.{_sign(session_key, payload_b64)}"
+
+
+def verify_session_value(session_key: bytes, value: str, now: int) -> dict | None:
+    """Verify a session-cookie value and return its claims, or None if invalid.
+
+    Args:
+        session_key: The HMAC signing key (bytes).
+        value: The cookie value (`payload_b64.signature_b64`).
+        now: Current Unix seconds, for the expiry check.
+
+    Returns:
+        The decoded claims dict when the signature verifies, the format version is
+        known, and the token has not expired; otherwise None.
+
+    Why:
+        Order matters: verify the HMAC FIRST (constant-time, on the raw b64 segment)
+        before decoding the payload, so a tampered/forged token is rejected without
+        trusting any of its bytes. We reject an unknown `v` (format rotation) and an
+        elapsed `exp` (server-side expiry, independent of the cookie's Max-Age, so a
+        browser keeping the cookie past expiry still fails). This returns only the
+        claims; checking `sv` against the DB and `active` is the request path's job.
+    """
+    try:
+        payload_b64, signature = value.split(".", 1)
+    except (ValueError, AttributeError):
+        return None
+    if not hmac.compare_digest(signature, _sign(session_key, payload_b64)):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(payload_b64))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("v") != _SESSION_FORMAT_VERSION:
+        return None
+    exp = payload.get("exp")
+    if not isinstance(exp, int) or exp < now:
+        return None
+    return payload
+
+
+def key_verifier(user_pepper: bytes, raw_key: str) -> str:
+    """Compute the stored verifier for a login key: HMAC-SHA256(pepper, key), hex.
+
+    Args:
+        user_pepper: The independent server-side pepper (bytes).
+        raw_key: The user's raw login key.
+
+    Returns:
+        The hex verifier stored in relay_users.key_verifier.
+
+    Why:
+        Peppering (HMAC with a server secret) means a database leak ALONE cannot test
+        candidate keys — an attacker also needs the pepper, which lives only in the
+        relay's env, not the DB. A slow KDF (bcrypt/argon2) is unnecessary here because
+        the keys are server-minted, ≥256-bit random (not human passwords), so there is
+        nothing to brute-force; this was confirmed by the Codex /second-opinion.
+    """
+    return hmac.new(user_pepper, raw_key.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def mint_key() -> str:
+    """Mint a fresh high-entropy login key (URL-safe, ~256 bits).
+
+    Returns:
+        A new random key string, shown to the operator ONCE at provisioning and never
+        stored (only its verifier is).
+
+    Why:
+        secrets.token_urlsafe(32) draws 32 cryptographically-random bytes (~256 bits),
+        far beyond brute-force, and the URL-safe alphabet makes it easy to copy/paste
+        into a login form. Centralized so provisioning and any test mint the same shape.
+    """
+    return secrets.token_urlsafe(32)
 
 
 def _validate_blob(payload: object) -> str | None:
@@ -189,11 +347,10 @@ def _simple_html(heading: str, detail: str) -> str:
         A tiny complete HTML document string.
 
     Why:
-        The comment POST is driven by a browser form, so its rejections (400/403)
+        The comment POST is driven by a browser form, so its rejections (400/401/403)
         read better as HTML than the JSON /ingest returns. These pages carry NO
-        dynamic input — every caller passes a fixed message — so, exactly like
-        _UNAUTHORIZED_HTML, they need no escaping. Keeping them here leaves render.py
-        (the dashboard view layer) untouched.
+        dynamic input — every caller passes a fixed message — so they need no escaping.
+        Keeping them here leaves render.py (the dashboard view layer) untouched.
     """
     return (
         "<!doctype html><html lang='en'><meta charset='utf-8'>"
@@ -225,48 +382,74 @@ class _RelayHandler(BaseHTTPRequestHandler):
         404; an unknown PROJECT renders a friendly empty-state (200), since "no
         reports" and "never existed" look the same to a viewer.
 
-        Read auth: when the server is configured with a view secret, every dashboard
-        route requires HTTP Basic credentials (a browser-native login); without one —
-        the loopback-only default — reads stay open for zero-friction local use. The
-        fail-closed guard in create_server() guarantees a view secret IS set whenever
-        the bind host is non-loopback, so a world-reachable dashboard is never
-        unauthenticated. Ingest (the write surface) stays Bearer-authed independently.
+        Read auth (multi-party): when the dashboard is access-gated — a view secret is
+        set OR any user has been provisioned — every route requires a valid SESSION
+        COOKIE; an absent/invalid/expired/revoked one redirects to /login (a persistent
+        login, not the old per-session Basic dialog). On a bare loopback dev relay with
+        neither, reads stay open. The fail-closed guard in create_server() still
+        guarantees a view secret whenever the bind is non-loopback, so a world-reachable
+        dashboard is never unauthenticated. Ingest stays Bearer-authed independently.
 
-        The "/api/..." namespace is the EXCEPTION: it is a machine-JSON surface for the
-        local pull-back client (C2), Bearer-authed like /ingest — NOT the browser's
-        Basic scheme. So it is routed FIRST, before the Basic gate below, keeping the
-        two consumers' auth schemes cleanly separated (a browser never reaches it; the
-        CLI never trips the Basic dialog).
+        /login and /logout are reachable WITHOUT a session (you must reach /login to
+        authenticate). The "/api/..." namespace is Bearer-authed (a machine surface),
+        routed FIRST — a browser never reaches it, the CLI never trips the session gate.
+
+        AuthZ scoping layers on top of the gate: an admin (and the open/ungated relay)
+        sees everything; a viewer is restricted to projects_for_user, and any project or
+        report outside that scope returns 404 (existence-hiding, decision A), resolved
+        from current DB state on every route so a regrant/revoke applies immediately.
         """
         # Strip any query string; routing is by path only (the /api/ handler re-reads
         # the query itself, since it — unlike the dashboard — takes parameters).
         path = urllib.parse.urlparse(self.path).path
 
-        # Machine-JSON API routes are Bearer-authed and bypass the Basic view gate.
+        # Machine-JSON API routes are Bearer-authed and bypass the browser session gate.
         if path == "/api/comments":
             self._handle_api_comments()
             return
 
-        # Read-auth gate: enforced only when a view secret is configured. A missing
-        # or wrong credential is a 401 whose WWW-Authenticate header makes the browser
-        # present its own login dialog.
-        if self.server.view_token and self._view_auth_error() is not None:
-            self._send_html(
-                401,
-                _UNAUTHORIZED_HTML,
-                extra_headers={"WWW-Authenticate": 'Basic realm="Orion dashboard"'},
-            )
+        # The login surface is reachable WITHOUT a session — you must get here to log in.
+        if path == "/login":
+            self._send_html(200, render_login())
             return
+        if path == "/logout":
+            self._handle_logout()
+            return
+
         # A fresh connection per request keeps each sqlite handle on its own thread.
         conn = open_relay_store(self.server.db_path)
         try:
+            # Authentication gate (cookie session). Required whenever the dashboard is
+            # access-gated; an absent/invalid/expired/revoked session redirects to
+            # /login instead of the old Basic 401, so a logged-in browser STAYS logged
+            # in across restarts (the point of the session).
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            if gated and principal is None:
+                self._send_redirect(303, "/login")
+                return
+
+            # AuthZ scoping: which projects this principal may see. None = unrestricted
+            # (admin / legacy admin / open relay); a set = a viewer's allowed projects.
+            # Out-of-scope resources return 404 (NOT 403) so a viewer cannot even learn
+            # that a project/report they aren't granted EXISTS — decision A (the audience
+            # may include guests). The 404 is byte-identical to a genuinely-missing one.
+            allowed = self._allowed_projects(conn, principal)
+
             if path == "/":
-                self._send_html(200, render_index(list_projects(conn)))
+                projects = list_projects(conn)
+                if allowed is not None:
+                    projects = [p for p in projects if p["project"] in allowed]
+                self._send_html(200, render_index(projects))
                 return
 
             if path.startswith("/project/"):
                 # Decode the percent-encoded name back to the stored project string.
                 name = urllib.parse.unquote(path[len("/project/"):])
+                # A viewer outside this project's scope is told it does not exist.
+                if allowed is not None and name not in allowed:
+                    self._send_html(404, render_not_found(f"No project {name!r}."))
+                    return
                 self._send_html(
                     200,
                     render_project(name, history(conn, name), self.server.display_tz),
@@ -278,7 +461,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 # Only a numeric id can match a row; anything else is a 404 without
                 # touching the store.
                 report = get(conn, int(id_str)) if id_str.isdigit() else None
-                if report is None:
+                # Resolve the report's project FIRST, then scope-check it: an out-of-scope
+                # report is reported as missing with the SAME message as a nonexistent
+                # one, so existence stays hidden from a viewer who lacks the grant.
+                if report is None or (
+                    allowed is not None and report["project"] not in allowed
+                ):
                     self._send_html(404, render_not_found(f"No report {id_str!r}."))
                     return
                 # report is not None implies id_str was numeric, so int() is safe.
@@ -320,6 +508,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/api/comments":
             self._handle_api_comment_post()
+            return
+
+        if path == "/login":
+            self._handle_login()
             return
 
         comment_report_id = _parse_comment_path(path)
@@ -389,12 +581,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             report_id: The report the comment attaches to (parsed from the path).
 
         The inbound-security checklist, enforced IN ORDER:
-          1. Auth — gated by the dashboard view secret, exactly as the GET dashboard
-             is: a view secret set means require HTTP Basic (401 otherwise); none set
-             (loopback dev) means open — consistent with reads.
-          2. CSRF — Basic auth makes the browser auto-send credentials, so a forged
-             cross-site POST would otherwise succeed. Require an Origin header whose
-             host matches the request Host; reject a mismatch with 403.
+          1. Auth — a valid SESSION COOKIE, exactly as the GET dashboard now requires:
+             gated whenever a view secret is set or users exist (401 otherwise); open
+             on a bare loopback dev relay — consistent with reads.
+          2. CSRF — a session cookie is auto-sent by the browser, so a forged cross-site
+             POST is the threat. Require an Origin matching our canonical public origin
+             (or, absent one configured, the request Host); reject a mismatch with 403.
+             SameSite=Lax on the cookie is a second layer (it suppresses the cookie on
+             most cross-site POSTs), but the Origin check stays the guarantee.
           3. Validate — parse the urlencoded form; require a non-empty body within the
              length caps (and a capped author); reject with 400.
           4. Report exists — 404 if the id has no report (a stale or forged link).
@@ -409,53 +603,61 @@ class _RelayHandler(BaseHTTPRequestHandler):
             access-gated dashboard is a different threat. The relevant control here is
             XSS-escaping on render (pinned in render.py), not redaction.
         """
-        # 1) Auth: enforced only when a view secret is configured (same gate as do_GET).
-        if self.server.view_token and self._view_auth_error() is not None:
-            self._send_html(
-                401,
-                _UNAUTHORIZED_HTML,
-                extra_headers={"WWW-Authenticate": 'Basic realm="Orion dashboard"'},
-            )
-            return
-
-        # 2) CSRF: require a same-origin POST.
-        if self._origin_error() is not None:
-            self._send_html(
-                403, _simple_html("forbidden", "Request blocked by an origin (CSRF) check.")
-            )
-            return
-
-        # 3) Read and parse the urlencoded form body.
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_html(
-                400, _simple_html("bad request", "Missing, oversized, or unreadable body.")
-            )
-            return
-        try:
-            fields = urllib.parse.parse_qs(raw.decode("utf-8"))
-        except UnicodeDecodeError:
-            self._send_html(400, _simple_html("bad request", "Body is not valid UTF-8."))
-            return
-
-        # parse_qs maps each key to a LIST of values; take the first (or "" if absent),
-        # then strip — a name/body of only whitespace counts as empty.
-        author = fields.get("author", [""])[0].strip()
-        body = fields.get("body", [""])[0].strip()
-
-        # 4) Validate: a non-empty body within caps, and a capped author.
-        if not body:
-            self._send_html(400, _simple_html("bad request", "A comment body is required."))
-            return
-        if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
-            self._send_html(400, _simple_html("bad request", "Comment or name is too long."))
-            return
-
-        # 5) Confirm the report exists, then store and redirect back to it. One fresh
-        # connection per request keeps each sqlite handle on its own thread.
+        # One fresh connection per request (own thread), used for both the auth check
+        # and the report lookup/insert below.
         conn = open_relay_store(self.server.db_path)
         try:
-            if get(conn, report_id) is None:
+            # 1) Auth: a valid session is required whenever the dashboard is access-gated
+            # (the same rule as do_GET). The credential is the session cookie, not Basic.
+            # Capture the principal so step 5 can scope the write to the report's project.
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            if gated and principal is None:
+                self._send_html(401, _simple_html("unauthorized", "Log in to comment."))
+                return
+
+            # 2) CSRF: require a same-origin POST (canonical Origin check).
+            if self._origin_error() is not None:
+                self._send_html(
+                    403, _simple_html("forbidden", "Request blocked by an origin (CSRF) check.")
+                )
+                return
+
+            # 3) Read and parse the urlencoded form body.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_html(
+                    400, _simple_html("bad request", "Missing, oversized, or unreadable body.")
+                )
+                return
+            try:
+                fields = urllib.parse.parse_qs(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                self._send_html(400, _simple_html("bad request", "Body is not valid UTF-8."))
+                return
+
+            # parse_qs maps each key to a LIST of values; take the first (or "" if
+            # absent), then strip — a name/body of only whitespace counts as empty.
+            author = fields.get("author", [""])[0].strip()
+            body = fields.get("body", [""])[0].strip()
+
+            # 4) Validate: a non-empty body within caps, and a capped author.
+            if not body:
+                self._send_html(400, _simple_html("bad request", "A comment body is required."))
+                return
+            if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
+                self._send_html(400, _simple_html("bad request", "Comment or name is too long."))
+                return
+
+            # 5) Confirm the report exists AND is in this principal's scope, then store. An
+            # out-of-scope report is reported as missing (identical to a nonexistent one),
+            # so a viewer can neither write to nor confirm the existence of a report they
+            # were not granted — the same existence-hiding rule do_GET applies to reads.
+            allowed = self._allowed_projects(conn, principal)
+            report = get(conn, report_id)
+            if report is None or (
+                allowed is not None and report["project"] not in allowed
+            ):
                 self._send_html(404, render_not_found(f"No report {report_id!r}."))
                 return
             add_comment(conn, report_id, author, body, _utc_now_iso())
@@ -690,37 +892,210 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return "invalid token"
         return None
 
-    def _view_auth_error(self) -> str | None:
-        """Return None if the request carries valid dashboard read credentials.
-
-        Returns:
-            None when valid HTTP Basic credentials are present; otherwise a short
-            reason string (a missing/malformed header, undecodable credentials, or a
-            wrong password). Only called when the server has a view secret set.
+    def _read_session_cookie(self) -> str | None:
+        """Return the raw session-cookie value from the request, or None.
 
         Why:
-            Read auth reuses the same single-shared-secret model as ingest, but over
-            HTTP Basic so a browser shows a native login dialog. Basic credentials are
-            "username:password"; with one shared secret there is no account to
-            enumerate, so the username is accepted as-is and only the PASSWORD is
-            checked — split on the FIRST ':' so a password may itself contain colons.
-            The compare is constant-time (hmac.compare_digest, no timing side-channel),
-            and the expected secret is never echoed, exactly as on the ingest path.
+            Parsing the Cookie header with http.cookies.SimpleCookie applies the cookie
+            quoting/splitting rules correctly (vs. a hand-rolled split). A malformed
+            Cookie header degrades to None ("not authenticated"), never an exception.
         """
-        header = self.headers.get("Authorization", "")
-        prefix = "Basic "
-        if not header.startswith(prefix):
-            return "missing or malformed Authorization header (expected Basic auth)"
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        jar = SimpleCookie()
         try:
-            decoded = base64.b64decode(header[len(prefix):], validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return "malformed Basic credentials"
-        # "username:password" — keep only the password (partition splits on the first
-        # ':', so colons in the password survive). view_token is non-None here.
-        _, _, password = decoded.partition(":")
-        if not hmac.compare_digest(password, self.server.view_token):
-            return "invalid credentials"
-        return None
+            jar.load(raw)
+        except CookieError:
+            return None
+        morsel = jar.get(_SESSION_COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    def _cookie_header(self, value: str, max_age: int) -> str:
+        """Build a single Set-Cookie header value for the session cookie.
+
+        Args:
+            value: The cookie value (an empty string with max_age=0 clears it on logout).
+            max_age: Lifetime in seconds.
+
+        Why:
+            SimpleCookie.OutputString() emits one correctly-formatted Set-Cookie (proper
+            attribute syntax) instead of a hand-joined string. The attributes ARE the
+            session's security posture: HttpOnly (no JS access → no theft via XSS),
+            SameSite=Lax (the browser won't send it on a cross-site POST — CSRF
+            defense-in-depth), Path=/ (the whole dashboard), and Secure WHEN the relay is
+            HTTPS-exposed (from the proxy signal) so the cookie can't leak over plaintext,
+            while a bare-loopback http dev relay still works (Secure off).
+        """
+        jar = SimpleCookie()
+        jar[_SESSION_COOKIE_NAME] = value
+        morsel = jar[_SESSION_COOKIE_NAME]
+        morsel["path"] = "/"
+        morsel["httponly"] = True
+        morsel["samesite"] = "Lax"
+        morsel["max-age"] = max_age
+        if self.server.secure_cookie:
+            morsel["secure"] = True
+        return morsel.OutputString()
+
+    def _users_exist(self, conn) -> bool:
+        """True once any user has been provisioned (the dashboard is then multi-user)."""
+        return conn.execute("SELECT 1 FROM relay_users LIMIT 1").fetchone() is not None
+
+    def _auth_required(self, conn) -> bool:
+        """Whether this request's dashboard route is access-gated.
+
+        Why:
+            Gated when a view secret is configured (the historical signal) OR once any
+            user exists (provisioning implies access should be controlled). A bare
+            loopback dev relay with neither stays open, exactly as before.
+        """
+        return bool(self.server.view_token) or self._users_exist(conn)
+
+    def _legacy_admin_allowed(self, conn) -> bool:
+        """Whether the legacy shared view key may still log in as a bootstrap admin.
+
+        Why:
+            Backward-compatible bootstrap: while there are NO provisioned users, the old
+            view secret still gets you in (so a deploy is not locked out before it
+            provisions anyone). Once users exist it is OFF unless the operator explicitly
+            opts back in (allow_legacy_admin) — Codex's gated/deprecated-legacy guidance,
+            so the shared key never silently remains a permanent peer to named users.
+        """
+        if not self.server.view_token:
+            return False
+        if self.server.allow_legacy_admin:
+            return True
+        return not self._users_exist(conn)
+
+    def _authenticate(self, conn) -> dict | None:
+        """Resolve the current principal from the session cookie, re-reading the DB.
+
+        Returns:
+            {"user_id", "role", "name"} for a valid session, else None. The legacy
+            bootstrap admin (cookie sub == 0) resolves to a synthetic admin principal
+            (user_id None) only while still permitted.
+
+        Why:
+            AuthZ trusts the DB, not the cookie. We verify the cookie's signature and
+            expiry (verify_session_value), THEN re-load the user by id and confirm it is
+            still active and its session_version still matches the cookie's — so a
+            revoked or force-logged-out user is rejected on their very next request, with
+            no server-side session store. The cookie never carries role/scope, so a
+            privilege can't ride in a stale/forged cookie.
+        """
+        if self.server.session_key is None:
+            return None
+        value = self._read_session_cookie()
+        if not value:
+            return None
+        claims = verify_session_value(self.server.session_key, value, int(time.time()))
+        if claims is None:
+            return None
+        sub = claims.get("sub")
+        # Legacy bootstrap admin: a reserved sentinel id (0) with no relay_users row.
+        if sub == 0:
+            if self._legacy_admin_allowed(conn):
+                return {"user_id": None, "role": "admin", "name": "legacy-admin"}
+            return None
+        if not isinstance(sub, int):
+            return None
+        user = get_user_by_id(conn, sub)
+        if user is None or not user["active"] or user["session_version"] != claims.get("sv"):
+            return None
+        return {"user_id": user["id"], "role": user["role"], "name": user["name"]}
+
+    def _allowed_projects(self, conn, principal: dict | None) -> set | None:
+        """Resolve which project names `principal` may see, or None for unrestricted.
+
+        Args:
+            conn: An open relay-store connection.
+            principal: The authenticated principal from _authenticate, or None on an open
+                (ungated) relay where no one logs in.
+
+        Returns:
+            None when the principal sees EVERYTHING — an admin, the legacy bootstrap admin
+            (both role == "admin"), or an open relay (principal is None, reads are public).
+            Otherwise a set of the viewer's allowed project names (possibly empty —
+            default-deny, so a viewer with no grants sees nothing).
+
+        Why:
+            One place computes read scope, so every route (the index filter, /project,
+            /report, and the comment POST) enforces the SAME rule from current DB state —
+            authZ never drifts between routes. None vs a set is the explicit "unrestricted
+            vs scoped" distinction; returning a set makes the membership checks at each
+            call site a trivial, hard-to-get-wrong `in`. Scope is re-read per request (not
+            cached on the cookie), so a regrant/revoke takes effect immediately.
+        """
+        if principal is None or principal["role"] == "admin":
+            return None
+        return set(projects_for_user(conn, principal["user_id"]))
+
+    def _handle_login(self) -> None:
+        """Verify a posted access key and set the session cookie (POST /login).
+
+        Why:
+            The login key is the credential: we recompute its verifier (HMAC with the
+            pepper) and look it up; a matching ACTIVE user gets a fresh signed session
+            cookie (sub = user id, sv = their session_version) and a redirect to the
+            dashboard. The legacy view key, while still permitted, logs in as the
+            bootstrap admin (sub = 0). A miss re-renders /login with a GENERIC error (we
+            never reveal which part failed, so the form leaks nothing about which keys
+            exist). All key compares are constant-time and the key is never logged.
+        """
+        # An unconfigured (no session key) relay has nothing to log into — treat /login
+        # as a no-op redirect rather than erroring.
+        if self.server.session_key is None:
+            self._send_redirect(303, "/")
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            raw = self._read_raw_body()
+            key = ""
+            if raw is not None:
+                try:
+                    key = urllib.parse.parse_qs(raw.decode("utf-8")).get("key", [""])[0]
+                except UnicodeDecodeError:
+                    key = ""
+
+            sub = sv = None
+            if key and self.server.user_pepper is not None:
+                user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, key))
+                if user is not None and user["active"]:
+                    sub, sv = user["id"], user["session_version"]
+                    update_last_login(conn, user["id"], _utc_now_iso())
+            if (
+                sub is None
+                and key
+                and self.server.view_token
+                and self._legacy_admin_allowed(conn)
+                and hmac.compare_digest(key, self.server.view_token)
+            ):
+                sub, sv = 0, 0  # legacy bootstrap admin
+
+            if sub is None:
+                self._send_html(401, render_login("Invalid or expired access key."))
+                return
+
+            now = int(time.time())
+            value = make_session_value(
+                self.server.session_key, sub, sv, now, now + self.server.session_seconds
+            )
+            self._send_redirect(
+                303,
+                "/",
+                extra_headers={
+                    "Set-Cookie": self._cookie_header(value, self.server.session_seconds)
+                },
+            )
+        finally:
+            conn.close()
+
+    def _handle_logout(self) -> None:
+        """Clear the session cookie and redirect to /login (GET /logout)."""
+        self._send_redirect(
+            303, "/login", extra_headers={"Set-Cookie": self._cookie_header("", 0)}
+        )
 
     def _origin_error(self) -> str | None:
         """Return None if the request is same-origin, else a 403 reason string.
@@ -731,22 +1106,25 @@ class _RelayHandler(BaseHTTPRequestHandler):
             Origin not matching Host.
 
         Why:
-            The comment POST authenticates via the view secret over HTTP Basic, which
-            the browser AUTO-SENDS on every request to this origin — including one a
-            malicious third-party page triggers (classic CSRF). An Origin check is the
-            lightweight, dependency-free defense: a genuine same-site form submit
-            carries an Origin equal to our own host, while a cross-site forgery carries
-            the attacker's origin (or, for some flows, none) — so we require Origin
-            present AND matching. We compare netloc (host[:port]) because that is what
-            survives the Fly topology: the browser sends Origin
-            "https://<app>.fly.dev", whose netloc is "<app>.fly.dev", and the proxied
-            request arrives with Host "<app>.fly.dev" — equal. (A SameSite-cookie
-            defense doesn't apply here: there is no session cookie, the credential is
-            Basic auth, so the Origin check is the right tool.)
+            The comment POST is now authenticated by the session cookie, which the
+            browser AUTO-SENDS on every request to this origin — including one a
+            malicious third-party page triggers (classic CSRF). The Origin check is the
+            primary defense (SameSite=Lax on the cookie is a second layer). When a
+            canonical public origin is configured (the deployed HTTPS URL), we require
+            the Origin to equal it EXACTLY — scheme+host+port — rather than merely match
+            the Host header, which a client can set and a proxy rewrites (Codex's
+            don't-blind-trust-Host point). On a loopback dev relay with none configured,
+            we fall back to comparing the Origin's netloc against Host.
         """
         origin = self.headers.get("Origin")
         if not origin:
             return "missing Origin header"
+        if self.server.public_origin:
+            # Exact canonical-origin match (trailing slash ignored). Nothing about the
+            # request (Host, proxy headers) is trusted — only the configured value.
+            if origin.rstrip("/") != self.server.public_origin.rstrip("/"):
+                return "Origin does not match the configured public origin"
+            return None
         if urllib.parse.urlparse(origin).netloc != self.headers.get("Host", ""):
             return "Origin does not match Host"
         return None
@@ -826,23 +1204,67 @@ class _RelayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_redirect(self, code: int, location: str) -> None:
+    def _send_redirect(
+        self, code: int, location: str, *, extra_headers: dict | None = None
+    ) -> None:
         """Write a bodyless redirect response to `location`.
 
         Args:
             code: The 3xx status code (303 for POST-redirect-GET).
             location: The path to redirect to (a site-relative path is fine).
+            extra_headers: Optional extra response headers — used to attach a
+                Set-Cookie on the login/logout redirects (set the session cookie while
+                redirecting to the dashboard, or clear it while redirecting to /login).
 
         Why:
             After a successful comment POST we 303 back to the report page so the
             browser re-fetches it with a GET — the POST-redirect-GET pattern, which
-            stops a page refresh from resubmitting the comment. A redirect needs no
+            stops a page refresh from resubmitting the comment. Login/logout reuse the
+            same redirect but also need to (un)set the session cookie, hence
+            extra_headers — same shape as _send_html/_send_json. A redirect needs no
             body, so we send an explicit zero Content-Length plus the Location header.
         """
         self.send_response(code)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    """The relay's multi-party auth/session configuration (Increment 1).
+
+    Args:
+        session_key: HMAC key for signing session cookies (independent secret). None
+            disables sessions (a bare, open dev relay).
+        user_pepper: HMAC pepper for the stored key verifiers (independent secret).
+        admin_token: Bearer token for the provisioning endpoint (independent of the
+            ingest token). None disables provisioning.
+        secure_cookie: Set the cookie's Secure attribute (true when HTTPS-exposed).
+        session_seconds: Session lifetime / cookie Max-Age in seconds.
+        public_origin: The canonical external origin (e.g. "https://app.fly.dev") the
+            comment-POST Origin must match. None falls back to Origin-vs-Host.
+        allow_legacy_admin: Keep the legacy shared view key usable as admin even after
+            users exist (default off → it is bootstrap-only).
+
+    Why:
+        Bundling the seven auth knobs into one frozen object keeps RelayServer /
+        create_server / serve signatures readable, and makes "this is the auth posture"
+        a single explicit thing to pass and reason about. Each secret is INDEPENDENT
+        (never derived from / shared with the view or ingest tokens) per the Codex
+        /second-opinion. The cookie attributes and origin live here so the request
+        handler reads them via self.server, the same pattern as db_path/token.
+    """
+
+    session_key: bytes | None = None
+    user_pepper: bytes | None = None
+    admin_token: str | None = None
+    secure_cookie: bool = False
+    session_seconds: int = 30 * 24 * 3600
+    public_origin: str | None = None
+    allow_legacy_admin: bool = False
 
 
 class RelayServer(ThreadingHTTPServer):
@@ -880,6 +1302,7 @@ class RelayServer(ThreadingHTTPServer):
         token: str,
         view_token: str | None = None,
         display_tz: ZoneInfo = _DISPLAY_TZ,
+        auth: "AuthConfig | None" = None,
     ):
         # Set config before binding so it is available to any request handled after
         # serve_forever() starts.
@@ -887,6 +1310,16 @@ class RelayServer(ThreadingHTTPServer):
         self.token = token
         self.view_token = view_token
         self.display_tz = display_tz
+        # Spread the auth bundle onto the server so each handler reads the individual
+        # knobs via self.server.<name> (the existing per-request access pattern).
+        auth = auth or AuthConfig()
+        self.session_key = auth.session_key
+        self.user_pepper = auth.user_pepper
+        self.admin_token = auth.admin_token
+        self.secure_cookie = auth.secure_cookie
+        self.session_seconds = auth.session_seconds
+        self.public_origin = auth.public_origin
+        self.allow_legacy_admin = auth.allow_legacy_admin
         super().__init__(server_address, _RelayHandler)
 
 
@@ -924,6 +1357,7 @@ def create_server(
     view_token: str | None = None,
     require_view_auth: bool = False,
     display_tz: ZoneInfo = _DISPLAY_TZ,
+    auth: "AuthConfig | None" = None,
 ) -> RelayServer:
     """Build and bind a RelayServer (does not start serving).
 
@@ -975,7 +1409,7 @@ def create_server(
             "secret: the read-only dashboard would be world-readable. Set a view "
             "secret (relay-serve --view-token-env) before binding beyond loopback."
         )
-    return RelayServer((host, port), db_path, token, view_token, display_tz)
+    return RelayServer((host, port), db_path, token, view_token, display_tz, auth)
 
 
 def serve(
@@ -986,6 +1420,7 @@ def serve(
     view_token: str | None = None,
     require_view_auth: bool = False,
     display_tz: ZoneInfo = _DISPLAY_TZ,
+    auth: "AuthConfig | None" = None,
 ) -> None:
     """Run the relay server until interrupted (the blocking entry point).
 
@@ -1011,12 +1446,12 @@ def serve(
         rather than a traceback.
     """
     server = create_server(
-        host, port, db_path, token, view_token, require_view_auth, display_tz
+        host, port, db_path, token, view_token, require_view_auth, display_tz, auth
     )
     bound_host, bound_port = server.server_address
     # Surface read-auth state at startup — the operator's confirmation that a
     # world-reachable bind is gated (the fail-closed guard guarantees it is).
-    auth_state = "Basic-auth required" if view_token else "open (loopback only)"
+    auth_state = "login required" if view_token else "open (loopback only)"
     print(
         f"[relay] listening on http://{bound_host}:{bound_port}  "
         f"(db: {db_path}; dashboard: {auth_state})",

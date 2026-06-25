@@ -76,6 +76,52 @@ CREATE TABLE IF NOT EXISTS report_comments (
 
 -- Comments are always fetched for one report; the index keeps that filter fast.
 CREATE INDEX IF NOT EXISTS idx_report_comments_report ON report_comments(report_id);
+
+-- C3 / multi-party access (Increment 1). relay_users is the per-user identity +
+-- credential store. The login credential is a server-minted high-entropy random key;
+-- only its VERIFIER = HMAC-SHA256(pepper, key) is stored (the raw key is shown once at
+-- creation, never persisted or logged). `active` + `session_version` give STATELESS
+-- revocation: set active = 0 and/or bump session_version to invalidate a user's live
+-- sessions WITHOUT a server-side session table — the signed cookie carries the
+-- session_version it was minted with and is rejected once it no longer matches. `name`
+-- is UNIQUE so CLI ops (e.g. revoke <name>) are unambiguous; `key_verifier` is UNIQUE so
+-- a login lookup resolves to exactly one row. The role column is an open enum
+-- (admin/viewer now; contributor/guest later) so new roles are additive.
+CREATE TABLE IF NOT EXISTS relay_users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,        -- display name + CLI handle
+    key_verifier    TEXT NOT NULL UNIQUE,        -- HMAC-SHA256(pepper, raw_key), hex
+    role            TEXT NOT NULL,               -- "admin" | "viewer"
+    active          INTEGER NOT NULL DEFAULT 1,  -- 0 = revoked (login + sessions denied)
+    session_version INTEGER NOT NULL DEFAULT 1,  -- bump to force-logout this user
+    created_by      TEXT NOT NULL,               -- who provisioned (actor label)
+    created_at      TEXT NOT NULL,               -- ISO 8601 UTC
+    last_login_at   TEXT                         -- ISO 8601 UTC, NULL until first login
+);
+
+-- A viewer's per-project READ scope. Default-deny: a viewer with no rows here sees
+-- nothing. An admin ignores this table entirely (it sees all projects). The composite
+-- primary key dedupes a repeated (user, project) grant.
+CREATE TABLE IF NOT EXISTS relay_user_projects (
+    user_id   INTEGER NOT NULL,
+    project   TEXT NOT NULL,
+    PRIMARY KEY (user_id, project)
+);
+
+-- The scope lookup filters by user_id on every authorized request; index it.
+CREATE INDEX IF NOT EXISTS idx_relay_user_projects_user ON relay_user_projects(user_id);
+
+-- Append-only audit of admin/provisioning actions (who created/revoked whom, with what
+-- role + projects). A multi-party access model needs an accountability trail; this is it.
+CREATE TABLE IF NOT EXISTS relay_admin_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor       TEXT NOT NULL,   -- who performed it (e.g. "admin-token")
+    action      TEXT NOT NULL,   -- "create_user" | "revoke_user" | …
+    target_user TEXT NOT NULL,   -- the affected user's name
+    role        TEXT NOT NULL,   -- role involved, or ""
+    projects    TEXT NOT NULL,   -- JSON array of projects, or "[]"
+    created_at  TEXT NOT NULL    -- ISO 8601 UTC
+);
 """
 
 
@@ -100,6 +146,12 @@ def open_relay_store(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # Busy timeout so concurrent pushes wait for the lock instead of erroring.
     conn = sqlite3.connect(db_path, timeout=_BUSY_TIMEOUT_SECONDS)
+    # WAL mode lets dashboard READS proceed concurrently with a writer (a login
+    # touching last_login_at, an ingest, a comment), instead of readers and the writer
+    # blocking each other. It is a per-database persistent setting, so running it on
+    # every open is idempotent and cheap. Multi-user read traffic (Increment 1) makes
+    # this worth it; the busy timeout above still covers the brief writer-vs-writer lock.
+    conn.execute("PRAGMA journal_mode=WAL")
     # Named-column access for the decoder below (explicit over positional).
     conn.row_factory = sqlite3.Row
     # executescript runs the multi-statement schema and commits implicitly.
@@ -410,3 +462,280 @@ def comments_for_project(
         }
         for row in rows
     ]
+
+
+# --- Multi-party access: users, scope, revocation, audit (Increment 1) ---------
+# These back the dashboard's per-user auth. The store deals ONLY in the verifier
+# string (HMAC of the key) — minting the raw key and computing its verifier is the
+# server/auth layer's job, where the pepper lives, so no crypto belongs here. Every
+# write commits immediately, matching the rest of this module.
+
+
+def add_user(
+    conn: sqlite3.Connection,
+    name: str,
+    key_verifier: str,
+    role: str,
+    projects: list[str],
+    created_by: str,
+    created_at: str,
+) -> int:
+    """Insert a new user and their project scope; return the new user id.
+
+    Args:
+        conn: An open relay-store connection.
+        name: The user's unique display name / CLI handle.
+        key_verifier: HMAC-SHA256(pepper, raw_key) — the stored credential verifier
+            (the server computed it; the raw key is never passed here).
+        role: "admin" or "viewer".
+        projects: The viewer's allowed project names (ignored for an admin, which
+            sees all; pass [] for an admin). Inserted into relay_user_projects.
+        created_by: An actor label for the audit trail (e.g. "admin-token").
+        created_at: ISO 8601 UTC timestamp.
+
+    Returns:
+        The new relay_users.id.
+
+    Why:
+        One call provisions identity + scope together so a half-created user can't
+        exist. active/session_version take their schema defaults (1/1). The
+        UNIQUE(name) and UNIQUE(key_verifier) constraints make a duplicate name or
+        (astronomically unlikely) verifier collision a loud IntegrityError the server
+        can map to a clean 4xx, rather than a silent second account. We INSERT OR
+        IGNORE the project rows so a caller passing a duplicate project is harmless.
+    """
+    cursor = conn.execute(
+        "INSERT INTO relay_users (name, key_verifier, role, created_by, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (name, key_verifier, role, created_by, created_at),
+    )
+    user_id = cursor.lastrowid
+    for project in projects:
+        conn.execute(
+            "INSERT OR IGNORE INTO relay_user_projects (user_id, project) VALUES (?, ?)",
+            (user_id, project),
+        )
+    conn.commit()
+    return user_id
+
+
+def get_user_by_verifier(conn: sqlite3.Connection, key_verifier: str) -> sqlite3.Row | None:
+    """Look up a user by their credential verifier (the login path).
+
+    Args:
+        conn: An open relay-store connection.
+        key_verifier: HMAC-SHA256(pepper, raw_key) the server computed from the
+            presented key.
+
+    Returns:
+        The full user Row, or None when no user has that verifier.
+
+    Why:
+        Login resolves a presented key to a user by its verifier. We return the row
+        REGARDLESS of `active` so the caller (server) can deny a revoked user
+        deliberately; baking the active check in here would hide that decision. The
+        UNIQUE(key_verifier) index makes this an exact single-row lookup.
+    """
+    return conn.execute(
+        "SELECT * FROM relay_users WHERE key_verifier = ?", (key_verifier,)
+    ).fetchone()
+
+
+def get_user_by_id(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
+    """Fetch a user by id (the per-request authorization re-read).
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The relay_users.id carried in the session cookie's `sub`.
+
+    Returns:
+        The full user Row, or None when the id no longer exists.
+
+    Why:
+        AuthZ trusts the DB, not the cookie: every request resolves the cookie's user
+        id back to the CURRENT row, so role changes, a revoked `active`, or a bumped
+        `session_version` take effect immediately. A None here (deleted user) means
+        the session is dead.
+    """
+    return conn.execute("SELECT * FROM relay_users WHERE id = ?", (user_id,)).fetchone()
+
+
+def get_user_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
+    """Fetch a user by name (the handle CLI ops like revoke use).
+
+    Args:
+        conn: An open relay-store connection.
+        name: The user's unique name.
+
+    Returns:
+        The full user Row, or None when no user has that name.
+
+    Why:
+        The admin operates on users by name (`relay-user revoke <name>`); name is
+        UNIQUE so this resolves unambiguously.
+    """
+    return conn.execute("SELECT * FROM relay_users WHERE name = ?", (name,)).fetchone()
+
+
+def projects_for_user(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    """Return the project names a viewer is scoped to (sorted).
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user whose scope to read.
+
+    Returns:
+        The allowed project names, alphabetically. Empty for a viewer with no grants
+        (default-deny) — and also for an admin, whose all-access is decided by role,
+        NOT by this list.
+
+    Why:
+        The single source of a viewer's read scope, consulted on every authorized
+        route. Sorted output keeps a filtered index stable and predictable.
+    """
+    rows = conn.execute(
+        "SELECT project FROM relay_user_projects WHERE user_id = ? ORDER BY project",
+        (user_id,),
+    ).fetchall()
+    return [row["project"] for row in rows]
+
+
+def list_users(conn: sqlite3.Connection) -> list[dict]:
+    """List all users (with their project scope) for the admin's CLI view.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        One dict per user — id, name, role, active, session_version, created_by,
+        created_at, last_login_at, and projects (a list) — ordered by name. The
+        `key_verifier` is DELIBERATELY excluded: a verifier never leaves the store.
+
+    Why:
+        Backs `orion relay-user list`. We omit the verifier so an admin listing can
+        never surface credential material, even hashed. The per-user scope query is a
+        small N+1, acceptable for this tiny, admin-only table.
+    """
+    rows = conn.execute(
+        "SELECT id, name, role, active, session_version, created_by, created_at, "
+        "last_login_at FROM relay_users ORDER BY name"
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "role": row["role"],
+            "active": bool(row["active"]),
+            "session_version": row["session_version"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "last_login_at": row["last_login_at"],
+            "projects": projects_for_user(conn, row["id"]),
+        }
+        for row in rows
+    ]
+
+
+def update_last_login(conn: sqlite3.Connection, user_id: int, ts: str) -> None:
+    """Stamp a user's last successful login time.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user who just logged in.
+        ts: ISO 8601 UTC timestamp (the server's clock).
+
+    Returns:
+        None.
+
+    Why:
+        A small operational signal (the admin can see who is actually using their
+        access, and spot stale grants). Written on each login; not load-bearing for
+        auth, so a failure here would never block a login (the server orders it after
+        the cookie is set).
+    """
+    conn.execute("UPDATE relay_users SET last_login_at = ? WHERE id = ?", (ts, user_id))
+    conn.commit()
+
+
+def bump_session_version(conn: sqlite3.Connection, user_id: int) -> None:
+    """Invalidate a user's live sessions by advancing their session_version.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user whose sessions to invalidate.
+
+    Returns:
+        None.
+
+    Why:
+        STATELESS revocation: a signed cookie embeds the session_version it was minted
+        with, and the per-request check rejects it once it no longer matches. Bumping
+        the version thus force-logs-out that one user everywhere, with no server-side
+        session store and without touching anyone else.
+    """
+    conn.execute(
+        "UPDATE relay_users SET session_version = session_version + 1 WHERE id = ?",
+        (user_id,),
+    )
+    conn.commit()
+
+
+def revoke_user(conn: sqlite3.Connection, user_id: int) -> None:
+    """Deactivate a user and invalidate their live sessions, atomically.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user to revoke.
+
+    Returns:
+        None.
+
+    Why:
+        Revoking access must do BOTH in one step: set active = 0 (so a future login
+        with the key is denied) and bump session_version (so any cookie already in a
+        browser stops working on its next request). Doing them in a single UPDATE
+        means there is no window where one took effect but not the other.
+    """
+    conn.execute(
+        "UPDATE relay_users SET active = 0, session_version = session_version + 1 "
+        "WHERE id = ?",
+        (user_id,),
+    )
+    conn.commit()
+
+
+def record_admin_audit(
+    conn: sqlite3.Connection,
+    actor: str,
+    action: str,
+    target_user: str,
+    role: str,
+    projects: list[str],
+    created_at: str,
+) -> None:
+    """Append one row to the admin/provisioning audit trail.
+
+    Args:
+        conn: An open relay-store connection.
+        actor: Who performed the action (e.g. "admin-token").
+        action: A short verb, e.g. "create_user" or "revoke_user".
+        target_user: The affected user's name.
+        role: The role involved, or "" when not applicable.
+        projects: Projects involved (JSON-encoded for the TEXT column; [] is fine).
+        created_at: ISO 8601 UTC timestamp.
+
+    Returns:
+        None.
+
+    Why:
+        A multi-party access model needs accountability: who granted or revoked whom,
+        and with what scope. Append-only (no update/delete) so the trail can't be
+        quietly rewritten. projects is JSON-encoded for the same reason sections /
+        participants are on relay_reports — sqlite has no list type.
+    """
+    conn.execute(
+        "INSERT INTO relay_admin_audit (actor, action, target_user, role, projects, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (actor, action, target_user, role, json.dumps(projects), created_at),
+    )
+    conn.commit()

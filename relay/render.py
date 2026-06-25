@@ -583,3 +583,36 @@ def render_not_found(message: str = "Not found.") -> str:
         '<p class="meta"><a href="/">← Back to projects</a></p>'
     )
     return _page("Orion — not found", body)
+
+
+def render_login(error: str | None = None) -> str:
+    """Render the dashboard login page (a single access-key field).
+
+    Args:
+        error: An optional message shown above the form after a failed attempt.
+            Escaped before display.
+
+    Returns:
+        A complete HTML page whose form POSTs the access key to /login.
+
+    Why:
+        Per-user access uses a login KEY rather than a shared Basic-auth dialog, so the
+        dashboard needs its own login page, and a persistent session replaces the
+        re-prompting dialog. The field is type=password so it is masked; the form POSTs
+        SAME-ORIGIN to /login, where the server verifies the key and sets the signed
+        session cookie. There is deliberately NO name field: a user's display name is
+        the one stored with their key, not self-asserted, so identity cannot be spoofed
+        at the login form.
+    """
+    error_html = f'<p class="meta">{_esc(error)}</p>\n' if error else ""
+    body = (
+        "<h1>Orion — sign in</h1>\n"
+        f"{error_html}"
+        '<form method="post" action="/login">\n'
+        "  <p><label>Access key<br>\n"
+        '  <input type="password" name="key" required autofocus '
+        'autocomplete="current-password"></label></p>\n'
+        '  <p><button type="submit">Sign in</button></p>\n'
+        "</form>"
+    )
+    return _page("Orion — sign in", body)

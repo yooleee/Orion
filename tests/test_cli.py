@@ -710,15 +710,21 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # ignore real .env
     monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
+    # A view secret now gates the dashboard with sessions, so cmd_relay_serve fails
+    # closed unless the session signing key + user pepper are also set. Provide them
+    # so this test reaches serve() (the fail-closed path is its own test below).
+    monkeypatch.setenv("ORION_RELAY_SESSION_KEY", "session-signing-key")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     calls = []
     # The recorder accepts the full serve() signature, including the trailing
-    # display_tz the timezone flag threads in (see test below); a fixed-arity stub
-    # would break the moment a new positional is added.
+    # display_tz the timezone flag threads in (see test below) and the auth= kwarg
+    # the session config now rides in on (**k); a fixed-arity stub would break the
+    # moment a new positional or keyword is added.
     monkeypatch.setattr(
         cli,
         "_load_relay_serve",
         lambda: (
-            lambda host, port, db_path, token, view_token, require_view_auth, display_tz: calls.append(
+            lambda host, port, db_path, token, view_token, require_view_auth, display_tz, **k: calls.append(
                 (host, port, db_path, token, view_token, require_view_auth, display_tz)
             )
         ),
@@ -758,8 +764,12 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
+    # A gated dashboard needs the session secrets too (see the fail-closed test below).
+    monkeypatch.setenv("ORION_RELAY_SESSION_KEY", "session-signing-key")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     seen = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: seen.append(a)))
+    # **k absorbs the auth= kwarg the session config now rides in on.
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(a)))
 
     code = cli.main(
         [
@@ -770,7 +780,8 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
         ]
     )
     assert code == 0
-    # require_view_auth is the second-to-last positional arg (display_tz now trails it).
+    # require_view_auth is the second-to-last positional arg (display_tz now trails it);
+    # auth rides in as a keyword, so it does not shift the positional tail.
     assert seen and seen[0][-2] is True
 
 
@@ -785,7 +796,7 @@ def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
     monkeypatch.delenv("ORION_RELAY_VIEW_TOKEN", raising=False)
 
-    def _raise_guard(*_a):
+    def _raise_guard(*_a, **_k):  # **_k absorbs the auth= kwarg
         raise ValueError("refusing to bind non-loopback host '0.0.0.0' ...")
 
     monkeypatch.setattr(cli, "_load_relay_serve", lambda: _raise_guard)
@@ -793,6 +804,31 @@ def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
         ["relay-serve", "--host", "0.0.0.0", "--config", str(tmp_path / "orion.toml")]
     )
     assert code == 1
+
+
+def test_relay_serve_without_session_secrets_when_gated_is_clean_error(tmp_path, monkeypatch):
+    """A gated dashboard with no session secrets fails closed (exit 1, never serves).
+
+    Why this matters: once a view secret (or admin token) is set, the dashboard runs the
+    cookie-session login, which is impossible without ORION_RELAY_SESSION_KEY and
+    ORION_RELAY_USER_PEPPER. Rather than boot a login that could never succeed, the CLI
+    must fail closed with a clear error before binding — the Codex-hardened
+    independent-secrets requirement enforced at the CLI seam. We set a view secret but
+    omit the session secrets and prove serve() is never reached.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")  # gates the dashboard
+    monkeypatch.delenv("ORION_RELAY_SESSION_KEY", raising=False)
+    monkeypatch.delenv("ORION_RELAY_USER_PEPPER", raising=False)
+    served = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
+
+    code = cli.main(
+        ["relay-serve", "--host", "127.0.0.1", "--config", str(tmp_path / "orion.toml")]
+    )
+    assert code == 1
+    assert served == []  # fail-closed: never started serving
 
 
 def test_relay_serve_missing_token_is_clean_error_and_never_serves(tmp_path, monkeypatch):
@@ -823,8 +859,21 @@ def test_relay_serve_timezone_flag_threads_a_zoneinfo(tmp_path, monkeypatch):
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    # This test exercises an UNGATED relay (only the timezone flag matters), so it must
+    # control its own env: an earlier non-mocked test can load the project's real .env
+    # (cwd-upward search) into os.environ, leaking ORION_RELAY_VIEW_TOKEN, which would
+    # gate the dashboard and trip the session-secret fail-closed guard. Clear the
+    # multi-party vars so this test stays hermetic regardless of run order.
+    for _var in (
+        "ORION_RELAY_VIEW_TOKEN",
+        "ORION_RELAY_ADMIN_TOKEN",
+        "ORION_RELAY_SESSION_KEY",
+        "ORION_RELAY_USER_PEPPER",
+    ):
+        monkeypatch.delenv(_var, raising=False)
     seen = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: seen.append(a)))
+    # **k absorbs the auth= kwarg; display_tz stays the last positional arg.
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(a)))
 
     code = cli.main(
         [

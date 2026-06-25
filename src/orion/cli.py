@@ -597,6 +597,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--session-days",
+        type=int,
+        default=30,
+        help="Dashboard login session length in days (default: 30).",
+    )
+    relay_parser.add_argument(
+        "--allow-legacy-admin",
+        action="store_true",
+        help=(
+            "Keep the legacy shared view key usable as an admin login even after "
+            "per-user accounts exist (default: off — it is bootstrap-only, usable "
+            "only while no users have been provisioned)."
+        ),
+    )
+    relay_parser.add_argument(
         "--config",
         default=default_config,
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
@@ -669,6 +684,8 @@ def main(argv: list[str] | None = None) -> int:
             args.require_view_auth,
             args.timezone,
             Path(args.config),
+            session_days=args.session_days,
+            allow_legacy_admin=args.allow_legacy_admin,
         )
     return 1  # Unreachable: subparsers are required.
 
@@ -2266,6 +2283,8 @@ def cmd_relay_serve(
     require_view_auth: bool,
     timezone_name: str,
     config_path: Path,
+    session_days: int = 30,
+    allow_legacy_admin: bool = False,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
 
@@ -2313,6 +2332,15 @@ def cmd_relay_serve(
         # Optional: empty/unset -> None. The fail-closed guard inside serve() refuses a
         # non-loopback bind when it is None; on loopback, None means "reads open".
         view_token = os.environ.get(view_token_env, "").strip() or None
+
+        # Multi-party auth secrets (fixed env names; the relay does not read orion.toml).
+        # Each is INDEPENDENT of the ingest/view secrets (Codex hardening): the session
+        # signing key, the per-user-key pepper, and the provisioning admin token.
+        session_key_raw = os.environ.get("ORION_RELAY_SESSION_KEY", "").strip()
+        user_pepper_raw = os.environ.get("ORION_RELAY_USER_PEPPER", "").strip()
+        admin_token = os.environ.get("ORION_RELAY_ADMIN_TOKEN", "").strip() or None
+        public_origin = os.environ.get("ORION_RELAY_PUBLIC_ORIGIN", "").strip() or None
+
         # Validate the display zone by constructing it (ZoneInfo is internally cached,
         # so the same object is reused by the renderer). This mirrors config.py's
         # _parse_display_timezone: ZoneInfoNotFoundError = no such zone in the tz
@@ -2325,7 +2353,37 @@ def cmd_relay_serve(
                 f"--timezone {timezone_name!r} is not a valid IANA zone name ({exc}). "
                 'Use a name like "America/Los_Angeles" or "UTC".'
             ) from exc
+
         serve = _load_relay_serve()
+        # AuthConfig + the loopback test live in the relay package, importable now that
+        # _load_relay_serve has put the repo root on sys.path if it was needed.
+        from relay.server import AuthConfig, _is_loopback
+
+        # Sessions/provisioning need their secrets whenever the dashboard is access-gated
+        # (a view secret is set) or provisioning is enabled (an admin token is set). Fail
+        # CLOSED with a named error rather than serving a login that could never work.
+        if (view_token is not None or admin_token is not None) and (
+            not session_key_raw or not user_pepper_raw
+        ):
+            raise ConfigError(
+                "multi-party auth needs ORION_RELAY_SESSION_KEY and "
+                "ORION_RELAY_USER_PEPPER in .env (each a long random secret, independent "
+                "of the ingest/view tokens). Set them before serving an access-gated "
+                "dashboard."
+            )
+
+        # Secure cookies whenever the relay is HTTPS-exposed: a non-loopback bind, or a
+        # loopback bind behind a TLS proxy (--require-view-auth). Plain loopback http
+        # dev stays non-Secure so the cookie still works there.
+        auth = AuthConfig(
+            session_key=session_key_raw.encode("utf-8") if session_key_raw else None,
+            user_pepper=user_pepper_raw.encode("utf-8") if user_pepper_raw else None,
+            admin_token=admin_token,
+            secure_cookie=require_view_auth or not _is_loopback(host),
+            session_seconds=session_days * 24 * 3600,
+            public_origin=public_origin,
+            allow_legacy_admin=allow_legacy_admin,
+        )
     except (SecretsError, ConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -2334,7 +2392,10 @@ def cmd_relay_serve(
         # Blocks until Ctrl-C; serve() prints its bound address and read-auth state.
         # The guard raises ValueError BEFORE binding if host is non-loopback without a
         # view secret — surfaced here as a clean, actionable error, not a traceback.
-        serve(host, port, db_path, token, view_token, require_view_auth, display_tz)
+        serve(
+            host, port, db_path, token, view_token, require_view_auth, display_tz,
+            auth=auth,
+        )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

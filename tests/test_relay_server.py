@@ -16,13 +16,14 @@
 #                then assert on responses and on what landed in the store.
 # =============================================================================
 
-import base64
 import json
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
 from relay.render import MAX_COMMENT_BODY_CHARS
 from relay.server import (
+    _SESSION_COOKIE_NAME,
+    AuthConfig,
     _b64url_encode,
     _is_loopback,
     _sign,
@@ -42,6 +45,8 @@ from relay.server import (
 )
 from relay.store import (
     add_comment,
+    add_user,
+    bump_session_version,
     comments_for,
     get,
     list_projects,
@@ -50,19 +55,30 @@ from relay.store import (
 
 _TOKEN = "test-ingest-token"
 _VIEW = "test-view-secret"
+# Independent test secrets for the multi-party auth: the cookie-signing key and the
+# per-user-key pepper. Defined here (not just beside the crypto tests) because the
+# running-relay helper builds a default AuthConfig from them so login works end to end.
+_SKEY = b"test-session-signing-key-32-bytes!!"
+_PEPPER = b"test-user-pepper-secret"
 
 
 @contextmanager
-def _running_relay(tmp_path, token=_TOKEN, view_token=None, require_view_auth=False):
+def _running_relay(tmp_path, token=_TOKEN, view_token=None, require_view_auth=False, auth=None):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
     Args:
         tmp_path: pytest temp dir for the relay's sqlite file.
         token: the shared ingest Bearer token.
         view_token: optional dashboard read secret. None (default) leaves GETs open,
-            matching the loopback access model; set it to exercise read auth.
+            matching the loopback access model; set it to gate the dashboard (with a
+            view secret OR provisioned users, GETs require a session cookie).
         require_view_auth: force the view secret even on this loopback bind (the
             reverse-proxy topology); used to exercise that guard path.
+        auth: an AuthConfig override. None (default) supplies a session-capable config
+            built from the shared test secrets (_SKEY / _PEPPER), so POST /login works
+            in every relay; pass a custom one to exercise secure_cookie, allow_legacy_admin,
+            etc. Supplying a session key does NOT gate anything — gating is still driven
+            by view_token/users — so the open-mode tests are unaffected.
 
     Why:
         The ingest/read contracts can only be proven against a real server (real auth
@@ -72,7 +88,11 @@ def _running_relay(tmp_path, token=_TOKEN, view_token=None, require_view_auth=Fa
         an assertion fails.
     """
     db = tmp_path / "relay.sqlite3"
-    server = create_server("127.0.0.1", 0, db, token, view_token, require_view_auth)
+    if auth is None:
+        auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER)
+    server = create_server(
+        "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -111,35 +131,128 @@ def _post(base_url, body, *, token=_TOKEN, path="/ingest"):
         return exc.code, exc.read()
 
 
-def _get(base_url, path, *, password=None, bearer=None):
+def _get(base_url, path, *, cookie=None, bearer=None):
     """GET `path` from the relay and return (status_code, response_text).
 
     Args:
         base_url: the server's base URL.
         path: the request path.
-        password: optional dashboard read secret to send as HTTP Basic auth (any
-            username; None omits the Authorization header).
+        cookie: optional session-cookie value (from _login) sent as the dashboard
+            credential. None omits the Cookie header (the unauthenticated case).
         bearer: optional Bearer token for the machine-JSON /api routes (None omits
-            it). Distinct from `password` because the two surfaces use different auth
-            schemes — Basic for the browser dashboard, Bearer for the pull-back API.
+            it). Distinct from `cookie` because the two surfaces use different auth
+            schemes — a signed session cookie for the browser dashboard, Bearer for
+            the pull-back API.
 
     Why:
-        Mirrors _post for the read side, unwrapping HTTPError so a 401/404 comes back
-        as a tuple to assert on. The password/bearer args let read-auth tests send (or
-        omit) the right credential scheme without each test rebuilding the request.
+        Mirrors _post for the read side, unwrapping HTTPError so a 303/401/404 comes
+        back as a tuple to assert on. The cookie/bearer args let auth tests send (or
+        omit) the right credential without each test rebuilding the request. Redirects
+        are NOT followed (a no-redirect opener), so a 303 to /login surfaces here
+        instead of being swallowed into the login page's 200.
     """
     headers = {}
-    if password is not None:
-        raw = base64.b64encode(f"orion:{password}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {raw}"
+    if cookie is not None:
+        headers["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
     if bearer is not None:
         headers["Authorization"] = f"Bearer {bearer}"
     request = urllib.request.Request(base_url + path, headers=headers, method="GET")
+    # A no-redirect opener so a 303 -> /login (the unauthenticated gate) surfaces as a
+    # 303 here rather than being auto-followed to the login page's 200.
+    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with opener.open(request, timeout=5) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8")
+
+
+def _provision_user(db, name, key, *, role="viewer", projects=()):
+    """Provision a real user (name + key verifier + scope) directly via the store.
+
+    Args:
+        db: the relay's sqlite path.
+        name: the user's unique display name / handle.
+        key: the raw login key (its HMAC verifier under _PEPPER is what gets stored).
+        role: "viewer" (default) or "admin".
+        projects: the viewer's allowed project names (ignored for an admin).
+
+    Why:
+        The login / authZ tests need a genuine relay_users row to authenticate against.
+        We insert it through the same store helper the provisioning endpoint will use,
+        computing the verifier exactly as the server does (HMAC under the shared
+        _PEPPER), so the real login path resolves the presented key to this user.
+    """
+    conn = open_relay_store(db)
+    try:
+        return add_user(
+            conn,
+            name,
+            key_verifier(_PEPPER, key),
+            role,
+            list(projects),
+            "test",
+            "2026-06-24T00:00:00+00:00",
+        )
+    finally:
+        conn.close()
+
+
+def _post_login(base_url, key):
+    """POST /login with an access key; return (status, headers, text), no redirect follow.
+
+    Args:
+        base_url: the server's base URL.
+        key: the raw access key to present.
+
+    Why:
+        The low-level login driver every login test shares. Success replies 303 +
+        Set-Cookie, a bad key replies 401 with the re-rendered login page; a no-redirect
+        opener keeps both (and their headers/body) readable rather than auto-following the
+        303 into the dashboard. Returning the raw headers lets a test inspect the
+        Set-Cookie attributes (HttpOnly / SameSite / Secure); returning the body lets it
+        assert the 401 re-renders the form and leaks no secret.
+    """
+    data = urllib.parse.urlencode({"key": key}).encode("utf-8")
+    req = urllib.request.Request(
+        base_url + "/login",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=5) as response:
+            return response.status, response.headers, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read().decode("utf-8")
+
+
+def _login(base_url, key):
+    """Log in and return the session-cookie value, or None when the key is rejected.
+
+    Args:
+        base_url: the server's base URL.
+        key: the raw access key to present (a provisioned user's key, or the legacy view
+            secret while bootstrapping).
+
+    Returns:
+        The orion_session cookie value on success, or None on a rejected key (the server
+        re-renders the login page with a 401 and sets no cookie).
+
+    Why:
+        The convenience wrapper most tests use: it drives the real login flow via
+        _post_login and extracts just the cookie value, so a follow-up _get / _post_comment
+        can present it. Tests that need the raw Set-Cookie attributes call _post_login.
+    """
+    _, headers, _ = _post_login(base_url, key)
+    set_cookie = headers.get("Set-Cookie")
+    if not set_cookie:
+        return None
+    jar = SimpleCookie()
+    jar.load(set_cookie)
+    morsel = jar.get(_SESSION_COOKIE_NAME)
+    return morsel.value if morsel else None
 
 
 def _real_blob_json():
@@ -362,78 +475,267 @@ def test_dashboard_unknown_get_path_is_404(tmp_path):
         assert code == 404
 
 
-# --- CP1: dashboard read auth (HTTP Basic) + the fail-closed bind guard ---------
+# --- C3: dashboard read auth (cookie session) + the fail-closed bind guard -------
 #
-# Read auth is enforced ONLY when a view secret is configured; with none set (the
-# loopback default) GETs stay open. The fail-closed guard then guarantees a secret
-# IS set whenever the bind is non-loopback, so a world-reachable dashboard is never
+# Read auth is enforced whenever the dashboard is access-gated — a view secret is set
+# OR any user has been provisioned. The credential is now a signed SESSION COOKIE
+# (minted by POST /login), not the old HTTP-Basic dialog: an absent/invalid session
+# redirects to /login (303) instead of a 401. With neither a view secret nor users (the
+# loopback default) GETs stay open. The fail-closed guard still guarantees a view secret
+# whenever the bind is non-loopback, so a world-reachable dashboard is never
 # unauthenticated. Ingest (the write surface) is unaffected — it stays Bearer-authed.
 
 
 def test_dashboard_open_when_no_view_secret(tmp_path):
-    """With no view secret, dashboard GETs serve without credentials (200).
+    """With no view secret and no users, dashboard GETs serve without a session (200).
 
     Why this matters: this pins the backward-compatible default — local, loopback
-    use stays zero-friction (no password) exactly as before CP1. The guard (below)
-    is what keeps this default safe by forbidding it on a non-loopback bind.
+    use stays zero-friction (no login) exactly as before C3. The guard (below) is what
+    keeps this default safe by forbidding it on a non-loopback bind.
     """
     with _running_relay(tmp_path) as (base_url, _db):
         code, _ = _get(base_url, "/")
         assert code == 200
 
 
-def test_dashboard_requires_basic_auth_when_view_secret_set(tmp_path):
-    """With a view secret set, a GET sent with no credentials is rejected 401.
+def test_dashboard_requires_login_when_view_secret_set(tmp_path):
+    """With a view secret set, a GET sent with no session is redirected to /login (303).
 
-    Why this matters: this is the read gate that makes leaving loopback safe — once a
-    secret exists, the dashboard is closed to anyone who can't present it.
+    Why this matters: this is the read gate that makes leaving loopback safe — once the
+    dashboard is access-gated, an unauthenticated visitor is sent to log in rather than
+    shown the content. A persistent login (cookie) replaces the old re-prompting dialog.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         code, _ = _get(base_url, "/")
-        assert code == 401
+        assert code == 303
 
 
-def test_dashboard_401_advertises_basic_and_never_echoes_secret(tmp_path):
-    """A read 401 carries WWW-Authenticate: Basic and never leaks the secret.
+def test_dashboard_no_session_redirects_to_login_and_login_page_hides_secret(tmp_path):
+    """The gate redirects to /login, and the login page never leaks the view secret.
 
-    Why this matters: the Basic scheme header is what makes a browser show its native
-    login dialog (the whole UX of read auth). And, like the ingest path, the response
-    must never contain the expected secret.
+    Why this matters: the redirect Location is how an unauthenticated browser is told
+    WHERE to authenticate (the cookie-session analog of the old WWW-Authenticate: Basic
+    header). And, like the ingest path, no auth surface — here the login page — may ever
+    contain the expected secret.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        # Build the request directly so the response headers are readable on the error.
+        # Build the request directly so the redirect's Location header is readable.
         req = urllib.request.Request(base_url + "/", method="GET")
+        opener = urllib.request.build_opener(_NoRedirect)
         try:
-            urllib.request.urlopen(req, timeout=5)
-            raise AssertionError("expected a 401")
+            opener.open(req, timeout=5)
+            raise AssertionError("expected a 303 redirect")
         except urllib.error.HTTPError as exc:
-            assert exc.code == 401
-            assert exc.headers.get("WWW-Authenticate", "").startswith("Basic")
-            assert _VIEW not in exc.read().decode("utf-8")
+            assert exc.code == 303
+            assert exc.headers.get("Location") == "/login"
+        # The login page itself must not echo the view secret.
+        _, login_html = _get(base_url, "/login")
+        assert _VIEW not in login_html
 
 
-def test_dashboard_wrong_password_is_401(tmp_path):
-    """Basic credentials with the wrong password are rejected 401.
+def test_dashboard_bad_key_is_401_and_rerenders_login(tmp_path):
+    """POST /login with the wrong key is refused 401, re-renders login, never echoes it.
 
-    Why this matters: a present-but-wrong credential must be refused just like a
-    missing one — the secret is the gate, not merely the presence of a header.
+    Why this matters: a present-but-wrong credential must be refused — the key is the
+    gate. The server re-renders the login page (so the browser stays on the form) with a
+    generic error and sets no cookie, and the response leaks neither the bad key nor the
+    expected view secret.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        code, _ = _get(base_url, "/", password="not-the-secret")
+        # _login returns None on a rejected key (no Set-Cookie issued).
+        assert _login(base_url, "not-the-key") is None
+        # Inspect the 401 + re-rendered login body directly.
+        code, headers, body = _post_login(base_url, "not-the-key")
         assert code == 401
+        assert headers.get("Set-Cookie") is None  # no session minted
+        assert "sign in" in body.lower()  # the login form was re-rendered
+        assert "not-the-key" not in body and _VIEW not in body
 
 
-def test_dashboard_correct_password_is_200(tmp_path):
-    """Basic credentials with the right password render the dashboard (200).
+def test_dashboard_login_then_view_is_200(tmp_path):
+    """After logging in, the session cookie renders the dashboard (200).
 
-    Why this matters: the positive path — a viewer who presents the secret sees the
-    content, proving the auth check lets valid requests through to the renderer.
+    Why this matters: the positive path — a visitor who logs in (here via the legacy
+    bootstrap admin, since no users exist yet) gets a session cookie that carries them
+    through to the content, proving login -> cookie -> authenticated GET works end to end.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         assert _post(base_url, _real_blob_json().encode("utf-8"))[0] == 201
-        code, html = _get(base_url, "/", password=_VIEW)
+        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users provisioned)
+        assert cookie is not None
+        code, html = _get(base_url, "/", cookie=cookie)
         assert code == 200
         assert "demo" in html
+
+
+# --- C3: session lifecycle — login, cookie hygiene, expiry, revocation, logout ---
+#
+# The running-server counterparts to the pure-crypto cookie tests at the bottom of the
+# file: these drive the REAL login flow against a live relay and pin the whole session
+# surface — a valid cookie's security attributes, gating by provisioned users (not just a
+# view secret), every way a session is refused (tampered / expired / revoked), logout,
+# the bootstrap-admin gate, and Secure-only-when-hosted.
+
+
+def test_login_success_sets_a_valid_cookie(tmp_path):
+    """A successful login sets a session cookie that is HttpOnly, SameSite=Lax, and signed.
+
+    Why this matters: the cookie's attributes ARE the session's security posture —
+    HttpOnly (no JS theft via XSS), SameSite=Lax (CSRF defense-in-depth), Path=/ — and the
+    value must be a real signature that verifies under the signing key, not an opaque blob.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        code, headers, _ = _post_login(base_url, _VIEW)  # legacy bootstrap admin
+        assert code == 303
+        set_cookie = headers.get("Set-Cookie")
+        assert set_cookie is not None
+        low = set_cookie.lower()
+        assert "httponly" in low and "samesite=lax" in low and "path=/" in low
+        # The value is a genuine signed session that verifies under _SKEY.
+        jar = SimpleCookie()
+        jar.load(set_cookie)
+        value = jar[_SESSION_COOKIE_NAME].value
+        claims = verify_session_value(_SKEY, value, int(time.time()))
+        assert claims is not None and claims["v"] == 1
+
+
+def test_provisioned_viewer_can_login_and_view(tmp_path):
+    """A provisioned user gates the dashboard (no view secret needed) and can log in to view.
+
+    Why this matters: this is the real per-user flow — provisioning a user is itself enough
+    to gate the dashboard (the access model is "controlled once anyone exists"), an
+    unauthenticated visitor is sent to /login, and the user's own key logs them in to the
+    content. Proves identity end to end: store -> login -> authenticated GET.
+    """
+    with _running_relay(tmp_path) as (base_url, db):  # no view secret
+        _ingest_one(base_url)
+        _provision_user(db, "erin", "erin-key", projects=["demo"])
+        # Provisioning a user gates the dashboard even with no view secret set.
+        assert _get(base_url, "/")[0] == 303  # no session -> login
+        cookie = _login(base_url, "erin-key")
+        assert cookie is not None
+        assert _get(base_url, "/", cookie=cookie)[0] == 200  # logged in -> served
+
+
+def test_tampered_cookie_redirects_to_login(tmp_path):
+    """A session cookie with a flipped byte is refused — the request is sent to /login.
+
+    Why this matters: the HMAC signature is what makes the stateless cookie unforgeable; a
+    mutated cookie must never authenticate, and the live gate must turn that into a clean
+    redirect, not an error or (worse) an authenticated request.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        cookie = _login(base_url, _VIEW)
+        tampered = cookie[:-1] + ("A" if cookie[-1] != "A" else "B")
+        assert _get(base_url, "/", cookie=tampered)[0] == 303
+
+
+def test_expired_cookie_redirects_to_login(tmp_path):
+    """A session whose `exp` has passed is refused server-side, redirecting to /login.
+
+    Why this matters: expiry is enforced from the signed payload, not just the browser's
+    Max-Age, so a client that keeps a cookie past its lifetime still cannot use it. We mint
+    a validly-signed but already-expired cookie under the known key and confirm the gate.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        now = int(time.time())
+        expired = make_session_value(
+            _SKEY, user_id=0, session_version=0, issued_at=now - 100, expires_at=now - 10
+        )
+        assert _get(base_url, "/", cookie=expired)[0] == 303
+
+
+def test_revoked_session_redirects_to_login(tmp_path):
+    """Bumping a user's session_version force-logs-out their live cookie on the next request.
+
+    Why this matters: this is STATELESS revocation — the cookie carries the session_version
+    it was minted with, and the per-request DB re-read rejects it once that no longer
+    matches. A working session must stop working the instant the user is revoked, with no
+    server-side session store.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        uid = _provision_user(db, "bob", "bob-key", projects=["demo"])
+        cookie = _login(base_url, "bob-key")
+        assert _get(base_url, "/", cookie=cookie)[0] == 200  # works before revocation
+        conn = open_relay_store(db)
+        try:
+            bump_session_version(conn, uid)
+        finally:
+            conn.close()
+        assert _get(base_url, "/", cookie=cookie)[0] == 303  # sv mismatch -> logged out
+
+
+def test_logout_clears_cookie(tmp_path):
+    """GET /logout redirects to /login and overwrites the session cookie with Max-Age=0.
+
+    Why this matters: logout must actively clear the cookie (a Max-Age=0 Set-Cookie tells
+    the browser to drop it), not merely redirect — otherwise the session would linger in
+    the browser. We confirm both the redirect target and the clearing Set-Cookie.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        cookie = _login(base_url, _VIEW)
+        req = urllib.request.Request(
+            base_url + "/logout",
+            headers={"Cookie": f"{_SESSION_COOKIE_NAME}={cookie}"},
+            method="GET",
+        )
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            opener.open(req, timeout=5)
+            raise AssertionError("expected a 303 redirect")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 303
+            assert exc.headers.get("Location") == "/login"
+            set_cookie = exc.headers.get("Set-Cookie")
+        assert set_cookie is not None and "max-age=0" in set_cookie.lower()
+
+
+def test_legacy_bootstrap_admin_only_when_no_users(tmp_path):
+    """The legacy view key logs in as admin ONLY while no users exist; off once any do.
+
+    Why this matters: the shared view secret is a bootstrap convenience, NOT a permanent
+    peer to named users (Codex's gated/deprecated-legacy guidance). It must stop working
+    the moment real users are provisioned, so it can't silently remain a backdoor.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        # No users yet: the legacy view key logs in (bootstrap admin).
+        assert _login(base_url, _VIEW) is not None
+        # Provision a user; the legacy key is now OFF.
+        _provision_user(db, "carol", "carol-key")
+        assert _login(base_url, _VIEW) is None
+        # ...but the real user still logs in.
+        assert _login(base_url, "carol-key") is not None
+
+
+def test_legacy_admin_override_allows_after_users_exist(tmp_path):
+    """With allow_legacy_admin, the legacy view key still works even after users exist.
+
+    Why this matters: the deprecation is the default, but an operator can explicitly opt
+    back in (the escape hatch). This pins that the override actually re-enables the legacy
+    key, so the gate is a deliberate, configurable choice — not a hard lockout.
+    """
+    auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, allow_legacy_admin=True)
+    with _running_relay(tmp_path, view_token=_VIEW, auth=auth) as (base_url, db):
+        _provision_user(db, "dave", "dave-key")
+        assert _login(base_url, _VIEW) is not None  # opt-in re-enables the legacy key
+
+
+def test_secure_cookie_only_when_hosted(tmp_path):
+    """The Secure attribute is set in a hosted posture and absent on a plain loopback dev relay.
+
+    Why this matters: Secure stops the cookie from ever traveling over plaintext (essential
+    once HTTPS-exposed), but it would break a bare http loopback dev relay (the browser
+    would withhold the cookie). So it must track the deployment posture, not be hardcoded.
+    """
+    # Hosted posture (e.g. behind TLS): Secure is set.
+    hosted = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, secure_cookie=True)
+    with _running_relay(tmp_path, view_token=_VIEW, auth=hosted) as (base_url, _db):
+        _, headers, _ = _post_login(base_url, _VIEW)
+        assert "secure" in headers.get("Set-Cookie", "").lower()
+    # Plain loopback dev (the default): no Secure, so the cookie works over http.
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        _, headers, _ = _post_login(base_url, _VIEW)
+        assert "secure" not in headers.get("Set-Cookie", "").lower()
 
 
 def test_ingest_unaffected_by_view_secret(tmp_path):
@@ -500,16 +802,17 @@ def test_require_view_auth_forces_secret_on_loopback(tmp_path):
         create_server("127.0.0.1", 0, db, _TOKEN, None, require_view_auth=True)
 
 
-def test_require_view_auth_with_secret_on_loopback_enforces_basic(tmp_path):
+def test_require_view_auth_with_secret_on_loopback_enforces_login(tmp_path):
     """With require_view_auth + a secret, a loopback relay starts AND gates the dashboard.
 
     Why this matters: this is the proxy topology done right — the guard passes (a secret
-    is set), and the loopback dashboard still demands Basic credentials, so the proxy
-    cannot expose an unauthenticated view. Proves both the guard and the enforcement.
+    is set), and the loopback dashboard still demands a session, so the proxy cannot
+    expose an unauthenticated view. Proves both the guard and the enforcement.
     """
     with _running_relay(tmp_path, view_token=_VIEW, require_view_auth=True) as (base_url, _db):
-        assert _get(base_url, "/")[0] == 401  # no creds -> refused even on loopback
-        assert _get(base_url, "/", password=_VIEW)[0] == 200  # correct creds -> served
+        assert _get(base_url, "/")[0] == 303  # no session -> redirected to login
+        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin
+        assert _get(base_url, "/", cookie=cookie)[0] == 200  # session -> served
 
 
 # --- C2: dashboard comments (POST /report/<id>/comment) -------------------------
@@ -554,7 +857,7 @@ def _post_comment(
     *,
     author="Alex",
     body="Nice work.",
-    password=None,
+    cookie=None,
     origin="__match__",
 ):
     """POST a comment form and return (status, headers, text), without following 303.
@@ -564,24 +867,23 @@ def _post_comment(
         report_id: the report id to comment on (goes in the path).
         author, body: the urlencoded form fields. Pass body="" to exercise the
             empty-body rejection (parse_qs drops blank values, so the server sees none).
-        password: optional view secret sent as HTTP Basic (any username); None omits
-            the Authorization header (the no-credentials case).
+        cookie: optional session-cookie value (from _login) sent as the dashboard
+            credential; None omits the Cookie header (the no-session case).
         origin: the Origin header. "__match__" (default) sends an Origin equal to the
             server's own base URL, so its host matches the request Host (a same-origin
             request). None omits the header; any other string is sent verbatim to
             exercise a cross-origin rejection.
 
     Why:
-        Centralizes the form-POST plumbing (urlencoding, Basic auth, Origin, and the
-        no-redirect opener) so each test states only the field it is exercising. A
+        Centralizes the form-POST plumbing (urlencoding, the session cookie, Origin, and
+        the no-redirect opener) so each test states only the field it is exercising. A
         303 or any 4xx surfaces as an HTTPError, unwrapped here into a uniform
         (code, headers, text) tuple.
     """
     data = urllib.parse.urlencode({"author": author, "body": body}).encode("utf-8")
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    if password is not None:
-        raw = base64.b64encode(f"orion:{password}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {raw}"
+    if cookie is not None:
+        headers["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
     if origin == "__match__":
         # Same-origin: derive Origin from base_url so its netloc equals the Host header
         # urllib sets from the URL.
@@ -605,16 +907,17 @@ def _post_comment(
 def test_comment_is_stored_and_redirects(tmp_path):
     """A valid, authed, same-origin comment is stored and answered with a 303.
 
-    Why this matters: this is the happy path end to end — correct view credentials, a
-    matching Origin, and a non-empty body produce a stored comment and a 303 redirect
-    back to the report (POST-redirect-GET, so a refresh won't resubmit). We assert both
-    the redirect target and that the comment actually landed in the store.
+    Why this matters: this is the happy path end to end — a logged-in session, a matching
+    Origin, and a non-empty body produce a stored comment and a 303 redirect back to the
+    report (POST-redirect-GET, so a refresh won't resubmit). We assert both the redirect
+    target and that the comment actually landed in the store.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users yet)
 
         status, headers, _ = _post_comment(
-            base_url, report_id, author="Alex", body="Ship it.", password=_VIEW
+            base_url, report_id, author="Alex", body="Ship it.", cookie=cookie
         )
         assert status == 303
         assert headers.get("Location") == f"/report/{report_id}"
@@ -626,16 +929,16 @@ def test_comment_is_stored_and_redirects(tmp_path):
         assert stored[0]["body"] == "Ship it."
 
 
-def test_comment_without_credentials_is_401(tmp_path):
-    """With a view secret set, a comment POST sent with no credentials is 401, not stored.
+def test_comment_without_a_session_is_401(tmp_path):
+    """With the dashboard gated, a comment POST sent with no session is 401, not stored.
 
-    Why this matters: the comment write path reuses the dashboard read gate — once a
-    view secret exists, you must present it to comment, exactly as to read. Auth is
-    checked first, so nothing is stored.
+    Why this matters: the comment write path reuses the dashboard gate — once access is
+    controlled, you must be logged in to comment, exactly as to read. Auth is checked
+    first, so nothing is stored.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id, password=None)
+        status, _, _ = _post_comment(base_url, report_id)  # no cookie
         assert status == 401
 
         conn = open_relay_store(db)
@@ -643,17 +946,19 @@ def test_comment_without_credentials_is_401(tmp_path):
 
 
 def test_comment_cross_origin_is_403_and_stores_nothing(tmp_path):
-    """An authed comment from a foreign Origin is rejected 403 (CSRF guard), not stored.
+    """A logged-in comment from a foreign Origin is rejected 403 (CSRF guard), not stored.
 
-    Why this matters: Basic auth means the browser auto-sends credentials, so a
-    malicious page could forge an authenticated comment POST. The Origin check is the
-    defense: a request whose Origin host differs from Host is refused even with valid
-    credentials, and leaves no trace in the store.
+    Why this matters: the session cookie is auto-sent by the browser, so a malicious page
+    could forge an authenticated comment POST. The Origin check is the defense: a request
+    whose Origin host differs from Host is refused even WITH a valid session, and leaves
+    no trace in the store. We send a real session cookie so the Origin check (not auth) is
+    what's under test.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
         status, _, _ = _post_comment(
-            base_url, report_id, password=_VIEW, origin="https://evil.example"
+            base_url, report_id, cookie=cookie, origin="https://evil.example"
         )
         assert status == 403
 
@@ -662,39 +967,43 @@ def test_comment_cross_origin_is_403_and_stores_nothing(tmp_path):
 
 
 def test_comment_missing_origin_is_403(tmp_path):
-    """A comment POST with NO Origin header is rejected 403.
+    """A logged-in comment POST with NO Origin header is rejected 403.
 
     Why this matters: the CSRF guard requires Origin to be present AND matching — a
     request that omits it entirely (as some forged cross-site flows do) must fail
-    closed, not be treated as same-origin by default.
+    closed, not be treated as same-origin by default. A valid session isolates the Origin
+    check as the thing under test.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id, password=_VIEW, origin=None)
+        cookie = _login(base_url, _VIEW)
+        status, _, _ = _post_comment(base_url, report_id, cookie=cookie, origin=None)
         assert status == 403
 
 
 def test_comment_on_missing_report_is_404(tmp_path):
-    """An authed, same-origin comment on a nonexistent report id returns 404.
+    """A logged-in, same-origin comment on a nonexistent report id returns 404.
 
     Why this matters: a stale or forged /report/<id>/comment link must be a clean 404,
     not a crash. Auth and the Origin check pass first (so this isolates the
     report-existence guard), then the missing report is reported as not found.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        status, _, _ = _post_comment(base_url, 999, password=_VIEW)
+        cookie = _login(base_url, _VIEW)
+        status, _, _ = _post_comment(base_url, 999, cookie=cookie)
         assert status == 404
 
 
 def test_comment_empty_body_is_400_and_stores_nothing(tmp_path):
-    """A comment with an empty body is rejected 400 and stored nothing.
+    """A logged-in comment with an empty body is rejected 400 and stored nothing.
 
     Why this matters: a comment must carry text. An empty (or whitespace-only) body is
     a validation failure, caught at the inbound boundary before the store is touched.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id, body="", password=_VIEW)
+        cookie = _login(base_url, _VIEW)
+        status, _, _ = _post_comment(base_url, report_id, body="", cookie=cookie)
         assert status == 400
 
         conn = open_relay_store(db)
@@ -702,7 +1011,7 @@ def test_comment_empty_body_is_400_and_stores_nothing(tmp_path):
 
 
 def test_comment_oversized_body_is_400(tmp_path):
-    """A comment body over the length cap is rejected 400.
+    """A logged-in comment body over the length cap is rejected 400.
 
     Why this matters: we never trust a client-sent size. A body beyond
     MAX_COMMENT_BODY_CHARS is refused, mirroring the ingest endpoint's length
@@ -710,8 +1019,9 @@ def test_comment_oversized_body_is_400(tmp_path):
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
         too_long = "x" * (MAX_COMMENT_BODY_CHARS + 1)
-        status, _, _ = _post_comment(base_url, report_id, body=too_long, password=_VIEW)
+        status, _, _ = _post_comment(base_url, report_id, body=too_long, cookie=cookie)
         assert status == 400
 
         conn = open_relay_store(db)
@@ -719,15 +1029,15 @@ def test_comment_oversized_body_is_400(tmp_path):
 
 
 def test_comment_open_when_no_view_secret(tmp_path):
-    """With NO view secret, a same-origin comment is accepted without credentials.
+    """With NO view secret and no users, a same-origin comment is accepted without a session.
 
-    Why this matters: this pins the loopback-dev default — reads are open without a
-    secret, and so is commenting, keeping local use zero-friction. The Origin check
-    still applies (it is not an auth control), so the request must be same-origin.
+    Why this matters: this pins the loopback-dev default — reads are open without a login,
+    and so is commenting, keeping local use zero-friction. The Origin check still applies
+    (it is not an auth control), so the request must be same-origin.
     """
-    with _running_relay(tmp_path) as (base_url, db):  # view_token=None
+    with _running_relay(tmp_path) as (base_url, db):  # view_token=None, no users
         report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id, body="local note", password=None)
+        status, _, _ = _post_comment(base_url, report_id, body="local note")  # no cookie
         assert status == 303
 
         conn = open_relay_store(db)
@@ -743,11 +1053,12 @@ def test_comment_appears_on_the_report_page(tmp_path):
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
         _post_comment(
-            base_url, report_id, author="Reviewer", body="Looks solid.", password=_VIEW
+            base_url, report_id, author="Reviewer", body="Looks solid.", cookie=cookie
         )
 
-        code, html = _get(base_url, f"/report/{report_id}", password=_VIEW)
+        code, html = _get(base_url, f"/report/{report_id}", cookie=cookie)
         assert code == 200
         assert "Reviewer" in html
         assert "Looks solid." in html
@@ -1203,9 +1514,8 @@ def test_api_comment_post_does_not_disturb_other_routes(tmp_path):
 # verifier. These are the cryptographic core of the new auth, so they're pinned in
 # isolation (no running server): a valid token round-trips, and every way a token can
 # be wrong (tampered, expired, wrong key, wrong format) is rejected.
-
-_SKEY = b"test-session-signing-key-32-bytes!!"
-_PEPPER = b"test-user-pepper-secret"
+# (_SKEY / _PEPPER are defined at the top of the file, shared with the running-relay
+# helper so the session/login tests sign and verify under the same secrets.)
 
 
 def test_session_cookie_round_trips():

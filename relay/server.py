@@ -493,8 +493,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     return
                 # report is not None implies id_str was numeric, so int() is safe.
                 comments = comments_for(conn, int(id_str))
+                # Pass the authenticated identity (when logged in) so the comment form
+                # shows "commenting as <name>" and drops the free-text name field — the
+                # comment will be attributed to this identity, not a typed value.
+                author_name = principal["name"] if principal is not None else None
                 self._send_html(
-                    200, render_report(report, comments, self.server.display_tz)
+                    200,
+                    render_report(
+                        report, comments, self.server.display_tz, author_name=author_name
+                    ),
                 )
                 return
 
@@ -668,16 +675,27 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
             # parse_qs maps each key to a LIST of values; take the first (or "" if
             # absent), then strip — a name/body of only whitespace counts as empty.
-            author = fields.get("author", [""])[0].strip()
+            form_author = fields.get("author", [""])[0].strip()
             body = fields.get("body", [""])[0].strip()
 
-            # 4) Validate: a non-empty body within caps, and a capped author.
+            # 4) Validate: a non-empty body within caps, and a capped author. We validate
+            # the FORM-submitted name even when logged in (defense), though it is then
+            # ignored in favor of the authenticated identity below.
             if not body:
                 self._send_html(400, _simple_html("bad request", "A comment body is required."))
                 return
-            if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
+            if len(body) > MAX_COMMENT_BODY_CHARS or len(form_author) > MAX_AUTHOR_CHARS:
                 self._send_html(400, _simple_html("bad request", "Comment or name is too long."))
                 return
+
+            # When the commenter is LOGGED IN, attribute the comment to their authenticated
+            # identity (re-read from the session principal), NOT the self-asserted form
+            # field — so a logged-in user cannot post under someone else's name. In open /
+            # loopback mode there is no session, so the typed name stands. The principal
+            # name comes from the DB (provisioned, or the legacy-admin sentinel), so it is
+            # trusted and not re-length-checked here. (The bot's POST /api/comments path is
+            # unchanged — a machine surface with its own free-text author.)
+            author = principal["name"] if principal is not None else form_author
 
             # 5) Confirm the report exists AND is in this principal's scope, then store. An
             # out-of-scope report is reported as missing (identical to a nonexistent one),

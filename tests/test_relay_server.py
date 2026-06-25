@@ -738,6 +738,174 @@ def test_secure_cookie_only_when_hosted(tmp_path):
         assert "secure" not in headers.get("Set-Cookie", "").lower()
 
 
+# --- C3: authZ scoping — a viewer sees only granted projects (decision A: 404) ---
+#
+# Unit 3 layers per-project authorization on top of the session gate. An admin (and the
+# legacy bootstrap admin, and an open relay) sees everything; a viewer is restricted to
+# their granted projects. Out-of-scope access returns 404 — byte-identical to a genuinely
+# missing resource — so a viewer cannot even learn that a project/report they lack a grant
+# for EXISTS (the audience may include guests). Scope is re-read from the DB per request.
+
+
+def _ingest_project(base_url, project):
+    """Push one real report relabeled to `project`; return its id.
+
+    Why:
+        The scoping tests need reports across SEVERAL projects to prove a viewer sees only
+        their grants. We reuse the real serialized blob (so the ingest contract still
+        holds) and only swap the project field, the one dimension these tests vary.
+    """
+    blob = json.loads(_real_blob_json())
+    blob["project"] = project
+    status, body = _post(base_url, json.dumps(blob).encode("utf-8"))
+    assert status == 201
+    return json.loads(body)["id"]
+
+
+def test_viewer_index_shows_only_scoped_projects(tmp_path):
+    """A viewer's index lists only the projects they are granted, not the others.
+
+    Why this matters: the index is the first authZ surface — a viewer scoped to "alpha"
+    must not even see that "beta" exists in the project list, so the filter runs on the
+    rendered set, not just the detail routes.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_project(base_url, "alpha")
+        _ingest_project(base_url, "beta")
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        code, html = _get(base_url, "/", cookie=cookie)
+        assert code == 200
+        assert "alpha" in html
+        assert "beta" not in html  # out-of-scope project is invisible on the index
+
+
+def test_admin_index_shows_all_projects(tmp_path):
+    """An admin (here the legacy bootstrap admin) sees every project on the index.
+
+    Why this matters: the scope filter must apply ONLY to viewers; an admin's all-access
+    is decided by role, never narrowed by the per-project table. This is the unrestricted
+    side of the same _allowed_projects(None) decision.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        _ingest_project(base_url, "alpha")
+        _ingest_project(base_url, "beta")
+        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin -> sees all
+        code, html = _get(base_url, "/", cookie=cookie)
+        assert code == 200
+        assert "alpha" in html and "beta" in html
+
+
+def test_viewer_in_scope_project_is_200_out_of_scope_is_404(tmp_path):
+    """A viewer reaches a granted project (200) but an ungranted one is 404 (hidden).
+
+    Why this matters: this is the per-project read gate. An out-of-scope project — whether
+    it exists or not — must be indistinguishable from a nonexistent one, so a viewer cannot
+    probe project names.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_project(base_url, "alpha")
+        _ingest_project(base_url, "beta")
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        assert _get(base_url, "/project/alpha", cookie=cookie)[0] == 200
+        assert _get(base_url, "/project/beta", cookie=cookie)[0] == 404  # exists, hidden
+        assert _get(base_url, "/project/nope", cookie=cookie)[0] == 404  # nonexistent
+
+
+def test_viewer_in_scope_report_is_200_out_of_scope_is_404(tmp_path):
+    """A viewer reads a report in a granted project (200) but not one outside it (404).
+
+    Why this matters: the report route resolves the report's project FIRST, then scope-
+    checks it, so a viewer cannot open a report belonging to a project they lack — even
+    with a direct /report/<id> link.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        alpha_report = _ingest_project(base_url, "alpha")
+        beta_report = _ingest_project(base_url, "beta")
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        assert _get(base_url, f"/report/{alpha_report}", cookie=cookie)[0] == 200
+        assert _get(base_url, f"/report/{beta_report}", cookie=cookie)[0] == 404
+
+
+def test_viewer_out_of_scope_report_404_is_identical_to_missing(tmp_path):
+    """An out-of-scope report's 404 is identical to a genuinely-missing one at the SAME id.
+
+    Why this matters: existence-hiding (decision A) holds only if, for the SAME requested
+    id, a viewer cannot tell "exists but not mine" from "does not exist". The 404 message
+    echoes the requested id (which the viewer already typed, so that leaks nothing), so the
+    right test fixes the id and varies only existence: we request the same id N across two
+    relays — one where report N exists in an unscoped project, one where N is missing — and
+    require an identical status AND body.
+    """
+    # Relay 1: report N exists, but in a project the viewer is NOT scoped to.
+    with _running_relay(tmp_path / "exists") as (base_url, db):
+        report_id = _ingest_project(base_url, "beta")
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        code_oos, body_oos = _get(base_url, f"/report/{report_id}", cookie=cookie)
+    # Relay 2: the SAME id is genuinely missing (nothing ingested there).
+    with _running_relay(tmp_path / "missing") as (base_url, db):
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        code_missing, body_missing = _get(base_url, f"/report/{report_id}", cookie=cookie)
+    assert code_oos == code_missing == 404
+    assert body_oos == body_missing  # indistinguishable -> existence hidden
+
+
+def test_viewer_with_no_grants_sees_nothing(tmp_path):
+    """A viewer with zero project grants sees an empty index and 404s every project.
+
+    Why this matters: default-deny is the invariant — access is granted, never assumed. A
+    freshly provisioned viewer with no scope rows must see nothing until an admin grants a
+    project, not the whole dashboard.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_project(base_url, "alpha")
+        _provision_user(db, "viewer-empty", "e-key", projects=[])  # no grants
+        cookie = _login(base_url, "e-key")
+        code, html = _get(base_url, "/", cookie=cookie)
+        assert code == 200
+        assert "alpha" not in html
+        assert _get(base_url, "/project/alpha", cookie=cookie)[0] == 404
+
+
+def test_viewer_cannot_comment_out_of_scope(tmp_path):
+    """A viewer's comment on an out-of-scope report is 404 (hidden) and stores nothing.
+
+    Why this matters: authZ runs on EVERY route, not just reads (hardening #6). A viewer
+    must not be able to write to — or even confirm the existence of — a report in a project
+    they were not granted, so the comment POST applies the same existence-hiding 404.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        beta_report = _ingest_project(base_url, "beta")
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        status, _, _ = _post_comment(base_url, beta_report, body="sneaky", cookie=cookie)
+        assert status == 404
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, beta_report) == []  # nothing written
+
+
+def test_viewer_can_comment_in_scope(tmp_path):
+    """A viewer's comment on a granted project's report is accepted (303) and stored.
+
+    Why this matters: the scope gate must not over-block — a viewer with a grant is exactly
+    the supervisor the sharing flow is for, so commenting within scope must still work.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        alpha_report = _ingest_project(base_url, "alpha")
+        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
+        cookie = _login(base_url, "a-key")
+        status, _, _ = _post_comment(base_url, alpha_report, body="looks good", cookie=cookie)
+        assert status == 303
+
+        conn = open_relay_store(db)
+        assert [c["body"] for c in comments_for(conn, alpha_report)] == ["looks good"]
+
+
 def test_ingest_unaffected_by_view_secret(tmp_path):
     """A view secret gates GETs but does not touch the Bearer-authed ingest path.
 

@@ -60,6 +60,7 @@ from .store import (
     ingest,
     list_projects,
     open_relay_store,
+    projects_for_user,
     update_last_login,
 )
 
@@ -392,7 +393,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
         /login and /logout are reachable WITHOUT a session (you must reach /login to
         authenticate). The "/api/..." namespace is Bearer-authed (a machine surface),
         routed FIRST — a browser never reaches it, the CLI never trips the session gate.
-        AuthZ scoping (who sees which project) layers on top of this gate in a later unit.
+
+        AuthZ scoping layers on top of the gate: an admin (and the open/ungated relay)
+        sees everything; a viewer is restricted to projects_for_user, and any project or
+        report outside that scope returns 404 (existence-hiding, decision A), resolved
+        from current DB state on every route so a regrant/revoke applies immediately.
         """
         # Strip any query string; routing is by path only (the /api/ handler re-reads
         # the query itself, since it — unlike the dashboard — takes parameters).
@@ -418,16 +423,33 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # access-gated; an absent/invalid/expired/revoked session redirects to
             # /login instead of the old Basic 401, so a logged-in browser STAYS logged
             # in across restarts (the point of the session).
-            if self._auth_required(conn) and self._authenticate(conn) is None:
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            if gated and principal is None:
                 self._send_redirect(303, "/login")
                 return
+
+            # AuthZ scoping: which projects this principal may see. None = unrestricted
+            # (admin / legacy admin / open relay); a set = a viewer's allowed projects.
+            # Out-of-scope resources return 404 (NOT 403) so a viewer cannot even learn
+            # that a project/report they aren't granted EXISTS — decision A (the audience
+            # may include guests). The 404 is byte-identical to a genuinely-missing one.
+            allowed = self._allowed_projects(conn, principal)
+
             if path == "/":
-                self._send_html(200, render_index(list_projects(conn)))
+                projects = list_projects(conn)
+                if allowed is not None:
+                    projects = [p for p in projects if p["project"] in allowed]
+                self._send_html(200, render_index(projects))
                 return
 
             if path.startswith("/project/"):
                 # Decode the percent-encoded name back to the stored project string.
                 name = urllib.parse.unquote(path[len("/project/"):])
+                # A viewer outside this project's scope is told it does not exist.
+                if allowed is not None and name not in allowed:
+                    self._send_html(404, render_not_found(f"No project {name!r}."))
+                    return
                 self._send_html(
                     200,
                     render_project(name, history(conn, name), self.server.display_tz),
@@ -439,7 +461,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 # Only a numeric id can match a row; anything else is a 404 without
                 # touching the store.
                 report = get(conn, int(id_str)) if id_str.isdigit() else None
-                if report is None:
+                # Resolve the report's project FIRST, then scope-check it: an out-of-scope
+                # report is reported as missing with the SAME message as a nonexistent
+                # one, so existence stays hidden from a viewer who lacks the grant.
+                if report is None or (
+                    allowed is not None and report["project"] not in allowed
+                ):
                     self._send_html(404, render_not_found(f"No report {id_str!r}."))
                     return
                 # report is not None implies id_str was numeric, so int() is safe.
@@ -582,7 +609,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
         try:
             # 1) Auth: a valid session is required whenever the dashboard is access-gated
             # (the same rule as do_GET). The credential is the session cookie, not Basic.
-            if self._auth_required(conn) and self._authenticate(conn) is None:
+            # Capture the principal so step 5 can scope the write to the report's project.
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            if gated and principal is None:
                 self._send_html(401, _simple_html("unauthorized", "Log in to comment."))
                 return
 
@@ -619,8 +649,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 self._send_html(400, _simple_html("bad request", "Comment or name is too long."))
                 return
 
-            # 5) Confirm the report exists, then store.
-            if get(conn, report_id) is None:
+            # 5) Confirm the report exists AND is in this principal's scope, then store. An
+            # out-of-scope report is reported as missing (identical to a nonexistent one),
+            # so a viewer can neither write to nor confirm the existence of a report they
+            # were not granted — the same existence-hiding rule do_GET applies to reads.
+            allowed = self._allowed_projects(conn, principal)
+            report = get(conn, report_id)
+            if report is None or (
+                allowed is not None and report["project"] not in allowed
+            ):
                 self._send_html(404, render_not_found(f"No report {report_id!r}."))
                 return
             add_comment(conn, report_id, author, body, _utc_now_iso())
@@ -967,6 +1004,32 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if user is None or not user["active"] or user["session_version"] != claims.get("sv"):
             return None
         return {"user_id": user["id"], "role": user["role"], "name": user["name"]}
+
+    def _allowed_projects(self, conn, principal: dict | None) -> set | None:
+        """Resolve which project names `principal` may see, or None for unrestricted.
+
+        Args:
+            conn: An open relay-store connection.
+            principal: The authenticated principal from _authenticate, or None on an open
+                (ungated) relay where no one logs in.
+
+        Returns:
+            None when the principal sees EVERYTHING — an admin, the legacy bootstrap admin
+            (both role == "admin"), or an open relay (principal is None, reads are public).
+            Otherwise a set of the viewer's allowed project names (possibly empty —
+            default-deny, so a viewer with no grants sees nothing).
+
+        Why:
+            One place computes read scope, so every route (the index filter, /project,
+            /report, and the comment POST) enforces the SAME rule from current DB state —
+            authZ never drifts between routes. None vs a set is the explicit "unrestricted
+            vs scoped" distinction; returning a set makes the membership checks at each
+            call site a trivial, hard-to-get-wrong `in`. Scope is re-read per request (not
+            cached on the cookie), so a regrant/revoke takes effect immediately.
+        """
+        if principal is None or principal["role"] == "admin":
+            return None
+        return set(projects_for_user(conn, principal["user_id"]))
 
     def _handle_login(self) -> None:
         """Verify a posted access key and set the session cookie (POST /login).

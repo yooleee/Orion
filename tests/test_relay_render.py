@@ -11,9 +11,14 @@
 #                  pinned at its source.
 # =============================================================================
 
+import base64
+import hashlib
+import re
 from zoneinfo import ZoneInfo
 
 from relay.render import (
+    PAGE_CSS_HASH,
+    PAGE_JS_HASH,
     _format_ts,
     render_index,
     render_not_found,
@@ -437,6 +442,34 @@ def test_page_includes_progressive_enhancement_script():
     html = render_not_found("anything")  # any view embeds the shared scaffold
     assert "<script>" in html
     assert "time[datetime]" in html  # the selector the enhancement queries
+
+
+def test_csp_hashes_match_the_inline_blocks_the_page_renders():
+    """The CSP hashes render.py exposes equal the SHA-256 of the page's actual inline blocks.
+
+    Why this matters: the dashboard's hash-based CSP allowlists its ONE inline <style>
+    and ONE inline <script> by hash. If render.py's exposed hash ever disagreed with the
+    bytes the page actually emits between the tags, the live CSP would BLOCK the
+    dashboard's own CSS/JS — a policy worse than none. This test recomputes the hashes
+    the way a browser does (over the exact bytes between the tags) and pins them to the
+    constants server.py builds the policy from. It always passes today (both derive from
+    the same constant), but it documents and guards the invariant: change the CSS/JS
+    without the hash tracking it, and this fails loudly here instead of in production.
+    """
+    html = render_not_found("anything")  # any view embeds the shared _page scaffold
+
+    # Extract the EXACT bytes between each tag pair — that is what a browser hashes for
+    # a hash-source CSP. DOTALL so the multi-line CSS/JS bodies match; non-greedy so we
+    # stop at the first closing tag (there is exactly one of each block per page).
+    css = re.search(r"<style>(.*?)</style>", html, re.DOTALL).group(1)
+    script = re.search(r"<script>(.*?)</script>", html, re.DOTALL).group(1)
+
+    def _sha256_csp(content):
+        digest = hashlib.sha256(content.encode("utf-8")).digest()
+        return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+    assert _sha256_csp(css) == PAGE_CSS_HASH
+    assert _sha256_csp(script) == PAGE_JS_HASH
 
 
 # --- C2: comments section on the report page ----------------------------------

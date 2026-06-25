@@ -44,6 +44,8 @@ from .render import (
     _DISPLAY_TZ,
     MAX_AUTHOR_CHARS,
     MAX_COMMENT_BODY_CHARS,
+    PAGE_CSS_HASH,
+    PAGE_JS_HASH,
     render_index,
     render_login,
     render_not_found,
@@ -120,6 +122,32 @@ _PROVISIONABLE_ROLES = ("admin", "viewer")
 # API authenticates with a shared admin token (not a named identity), so the trail
 # records the token role rather than a person — enough to attribute the action.
 _ADMIN_ACTOR = "admin-token"
+
+# --- Security response headers (hardening, defense-in-depth) --------------------
+# The Content-Security-Policy sent on every HTML response. It is HASH-BASED: the two
+# inline blocks the dashboard renders (_PAGE_CSS, _PAGE_JS) are allowlisted by their
+# SHA-256, computed in render.py from the SAME constants the markup uses (so the policy
+# and the page can never drift). That avoids 'unsafe-inline' while letting the page's
+# own style/script run; everything else is locked down:
+#   default-src 'self'      — same-origin only is the baseline for anything unlisted
+#   style-src / script-src  — 'self' plus the one exact inline hash each
+#   img-src 'self'          — the dashboard loads no external images
+#   base-uri 'none'         — block a <base> tag that could rewrite relative URLs
+#   form-action 'self'      — the login/comment forms may only POST back to us
+#   frame-ancestors 'none'  — the dashboard may not be framed (clickjacking)
+#   object-src 'none'       — no plugins/embeds
+# The inline-hash allowances are simply inert on the _simple_html error pages (which
+# carry no inline blocks), so this ONE policy safely covers every HTML response.
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    f"style-src 'self' '{PAGE_CSS_HASH}'; "
+    f"script-src 'self' '{PAGE_JS_HASH}'; "
+    "img-src 'self'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'"
+)
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -1411,6 +1439,43 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length)
 
+    def _security_headers(self, *, html: bool) -> dict:
+        """Return the standard security response headers for this response.
+
+        Args:
+            html: True for an HTML response, which additionally gets the CSP and the
+                legacy X-Frame-Options (both only meaningful for a document a browser
+                renders/frames); False for JSON and bodyless redirects.
+
+        Returns:
+            A header-name -> value dict for the response writer to merge in.
+
+        Why:
+            Defense-in-depth on an internet-facing surface, defined ONCE so all three
+            response writers send a consistent set (DRY). X-Content-Type-Options and
+            Referrer-Policy ride EVERY response. HSTS is gated on secure_cookie — the
+            same hosted-HTTPS signal the cookie's Secure attribute uses — so a plain
+            HTTP loopback dev relay never claims HTTPS-only (which would wedge it in a
+            browser). The CSP (from _CONTENT_SECURITY_POLICY) and the legacy
+            X-Frame-Options clickjacking cover go on HTML only, where a browser renders
+            or frames the response — they are meaningless on a JSON API reply.
+        """
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        }
+        # HSTS only in a hosted HTTPS posture: a plain-http loopback dev relay must not
+        # send an HTTPS-only directive (the browser would then refuse plain http to it).
+        # 2 years, includeSubDomains — the standard durable HSTS lifetime.
+        if self.server.secure_cookie:
+            headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        if html:
+            headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
+            # Legacy clickjacking cover for older browsers, alongside the CSP's
+            # frame-ancestors 'none' (which supersedes it in modern ones).
+            headers["X-Frame-Options"] = "DENY"
+        return headers
+
     def _send_json(
         self, code: int, obj: dict, *, extra_headers: dict | None = None
     ) -> None:
@@ -1433,7 +1498,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        for name, value in (extra_headers or {}).items():
+        # Security headers first, then any caller-supplied extras (which take
+        # precedence on a name clash, though none currently collide).
+        merged = {**self._security_headers(html=False), **(extra_headers or {})}
+        for name, value in merged.items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
@@ -1460,7 +1528,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        for name, value in (extra_headers or {}).items():
+        # HTML responses additionally carry the CSP and X-Frame-Options (html=True).
+        # Security headers first, then caller extras (precedence on a clash).
+        merged = {**self._security_headers(html=True), **(extra_headers or {})}
+        for name, value in merged.items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
@@ -1488,7 +1559,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
-        for name, value in (extra_headers or {}).items():
+        # A redirect carries no rendered body, so it gets the common headers only
+        # (html=False — no CSP/X-Frame-Options). Caller extras (e.g. the login/logout
+        # Set-Cookie) take precedence on a clash.
+        merged = {**self._security_headers(html=False), **(extra_headers or {})}
+        for name, value in merged.items():
             self.send_header(name, value)
         self.end_headers()
 

@@ -160,6 +160,13 @@ A few rules are permanent, not stage-appropriate conveniences.
 - **Cookie hygiene.** Cookies are `HttpOnly` (JavaScript cannot read them, which neutralizes
   theft via XSS) and `Secure` when the relay is HTTPS-exposed (the browser sends them only over
   HTTPS).
+- **Hardening headers.** Every dashboard HTML response carries a hash-based
+  `Content-Security-Policy` (only same-origin resources, plus the SHA-256 of the page's own inline
+  style/script, so no `unsafe-inline` is needed and nothing external loads) and `X-Frame-Options:
+  DENY`. All responses carry `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`,
+  and `Strict-Transport-Security` when the relay is HTTPS-exposed. This is defense-in-depth behind
+  the `_esc` escaping discipline: a CSP would neutralize an injected script even if an escaping bug
+  slipped through.
 
 ## The legacy view token
 

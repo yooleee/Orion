@@ -14,6 +14,40 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Dashboard security hardening — CSP + headers (2026-06-24)
+
+A small, `relay/`-local hardening slice following C3 Increment 1, which put a login-gated,
+comment-bearing dashboard on the public internet. No user-facing behavior changes — this adds
+defense-in-depth to an internet-facing surface that renders user-influenced text (comments,
+project names). Stdlib-only, no new dependencies.
+
+### Added
+
+- **Hash-based Content-Security-Policy** on every dashboard HTML response. The two inline blocks
+  the page renders (`_PAGE_CSS`, `_PAGE_JS`) are allowlisted by the SHA-256 of their content,
+  computed in `relay/render.py` (`PAGE_CSS_HASH` / `PAGE_JS_HASH`) from the SAME constants `_page()`
+  emits — so the policy can never drift from the markup, and no `unsafe-inline` is needed (the
+  inline-asset choice from C1 is kept intact). The policy locks everything else down:
+  `default-src 'self'`, `base-uri 'none'`, `form-action 'self'`, `frame-ancestors 'none'`,
+  `object-src 'none'`.
+- **Standard security headers.** `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  no-referrer` on all responses; `X-Frame-Options: DENY` on HTML; `Strict-Transport-Security`
+  (2-year, `includeSubDomains`) only when HTTPS-exposed (gated on the same hosted signal the
+  cookie's `Secure` attribute uses, so a plain-http loopback dev relay does not send it).
+
+### Tests
+
+- `pytest`: **521** (+3). A render-side **contract test** recomputes the inline blocks' hashes the
+  way a browser does and pins them to the exposed constants, guarding the invariant that the CSP can
+  never block the dashboard's own CSS/JS. Server tests assert the CSP (with both hashes) and headers
+  ride a dashboard GET, and that HSTS appears only in a hosted posture. Verified eyes-on against the
+  rendered page in a real browser: styling and the relative-time JS both run with **no** CSP
+  violation in the console.
+
+### Fixed
+
+- **KI-19** (dashboard served inline CSS/JS with no CSP) — resolved by the above.
+
 ## C3 — multi-party dashboard access, Increment 1 (2026-06-24 – 2026-06-25)
 
 Brings per-user identity and access control into the relay dashboard (the C3 multi-party

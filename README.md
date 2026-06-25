@@ -355,7 +355,9 @@ Each user gets a role (`admin` sees everything and provisions; `viewer` is limit
 you grant) and a persistent, revocable login session. A `viewer` sees only their granted projects;
 anything else returns "not found", so they cannot even learn that other projects exist. This needs
 three extra secrets in the relay's `.env` (`ORION_RELAY_SESSION_KEY`, `ORION_RELAY_USER_PEPPER`,
-`ORION_RELAY_ADMIN_TOKEN`) and an `admin_token_env_var` in the `[relay]` table — see
+`ORION_RELAY_ADMIN_TOKEN`) and an `admin_token_env_var` in the `[relay]` table. For how the login,
+sessions, roles, and scope work (and the security model behind them), see
+[**docs/dashboard-auth.md**](docs/dashboard-auth.md); for deploying it, see
 [**docs/deployment.md**](docs/deployment.md).
 
 ## Scheduling

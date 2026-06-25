@@ -148,7 +148,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
 | E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range — reached as **E2 Inc 3** (the forward-state ladder) |
-| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview home) shipped 2026-06-25.** Validated by the founding family-visibility intent + personal use (not the dogfood, which tested reporting). Ladder below. |
+| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview home) shipped 2026-06-25; Inc 2 (live checklist signal) BUILT + locally verified 2026-06-25 (PR pending, not yet merged/deployed).** Validated by the founding family-visibility intent + personal use (not the dogfood, which tested reporting). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
 | E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
@@ -168,10 +168,21 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   (name → history, latest-report headline, count, relative last-activity), reusing existing relay
   data; relay-local, additive, CSP-safe. Family access uses **existing scoped viewer logins** (no
   guest-view build).
-- **Inc 2 — surface the to-do/milestone checklist signal.** A full-pipeline change (collector → blob
-  field → store column → render), since structured item data is flattened to prose today. Depth
-  target: **mirror the current checklist** (done + open items from the existing file; stays
-  *reframing, not originating*).
+- **Inc 2 — surface the to-do/milestone checklist signal (✅ BUILT + locally verified 2026-06-25; PR
+  pending).** A full-pipeline change (collector → blob field → store table → render), since structured
+  item data is flattened to prose today. Depth target met: **mirror the current checklist** (done + open
+  items from the existing file; stays *reframing, not originating*). **Decisions taken this session
+  (override the kickoff's default-leans):** (1) a **project-level LIVE checklist** — the relay holds one
+  current checklist row per project (`relay_project_checklists`, upserted on each push), *not* a
+  per-report snapshot; (2) a **new per-project `checklist` config toggle** (opt-in, requires the `tasks`
+  collector); (3) renders as a **portfolio-card "X/Y done" badge + a report-page "Current checklist"
+  block** (CSP-safe, escaped). The full checklist is captured by a new `tasks.snapshot()` that reads the
+  same file *independently* of the retrospective `collect()` (so the "newly completed" report behavior is
+  untouched) and rides on `full_blob` only (the relay payload), redacted per item. **Known limitation
+  (honest):** it updates on the **report push**, not the instant `tasks_file` changes — a no-activity run
+  pushes nothing. A dedicated checklist-only push (CLI command + relay endpoint) is the clean additive
+  seam left for later. Eyes-on confirmed badge + done/open block + escaping + CSP against a local relay;
+  live-Fly confirmation follows merge + deploy.
 - **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
   the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for

@@ -26,6 +26,7 @@ from relay.store import (
     comments_for,
     comments_for_project,
     get,
+    get_checklist,
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
@@ -39,6 +40,7 @@ from relay.store import (
     record_admin_audit,
     revoke_user,
     update_last_login,
+    upsert_checklist,
 )
 
 
@@ -247,6 +249,89 @@ def test_latest_report_per_project_empty_store_is_empty(tmp_path):
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     assert latest_report_per_project(conn) == []
+
+
+# --- E2 Inc 2: the live checklist (current state, one row per project) ----------
+# upsert_checklist REPLACES (not appends), get_checklist decodes back to dicts, and
+# latest_report_per_project carries precomputed done/total counts for the card badge.
+
+
+def _items(*pairs):
+    """Build a checklist as a list of {text, done} dicts.
+
+    Why: the checklist's wire/stored shape is named objects; a tiny helper keeps each
+    test to the items it cares about. Each arg is a (text, done) tuple.
+    """
+    return [{"text": text, "done": done} for text, done in pairs]
+
+
+def test_upsert_checklist_replaces_not_appends(tmp_path):
+    """A second upsert overwrites the project's checklist rather than adding a row.
+
+    Why this matters: the live checklist is CURRENT STATE — one row per project. If
+    upsert appended, get_checklist would return stale items, and the badge would
+    double-count. We upsert twice and assert only the second push survives.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(conn, "demo", _items(("Old item", True)), "2026-06-25T00:00:00+00:00")
+    upsert_checklist(
+        conn,
+        "demo",
+        _items(("New A", False), ("New B", True)),
+        "2026-06-25T01:00:00+00:00",
+    )
+
+    assert get_checklist(conn, "demo") == _items(("New A", False), ("New B", True))
+
+
+def test_get_checklist_missing_project_returns_none(tmp_path):
+    """A project with no checklist row returns None, not an error or empty list.
+
+    Why this matters: None means "this project never had a checklist" (feature off),
+    which the renderer reads as "omit the block". It must be distinct from [] below.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert get_checklist(conn, "demo") is None
+
+
+def test_get_checklist_empty_list_is_distinct_from_none(tmp_path):
+    """An upserted empty checklist returns [] — distinct from a missing project's None.
+
+    Why this matters: an enabled-but-empty checklist ([]) legitimately clears a
+    project's prior list. The store must preserve the [] vs None distinction so the
+    renderer can tell "checklist enabled, no items" from "no checklist at all".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(conn, "demo", [], "2026-06-25T00:00:00+00:00")
+    assert get_checklist(conn, "demo") == []
+
+
+def test_latest_report_per_project_carries_checklist_counts(tmp_path):
+    """The portfolio overview surfaces precomputed done/total per project.
+
+    Why this matters: the portfolio card shows an "X/Y done" badge. The store
+    precomputes the counts (decoding the JSON once) so the renderer just presents
+    them. A project with a checklist carries real counts; a project without one
+    carries None for both, which the renderer reads as "omit the badge".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # 'alpha' has reports AND a checklist (2 of 3 done); 'beta' has reports only.
+    ingest(conn, _blob("alpha", generated_at="2026-06-25T09:00:00+00:00"), "2026-06-25T09:00:01+00:00")
+    upsert_checklist(
+        conn,
+        "alpha",
+        _items(("Done one", True), ("Done two", True), ("Still open", False)),
+        "2026-06-25T09:00:02+00:00",
+    )
+    ingest(conn, _blob("beta", generated_at="2026-06-25T08:00:00+00:00"), "2026-06-25T08:00:01+00:00")
+
+    by_name = {r["project"]: r for r in latest_report_per_project(conn)}
+
+    assert by_name["alpha"]["checklist_done"] == 2
+    assert by_name["alpha"]["checklist_total"] == 3
+    # No checklist row for beta → both None (badge omitted).
+    assert by_name["beta"]["checklist_done"] is None
+    assert by_name["beta"]["checklist_total"] is None
 
 
 # --- C2: report comments (append-only, flat) ----------------------------------

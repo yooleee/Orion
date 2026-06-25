@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from orion.collectors.tasks import ChecklistItem
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
 from relay.render import MAX_COMMENT_BODY_CHARS, PAGE_CSS_HASH, PAGE_JS_HASH
@@ -49,6 +50,7 @@ from relay.store import (
     bump_session_version,
     comments_for,
     get,
+    get_checklist,
     list_projects,
     open_relay_store,
 )
@@ -303,6 +305,95 @@ def test_valid_push_is_stored_and_returns_201(tmp_path):
         assert report is not None
         assert report["project"] == "demo"
         assert report["sections"] == [["Code activity", "Shipped the seam."]]
+        # A blob WITHOUT a checklist must not create a live checklist row (back-compat
+        # with producers that predate the field — the optional path stays inert).
+        assert get_checklist(conn, "demo") is None
+
+
+def _blob_json_with_checklist(checklist):
+    """A real serialized blob (build + serialize) carrying a given checklist.
+
+    Why: mirrors _real_blob_json but exercises the optional checklist field through
+    the production path, so the server test validates the EXACT bytes local Orion
+    would push when a project has the live checklist enabled.
+    """
+    project = ProjectConfig(
+        name="demo",
+        repo_path=Path("/tmp/demo"),
+        share_level="high_level",
+        collectors=("git",),
+        recipients=(Recipient(name="Alex", channel="discord", webhook_env_var="ORION_W"),),
+    )
+    blob = build_report(
+        project,
+        body="Shipped the relay seam.",
+        lane="raw",
+        source_marker="",
+        generated_at="2026-06-18T00:00:00+00:00",
+        sections=(("Code activity", "Shipped the seam."),),
+        checklist=checklist,
+    )
+    return serialize_blob(blob)
+
+
+def test_push_with_checklist_upserts_the_live_row(tmp_path):
+    """A real push carrying a checklist stores it as the project's live checklist.
+
+    Why this matters: this is the receiver half of the E2 Inc 2 contract end to end.
+    The exact bytes local Orion pushes (build_report + serialize_blob with a
+    checklist) are accepted, and get_checklist returns the items as {text, done}
+    dicts in file order — the shape the renderer unpacks.
+    """
+    checklist = (
+        ChecklistItem(text="Wire the relay", done=True),
+        ChecklistItem(text="Render the dashboard", done=False),
+    )
+    with _running_relay(tmp_path) as (base_url, db):
+        status, _body = _post(base_url, _blob_json_with_checklist(checklist).encode("utf-8"))
+        assert status == 201
+
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") == [
+            {"text": "Wire the relay", "done": True},
+            {"text": "Render the dashboard", "done": False},
+        ]
+
+
+def test_empty_checklist_push_clears_the_live_row(tmp_path):
+    """An enabled-but-empty checklist ([]) is stored as [], clearing prior items.
+
+    Why this matters: () on the producer means "checklist enabled, no items now" and
+    must overwrite a project's prior list rather than be ignored. We push items, then
+    push an empty checklist, and assert the live row is now [] (not the stale items).
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        first = (ChecklistItem(text="Old item", done=False),)
+        assert _post(base_url, _blob_json_with_checklist(first).encode("utf-8"))[0] == 201
+        # Now push an empty checklist (the file was cleared).
+        assert _post(base_url, _blob_json_with_checklist(()).encode("utf-8"))[0] == 201
+
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") == []
+
+
+def test_malformed_checklist_is_400_and_stores_nothing(tmp_path):
+    """A checklist with a non-boolean 'done' is rejected 400 and nothing is stored.
+
+    Why this matters: /ingest is an untrusted surface, so a malformed checklist must
+    become a clean 400 at validation, never a later crash in store/render. We start
+    from a valid blob and corrupt only the checklist, so the failure is attributable
+    to the new validation, then confirm the store is untouched.
+    """
+    payload = json.loads(_real_blob_json())
+    payload["checklist"] = [{"text": "ok", "done": "yes"}]  # 'done' must be a bool
+    with _running_relay(tmp_path) as (base_url, db):
+        status, body = _post(base_url, json.dumps(payload).encode("utf-8"))
+        assert status == 400
+        assert "checklist" in json.loads(body)["error"]
+
+        conn = open_relay_store(db)
+        assert list_projects(conn) == []          # no report row stored
+        assert get_checklist(conn, "demo") is None  # and no checklist row either
 
 
 def test_wrong_token_is_401_invalid_and_stores_nothing(tmp_path):

@@ -138,6 +138,10 @@ class ProjectConfig:
             during an unattended run. Defaults to False (opt-in). It only takes
             effect when the `report` command is also given `--yes`; on its own it
             never bypasses the preview (see cli._run_report). Defense in depth.
+        checklist: Whether to surface this project's LIVE checklist (open + done
+            items, parsed from tasks_file) on the dashboard. Defaults to False
+            (opt-in). Requires the `tasks` collector to be enabled (validated at
+            load), since that is what resolves tasks_file.
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
@@ -157,6 +161,7 @@ class ProjectConfig:
     notes_file: Path | None = None
     incubator_file: Path | None = None
     auto_send: bool = False
+    checklist: bool = False
 
 
 @dataclass(frozen=True)
@@ -833,6 +838,24 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
             f"{where} has invalid auto_send={auto_send!r}. Expected true or false."
         )
 
+    # checklist defaults to False (opt-in). When on, the dashboard surfaces this
+    # project's LIVE checklist (open + done) parsed from its tasks_file. It therefore
+    # requires the `tasks` collector to be enabled — that pairing is what guarantees
+    # tasks_file is resolved (see _parse_collector_file) — so we reject the
+    # contradiction here, at load time, with a fixable message rather than at run time.
+    # isinstance(..., bool) rejects ints/strings so `checklist = 1` is caught too.
+    checklist = body.get("checklist", False)
+    if not isinstance(checklist, bool):
+        raise ConfigError(
+            f"{where} has invalid checklist={checklist!r}. Expected true or false."
+        )
+    if checklist and "tasks" not in collectors_raw:
+        raise ConfigError(
+            f"{where} enables `checklist` but not the 'tasks' collector. The live "
+            f"checklist is read from `tasks_file`, so enable the 'tasks' collector "
+            f"(which is what sets `tasks_file`)."
+        )
+
     # Recipients are parsed AFTER collectors are validated so each recipient's
     # `signals` filter can default to (and be validated against) the project's
     # actual collector set — see _parse_recipients.
@@ -861,6 +884,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         notes_file=notes_file,
         incubator_file=incubator_file,
         auto_send=auto_send,
+        checklist=checklist,
     )
 
 

@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS relay_reports (
 -- signals intent, even though the data volume here is small.
 CREATE INDEX IF NOT EXISTS idx_relay_reports_project ON relay_reports(project);
 
+-- E2 Inc 2: a project's LIVE checklist — its CURRENT open/done items, mirrored from
+-- the user's tasks_file. Unlike relay_reports (append-only history), this is current
+-- state: ONE row per project, REPLACED on each push (project is the PRIMARY KEY, and
+-- ingest upserts). This is a brand-new table, so "IF NOT EXISTS" creates it on the
+-- already-deployed relay with NO column migration — the reason a project-level table
+-- is cleaner here than widening relay_reports. items is a JSON array of {text, done}
+-- objects in file order (the same shape the blob carries); updated_at is the relay's
+-- receive clock (matching ingested_at's provenance meaning).
+CREATE TABLE IF NOT EXISTS relay_project_checklists (
+    project     TEXT PRIMARY KEY,   -- one current checklist per project
+    items       TEXT NOT NULL,      -- JSON array of {text, done} objects, in file order
+    updated_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay last received it
+);
+
 -- C2: supervisor comments on a report. Append-only and flat (no threading, edit, or
 -- delete) — the v1 model. report_id points at relay_reports.id but is deliberately
 -- NOT a foreign key: sqlite enforces FKs only when explicitly enabled per-connection,
@@ -208,6 +222,65 @@ def ingest(conn: sqlite3.Connection, blob: dict, ingested_at: str) -> int:
     return cursor.lastrowid
 
 
+def upsert_checklist(
+    conn: sqlite3.Connection, project: str, items: list, updated_at: str
+) -> None:
+    """Replace a project's live checklist with the items from the latest push.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the checklist belongs to.
+        items: The current checklist as a list of {"text": str, "done": bool} dicts
+            (the validated shape the blob carries), in file order. May be empty — an
+            enabled-but-empty checklist legitimately clears the project's prior list.
+        updated_at: ISO 8601 UTC timestamp of when the relay received this push.
+
+    Why:
+        The live checklist is CURRENT STATE, not history, so each push REPLACES the
+        project's row rather than appending. ON CONFLICT(project) DO UPDATE makes that
+        a single idempotent statement: first push inserts, every later push overwrites
+        the same row. We re-encode items as JSON for the TEXT column for the same
+        reason sections/participants are encoded — sqlite has no list type — and store
+        it verbatim (already redacted upstream, already validated by the server).
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_checklists (project, items, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project) DO UPDATE SET
+            items = excluded.items,
+            updated_at = excluded.updated_at
+        """,
+        (project, json.dumps(items), updated_at),
+    )
+    conn.commit()
+
+
+def get_checklist(conn: sqlite3.Connection, project: str) -> list | None:
+    """Return a project's live checklist items, or None if it has none.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to fetch the checklist for.
+
+    Returns:
+        The checklist as a list of {"text", "done"} dicts (decoded from JSON), or None
+        when the project has no checklist row. None (no row) is deliberately distinct
+        from [] (a row with an empty list) so a caller can tell "never had a checklist"
+        from "checklist enabled but currently empty".
+
+    Why:
+        Backs the dashboard's per-project / report-page checklist view. Decoding the
+        JSON here (like _row_to_report) means the renderer gets real dicts, not a raw
+        string it would have to parse. Returning None for a missing project lets the
+        renderer simply omit the block rather than special-casing an error.
+    """
+    row = conn.execute(
+        "SELECT items FROM relay_project_checklists WHERE project = ?", (project,)
+    ).fetchone()
+    return json.loads(row["items"]) if row is not None else None
+
+
 def list_projects(conn: sqlite3.Connection) -> list[dict]:
     """Summarize every project that has ingested reports, most recent first.
 
@@ -282,11 +355,17 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
                cnt.report_count,
                r.id           AS latest_report_id,
                r.body         AS latest_body,
-               r.generated_at AS latest_generated_at
+               r.generated_at AS latest_generated_at,
+               pc.items       AS checklist_items
         FROM relay_reports r
         JOIN (SELECT project, COUNT(*) AS report_count
               FROM relay_reports GROUP BY project) cnt
           ON cnt.project = r.project
+        -- LEFT JOIN: a project may have reports but no live checklist (feature off),
+        -- in which case checklist_items is NULL and the badge is simply omitted. The
+        -- project key is the checklist PK, so this adds at most one row per project.
+        LEFT JOIN relay_project_checklists pc
+          ON pc.project = r.project
         WHERE r.id = (
             SELECT id FROM relay_reports r2
             WHERE r2.project = r.project
@@ -296,16 +375,29 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
         ORDER BY r.generated_at DESC, r.project ASC
         """
     ).fetchall()
-    return [
-        {
-            "project": row["project"],
-            "report_count": row["report_count"],
-            "latest_generated_at": row["latest_generated_at"],
-            "latest_report_id": row["latest_report_id"],
-            "latest_body": row["latest_body"],
-        }
-        for row in rows
-    ]
+    result = []
+    for row in rows:
+        # Precompute the done/total counts here (decode once) so the renderer just
+        # presents "X/Y done" without parsing JSON. None for both when the project has
+        # no checklist row — the renderer reads that as "omit the badge".
+        items_json = row["checklist_items"]
+        checklist_done = checklist_total = None
+        if items_json is not None:
+            items = json.loads(items_json)
+            checklist_total = len(items)
+            checklist_done = sum(1 for item in items if item.get("done"))
+        result.append(
+            {
+                "project": row["project"],
+                "report_count": row["report_count"],
+                "latest_generated_at": row["latest_generated_at"],
+                "latest_report_id": row["latest_report_id"],
+                "latest_body": row["latest_body"],
+                "checklist_done": checklist_done,
+                "checklist_total": checklist_total,
+            }
+        )
+    return result
 
 
 def history(conn: sqlite3.Connection, project: str) -> list[dict]:

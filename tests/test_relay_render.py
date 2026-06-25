@@ -147,6 +147,41 @@ def test_portfolio_wraps_last_activity_in_a_time_tag():
     assert '<time datetime="2026-06-18T00:00:00+00:00">' in html
 
 
+def test_portfolio_card_shows_checklist_badge():
+    """A project with a live checklist shows an "X/Y done" badge on its card.
+
+    Why this matters: this is the founding cross-project glance — family seeing, at a
+    glance, how far along each project is. When the store surfaces the counts, the card
+    must render them.
+    """
+    html = render_portfolio([_pcard(checklist_done=2, checklist_total=3)])
+    assert "2/3 done" in html
+
+
+def test_portfolio_card_omits_badge_when_no_checklist():
+    """A project without a checklist (counts absent/None) shows no badge.
+
+    Why this matters: the badge is opt-in — a project without the feature must look
+    exactly as it did before, not show a stray "0/0" or an empty element. The default
+    _pcard carries no checklist keys, so this pins the .get()-driven omission.
+    """
+    html = render_portfolio([_pcard()])
+    # The badge element is the precise signal (the word "done" also appears in the
+    # page's static CSS comment, so we assert on the class, not the bare word).
+    assert "class='checklist-badge'" not in html
+
+
+def test_portfolio_card_omits_badge_when_checklist_empty():
+    """An enabled-but-empty checklist (0 of 0) shows no badge either.
+
+    Why this matters: a 0/0 badge is noise, not signal. `if total` treats an empty
+    checklist the same as no checklist for the card — the block only appears once
+    there is something to count.
+    """
+    html = render_portfolio([_pcard(checklist_done=0, checklist_total=0)])
+    assert "class='checklist-badge'" not in html
+
+
 def test_project_lists_reports_linking_to_each_report():
     """A project page lists its reports, each linking to /report/<id>.
 
@@ -184,6 +219,52 @@ def test_report_without_sections_renders_the_flat_body():
     """
     html = render_report(_report(sections=[], body="A pushed update."))
     assert "A pushed update." in html
+
+
+def test_report_renders_live_checklist_done_and_open():
+    """The report page shows the project's live checklist with done/open state.
+
+    Why this matters: this is the leaf-view delivery of the checklist signal — both
+    what is done AND what is still open/planned, with a count. We pin the heading, the
+    count, both item texts, and the done/open state classes the styling keys off.
+    """
+    checklist = [
+        {"text": "Wire the relay", "done": True},
+        {"text": "Render the dashboard", "done": False},
+    ]
+    html = render_report(_report(), checklist=checklist)
+
+    assert "Current checklist" in html
+    assert "1/2 done" in html
+    assert "Wire the relay" in html
+    assert "Render the dashboard" in html
+    assert 'class="done"' in html   # the completed item carries the done class
+    assert 'class="open"' in html   # the open item carries the open class
+
+
+def test_report_checklist_item_text_is_escaped():
+    """A checklist item's text is HTML-escaped (it is arbitrary user text).
+
+    Why this matters: checklist items are user-authored, so a task literally named
+    "<script>..." must render inert — the same XSS guarantee the report body and
+    section content have. This is the structured-lane content reaching a new surface.
+    """
+    html = render_report(_report(), checklist=[{"text": _XSS, "done": False}])
+    assert "&lt;script&gt;" in html
+    assert "<script>alert" not in html
+
+
+def test_report_omits_checklist_when_none_or_empty():
+    """No checklist block renders when the project has none (None) or it is empty.
+
+    Why this matters: the block is additive — a report for a project without the
+    feature (None) or with an enabled-but-empty checklist ([]) must look exactly as
+    before, with no stray "Current checklist" heading.
+    """
+    assert "Current checklist" not in render_report(_report(), checklist=None)
+    assert "Current checklist" not in render_report(_report(), checklist=[])
+    # And the default call (no checklist arg) is unaffected — back-compat.
+    assert "Current checklist" not in render_report(_report())
 
 
 # --- empty states -------------------------------------------------------------

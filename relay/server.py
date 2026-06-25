@@ -58,6 +58,7 @@ from .store import (
     comments_for,
     comments_for_project,
     get,
+    get_checklist,
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
@@ -70,6 +71,7 @@ from .store import (
     record_admin_audit,
     revoke_user,
     update_last_login,
+    upsert_checklist,
 )
 
 # Reject a Content-Length larger than this outright. A report blob is a few KB; 1 MB
@@ -340,6 +342,23 @@ def _validate_blob(payload: object) -> str | None:
         ):
             return "each section must be a [title, body] pair of strings"
 
+    # checklist is OPTIONAL (E2 Inc 2): a producer without the feature omits it
+    # entirely, exactly like the vestigial source_marker is not required. So we only
+    # validate it WHEN PRESENT. When present it must be a list of {text: str, done:
+    # bool} objects — the shape get_checklist decodes and the renderer unpacks — so a
+    # malformed checklist is a clean 400 here, never a later crash in store/render.
+    checklist = payload.get("checklist")
+    if checklist is not None:
+        if not isinstance(checklist, list):
+            return "field 'checklist' must be a list when present"
+        for item in checklist:
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("text"), str)
+                and isinstance(item.get("done"), bool)
+            ):
+                return "each checklist item must be an object with string 'text' and boolean 'done'"
+
     return None
 
 
@@ -527,6 +546,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     return
                 # report is not None implies id_str was numeric, so int() is safe.
                 comments = comments_for(conn, int(id_str))
+                # The project's LIVE checklist (E2 Inc 2) — current state, shown as
+                # context on the report page. None when the project has no checklist.
+                checklist = get_checklist(conn, report["project"])
                 # Pass the authenticated identity (when logged in) so the comment form
                 # shows "commenting as <name>" and drops the free-text name field — the
                 # comment will be attributed to this identity, not a typed value.
@@ -534,7 +556,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 self._send_html(
                     200,
                     render_report(
-                        report, comments, self.server.display_tz, author_name=author_name
+                        report,
+                        comments,
+                        self.server.display_tz,
+                        author_name=author_name,
+                        checklist=checklist,
                     ),
                 )
                 return
@@ -636,7 +662,16 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # keeps each sqlite handle on its own thread.
         conn = open_relay_store(self.server.db_path)
         try:
-            new_id = ingest(conn, payload, _utc_now_iso())
+            received_at = _utc_now_iso()
+            new_id = ingest(conn, payload, received_at)
+            # E2 Inc 2: if the push carries a live checklist, REPLACE this project's
+            # current checklist (upsert). Stamped with the same receive clock as the
+            # report. Absent ⇒ leave any existing checklist untouched (an old producer
+            # or the feature off); present-but-empty ⇒ clears it (a real "no items now"
+            # state). Validated above, so the items are the expected {text, done} shape.
+            checklist = payload.get("checklist")
+            if checklist is not None:
+                upsert_checklist(conn, payload["project"], checklist, received_at)
         finally:
             conn.close()
         print(

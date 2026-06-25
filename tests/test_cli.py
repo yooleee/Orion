@@ -664,6 +664,75 @@ def test_relay_does_not_fire_when_no_delivery_succeeds(tmp_path, env_and_mocks):
     assert pushes == []       # and the relay was never reached
 
 
+def test_relay_push_carries_redacted_live_checklist(tmp_path, env_and_mocks):
+    """With `checklist = true`, the relay push carries the full open+done checklist,
+    item texts redacted, even though the tasks delta had no new completions.
+
+    Why this matters: this pins the E2 Inc 2 wiring end-to-end through the
+    orchestrator. (1) The live checklist rides on the relay (full) blob, NOT the chat
+    payloads. (2) It is captured INDEPENDENTLY of the tasks delta — here git activity
+    triggers the report and the already-done item is "old" (so the tasks section
+    reports nothing new), yet the snapshot still carries both the done and the open
+    item. (3) Each item text passes through redaction before it leaves the machine —
+    a secret in an item name must be scrubbed, the structured-lane privacy net.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    repo = _make_repo(tmp_path)  # git activity → a report is generated and pushed
+
+    # A checklist with a done item, an open item, and a secret embedded in an item.
+    tasks = tmp_path / "TODO.md"
+    tasks.write_text(
+        "- [x] Wire the relay\n"
+        "- [ ] Render the dashboard\n"
+        "- [ ] Rotate AKIAIOSFODNN7EXAMPLE\n",
+        encoding="utf-8",
+    )
+
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git", "tasks"]
+        tasks_file = "TODO.md"
+        checklist = true
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+
+    blob_json, _url, _token = pushes[0]
+    payload = json.loads(blob_json)
+    checklist = payload["checklist"]
+
+    # Full current checklist (open + done), in file order, with done-state.
+    assert checklist[0] == {"text": "Wire the relay", "done": True}
+    assert checklist[1] == {"text": "Render the dashboard", "done": False}
+    # The secret-bearing item is still present (with its open state) but scrubbed.
+    assert checklist[2]["done"] is False
+    assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
+    # And the secret never appears anywhere in the pushed payload.
+    assert "AKIAIOSFODNN7EXAMPLE" not in blob_json
+
+
 def test_relay_error_is_non_fatal(tmp_path, env_and_mocks):
     """A relay push failure is reported but does not fail the run or block state.
 

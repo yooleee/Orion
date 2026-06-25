@@ -12,19 +12,22 @@
 import json
 
 from orion import __version__
+from orion.collectors.tasks import ChecklistItem
 from orion.report import ReportBlob, serialize_blob
 
 
-def _blob(sections=()):
+def _blob(sections=(), checklist=None):
     """A fully-populated ReportBlob for serialization tests.
 
     Args:
         sections: The ordered (title, body) pairs to attach. Defaults to empty so a
             test can opt into either the empty- or populated-sections case.
+        checklist: The optional live checklist (tuple of ChecklistItem) or None.
+            Defaults to None so the field is absent unless a test opts in.
 
     Why:
         Centralizes blob construction so each test varies only what it is checking
-        (here: the sections field) rather than restating all eight fields.
+        rather than restating every field.
     """
     return ReportBlob(
         project="demo",
@@ -36,6 +39,7 @@ def _blob(sections=()):
         generated_at="2026-06-17T00:00:00+00:00",
         orion_version=__version__,
         sections=sections,
+        checklist=checklist,
     )
 
 
@@ -91,6 +95,73 @@ def test_serialize_blob_empty_sections_is_empty_array():
     parsed = json.loads(serialize_blob(_blob(sections=())))
 
     assert parsed["sections"] == []
+
+
+def test_serialize_blob_omits_checklist_when_none():
+    """A blob with no checklist omits the key entirely (back-compat).
+
+    Why this matters: the checklist is an OPTIONAL field added after the original
+    contract. None means "this producer has no checklist," so the key must be absent
+    — not an empty list — so a receiver that predates the field, and the validator's
+    optional-field handling, both see exactly the old shape.
+    """
+    parsed = json.loads(serialize_blob(_blob(checklist=None)))
+
+    assert "checklist" not in parsed
+
+
+def test_serialize_blob_emits_checklist_as_text_done_objects():
+    """A checklist serializes to a list of {text, done} objects, in order.
+
+    Why this matters: the live-checklist wire shape is named objects (not positional
+    pairs) so the done-state is explicit for any receiver. Order is preserved so the
+    rendered list matches the user's file.
+    """
+    checklist = (
+        ChecklistItem(text="Build it", done=True),
+        ChecklistItem(text="Ship it", done=False),
+    )
+    parsed = json.loads(serialize_blob(_blob(checklist=checklist)))
+
+    assert parsed["checklist"] == [
+        {"text": "Build it", "done": True},
+        {"text": "Ship it", "done": False},
+    ]
+
+
+def test_serialize_blob_empty_checklist_is_present_empty_array():
+    """An enabled-but-empty checklist serializes to a present empty array.
+
+    Why this matters: () is meaningfully different from None — it says "checklist
+    enabled, currently no items," which the relay uses to CLEAR a stale live
+    checklist. So the key must be present (as []), distinguishing it from the
+    omitted-when-None case above.
+    """
+    parsed = json.loads(serialize_blob(_blob(checklist=())))
+
+    assert parsed["checklist"] == []
+
+
+def test_serialize_blob_round_trips_checklist():
+    """Serializing then reconstructing a blob with a checklist yields the original.
+
+    Why this matters: the checklist must survive the seam losslessly, like the other
+    fields. We rebuild the ChecklistItem tuple from the parsed {text, done} objects.
+    """
+    original = _blob(
+        checklist=(
+            ChecklistItem(text="Open task", done=False),
+            ChecklistItem(text="Done task", done=True),
+        )
+    )
+
+    parsed = json.loads(serialize_blob(original))
+    rebuilt_checklist = tuple(
+        ChecklistItem(text=item["text"], done=item["done"])
+        for item in parsed["checklist"]
+    )
+
+    assert rebuilt_checklist == original.checklist
 
 
 def test_serialize_blob_is_deterministic():

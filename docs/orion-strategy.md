@@ -124,7 +124,7 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   building" pass, not a framework. The living map is `[docs/parallelization.md](parallelization.md)`,
   updated as the analysis shifts with the work.
 
-## Direction under consideration (recorded, deferred — seams kept clean)
+## Direction now in build — the light planning/tracking layer (rung 1 = E2 Inc 3; seams kept clean)
 
 > **Governing principle — Orion reframes, it doesn't originate.** The planning layer is *derived*
 > (as a report is): it **reorganizes / reframes / assesses** what the project has already produced
@@ -133,6 +133,14 @@ The 3–5 decisions that define the route — and, by implication, what we're **
 > reorganizes them — it does **not** invent them. So there is **no double-entry**: Orion stays
 > *downstream* even for planning, which is exactly what preserves the "derives-from-existing-work"
 > differentiator at every scale.
+>
+> **Observe vs originate (clarified 2026-06-26).** Persisting *observed* state — a rebuildable,
+> append-only **downstream projection** of what the source docs claimed over time — is fully
+> consistent with this principle. The invariant is **no *authored* forward state**, not "no
+> *persisted* forward state": the line is **observe vs originate**, not derive vs persist. Authoring
+> stays at the incubator / source docs; Orion only remembers what it *observed*, re-derivable from
+> the record. This *adds* live, purposeful memory and is distinct from the *dead* Phase-1 state
+> **KI-8** removed.
 
 - **From reporter toward a *light planning/tracking layer*.** Today the to-do/milestone leg is
   **retrospective only** — the `tasks` collector reports what got checked off. The intended evolution:
@@ -141,11 +149,16 @@ The 3–5 decisions that define the route — and, by implication, what we're **
   user still owns their task files). This **serves** the reporting north-star, it doesn't fork from it:
   forward-looking status ("milestone X on track for Friday, 1 blocked") makes reports far more
   meeting-replacing (**G2**).
-- **Why deferred + where it lands.** It needs Orion to hold *forward-looking state of its own* — exactly
-  the "cadence needs Orion's own state" threshold flagged for the deferred **scheduling layer
-  (B5 / KI-13)**. So it most naturally arrives **with Horizon C's stateful, always-on process**, not
-  before. Seams that keep it additive: the portable blob accepts extra fields without rejecting them
-  (forward-looking metadata slots in), and the SQLite store can gain planning-state tables additively.
+- **Now in build (rung 1 = E2 Inc 3) — where it lands.** It needs Orion to hold *forward-looking
+  state of its own* — the same "needs Orion's own state" threshold flagged for the deferred
+  **scheduling layer (B5 / KI-13)**, which is why it waited for Horizon C's stateful, always-on
+  process. That threshold is now crossed: rung 1 (due-dates / at-risk / slippage / derived milestones)
+  is being built as **E2 Inc 3** on an **observe-and-remember** model — the knowledge-base "brain"
+  lives relay-side (the only place all projects are visible together); the local side stays "parse the
+  docs and deliver," so local-first holds. Scheduling / cadence (KI-13) stays a *separate* track. The
+  seams held as predicted: the portable blob accepts extra fields without rejecting them, and the
+  SQLite store gains planning-state tables additively. See
+  [`docs/e2-inc3-kickoff.md`](e2-inc3-kickoff.md).
 - **Discipline (focus = saying no):** keep it a *light, tracked* layer in service of better reports;
   resist drift into full task/calendar/sprint management. Decide the exact scope via discovery when it
   nears (would I actually use the planning side?).

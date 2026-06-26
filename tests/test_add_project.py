@@ -392,3 +392,231 @@ def test_declined_preview_creates_no_tasks_file(tmp_path, monkeypatch):
     assert code == 0
     assert not cfg.exists()
     assert not (repo / "TODO.md").exists()
+
+
+# --- Unit 2: tracker / incubator file args ------------------------------------
+# add-project can now wire the tracker and incubator collectors' file paths, which
+# previously KeyError'd in render_project_stanza. Unlike tasks, no file is created.
+
+
+def test_add_project_wires_tracker_file(tmp_path):
+    """--collectors tracker --tracker-file produces a loadable stanza with tracker_file.
+
+    Why this matters: this is the exact command that used to fail (the reason the
+    `applications` tracker had to be hand-edited into orion.toml). It must now register
+    cleanly, record the path, and NOT create any file (a tracker points at a rich user
+    doc the user maintains).
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    tracker = repo / "ROADMAP.md"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tracker",
+            "--tracker-file",
+            str(tracker),
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    project = get_project(load_config(cfg), "demo")
+    assert project.collectors == ("git", "tracker")
+    assert project.tracker_file == tracker
+    assert not tracker.exists()  # config-only, never created
+
+
+def test_add_project_wires_incubator_file(tmp_path):
+    """--collectors incubator --incubator-file produces a loadable stanza, file uncreated.
+
+    Why this matters: same newly-wired path as tracker; pins the incubator collector's
+    file arg threads through and is config-only.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    index = repo / "index.md"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,incubator",
+            "--incubator-file",
+            str(index),
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    project = get_project(load_config(cfg), "demo")
+    assert project.collectors == ("git", "incubator")
+    assert project.incubator_file == index
+    assert not index.exists()
+
+
+# --- Unit 3: --seed-tasks-from ------------------------------------------------
+# When add-project CREATES a defaulted tasks_file, --seed-tasks-from <doc> fills it from
+# the doc's Markdown tables (parse, no LLM) instead of the empty starter. A doc with no
+# usable table falls back to the starter; the flag is ignored (warned) when no tasks_file
+# is being created. Never fails the add.
+
+# A roadmap-shaped doc: a status column with one done (✅) and one open row, plus a
+# preamble line that is NOT a table (must be ignored by parse_tables).
+_ROADMAP_DOC = (
+    "# Roadmap\n"
+    "\n"
+    "Some intro prose that is not a table.\n"
+    "\n"
+    "| Scope          | Status        |\n"
+    "| -------------- | ------------- |\n"
+    "| Ship the thing | ✅ Signed off |\n"
+    "| Plan the next  | In progress   |\n"
+)
+
+
+def test_seed_tasks_from_seeds_checklist_with_done_mapping(tmp_path):
+    """A roadmap table seeds checkbox lines, mapping its status column to done/open.
+
+    Why this matters: this is the Unit 3 payoff — a doc the user already maintains
+    becomes the new project's starting checklist, with the ✅ row checked and the
+    in-progress row open, and the written file reads back through the real tasks
+    snapshot (so the dashboard would show exactly those items).
+    """
+    repo = _make_repo(tmp_path)
+    doc = tmp_path / "roadmap.md"
+    doc.write_text(_ROADMAP_DOC, encoding="utf-8")
+    cfg = tmp_path / "orion.toml"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--seed-tasks-from",
+            str(doc),
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    todo = repo / "TODO.md"
+    assert todo.exists()
+    # The real snapshot parser reads the seeded file back as the dashboard would.
+    items = snapshot_tasks(todo)
+    by_text = {item.text: item.done for item in items}
+    assert by_text == {"Ship the thing": True, "Plan the next": False}
+
+
+def test_seed_tasks_from_no_table_falls_back_to_starter(tmp_path):
+    """A doc with no usable table warns and falls back to the empty starter (add succeeds).
+
+    Why this matters: seeding must NEVER fail the add. A doc Orion can't parse into a
+    checklist yields the same empty starter as no --seed-tasks-from at all.
+    """
+    repo = _make_repo(tmp_path)
+    doc = tmp_path / "prose.md"
+    doc.write_text("# Notes\n\nJust prose, no tables here.\n", encoding="utf-8")
+    cfg = tmp_path / "orion.toml"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--seed-tasks-from",
+            str(doc),
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    todo = repo / "TODO.md"
+    assert todo.exists()
+    assert todo.read_text(encoding="utf-8").startswith("# TODO")
+    assert snapshot_tasks(todo) == ()  # the empty starter (no seeded rows)
+
+
+def test_seed_tasks_from_ignored_when_no_tasks_file_created(tmp_path, capsys):
+    """--seed-tasks-from with an explicit --tasks-file is ignored (warned), not applied.
+
+    Why this matters: seeding only acts on the defaulted-tasks creation flow. An explicit
+    --tasks-file is config-only (never created), so there is nothing to seed; the command
+    must warn rather than silently swallow the flag, and still succeed.
+    """
+    repo = _make_repo(tmp_path)
+    doc = tmp_path / "roadmap.md"
+    doc.write_text(_ROADMAP_DOC, encoding="utf-8")
+    explicit = repo / "MY_TASKS.md"
+    cfg = tmp_path / "orion.toml"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--tasks-file",
+            str(explicit),
+            "--seed-tasks-from",
+            str(doc),
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    assert not explicit.exists()  # explicit path stays config-only
+    assert "ignored" in capsys.readouterr().err  # the warning was surfaced
+
+
+# --- Unit 3: focused helper behavior ------------------------------------------
+
+
+def test_status_is_done_guards_against_substring_false_positives():
+    """_status_is_done treats ✅/[x] as done but guards "incomplete" and "not done".
+
+    Why this matters: the seed source is an arbitrary user doc, so a naive substring test
+    would wrongly check "incomplete" (contains "complete") or "not done" (contains "done").
+    Word boundaries plus a "not" veto keep those open while still honoring real markers.
+    """
+    assert cli._status_is_done("✅ Signed off (2026-06-15)") is True
+    assert cli._status_is_done("Shipped") is True
+    assert cli._status_is_done("[x]") is True
+    assert cli._status_is_done("incomplete") is False
+    assert cli._status_is_done("not done") is False
+    assert cli._status_is_done("In progress") is False
+    assert cli._status_is_done("") is False
+
+
+def test_seed_checklist_from_doc_returns_none_for_unusable_doc(tmp_path):
+    """The seeding helper returns None for a missing file or a table with no text column.
+
+    Why this matters: None is the "fall back to starter" signal the caller relies on, and
+    it must cover both an unreadable doc and a table whose headers Orion doesn't recognize
+    as item text (so seeding never raises into the add path).
+    """
+    missing = tmp_path / "nope.md"
+    assert cli._seed_checklist_from_doc(missing, "demo") is None
+
+    # A real table, but no recognized text column (no task/scope/item/... header).
+    no_text_col = tmp_path / "weird.md"
+    no_text_col.write_text(
+        "| Owner | Status |\n| ----- | ------ |\n| Mom | done |\n", encoding="utf-8"
+    )
+    assert cli._seed_checklist_from_doc(no_text_col, "demo") is None

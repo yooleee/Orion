@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from orion.collectors import LANE_RAW, LANE_STRUCTURED
+from orion.collectors._markdown import Table, parse_tables
 from orion.collectors.git import GitError
 from orion.collectors.git import collect as collect_git
 from orion.collectors.incubator import IncubatorError, read_index
@@ -357,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     add_parser.add_argument(
         "--collectors",
         default="git",
-        help="Comma-separated signals to enable (default: git). Any of: git,tasks,notes.",
+        help="Comma-separated signals to enable (default: git). Any of: git,tasks,notes,incubator,tracker.",
     )
     add_parser.add_argument(
         "--tasks-file",
@@ -371,6 +373,26 @@ def main(argv: list[str] | None = None) -> int:
         dest="notes_file",
         default=None,
         help="Path to the notes file (required if 'notes' is in --collectors).",
+    )
+    add_parser.add_argument(
+        "--tracker-file",
+        dest="tracker_file",
+        default=None,
+        help="Path to the status-aware tracker doc (required if 'tracker' is in --collectors).",
+    )
+    add_parser.add_argument(
+        "--incubator-file",
+        dest="incubator_file",
+        default=None,
+        help="Path to the incubator index.md (required if 'incubator' is in --collectors).",
+    )
+    add_parser.add_argument(
+        "--seed-tasks-from",
+        dest="seed_tasks_from",
+        default=None,
+        metavar="DOC",
+        help="When a tasks_file is being created (no --tasks-file given), seed its "
+        "checklist from this doc's Markdown tables instead of an empty starter.",
     )
     add_parser.add_argument(
         "--config",
@@ -742,6 +764,9 @@ def main(argv: list[str] | None = None) -> int:
             collectors_csv=args.collectors,
             tasks_file=args.tasks_file,
             notes_file=args.notes_file,
+            tracker_file=args.tracker_file,
+            incubator_file=args.incubator_file,
+            seed_tasks_from=args.seed_tasks_from,
             print_only=args.print_only,
             assume_yes=args.yes,
         )
@@ -1705,6 +1730,124 @@ def _starter_checklist(project_name: str) -> str:
     )
 
 
+# --- --seed-tasks-from: build a starter checklist from a doc's Markdown tables ----------
+# Preference order for the column whose cells become each checklist item's text. The first
+# header that matches (case-insensitive) wins, so a roadmap table keyed by "Scope" and a
+# to-do table keyed by "Task" both work without configuration. Matches the column NAMES the
+# tracker/incubator collectors already read (see collectors/_markdown.Table).
+_SEED_TEXT_HEADERS = ("task", "scope", "sub-goal", "item", "milestone", "name")
+
+# Substrings (case-insensitive) in a "status" cell that flag an item as already done. ✅ and
+# a "[x]" checkbox are unambiguous, so they match as plain substrings. The word markers are
+# matched on WORD BOUNDARIES instead of as bare substrings so a status like "incomplete"
+# does not match "complete" — and a cell containing a standalone "not" (e.g. "not done") is
+# never treated as done. This hardening goes slightly beyond the literal "contains a marker"
+# spec because the seed source is an arbitrary user doc in a public tool (settled 2026-06-25).
+_SEED_DONE_SUBSTRINGS = ("✅", "[x]")
+_SEED_DONE_WORD_RE = re.compile(r"\b(done|shipped|complete|signed off)\b", re.IGNORECASE)
+_SEED_NEGATION_RE = re.compile(r"\bnot\b", re.IGNORECASE)
+
+
+def _status_is_done(status_cell: str) -> bool:
+    """Decide whether a tracker/roadmap status cell marks its row as complete.
+
+    Args:
+        status_cell: The raw text of the row's status column (may be empty).
+
+    Returns:
+        True when the cell signals a finished item, False otherwise.
+
+    Why:
+        Seeding maps a roadmap's status column onto checkbox state. ✅ / "[x]" are taken
+        verbatim; the word markers use word boundaries (so "incomplete" ≠ "complete") and a
+        standalone "not" vetoes a match (so "not done" stays open) — the cheap guards that
+        keep an arbitrary user doc from producing wrong checkboxes.
+    """
+    cell = status_cell.casefold()
+    if any(sub in cell for sub in _SEED_DONE_SUBSTRINGS):
+        return True
+    if _SEED_NEGATION_RE.search(cell):
+        return False
+    return _SEED_DONE_WORD_RE.search(cell) is not None
+
+
+def _seed_lines_from_table(table: Table) -> list[str]:
+    """Turn one parsed Markdown table into GitHub-style checklist lines.
+
+    Args:
+        table: A parse_tables() result — its `headers` and per-row `rows` dicts.
+
+    Returns:
+        One "- [ ] <text>" (or "- [x] <text>") line per row that has non-empty text in the
+        chosen text column. An empty list when the table has no recognized text column.
+
+    Why:
+        Tables are read by column NAME, not position (the same contract the tracker uses), so
+        a table is usable iff one of the preferred text headers is present. Picking the text
+        column here (not in the caller) keeps the per-table rule in one place and lets the
+        caller simply concatenate the lines of every table in the doc.
+    """
+    # Map case-folded header -> the actual header string, so a preference lookup is O(1) and
+    # case-insensitive. Last duplicate header wins, which is irrelevant for well-formed tables.
+    header_by_fold = {h.casefold(): h for h in table.headers}
+    text_header = next(
+        (header_by_fold[pref] for pref in _SEED_TEXT_HEADERS if pref in header_by_fold),
+        None,
+    )
+    if text_header is None:
+        return []  # no usable text column — skip this table entirely
+    status_header = header_by_fold.get("status")
+
+    lines: list[str] = []
+    for row in table.rows:
+        text = (row.get(text_header) or "").strip()
+        if not text:
+            continue  # a row with no item text contributes no checkbox
+        done = status_header is not None and _status_is_done(row.get(status_header) or "")
+        lines.append(f"- [{'x' if done else ' '}] {text}")
+    return lines
+
+
+def _seed_checklist_from_doc(doc_path: Path, project_name: str) -> str | None:
+    """Build tasks_file checklist text from a doc's Markdown tables, or None if unusable.
+
+    Args:
+        doc_path: The --seed-tasks-from document to parse.
+        project_name: The project the checklist belongs to (named in the header comment).
+
+    Returns:
+        Ready-to-write Markdown (a "# TODO" header comment plus one checkbox line per table
+        row), or None when the doc cannot be read or has no table with a recognized text
+        column — the signal for the caller to fall back to the empty starter.
+
+    Why:
+        This is the parse-not-generate seed path (no LLM): a roadmap/to-do doc the user
+        already maintains becomes the new project's starting checklist. Reuses
+        _markdown.parse_tables (the DRY seam shared with the tracker/incubator collectors) so
+        the same table-reading rules apply. Returning None rather than raising keeps the
+        "never fail the add" contract — an unparseable doc just yields the empty starter.
+    """
+    try:
+        text = doc_path.read_text(encoding="utf-8")
+    except OSError:
+        return None  # unreadable/missing doc → caller falls back to the starter
+
+    lines: list[str] = []
+    for table in parse_tables(text):
+        lines.extend(_seed_lines_from_table(table))
+    if not lines:
+        return None  # no usable table in the doc
+
+    header = (
+        "# TODO\n"
+        "\n"
+        f'<!-- Orion checklist for "{project_name}", seeded from {doc_path.name}.\n'
+        '     "- [ ]" is an open item, "- [x]" is done. Items appear on the dashboard. -->\n'
+        "\n"
+    )
+    return header + "\n".join(lines) + "\n"
+
+
 def cmd_add_project(
     name: str | None,
     config_path: Path,
@@ -1718,6 +1861,9 @@ def cmd_add_project(
     notes_file: str | None,
     print_only: bool,
     assume_yes: bool,
+    tracker_file: str | None = None,
+    incubator_file: str | None = None,
+    seed_tasks_from: str | None = None,
 ) -> int:
     """Register a new project by appending (or creating) a stanza in orion.toml.
 
@@ -1736,6 +1882,14 @@ def cmd_add_project(
         notes_file: Path for the notes collector (required if "notes" enabled).
         print_only: Print the stanza and write nothing.
         assume_yes: Skip the preview confirmation (for non-interactive callers).
+        tracker_file: Path for the tracker collector (required if "tracker" enabled).
+            Unlike tasks, no file is created — a tracker points at a rich user doc.
+        incubator_file: Path for the incubator collector (required if "incubator"
+            enabled). Like tracker, config-only (no file creation).
+        seed_tasks_from: When a tasks_file is being CREATED (the defaulted-tasks flow),
+            seed its checklist from this doc's Markdown tables instead of the empty
+            starter. Ignored (with a warning) when no tasks_file is being created; a doc
+            with no usable table falls back to the starter (never fails the add).
 
     Returns:
         Exit code: 0 on success or a declined preview; 1 on any error.
@@ -1822,6 +1976,8 @@ def cmd_add_project(
             tuple(recipients),
             tasks_file=tasks_file,
             notes_file=notes_file,
+            incubator_file=incubator_file,
+            tracker_file=tracker_file,
             with_state_db=not config_exists,
         )
     except ConfigError as exc:
@@ -1833,6 +1989,32 @@ def cmd_add_project(
     # path. tasks_file is a real str here whenever tasks_file_defaulted is True.
     new_tasks_path = Path(tasks_file).expanduser() if tasks_file_defaulted else None
     create_tasks_file = new_tasks_path is not None and not new_tasks_path.exists()
+
+    # Unit 3 (E2 Inc 2.6 follow-on): when a tasks_file is being CREATED and --seed-tasks-from
+    # was given, seed the checklist from that doc's Markdown tables instead of the empty
+    # starter. The content is decided here (before the preview) so the gate can describe it
+    # honestly. A doc with no usable table → warn and fall back to the starter (never fail).
+    checklist_text = _starter_checklist(project_name) if create_tasks_file else None
+    seeded_from: str | None = None
+    if seed_tasks_from is not None and not create_tasks_file:
+        # The flag only acts when a new tasks_file is being created; say so rather than
+        # silently ignoring it (tasks off, an explicit --tasks-file, or the file exists).
+        print(
+            f"Warning: --seed-tasks-from {seed_tasks_from!r} ignored — no new tasks file is "
+            "being created (enable 'tasks' without --tasks-file to create one).",
+            file=sys.stderr,
+        )
+    elif seed_tasks_from is not None and create_tasks_file:
+        seeded = _seed_checklist_from_doc(Path(seed_tasks_from).expanduser(), project_name)
+        if seeded is None:
+            print(
+                f"Warning: --seed-tasks-from {seed_tasks_from!r} had no usable table; "
+                "using the empty starter checklist instead.",
+                file=sys.stderr,
+            )
+        else:
+            checklist_text = seeded
+            seeded_from = seed_tasks_from
 
     # 6. --print: show exactly what would be written, change nothing.
     if print_only:
@@ -1847,8 +2029,11 @@ def cmd_add_project(
         print(f"PREVIEW — would {action} {config_path} (nothing written yet)")
         if create_tasks_file:
             # The file creation is a SECOND write surface; surface it in the same gate
-            # so a single decline declines both.
-            print(f"           and create a starter checklist at {new_tasks_path}")
+            # so a single decline declines both. Name the seed source when there is one.
+            if seeded_from is not None:
+                print(f"           and seed a checklist at {new_tasks_path} from {seeded_from}")
+            else:
+                print(f"           and create a starter checklist at {new_tasks_path}")
         print(bar)
         print(stanza, end="")
         print(bar)
@@ -1872,9 +2057,9 @@ def cmd_add_project(
     #     overwritten — the create is strictly additive, like the config append.
     if create_tasks_file and not new_tasks_path.exists():
         new_tasks_path.parent.mkdir(parents=True, exist_ok=True)
-        new_tasks_path.write_text(
-            _starter_checklist(project_name), encoding="utf-8", newline="\n"
-        )
+        # checklist_text is the seeded content when --seed-tasks-from produced a usable
+        # table, else the empty starter (both decided above, before the preview gate).
+        new_tasks_path.write_text(checklist_text, encoding="utf-8", newline="\n")
 
     # 9. Re-load to prove the written file parses and the project is present — the
     #    same belt-and-suspenders idea as report's "redact again before send".
@@ -1890,7 +2075,10 @@ def cmd_add_project(
     # 10. Confirm, and point at the remaining manual steps (secrets stay in .env).
     print(f"Registered {project_name!r} in {config_path}.")
     if create_tasks_file:
-        print(f"  Created a starter checklist at {new_tasks_path}. Add your tasks there.")
+        if seeded_from is not None:
+            print(f"  Seeded a checklist at {new_tasks_path} from {seeded_from}. Review and edit it.")
+        else:
+            print(f"  Created a starter checklist at {new_tasks_path}. Add your tasks there.")
     env_vars = sorted({r.webhook_env_var for r in recipients})
     print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
     print(f"  Then: python -m orion check {project_name}")

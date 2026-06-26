@@ -99,6 +99,11 @@ Structured parse, **no LLM** (the parse-vs-generate fork, already settled as par
   **status column** (`status`); emit `- [ ] <text>` per row, `- [x]` when the status cell contains a
   done-marker (`✅`, `done`, `shipped`, `signed off`, `complete`, `[x]`). A doc with no usable table →
   warn and fall back to the empty starter checklist (never fail the add).
+  - **Done-marker robustness (decided 2026-06-25):** the seed source is an arbitrary user doc in a
+    public tool, so the marker match is hardened past a literal substring test: `✅` and `[x]` match as
+    substrings, but the word markers match on **word boundaries** (so `incomplete` ≠ `complete`) and a
+    standalone `not` in the cell vetoes a done match (so `not done` stays open). Implemented in
+    `cli._status_is_done`.
 - Lives in `cmd_add_project`'s creation step (where Unit B-i writes `_starter_checklist`): when
   `--seed-tasks-from` is given, write the generated lines instead. Preview-gated and never-overwrite,
   same as Unit B-i.

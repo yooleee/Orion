@@ -208,6 +208,69 @@ def test_render_with_tasks_collector_round_trips(tmp_path):
     assert project.tasks_file == (tmp_path / "TODO.md")
 
 
+def test_render_with_tracker_collector_round_trips(tmp_path):
+    """Enabling the "tracker" collector writes tracker_file and round-trips.
+
+    Why this matters: before Unit 2, render_project_stanza had no tracker entry in its
+    collector_files map, so the COLLECTOR_FILE_KEYS loop KeyError'd the moment "tracker"
+    was enabled (the reason `applications` had to be hand-edited into orion.toml). This
+    pins that the path is now emitted and the real loader accepts it.
+    """
+    stanza = render_project_stanza(
+        name="withtracker",
+        repo_path=tmp_path / "r",
+        share_level="high_level",
+        collectors=("git", "tracker"),
+        recipients=(_recipient(),),
+        tracker_file=tmp_path / "ROADMAP.md",
+        with_state_db=True,
+    )
+    cfg_path = tmp_path / "orion.toml"
+    cfg_path.write_text(stanza)
+    project = get_project(load_config(cfg_path), "withtracker")
+    assert project.collectors == ("git", "tracker")
+    assert project.tracker_file == (tmp_path / "ROADMAP.md")
+
+
+def test_render_with_incubator_collector_round_trips(tmp_path):
+    """Enabling the "incubator" collector writes incubator_file and round-trips.
+
+    Why this matters: same KeyError gap as tracker — the incubator collector had no
+    collector_files entry. This pins the path is emitted and loads back.
+    """
+    stanza = render_project_stanza(
+        name="withincubator",
+        repo_path=tmp_path / "r",
+        share_level="high_level",
+        collectors=("git", "incubator"),
+        recipients=(_recipient(),),
+        incubator_file=tmp_path / "index.md",
+        with_state_db=True,
+    )
+    cfg_path = tmp_path / "orion.toml"
+    cfg_path.write_text(stanza)
+    project = get_project(load_config(cfg_path), "withincubator")
+    assert project.collectors == ("git", "incubator")
+    assert project.incubator_file == (tmp_path / "index.md")
+
+
+def test_render_rejects_tracker_collector_without_file(tmp_path):
+    """Enabling "tracker" but giving no tracker_file is refused before writing.
+
+    Why this matters: the enabled⇒path-required contract must hold for the newly-wired
+    collectors too — a clear render-time error, not a KeyError or a config the loader
+    would later reject.
+    """
+    with pytest.raises(ConfigError, match="tracker.*collector but no tracker_file"):
+        render_project_stanza(
+            name="bad",
+            repo_path=tmp_path / "r",
+            share_level="high_level",
+            collectors=("git", "tracker"),
+            recipients=(_recipient(),),
+        )
+
+
 # --- render_project_stanza: validation --------------------------------------
 
 

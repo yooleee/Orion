@@ -66,7 +66,6 @@ def _blob(project="demo", *, generated_at="2026-06-18T00:00:00+00:00", sections=
         "share_level": "high_level",
         "lane": "raw",
         "body": "Shipped the seam.",
-        "source_marker": "",
         "generated_at": generated_at,
         "orion_version": "0.0.0",
         "sections": sections,

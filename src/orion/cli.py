@@ -1081,8 +1081,8 @@ def _run_report(
 
         # --- Build the portable (full) report blob ---
         # lane is provenance: RAW if the LLM touched any part of this run, else
-        # STRUCTURED. source_marker is now per-collector (in state), so the blob's
-        # single field is no longer meaningful — pass "" (see KI-8). The
+        # STRUCTURED. Delta markers are per-collector (in the state store), so the blob
+        # carries none (the old single source_marker was dropped in KI-8). The
         # twice-redacted sections ride along for B3's structured rendering. This is
         # the blob the relay receives; the per-audience blobs below are derived from
         # the same sections, filtered.
@@ -1108,7 +1108,6 @@ def _run_report(
             project,
             safe_body,
             lane,
-            "",
             generated_at,
             sections=tuple(full_pairs),
             checklist=checklist,
@@ -1138,7 +1137,7 @@ def _run_report(
             # never serialized (the relay gets full_blob), so the run-level value is
             # honest enough without tracking lane per section.
             group_blob = build_report(
-                project, group_body, lane, "", generated_at, sections=tuple(group_pairs)
+                project, group_body, lane, generated_at, sections=tuple(group_pairs)
             )
             group_messages[(channel, signals)] = compose(
                 group_blob, channel, display_timezone
@@ -1518,9 +1517,9 @@ def cmd_intake(
             )
             return 1
 
-        # A pushed update is already audience-ready: structured lane, empty marker.
+        # A pushed update is already audience-ready: structured lane.
         generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        blob = build_report(project, safe_body, LANE_STRUCTURED, "", generated_at)
+        blob = build_report(project, safe_body, LANE_STRUCTURED, generated_at)
 
         # Compose per distinct channel and route each recipient accordingly —
         # identical delivery path to cmd_report (just no markers afterward). Intake

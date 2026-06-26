@@ -14,6 +14,55 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Consolidation slice — dashboard-home visibility, add-project completeness, KI-8 cleanup (2026-06-25)
+
+A small post-E2-Inc-2.6 cleanup: one dashboard-visibility fix plus three deferred CLI/state
+items, each shipped as its own reviewable PR (#52, #53, #54). No new dependencies; the only
+deploy was the relay for Unit 1.
+
+### Fixed
+
+- **The dashboard home shows checklist-only projects** (Unit 1, #52). `latest_report_per_project()`
+  (`relay/store.py`) is now **project-driven, not report-driven** — its row set is the union of
+  projects with a report OR a live checklist — so a dashboard-only project (a live checklist but
+  zero reports, e.g. the `applications` tracker) finally gets a portfolio card and a
+  `/project/<name>` link instead of being reachable only by direct URL. `render_portfolio()`
+  (`relay/render.py`) tolerates a no-report card (omits the headline, falls back to the checklist's
+  `updated_at` for last-activity). Relay-only, no schema change; deployed to Fly.
+
+### Added
+
+- **`add-project --tracker-file` / `--incubator-file`** (Unit 2, #53). `render_project_stanza`
+  completed its `collector_files` map for all four file-backed collectors, so
+  `add-project --collectors tracker` no longer `KeyError`s (the reason the `applications` tracker
+  had to be hand-edited into `orion.toml`). Config-only — no file is created (these point at rich
+  user docs).
+- **`add-project --seed-tasks-from <doc>`** (Unit 3, #53). When a defaulted `tasks_file` is being
+  created, seed its checklist from a doc's Markdown tables (reusing `collectors/_markdown.parse_tables`
+  — parse, no LLM) instead of the empty starter. Picks the text column by preference and maps an
+  optional status column to done/open; done-marker detection uses word boundaries plus a `not` veto
+  (so `incomplete` / `not done` stay open). A doc with no usable table warns and falls back to the
+  starter — it never fails the add.
+
+### Removed
+
+- **KI-8: the vestigial Phase-1 state artifacts** (Unit 4, #54). Dropped the `project_state` table
+  and the one-time `_backfill_git_markers` from `state.py`, and the always-`""` `source_marker` from
+  `ReportBlob` / `build_report` / `serialize_blob` (`report.py`). The Phase-1→Phase-2 marker-migration
+  window closed long ago (Phase 2 shipped 2026-06-15; live DBs backfilled then, new DBs never had the
+  table), and the relay never required `source_marker` — so the wire change is backward-compatible
+  (the relay still ignores a missing or extra field). Relay comments updated to match.
+
+### Tests
+
+- `pytest`: **620** green locally (CI quota-capped until 2026-07-01 → merged on local-green). New:
+  checklist-only store/render/server cases and interleaved ordering (Unit 1); tracker/incubator
+  stanza round-trips and `--seed-tasks-from` done/open seeding + fallback + `_status_is_done` guards
+  (Units 2–3); a fresh `open_state()` creates no `project_state` table, and the wire payload
+  serializes without `source_marker` (Unit 4). The two legacy-backfill tests were removed with the
+  code they covered. Verified by hand: the seeded checklist reads back through the real `tasks`
+  snapshot, and the live dashboard shows the `applications` card after deploy.
+
 ## Dashboard portfolio overview — visibility surface, increment 1 (2026-06-25)
 
 The first slice of evolving the relay dashboard into a richer multi-project visibility and

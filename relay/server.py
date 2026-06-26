@@ -85,10 +85,11 @@ _MAX_BLOB_BYTES = 1_000_000
 # the outer memory guard; MAX_COMMENT_BODY_CHARS / MAX_AUTHOR_CHARS are the semantic
 # limits on the DECODED form fields.
 
-# The blob fields the relay consumes, each required to be a string. NOTE: the
-# vestigial `source_marker` (always "", KI-8, unused by the store) is intentionally
-# NOT required — coupling the wire check to a field slated for removal would be
-# brittle. orion_version is here too, and additionally checked non-empty below: it
+# The blob fields the relay consumes, each required to be a string. NOTE: the legacy
+# `source_marker` field (removed from the producer in KI-8; older blobs may still carry
+# it, and the store ignores it either way) is intentionally NOT required — the relay
+# stays backward-compatible by validating only the fields it consumes, never rejecting a
+# missing or extra one. orion_version is here too, and additionally checked non-empty below: it
 # is the contract's version handle, so it must be present, but we do NOT yet reject
 # on a version *mismatch* (there is one version today; a compatibility policy is a
 # deferred decision — the seam is simply that we capture the producing version).
@@ -396,7 +397,7 @@ def _validate_blob(payload: object) -> str | None:
             return "each section must be a [title, body] pair of strings"
 
     # checklist is OPTIONAL (E2 Inc 2): a producer without the feature omits it
-    # entirely, exactly like the vestigial source_marker is not required. So we only
+    # entirely, exactly like the legacy source_marker field is not required. So we only
     # validate it WHEN PRESENT, via the shared item-shape helper. A malformed checklist
     # is a clean 400 here, never a later crash in store/render.
     checklist = payload.get("checklist")

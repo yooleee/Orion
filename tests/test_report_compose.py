@@ -56,13 +56,11 @@ def test_build_report_populates_metadata():
         _project(),
         body="Shipped the collector.",
         lane="raw",
-        source_marker="abc123",
         generated_at="2026-06-14T00:00:00+00:00",
     )
     assert blob.project == "demo"
     assert blob.participants == ("Alex", "Sam")
     assert blob.lane == "raw"
-    assert blob.source_marker == "abc123"
     assert blob.body == "Shipped the collector."
     assert blob.orion_version == __version__
 
@@ -79,7 +77,6 @@ def test_build_report_defaults_sections_to_empty():
         _project(),
         body="A pushed update.",
         lane="structured",
-        source_marker="",
         generated_at="2026-06-14T00:00:00+00:00",
     )
     assert blob.sections == ()
@@ -97,7 +94,6 @@ def test_build_report_carries_sections_in_order():
         _project(),
         body="## Code activity\nShipped the seam.\n\n## Completed tasks\nDid X.",
         lane="raw",
-        source_marker="",
         generated_at="2026-06-14T00:00:00+00:00",
         sections=sections,
     )
@@ -114,7 +110,6 @@ def test_compose_includes_project_and_body():
         _project(),
         body="Wired the pipeline end to end.",
         lane="raw",
-        source_marker="abc123",
         generated_at="2026-06-14T00:00:00+00:00",
     )
     message = compose(blob, "discord", _TZ).preview
@@ -136,7 +131,6 @@ def test_compose_renders_friendly_timestamp_in_display_zone():
         _project(),
         body="Body.",
         lane="raw",
-        source_marker="abc123",
         generated_at="2026-06-15T01:32:53+00:00",
     )
     message = compose(blob, "discord", _TZ).preview
@@ -159,7 +153,6 @@ def test_compose_timestamp_honors_a_non_default_timezone():
         _project(),
         body="Body.",
         lane="raw",
-        source_marker="abc123",
         generated_at="2026-06-15T01:32:53+00:00",
     )
     message = compose(blob, "discord", "UTC").preview
@@ -177,7 +170,6 @@ def test_compose_malformed_timestamp_degrades_gracefully():
         _project(),
         body="Body.",
         lane="raw",
-        source_marker="abc123",
         generated_at="not-a-timestamp",
     )
     message = compose(blob, "discord", _TZ).preview
@@ -195,7 +187,6 @@ def _blob(body, sections=()):
         _project(),
         body=body,
         lane="structured",
-        source_marker="",
         generated_at="2026-06-15T01:32:53+00:00",
         sections=sections,
     )

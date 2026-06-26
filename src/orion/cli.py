@@ -1302,18 +1302,21 @@ def _redacted_checklist(project: ProjectConfig) -> tuple[list[ChecklistItem], in
         safe_text = scrub.text.strip()
         if safe_text:
             # due_date is already a normalized ISO date (or None), never raw user text, so
-            # it rides through untouched — but the rebuild must preserve it (and key) or
-            # they would be lost before reaching the wire. The `key` (a title) IS user text,
-            # so it is redacted here too as a safety net; its hits are NOT re-counted,
-            # because the title is a substring of `text` whose redaction already counted
-            # any secret. None (tasks/table items) stays None.
+            # it rides through untouched — but the rebuild must preserve it (and key/group)
+            # or they would be lost before reaching the wire. The `key` (a title) and
+            # `group` (a heading) ARE user text, so both are redacted here too as a safety
+            # net; their hits are NOT re-counted: a `key` is a substring of `text` (already
+            # counted), and a `group` is shared across many items, so counting it per item
+            # would multiply one secret into many. None (tasks/table items) stays None.
             safe_key = redact(item.key).text if item.key is not None else None
+            safe_group = redact(item.group).text if item.group is not None else None
             items.append(
                 ChecklistItem(
                     text=safe_text,
                     done=item.done,
                     due_date=item.due_date,
                     key=safe_key,
+                    group=safe_group,
                 )
             )
     return items, hits

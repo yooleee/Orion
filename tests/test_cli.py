@@ -874,11 +874,13 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
     _url, project, checklist, _token = pushes[0]
     assert project == "apps"
     # The application item carries its status in the text and is done (Submitted); it also
-    # emits the bare title as the stable forward-store `key` (Unit 3).
+    # emits the bare title as the stable forward-store `key` (Unit 3) and the "Applications"
+    # milestone `group` (Unit 5).
     assert checklist[0] == {
         "text": "Claude Corps Fellow (job) - Submitted",
         "done": True,
         "key": "Claude Corps Fellow (job)",
+        "group": "Applications",
     }
     # The table row is an open item, with its secret scrubbed (privacy net holds here).
     assert checklist[1]["done"] is False
@@ -886,13 +888,13 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
 
 
 def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_and_mocks):
-    """A tracker deadline rides the pushed /checklist payload, surviving redaction.
+    """A tracker deadline + milestone group ride the /checklist payload through redaction.
 
-    Why this matters: this pins the Unit 1 end-to-end local path. The deadline is parsed
-    onto the item, then carried THROUGH the redaction rebuild (which reconstructs each
-    item and would otherwise drop the new field), and emitted on the wire as due_date.
-    The relay (Unit 2) derives at-risk from it; if it were lost here, nothing downstream
-    could ever surface it.
+    Why this matters: this pins the end-to-end local path for the per-item forward fields.
+    The deadline (Unit 1), stable key (Unit 3), and milestone group (Unit 5) are each parsed
+    onto the item, carried THROUGH the redaction rebuild (which reconstructs each item and
+    would otherwise drop a new field), and emitted on the wire. The relay derives at-risk and
+    milestones from them; if any were lost here, nothing downstream could surface it.
     """
     mp = env_and_mocks["monkeypatch"]
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
@@ -936,6 +938,7 @@ def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_an
         "done": False,
         "due_date": "2026-07-17",
         "key": "Claude Corps Fellow (job)",
+        "group": "Applications",
     }
 
 

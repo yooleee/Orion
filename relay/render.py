@@ -34,7 +34,14 @@ import urllib.parse
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from .derive import DUE_SOON, OVERDUE, classify_item, slipping_item_keys, today_in_tz
+from .derive import (
+    DUE_SOON,
+    OVERDUE,
+    classify_item,
+    milestones,
+    slipping_item_keys,
+    today_in_tz,
+)
 
 # The DEFAULT display zone. The dashboard pins a FIXED IANA zone (not the server's
 # local time, not the reader's) so the displayed time is the same regardless of where
@@ -173,6 +180,9 @@ li.card .meta { display: block; }
 li.card .checklist-badge { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.875rem; }
 li.card .at-risk-badge { margin: 0 0 0.4rem; color: #d64545; font-size: 0.875rem; font-weight: 600; }
 li.card .slipping-badge { margin: 0 0 0.4rem; color: #8a5cf6; font-size: 0.875rem; font-weight: 600; }
+/* "Next milestone" hint (E2 Inc 3 Unit 5): a quiet one-liner on the card pointing at the
+   soonest-due section. Muted like the other secondary meta — it orients, it doesn't alarm. */
+li.card .milestone-hint { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.875rem; }
 /* Live checklist (E2 Inc 2): current open/done items on the report page. Function-first,
    reusing the muted/accent tokens; the glyph carries state, the class adds the styling. */
 ul.checklist { list-style: none; padding: 0; margin: 0.5rem 0 0; }
@@ -191,6 +201,14 @@ ul.checklist li.overdue .due { color: #d64545; font-weight: 600; }
    distinct from the point-in-time due-date tint above. Violet so it reads as its own axis,
    not a louder overdue; the "↘" marker carries it with no stylesheet. */
 ul.checklist li .slipping { color: #8a5cf6; margin-left: 0.5rem; font-size: 0.875rem; font-weight: 600; }
+/* Derived milestones (E2 Inc 3 Unit 5): a per-group roll-up above the checklist. The group
+   name reads as the row label; the quiet meta carries progress/next-due, and the at-risk
+   clause reuses the SAME amber as the checklist so the two agree at a glance. Function-first;
+   an aesthetic pass is a later slice. */
+ul.milestones { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+ul.milestones li { display: flex; flex-wrap: wrap; gap: 0.2rem 0.5rem; align-items: baseline; padding: 0.25rem 0; }
+ul.milestones li .group { font-weight: 500; }
+ul.milestones li .at-risk { color: #c77700; font-weight: 600; }
 """.strip()
 
 # A single, static progressive-enhancement script. It rewrites each <time datetime>
@@ -384,6 +402,32 @@ def _time_tag(iso: str, tz: ZoneInfo = _DISPLAY_TZ) -> str:
     return f'<time datetime="{_esc(iso)}">{_esc(_format_ts(iso, tz))}</time>'
 
 
+def _human_date(iso: str | None) -> str:
+    """Format an ISO "YYYY-MM-DD" string as a locale-independent "Jul 4, 2026", or "".
+
+    Args:
+        iso: An ISO date-only string (the producer-normalized deadline), or None.
+
+    Returns:
+        The date as "Mon D, YYYY" using the fixed _MONTH_ABBR table, or "" when the value
+        is absent or unparseable.
+
+    Why:
+        Two forward-looking surfaces render a bare deadline as plain text — the per-item
+        due date (_due_span) and the milestone roll-ups (_render_milestones / the portfolio
+        hint) — so the one human format lives here (DRY) and never reaches for the
+        locale-dependent strftime("%b"). Failing to "" keeps a malformed value from breaking
+        a render, matching the defensive stance elsewhere in this module.
+    """
+    if not iso:
+        return ""
+    try:
+        d = date.fromisoformat(iso)
+    except (ValueError, TypeError):
+        return ""
+    return f"{_MONTH_ABBR[d.month - 1]} {d.day}, {d.year}"  # month is 1-indexed; table is 0-indexed
+
+
 def _due_span(due_date: str | None, tz: ZoneInfo, status: str | None) -> str:
     """Render a checklist item's deadline as a small <span class="due">, or "".
 
@@ -418,7 +462,7 @@ def _due_span(due_date: str | None, tz: ZoneInfo, status: str | None) -> str:
     # End-of-day in the display zone: the instant a date-only deadline lapses, so the JS
     # relative label aligns with the overdue/due-soon classification.
     eod_iso = datetime(deadline.year, deadline.month, deadline.day, 23, 59, 59, tzinfo=tz).isoformat()
-    human = f"{_MONTH_ABBR[deadline.month - 1]} {deadline.day}, {deadline.year}"  # "Jul 17, 2026"
+    human = _human_date(due_date)  # "Jul 17, 2026" — shared with the milestone surfaces (DRY)
     marker = "⚠ " if status == OVERDUE else ""
     return (
         f'<span class="due">{marker}due '
@@ -584,6 +628,18 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
         slipping_html = (
             f"<p class='slipping-badge'>↘ {_esc(slipping)} slipping</p>\n" if slipping else ""
         )
+        # "Next milestone" hint (E2 Inc 3 Unit 5): the soonest-due milestone group + its date,
+        # precomputed by latest_report_per_project. .get() so a portfolio dict without the key
+        # still renders; omitted when None (no grouped+dated milestone, or `today` not given),
+        # so a project without a structured tracker looks exactly as it did before. Both the
+        # group name (user heading text) and the date are escaped.
+        nearest = project.get("nearest_milestone")
+        milestone_html = (
+            f"<p class='milestone-hint'>Next: {_esc(nearest['group'])} "
+            f"by {_esc(_human_date(nearest['nearest_due']))}</p>\n"
+            if nearest
+            else ""
+        )
         # Last-activity time: the latest report's generated_at when there is one, else
         # the checklist's updated_at (checklist-only project). One of the two is always
         # present for a card to exist, so activity_ts is never None — _time_tag is not
@@ -596,6 +652,7 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
             f"{checklist_html}"
             f"{at_risk_html}"
             f"{slipping_html}"
+            f"{milestone_html}"
             f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
             f"last {_time_tag(activity_ts, tz)}</span>"
             "</li>"
@@ -639,18 +696,25 @@ def render_project(
         from "no reports yet", and both mean the same thing to a viewer.
     """
     heading = f"<h1>{_esc(project_name)}</h1>"
-    # Which live items are slipping, derived from the observation history against today in
-    # the display zone (E2 Inc 3 Unit 4). Empty when no history was supplied — the report
-    # page passes none, so only the project page shows slipping.
-    slipping = (
-        slipping_item_keys(observations, today_in_tz(tz)) if observations else frozenset()
-    )
-    # The live checklist sits above the history (or the empty-state); _render_checklist
-    # returns "" when the project has no checklist, which the join below drops.
-    checklist_html = _render_checklist(checklist, tz, slipping_keys=slipping)
+    # One "today" in the display zone for every forward-looking derivation on this page, so
+    # the milestones, the slipping set, and the per-item due classification all judge against
+    # the same instant (and a test pins one date).
+    today = today_in_tz(tz)
+    # Which live items are slipping, derived from the observation history (E2 Inc 3 Unit 4).
+    # Empty when no history was supplied — the report page passes none, so only the project
+    # page shows slipping.
+    slipping = slipping_item_keys(observations, today) if observations else frozenset()
+    # Derived milestones (E2 Inc 3 Unit 5): a per-group roll-up shown ABOVE the per-item
+    # checklist as a summary-first overview. "" (dropped by the join) when nothing is grouped.
+    milestones_html = _render_milestones(milestones(checklist, today))
+    # The live checklist sits below the milestones and above the history (or the empty-state);
+    # _render_checklist returns "" when the project has no checklist, which the join drops.
+    checklist_html = _render_checklist(checklist, tz, today=today, slipping_keys=slipping)
     if not reports:
         empty = "<p class='empty'>No reports for this project yet.</p>"
-        body = "\n".join(part for part in (heading, checklist_html, empty) if part)
+        body = "\n".join(
+            part for part in (heading, milestones_html, checklist_html, empty) if part
+        )
         return _page(f"Orion — {project_name}", body)
 
     items = []
@@ -671,7 +735,11 @@ def render_project(
             f"{_esc(report['share_level'])} · {_esc(heft)}</span></li>"
         )
     history_html = "<ul class='list'>\n" + "\n".join(items) + "\n</ul>"
-    body = "\n".join(part for part in (heading, checklist_html, history_html) if part)
+    body = "\n".join(
+        part
+        for part in (heading, milestones_html, checklist_html, history_html)
+        if part
+    )
     return _page(f"Orion — {project_name}", body)
 
 
@@ -754,6 +822,55 @@ def _render_checklist(
         "<section class='checklist'><h2>Current checklist "
         f"<span class='meta'>({_esc(done)}/{_esc(total)} done)</span></h2>\n"
         "<ul class='checklist'>\n" + "\n".join(rows) + "\n</ul></section>"
+    )
+
+
+def _render_milestones(milestone_rows: list[dict]) -> str:
+    """Render derived milestones as a titled "Milestones" block, or "".
+
+    Args:
+        milestone_rows: The derive.milestones() output — a list of
+            {"group", "done", "total", "at_risk", "nearest_due"} dicts, in first-seen order.
+            An empty list (a project with no grouped items) renders nothing.
+
+    Returns:
+        An HTML <section> with a "Milestones" heading and one row per group — its name plus a
+        meta line "M/N done · next due Mon D · K at risk" (the date and at-risk clauses appear
+        only when present) — or "" when there are no milestones.
+
+    Why:
+        A milestone is just a group of checklist items (the tracker tags the group; a plain
+        checkbox list tags none), so this is an at-a-glance roll-up shown ABOVE the per-item
+        checklist on the project page: progress, the nearest thing still due, and how many are
+        at risk. The at-risk count is wrapped in its own span so the same amber tint as the
+        checklist marks it, and the count carries the signal even with no stylesheet. EVERY
+        dynamic value — the group name (user heading text), the counts, the date — is routed
+        through _esc, so a "<script>" in a heading renders inert. Returns "" on an empty list
+        so the caller's join simply drops the section for a project without a structured
+        tracker (graceful — no empty heading).
+    """
+    if not milestone_rows:
+        return ""
+    rows = []
+    for m in milestone_rows:
+        # Build the meta clauses left-to-right; the date and at-risk clauses are conditional,
+        # so a milestone with neither shows just "M/N done".
+        parts = [f"{_esc(m['done'])}/{_esc(m['total'])} done"]
+        human_due = _human_date(m["nearest_due"])  # "" when the group has no open deadline
+        if human_due:
+            parts.append(f"next due {_esc(human_due)}")
+        if m["at_risk"]:
+            # Wrapped so the at-risk tint (amber, matching the checklist) applies to just the
+            # count; the number itself keeps the signal legible with no stylesheet.
+            parts.append(f"<span class='at-risk'>{_esc(m['at_risk'])} at risk</span>")
+        meta = " · ".join(parts)
+        rows.append(
+            f'<li><span class="group">{_esc(m["group"])}</span> '
+            f"<span class='meta'>{meta}</span></li>"
+        )
+    return (
+        "<section class='milestones'><h2>Milestones</h2>\n"
+        "<ul class='milestones'>\n" + "\n".join(rows) + "\n</ul></section>"
     )
 
 

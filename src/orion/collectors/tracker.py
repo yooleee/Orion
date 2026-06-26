@@ -20,6 +20,10 @@
 # Identity model: an item is identified by its TEXT (KI-6), mirroring the tasks
 #                  collector — re-ordering is safe; renaming a title makes the old
 #                  text disappear and the new one appear; duplicates dedupe.
+# Milestones: each item carries a `group` (E2 Inc 3, Unit 5) — "Applications" for the
+#                  numbered application sections, the table's nearest heading for to-do
+#                  rows — so the relay can roll items up into per-section milestones
+#                  (progress, nearest deadline, at-risk). Ungrouped items have group=None.
 # Deadlines: PARSED and carried on each item (due_date), but NOT yet surfaced here.
 #                  Reading the deadline the tracker already holds is the on-ramp to the
 #                  forward-looking layer (E2 Inc 3 / E1, Unit 1); deriving "due soon /
@@ -234,7 +238,16 @@ def _application_items(text: str) -> list[ChecklistItem]:
         # status, so it changes when the application advances (Not started -> Submitted),
         # but the title does not. Carrying key=title lets the relay track the SAME item's
         # deadline/done over time across that change (E2 Inc 3, Unit 3).
-        items.append(ChecklistItem(text=text_, done=done, due_date=deadline, key=title))
+        #
+        # Every numbered section is an application, so they all share ONE milestone,
+        # "Applications" (E2 Inc 3, Unit 5) — a single "N/M applications, next due ..."
+        # roll-up reads better than four groups of one. The label is fixed (not the H1)
+        # to keep it clean; revisit only if the tracker is reused for a non-apps doc.
+        items.append(
+            ChecklistItem(
+                text=text_, done=done, due_date=deadline, key=title, group="Applications"
+            )
+        )
     return items
 
 
@@ -271,7 +284,15 @@ def _table_items(text: str) -> list[ChecklistItem]:
                     if deadline_column is not None
                     else None
                 )
-                items.append(ChecklistItem(text=cell, done=False, due_date=deadline))
+                # The table's nearest heading is the row's milestone (E2 Inc 3, Unit 5):
+                # the "# Non-Application To-Do" table and each "### Task N" breakdown table
+                # become their own milestones. None when the table sits under no heading,
+                # which leaves those rows ungrouped (no milestone) rather than guessing.
+                items.append(
+                    ChecklistItem(
+                        text=cell, done=False, due_date=deadline, group=table.heading
+                    )
+                )
     return items
 
 

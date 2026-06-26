@@ -13,16 +13,17 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-26 (E2 **Inc 3 rung 1** nearly complete — the forward-looking layer. Units 0
+_Last synced: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE** — the forward-looking layer. Units 0
 (strategy invariant), 1 (local parse/carry of `due_date`), 2 (relay derive + surface due-date/at-risk;
-deployed), 3 (the `relay_observed_items` memory store + a stable `item_key`; deployed) and 4 (slippage
-derivation + surface, relay-side) have shipped; **only Unit 5 (derived milestones) remains**. The
-coupling played out as mapped: Unit 2 was a clean relay-only slice once Unit 1 put `due_date` on the
-wire; Unit 4 was relay-only too (it reads the history Unit 3 stored); Unit 3 was the one **vertical
-slice** (local `ChecklistItem.key` → wire → relay store), because the memory store needs a
-status-independent identity only the producer can supply. Unit 5 will likewise be a vertical slice
-(`ChecklistItem.group` → wire → relay milestone roll-up). The per-unit coupling map (Unit 1 upstream;
-Units 2∥3 independent; 4→3; 5→1+2) lives in [`docs/e2-inc3-kickoff.md`](e2-inc3-kickoff.md). Earlier:
+deployed), 3 (the `relay_observed_items` memory store + a stable `item_key`; deployed), 4 (slippage
+derivation + surface, relay-side) and **5 (derived milestones)** have all shipped (Unit 5 PR pending →
+final rung-1 deploy). The coupling played out as mapped: Unit 2 was a clean relay-only slice once Unit 1
+put `due_date` on the wire; Unit 4 was relay-only too (it reads the history Unit 3 stored); Units 3 and
+5 were the two **vertical slices** (local field → wire → relay consumer), because each needs a field
+only the producer can supply — Unit 3 a status-independent identity (`key`), Unit 5 the section grouping
+(`group`, via a new `Table.heading` on the Markdown parser). Each slice stayed serial top-to-bottom (no
+fan-out): every layer consumes the previous. The per-unit coupling map (Unit 1 upstream; Units 2∥3
+independent; 4→3; 5→1+2) lives in [`docs/e2-inc3-kickoff.md`](e2-inc3-kickoff.md). Earlier:
 dashboard CSP/headers hardening, **E2 Inc 1 — portfolio overview**, **Inc 2 — live checklist signal**
 [PR #47], **Inc 2.5** [PR #49], the **CSRF fix** [PR #48] — all shipped + deployed.) Excludes Horizon
 P, decision-gated launch work._

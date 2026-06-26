@@ -22,6 +22,23 @@ six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
 
 ### Added
 
+- **Derived milestones** (Unit 5, the LAST rung-1 unit, vertical slice — deploy after merge). Rolls
+  the live checklist up into per-**section** milestones and surfaces them. The grouping is OBSERVED
+  from the tracker's own structure, carried on a new additive `ChecklistItem.group`: the numbered
+  application sections all share one **"Applications"** milestone, and each to-do **table** is grouped
+  by its **nearest preceding heading** (a small additive `Table.heading` was added to the Markdown
+  parser to enable this) — so "Non-Application To-Do" and each "Task N" breakdown become their own
+  milestones; a plain checkbox list tags no group and yields none. A pure `relay.derive.milestones()`
+  turns the grouped items into `{group, done, total, at_risk, nearest_due}` rows (progress, the soonest
+  **open** deadline, and an at-risk roll-up reusing `count_at_risk` so the milestone and the per-item
+  treatment never disagree). Surfaced as a **"Milestones"** section ABOVE the checklist on the project
+  page, plus a **"Next: <group> by <date>"** hint on each portfolio card (the soonest-due milestone,
+  precomputed by `latest_report_per_project`, today-gated). `group` is redacted on the structured lane
+  like `key`. Verified eyes-on against the live tracker: "Applications — 0/4 done · next due Jun 12,
+  2026 · 2 at risk", "Non-Application To-Do — 0/8 done", and the card's next-milestone hint, with the
+  two at-risk reconciling against the per-item overdue/due-soon dates below. At-risk roll-up only —
+  a milestone **slipping** count is deferred (the seam is there; slipping stays per-item for now).
+
 - **Slippage surfaced on the dashboard** (Unit 4, relay-side — deploy after merge). The first
   consumer of the observation history: a pure `relay.derive.is_slipping()` / `slipping_item_keys()`
   flags an **open** item as *slipping* when its history shows either (a) its **deadline moved later**

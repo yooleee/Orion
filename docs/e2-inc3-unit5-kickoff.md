@@ -13,6 +13,14 @@ Role in project: Read this at the START of the next session, THEN build (one
 
 # Kickoff: E2 Inc 3 — Unit 5 (derived milestones), the last rung-1 unit
 
+> **Status (2026-06-26): SHIPPED.** Built as designed below in one vertical slice — `Table.heading`
+> + `ChecklistItem.group` (apps → "Applications", table rows → nearest heading), `relay.derive.milestones()`,
+> a "Milestones" section above the project-page checklist, and a "Next: <group> by <date>" portfolio
+> hint. Both open decisions resolved to their leans (milestones **above** the checklist; a **single**
+> next-milestone line). At-risk roll-up only (milestone slipping count deferred). Verified eyes-on
+> against the live tracker. This doc is kept as the grounding record; the backward record is the
+> CHANGELOG (E2 Inc 3 → Unit 5) and the plan's E1/Inc 3 rows. **Rung 1 is complete.**
+
 ## Where we are (context)
 
 Rung 1 of the forward-looking layer is **nearly complete**. Units 0-4 have shipped and the

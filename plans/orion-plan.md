@@ -148,7 +148,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
-| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; shares the "needs Orion's own forward state" threshold with the deferred scheduling layer (B5 / KI-13), but kept a **separate track** | 🛠️ **Building — E2 Inc 3 rung 1** (observe + remember, never originate; gate settled 2026-06-26) — the forward-state ladder |
+| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; shares the "needs Orion's own forward state" threshold with the deferred scheduling layer (B5 / KI-13), but kept a **separate track** | 🛠️ **E2 Inc 3 rung 1 COMPLETE** (Units 0–5 shipped: due-dates/at-risk/observed-store/slippage/milestones; observe + remember, never originate; gate settled 2026-06-26). Unit 5 PR pending → final rung-1 deploy |
 | E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time checklist push, PR #49), and Inc 2.6 (status-aware `tracker` collector + `tasks_file` bootstrapping, PR #50) all SHIPPED 2026-06-25/26.** Inc 2.6's first real workload — the `applications` tracker — is wired and pushed live (admin-visible; family viewer grants on hold). Validated by the founding family-visibility intent + personal use. A post-2.6 **consolidation slice** then SHIPPED 2026-06-25 (PRs #52–#54): dashboard home shows checklist-only projects, `add-project` tracker/incubator/`--seed-tasks-from` completeness, and KI-8 state cleanup. Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
@@ -252,11 +252,16 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   observations recorded on every push; **KI-21** documents the identity model; deployed 2026-06-26) and
   Unit 4 (slippage from the observation history — `is_slipping`/`slipping_item_keys`: deadline moved
   later, or lingering open past due; a per-item "↘ slipping" marker + an "N slipping" portfolio badge;
-  deployed 2026-06-26) have shipped — the forward layer now *remembers and flags slippage*. **Only
-  Unit 5 remains** in rung 1: derived milestones (group items → per-group progress / nearest deadline
-  / at-risk roll-up), which needs `ChecklistItem.group`. Design grounded + settled (group mapping:
-  apps → "Applications", table rows → nearest heading via a new `Table.heading`) in the **Unit 5
-  kickoff: [`docs/e2-inc3-unit5-kickoff.md`](../docs/e2-inc3-unit5-kickoff.md)** — build next session.
+  deployed 2026-06-26) and **Unit 5 (derived milestones — the LAST rung-1 unit)** have shipped. Unit 5
+  groups the checklist by the tracker's own structure (a new additive `ChecklistItem.group`: apps →
+  "Applications", table rows → the table's nearest heading via a new `Table.heading` on the Markdown
+  parser), and a pure `relay.derive.milestones()` rolls each group up into `{group, done, total,
+  at_risk, nearest_due}` — surfaced as a **"Milestones"** section above the project-page checklist and
+  a **"Next: <group> by <date>"** hint on each portfolio card. At-risk roll-up only (a milestone
+  slipping count is deferred — the seam is there). Verified eyes-on against the live tracker
+  ("Applications — 0/4 done · next due Jun 12, 2026 · 2 at risk"). Grounding: **[`docs/e2-inc3-unit5-kickoff.md`](../docs/e2-inc3-unit5-kickoff.md)**.
+  **Rung 1 is now complete** (PR pending → final rung-1 deploy): the forward layer observes deadlines,
+  remembers them over time, flags at-risk and slipping, and rolls up milestones — all observe-not-originate.
   Adjacent deferred rung recorded: a **disciplines & directions** signal + dashboard section.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via

@@ -263,18 +263,22 @@ Deferred).
   Consequences, inherited from the same title/text identity model as KI-6: (a) **renaming** an item's
   title makes the old key's history stop and a brand-new key begin (the prior observations are
   orphaned, not migrated); (b) **two items with the same title** (e.g. in different tracker sections)
-  collapse to one `item_key` and their observations interleave; (c) `group` is not yet part of the key,
-  so cross-section disambiguation waits for Unit 5.
+  collapse to one `item_key` and their observations interleave; (c) `group` (added in Unit 5 for
+  milestone roll-up) is **deliberately not part of the key** — identity stayed status-/group-independent
+  so a milestone re-grouping never orphans an item's history. So two same-titled rows in different
+  sections still share one key (the limitation above), and group+title disambiguation remains the
+  available, un-taken seam rather than a shipped change.
 - **Why it matters:** Slippage and history (Units 4+) read this key to track one item across pushes.
   The title-based key is the simplest identity that meets the rung's needs and is correct for the
   common case (a stable title that advances through statuses). The edge cases are minor for the
   current single-tracker workload, and surfacing them keeps the behavior intentional. The seam stays
-  additive: once `group` lands (Unit 5), the key can become group+title without a migration (the store
-  is an append-only **projection**, rebuildable from the pushes). Complements **KI-6** (the tasks
-  collector's text identity) — same model, applied forward.
+  additive: `group` now rides each item (Unit 5), so the key *could* become group+title without a
+  migration (the store is an append-only **projection**, rebuildable from the pushes) — but that is held
+  as a seam, not built, since folding group into the key would orphan history on a re-grouping for no
+  current benefit. Complements **KI-6** (the tasks collector's text identity) — same model, applied forward.
 - **Severity:** low
 - **Status:** By-design (documented limitation; revisit if a rename/duplicate-title case bites in real
-  use, or when `group` disambiguation lands in Unit 5).
+  use — group+title keying is the available seam if so).
 
 ## Resolved
 

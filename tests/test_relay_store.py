@@ -362,6 +362,50 @@ def test_latest_report_per_project_counts_at_risk_when_today_given(tmp_path):
     assert row["checklist_at_risk"] == 2
 
 
+def test_latest_report_per_project_nearest_milestone_when_today_given(tmp_path):
+    """The portfolio row carries the soonest-due milestone group as a {group, nearest_due} hint.
+
+    Why this matters: the home's "next milestone" line needs one precomputed group + date.
+    Across two milestones, the one with the earliest OPEN deadline wins — here "Applications"
+    (Jun 28) beats "Chores" (Aug 01) — and a done item's earlier date does not pull it in.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(
+        conn,
+        "demo",
+        [
+            {"text": "App A", "done": True, "due_date": "2026-06-10", "group": "Applications"},
+            {"text": "App B", "done": False, "due_date": "2026-06-28", "group": "Applications"},
+            {"text": "Chore", "done": False, "due_date": "2026-08-01", "group": "Chores"},
+        ],
+        "2026-06-26T00:00:00+00:00",
+    )
+
+    row = {r["project"]: r for r in latest_report_per_project(conn, today=date(2026, 6, 26))}["demo"]
+
+    assert row["nearest_milestone"] == {"group": "Applications", "nearest_due": "2026-06-28"}
+
+
+def test_latest_report_per_project_nearest_milestone_none_without_today(tmp_path):
+    """Without a reference date (or no grouped+dated item), the hint is None.
+
+    Why this matters: `today` gates the derivation like the other forward fields, and a
+    checklist with no milestone (ungrouped) or no open deadline yields None so the card
+    simply omits the line.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(
+        conn, "demo", _items(("Open", False)), "2026-06-26T00:00:00+00:00"
+    )
+
+    no_today = {r["project"]: r for r in latest_report_per_project(conn)}["demo"]
+    assert no_today["nearest_milestone"] is None
+
+    # Even WITH today, an ungrouped checklist has no milestone → still None.
+    with_today = {r["project"]: r for r in latest_report_per_project(conn, today=date(2026, 6, 26))}["demo"]
+    assert with_today["nearest_milestone"] is None
+
+
 def test_latest_report_per_project_at_risk_is_none_without_today(tmp_path):
     """Without a reference date, at-risk derivation is skipped → checklist_at_risk is None.
 

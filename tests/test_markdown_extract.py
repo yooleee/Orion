@@ -119,3 +119,40 @@ def test_parse_tables_short_row_leaves_trailing_columns_absent():
     text = "| A | B | C |\n|---|---|---|\n| only-a | only-b |\n"
     rows = parse_tables(text)[0].rows
     assert rows == [{"A": "only-a", "B": "only-b"}]  # C absent, not blank
+
+
+def test_parse_tables_attributes_each_table_to_its_nearest_heading():
+    """Each table carries the nearest heading that precedes it (any level).
+
+    Why this matters: Unit 5 groups table rows into milestones by the section they
+    live under, so a table beneath "# Non-Application To-Do" and a later one beneath
+    "### Task 2" must each report their OWN heading — not the document's first one.
+    """
+    text = (
+        "# Non-Application To-Do\n"
+        "\n"
+        "| Task | Deadline |\n"
+        "|------|----------|\n"
+        "| Do the thing | Sun, Jun 14 |\n"
+        "\n"
+        "### Task 2 — Format repo\n"
+        "\n"
+        "| Sub-goal | Deadline |\n"
+        "|----------|----------|\n"
+        "| Sub one | Mon, Jun 15 |\n"
+    )
+    tables = parse_tables(text)
+    assert [t.heading for t in tables] == [
+        "Non-Application To-Do",
+        "Task 2 — Format repo",
+    ]
+
+
+def test_parse_tables_table_before_any_heading_has_none_heading():
+    """A table with no heading above it carries heading=None, not a crash.
+
+    Why this matters: the heading is optional context — a document that opens with a
+    table (no section above it) must still parse, leaving the milestone label empty.
+    """
+    text = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    assert parse_tables(text)[0].heading is None

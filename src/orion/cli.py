@@ -71,7 +71,12 @@ from orion.delivery.slack import send as slack_send
 from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
-from orion.report import ReportBlob, build_report, serialize_blob
+from orion.report import (
+    ReportBlob,
+    build_report,
+    serialize_blob,
+    serialize_checklist_item,
+)
 from orion.scaffold import parse_recipient_spec, render_project_stanza, slugify_project_name
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
@@ -1296,12 +1301,17 @@ def _redacted_checklist(project: ProjectConfig) -> tuple[list[ChecklistItem], in
         # empty AFTER redaction (the whole label was a secret), to avoid a blank row.
         safe_text = scrub.text.strip()
         if safe_text:
-            items.append(ChecklistItem(text=safe_text, done=item.done))
+            # Carry due_date through untouched: it is already a normalized ISO date (or
+            # None), never raw user text, so it needs no redaction — but the rebuild must
+            # preserve it or the deadline would be lost before it reaches the wire.
+            items.append(
+                ChecklistItem(text=safe_text, done=item.done, due_date=item.due_date)
+            )
     return items, hits
 
 
 def _checklist_payload(project: ProjectConfig) -> list[dict]:
-    """The project's redacted checklist as the wire payload (list of {text, done}).
+    """The project's redacted checklist as the wire payload (list of {text, done[, due_date]}).
 
     Why:
         The relay push and the watch loop both need the checklist in the exact JSON
@@ -1310,7 +1320,7 @@ def _checklist_payload(project: ProjectConfig) -> list[dict]:
         it can compare across ticks to detect changes.
     """
     items, _hits = _redacted_checklist(project)
-    return [{"text": item.text, "done": item.done} for item in items]
+    return [serialize_checklist_item(item) for item in items]
 
 
 def _watch_tick(

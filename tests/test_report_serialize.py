@@ -162,6 +162,60 @@ def test_serialize_blob_round_trips_checklist():
     assert rebuilt_checklist == original.checklist
 
 
+def test_serialize_blob_emits_due_date_when_item_has_one():
+    """A checklist item with a deadline serializes its due_date alongside text/done.
+
+    Why this matters: the forward-looking deadline (E2 Inc 3) must cross the seam so the
+    relay can later derive overdue/at-risk. We pin that the ISO date rides each item.
+    """
+    checklist = (
+        ChecklistItem(text="Apply", done=False, due_date="2026-07-17"),
+        ChecklistItem(text="No deadline", done=False),
+    )
+    parsed = json.loads(serialize_blob(_blob(checklist=checklist)))
+
+    assert parsed["checklist"] == [
+        {"text": "Apply", "done": False, "due_date": "2026-07-17"},
+        # The item without a deadline keeps EXACTLY the old {text, done} shape.
+        {"text": "No deadline", "done": False},
+    ]
+
+
+def test_serialize_blob_omits_due_date_when_none():
+    """An item with due_date None omits the key entirely (back-compat with old receivers).
+
+    Why this matters: due_date is optional per item, mirroring the top-level checklist
+    key. None ⇒ absent (not null), so a receiver predating the field sees the exact old
+    object and nothing downstream has to special-case a null date.
+    """
+    parsed = json.loads(serialize_blob(_blob(checklist=(ChecklistItem(text="x", done=True),))))
+
+    assert parsed["checklist"] == [{"text": "x", "done": True}]
+    assert "due_date" not in parsed["checklist"][0]
+
+
+def test_serialize_blob_round_trips_checklist_with_due_date():
+    """A checklist carrying due_dates survives serialize → parse → rebuild losslessly.
+
+    Why this matters: the deadline must be reconstructable on the far side of the seam,
+    just like text and done — otherwise the relay can't trust the field it stores.
+    """
+    original = _blob(
+        checklist=(
+            ChecklistItem(text="Dated", done=False, due_date="2026-06-30"),
+            ChecklistItem(text="Undated", done=True),
+        )
+    )
+
+    parsed = json.loads(serialize_blob(original))
+    rebuilt = tuple(
+        ChecklistItem(text=item["text"], done=item["done"], due_date=item.get("due_date"))
+        for item in parsed["checklist"]
+    )
+
+    assert rebuilt == original.checklist
+
+
 def test_serialize_blob_is_deterministic():
     """The same blob always serializes to the same string.
 

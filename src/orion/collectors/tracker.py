@@ -20,9 +20,13 @@
 # Identity model: an item is identified by its TEXT (KI-6), mirroring the tasks
 #                  collector — re-ordering is safe; renaming a title makes the old
 #                  text disappear and the new one appear; duplicates dedupe.
-# Deadlines: deliberately NOT parsed in v1. The tracker carries real deadlines, but
-#                  surfacing "due soon / overdue / at-risk" is the forward-looking
-#                  layer (E2 Inc 3 / E1); v1 is status-only.
+# Deadlines: PARSED and carried on each item (due_date), but NOT yet surfaced here.
+#                  Reading the deadline the tracker already holds is the on-ramp to the
+#                  forward-looking layer (E2 Inc 3 / E1, Unit 1); deriving "due soon /
+#                  overdue / at-risk" and rendering it come later in that ladder. Only
+#                  EXPLICIT-YEAR dates are accepted (ISO, or "Month D, YYYY" with
+#                  trailing context tolerated); a year-less form like "Sun, Jun 14"
+#                  parses to None on purpose — see _parse_deadline for why.
 # Assumptions: a UTF-8 Markdown file. Structure is parsed by collectors/_markdown.py
 #                  (sections + pipe tables); anything that does not match is ignored.
 # =============================================================================
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 from orion.collectors import LANE_STRUCTURED, CollectorResult
@@ -76,6 +81,26 @@ _STATUS_SEP = " - "
 # Non-Application table keys its task on "Task"; sub-goal breakdown tables use
 # "Sub-goal". Any table lacking both is not a to-do table and is skipped.
 _TASK_COLUMNS = ("task", "sub-goal")
+
+# Table columns (case-insensitive) whose cell carries a row's deadline. The tracker's
+# tables label it "Deadline"; "Due"/"Target" are accepted aliases so other docs slot in.
+_DEADLINE_COLUMNS = ("deadline", "due", "target")
+
+# Month name -> number, full names plus 3-letter abbreviations, lower-cased. Built
+# explicitly rather than relying on strptime's %B/%b so deadline parsing never depends
+# on the process LOCALE (a cross-platform requirement); the tracker is written in English.
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_MONTHS.update({name[:3]: num for name, num in list(_MONTHS.items())})
+
+# A LEADING ISO date, e.g. "2026-06-30" (anything after the day is ignored).
+_ISO_DATE_RE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})\b")
+# A LEADING "Month D, YYYY" date, full or abbreviated month, with an EXPLICIT 4-digit
+# year, e.g. "July 17, 2026" or "June 12, 2026, 23:59 AoE …" (trailing context ignored).
+# The year-less table form "Sun, Jun 14" has no 4-digit year here and so will not match.
+_MONTH_DATE_RE = re.compile(r"^\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\b")
 
 
 def collect(tracker_file: Path, prior_marker: str | None) -> CollectorResult:
@@ -191,6 +216,11 @@ def _application_items(text: str) -> list[ChecklistItem]:
         title = numbered.group(1).strip()
         if not title:
             continue
+        # A "- **Deadline:**" (or "- **Due:**") field, normalized to ISO or None. Read
+        # independently of status, so even an open application carries its due date.
+        deadline = _parse_deadline(
+            section.fields.get("deadline") or section.fields.get("due")
+        )
         status = _canonical_status(section.fields.get("status", ""))
         if status is not None:
             text_ = f"{title}{_STATUS_SEP}{status}"
@@ -200,7 +230,7 @@ def _application_items(text: str) -> list[ChecklistItem]:
             # just its title so we never echo unrecognized free text onto the dashboard.
             text_ = title
             done = False
-        items.append(ChecklistItem(text=text_, done=done))
+        items.append(ChecklistItem(text=text_, done=done, due_date=deadline))
     return items
 
 
@@ -225,10 +255,19 @@ def _table_items(text: str) -> list[ChecklistItem]:
         column = _task_column(table.headers)
         if column is None:
             continue
+        # Resolve the deadline column once per table (None when the table has none);
+        # the live tables use a year-less "Deadline" form, which parses to None — the
+        # seam is wired so a future table with explicit-year dates carries them.
+        deadline_column = _deadline_column(table.headers)
         for row in table.rows:
             cell = row.get(column, "").strip()
             if cell:
-                items.append(ChecklistItem(text=cell, done=False))
+                deadline = (
+                    _parse_deadline(row.get(deadline_column, ""))
+                    if deadline_column is not None
+                    else None
+                )
+                items.append(ChecklistItem(text=cell, done=False, due_date=deadline))
     return items
 
 
@@ -253,6 +292,77 @@ def _canonical_status(value: str) -> str | None:
     for status in _KNOWN_STATUSES:
         if low.startswith(status.lower()):
             return status
+    return None
+
+
+def _parse_deadline(value: str | None) -> str | None:
+    """Normalize a raw deadline string to an ISO "YYYY-MM-DD" date, or None.
+
+    Args:
+        value: The raw text of a "- **Deadline:**"/"- **Due:**" field or a
+            Deadline/Due/Target table cell (e.g. "July 17, 2026", "2026-06-30",
+            "June 12, 2026, 23:59 AoE (UTC-12) — about 4:59 AM PT"), or None when absent.
+
+    Returns:
+        The date as an ISO "YYYY-MM-DD" string when `value` STARTS with a date we accept
+        — ISO, or "Month D, YYYY" (full or abbreviated month, EXPLICIT 4-digit year) with
+        any trailing time/timezone context ignored. None for an absent, empty,
+        unrecognized, year-less, or calendar-invalid value.
+
+    Why:
+        This is the forward-looking layer's on-ramp (E2 Inc 3): the deadlines the tracker
+        already carries, finally read instead of discarded. We accept only EXPLICIT-YEAR
+        dates on purpose — inferring a missing year is ambiguous, and for a tracker that
+        holds genuinely-past deadlines it would mislabel them as upcoming, so a year-less
+        value is left unparsed rather than guessed (a documented, additive-to-revisit
+        limitation). Parsing NEVER raises: an unreadable deadline yields None so a typo
+        can never break the checklist. Mirrors _canonical_status's "match the leading
+        token, tolerate trailing context" shape. A normalized return also means due_date
+        is always sanitized digits-and-hyphens, never raw user free text on the wire.
+    """
+    if not value:
+        return None
+    text = value.strip()
+
+    iso = _ISO_DATE_RE.match(text)
+    if iso is not None:
+        year, month, day = (int(group) for group in iso.groups())
+    else:
+        named = _MONTH_DATE_RE.match(text)
+        if named is None:
+            return None
+        month = _MONTHS.get(named.group(1).lower())
+        if month is None:
+            return None  # a leading word in date position that is not a month name
+        day, year = int(named.group(2)), int(named.group(3))
+
+    # date() validates the calendar (rejects e.g. Feb 30 or month 13). An impossible
+    # date is treated as unparseable, not an error — "never fail the parse" holds.
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _deadline_column(headers: list[str]) -> str | None:
+    """Return the header (verbatim) whose column carries a row's deadline, if any.
+
+    Args:
+        headers: A table's header cells.
+
+    Returns:
+        The actual header string matching "Deadline"/"Due"/"Target" (case-insensitive),
+        or None when the table has no deadline column.
+
+    Why:
+        Symmetric to _task_column: rows are keyed by their real header text, so we return
+        the matching header verbatim to index each row dict, comparing case-insensitively.
+        Returning None (rather than raising) lets a to-do table without a deadline column
+        simply carry no due dates — deadlines are optional context, not required.
+    """
+    for header in headers:
+        if header.strip().lower() in _DEADLINE_COLUMNS:
+            return header
     return None
 
 

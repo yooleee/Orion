@@ -252,9 +252,11 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   observations recorded on every push; **KI-21** documents the identity model; deployed 2026-06-26) and
   Unit 4 (slippage from the observation history — `is_slipping`/`slipping_item_keys`: deadline moved
   later, or lingering open past due; a per-item "↘ slipping" marker + an "N slipping" portfolio badge;
-  deploy after merge) have shipped — the forward layer now *remembers and flags slippage*. **Only Unit
-  5 remains** in rung 1: derived milestones (group items → per-group progress / nearest deadline /
-  at-risk roll-up), which needs `ChecklistItem.group` (the Unit-1-style field deferred to here).
+  deployed 2026-06-26) have shipped — the forward layer now *remembers and flags slippage*. **Only
+  Unit 5 remains** in rung 1: derived milestones (group items → per-group progress / nearest deadline
+  / at-risk roll-up), which needs `ChecklistItem.group`. Design grounded + settled (group mapping:
+  apps → "Applications", table rows → nearest heading via a new `Table.heading`) in the **Unit 5
+  kickoff: [`docs/e2-inc3-unit5-kickoff.md`](../docs/e2-inc3-unit5-kickoff.md)** — build next session.
   Adjacent deferred rung recorded: a **disciplines & directions** signal + dashboard section.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via

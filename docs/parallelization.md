@@ -75,6 +75,9 @@ decision-gated launch work._
 - **Tier 2 — parallel *within* a phase (intra-phase fan-out):** module + its unit tests by one agent
   while another drafts docs (the cli/config wiring is the serial tail); multi-file sweeps by file;
   read-only fan-out (exploration, multi-dimension review, adversarial verification) is always safe.
+  (E2 Inc 2.6 illustrates the *serial-seam* limit: its tracker collector [Unit A] and the `add-project`
+  tasks_file bootstrap [Unit B] both depend on the shared `collectors/_markdown.py`, so A1 had to land
+  first — the shared parser is a serial point, with the per-unit tests the parallelizable tail.)
 - **Tier 3 — NOT parallelizable:** anything gated on C3 (E4, E5, author identity); C2d before the bots;
   E1 split from B5; multiple local features rewriting the `cli.py`/`config.py` spine at once.
 

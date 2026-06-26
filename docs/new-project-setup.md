@@ -47,7 +47,7 @@ cp orion.toml.example orion.toml
 [projects.myapp]
 repo_path = "/absolute/path/to/your/repo"
 share_level = "high_level"           # safest: commit messages + diffstat, NO code diff
-collectors = ["git"]                 # add "tasks"/"notes"/"incubator" later if you want
+collectors = ["git"]                 # add "tasks"/"notes"/"incubator"/"tracker" later if you want
 
   [[projects.myapp.recipients]]
   name = "Alex (supervisor)"

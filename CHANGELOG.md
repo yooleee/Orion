@@ -20,6 +20,22 @@ The forward-looking layer (E1): due-dates, at-risk, slippage, and derived milest
 **observe-and-remember, never originate** model. Shipped unit by unit (each its own PR); see the
 six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
 
+### Added
+
+- **Tracker deadlines are parsed and carried** (Unit 1, local-only — no deploy). The `tracker`
+  collector now reads the deadline each item already holds — a `- **Deadline:**` / `- **Due:**`
+  field, or a `Deadline` / `Due` / `Target` table column — via a new `_parse_deadline` helper, and
+  carries it on `ChecklistItem.due_date` (additive; defaults `None`, so the tasks collector and every
+  existing call site are untouched). It rides the wire on **both** serialization paths (the report
+  blob and the `/checklist` push) as an optional per-item `due_date`, single-sourced through a new
+  `report.serialize_checklist_item` and carried through the redaction rebuild. Only **explicit-year**
+  formats are accepted — ISO `YYYY-MM-DD`, or `Month D, YYYY` (full/abbreviated month) with trailing
+  time/timezone context tolerated. A **year-less** form like `Sun, Jun 14` parses to `None` on
+  purpose: inferring the year would mislabel a genuinely-past deadline as upcoming. Parsing never
+  raises (a typo yields `None`). Nothing is surfaced yet — deriving overdue/at-risk and rendering it
+  is Unit 2. Verified against the real applications tracker (three application deadlines parsed; a
+  multi-line `Deadlines:` block and the year-less table rows correctly yield `None`).
+
 ### Changed
 
 - **Strategy invariant clarified — observe vs originate** (Unit 0, docs-only, 2026-06-26). The

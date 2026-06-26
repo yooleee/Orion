@@ -251,3 +251,36 @@ def test_snapshot_does_not_disturb_collect_delta(tmp_path):
         ChecklistItem(text="Done thing", done=True),
         ChecklistItem(text="Open thing", done=False),
     )
+
+
+# --- ChecklistItem.due_date: the additive field (E2 Inc 3, Unit 1) -------------------
+
+
+def test_checklist_item_due_date_defaults_to_none():
+    """A two-arg ChecklistItem still constructs, with due_date defaulting to None.
+
+    Why this matters: due_date was added additively. Every existing construction site
+    (and every existing test) passes only text+done, so the default must keep that valid
+    and the wire shape unchanged when no deadline is present.
+    """
+    assert ChecklistItem(text="x", done=False).due_date is None
+
+
+def test_checklist_item_carries_due_date_when_given():
+    """When provided, due_date is carried verbatim on the item.
+
+    Why this matters: the tracker collector sets due_date to a normalized ISO date; the
+    record must hold it so it can ride the wire to the dashboard.
+    """
+    item = ChecklistItem(text="x", done=True, due_date="2026-07-17")
+    assert item.due_date == "2026-07-17"
+
+
+def test_tasks_snapshot_leaves_due_date_none(tmp_path):
+    """The tasks collector (checkbox lists) never sets a deadline — due_date stays None.
+
+    Why this matters: GitHub-style "[ ]/[x]" lists carry no deadline syntax, so the tasks
+    collector must leave due_date None; deadlines come only from the tracker collector.
+    """
+    live = snapshot(_write_tasks(tmp_path, "- [ ] Open thing\n"))
+    assert all(item.due_date is None for item in live)

@@ -38,17 +38,24 @@ class ChecklistItem:
     Args:
         text: The item's text (the part after the "[ ]"/"[x]" box), stripped.
         done: True when the box is checked ("[x]"/"[X]"), False when open ("[ ]").
+        due_date: The item's deadline as an ISO "YYYY-MM-DD" string, or None when it has
+            no (parseable) deadline. Set by the tracker collector (E2 Inc 3); the tasks
+            collector leaves it None — GitHub-style checkbox lists carry no deadline.
 
     Why:
         snapshot() reports the FULL current checklist (open + done), unlike collect()
         which reports only newly-completed items as prose. A tiny named record (rather
         than a bare (text, bool) tuple) makes the done-state explicit at every use site
-        and leaves a clean seam for a later additive field (e.g. a section/heading
-        group) without churning positional unpacking everywhere.
+        and leaves a clean seam for additive fields without churning positional unpacking
+        everywhere — due_date is the first such addition (the forward-looking deadline;
+        a milestone `group` may follow in a later rung). It defaults to None so every
+        existing two-arg construction stays valid and the wire shape is unchanged when
+        no deadline is present.
     """
 
     text: str
     done: bool
+    due_date: str | None = None
 
 
 class TasksError(Exception):

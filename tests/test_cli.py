@@ -880,6 +880,59 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[1]["text"]
 
 
+def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_and_mocks):
+    """A tracker deadline rides the pushed /checklist payload, surviving redaction.
+
+    Why this matters: this pins the Unit 1 end-to-end local path. The deadline is parsed
+    onto the item, then carried THROUGH the redaction rebuild (which reconstructs each
+    item and would otherwise drop the new field), and emitted on the wire as due_date.
+    The relay (Unit 2) derives at-risk from it; if it were lost here, nothing downstream
+    could ever surface it.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "to_do.md").write_text(
+        "## 1. Claude Corps Fellow (job)\n"
+        "- **Status:** In progress\n"
+        "- **Deadline:** July 17, 2026\n",
+        encoding="utf-8",
+    )
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.apps]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tracker"]
+        tracker_file = "to_do.md"
+        checklist = true
+
+          [[projects.apps.recipients]]
+          name = "Placeholder"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    code = cli.main(["checklist-push", "apps", "--config", str(toml)])
+    assert code == 0
+
+    _url, _project, checklist, _token = pushes[0]
+    assert checklist[0] == {
+        "text": "Claude Corps Fellow (job) - In progress",
+        "done": False,
+        "due_date": "2026-07-17",
+    }
+
+
 def test_checklist_push_requires_checklist_enabled(tmp_path, env_and_mocks):
     """`checklist-push` on a project without `checklist = true` errors, pushes nothing.
 

@@ -16,7 +16,7 @@ import pytest
 
 from orion.collectors import LANE_STRUCTURED
 from orion.collectors.tasks import ChecklistItem
-from orion.collectors.tracker import TrackerError, collect, snapshot
+from orion.collectors.tracker import TrackerError, _parse_deadline, collect, snapshot
 
 # A fixture mirroring the real applications tracker's shape: numbered application
 # sections each with a "- **Status:**" field (one carrying trailing free-text), a
@@ -235,3 +235,122 @@ def test_collect_missing_file_raises_tracker_error(tmp_path):
     """
     with pytest.raises(TrackerError, match="not found"):
         collect(tmp_path / "nope.md", prior_marker=None)
+
+
+# --- _parse_deadline(): the format truth-table (E2 Inc 3, Unit 1) --------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # ISO is the primary, documented format.
+        ("2026-06-30", "2026-06-30"),
+        # Full month name + explicit year — the dominant form in the live tracker.
+        ("July 17, 2026", "2026-07-17"),
+        # Abbreviated month + explicit year is accepted too.
+        ("Jul 1, 2026", "2026-07-01"),
+        # Trailing time/timezone context after the date is tolerated and dropped,
+        # mirroring _canonical_status — the live file writes deadlines this way.
+        ("June 12, 2026, 23:59 AoE (UTC-12) — about 4:59 AM PT", "2026-06-12"),
+        # YEAR-LESS forms (the "Sun, Jun 14" table convention) are deliberately NOT
+        # parsed: inferring the year would mislabel genuinely-past deadlines.
+        ("Sun, Jun 14", None),
+        ("Jun 14", None),
+        # Free text that is not a date never raises — it simply yields None.
+        ("sometime next week", None),
+        ("TBD", None),
+        # A syntactically date-shaped but calendar-impossible value is unparseable.
+        ("February 30, 2026", None),
+        ("2026-13-01", None),
+        # A leading word in date position that is not a month name → None.
+        ("Someday 14, 2026", None),
+        # Absent / empty input.
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_deadline_format_truth_table(raw, expected):
+    """_parse_deadline accepts explicit-year dates (ISO / "Month D, YYYY"), else None.
+
+    Why this matters: this single table pins the entire accepted-format contract — what
+    is normalized to ISO, what is tolerated as trailing context, and (critically) what is
+    deliberately rejected (year-less and unparseable values), all WITHOUT raising. Getting
+    this wrong would either crash a push on a typo or surface a wrong due date.
+    """
+    assert _parse_deadline(raw) == expected
+
+
+# --- snapshot(): deadlines carried on items (E2 Inc 3, Unit 1) -----------------------
+
+
+def test_snapshot_carries_application_deadline_field(tmp_path):
+    """An application's "- **Deadline:**" field is parsed onto the item's due_date.
+
+    Why this matters: the rich application sections are where the meaningful deadlines
+    live; reading the field the tracker already holds is the whole point of Unit 1.
+    """
+    text = "## 1. Fellowship (job)\n- **Status:** In progress\n- **Deadline:** July 17, 2026\n"
+    items = snapshot(_write_tracker(tmp_path, text))
+    assert items == (
+        ChecklistItem(text="Fellowship (job) - In progress", done=False, due_date="2026-07-17"),
+    )
+
+
+def test_snapshot_accepts_due_field_alias(tmp_path):
+    """A "- **Due:**" field is an accepted alias for "- **Deadline:**".
+
+    Why this matters: docs vary in their field label; "Due" is common, so we read it too.
+    """
+    text = "## 1. App (job)\n- **Status:** Not started\n- **Due:** 2026-06-30\n"
+    items = snapshot(_write_tracker(tmp_path, text))
+    assert items[0].due_date == "2026-06-30"
+
+
+def test_snapshot_application_without_deadline_has_none(tmp_path):
+    """An application with no deadline field carries due_date None (unchanged shape).
+
+    Why this matters: the no-deadline path must be untouched — the field is optional, and
+    its absence is the common case for most checklist items.
+    """
+    text = "## 1. App (job)\n- **Status:** Submitted\n"
+    items = snapshot(_write_tracker(tmp_path, text))
+    assert items == (ChecklistItem(text="App (job) - Submitted", done=True, due_date=None),)
+
+
+def test_snapshot_year_less_table_deadline_is_ignored(tmp_path):
+    """The live table's year-less "Sun, Jun 14" deadlines parse to None, not a guess.
+
+    Why this matters: the main fixture's Deadline column is year-less; those rows must
+    surface as open items with NO due date rather than a mis-inferred one.
+    """
+    items = snapshot(_write_tracker(tmp_path))  # the default _TRACKER fixture
+    table_item = next(i for i in items if i.text == "Review GitHub repo")
+    assert table_item.due_date is None
+
+
+def test_snapshot_parses_explicit_year_table_deadline_column(tmp_path):
+    """A table whose Deadline column carries explicit-year dates sets each row's due_date.
+
+    Why this matters: the deadline-column seam is wired (via _deadline_column); a table
+    that DOES write full dates should carry them, even though today's live tables don't.
+    """
+    text = (
+        "| # | Task | Deadline |\n"
+        "|---|------|----------|\n"
+        "| 1 | Ship the thing | 2026-07-01 |\n"
+    )
+    items = snapshot(_write_tracker(tmp_path, text))
+    assert items == (ChecklistItem(text="Ship the thing", done=False, due_date="2026-07-01"),)
+
+
+def test_snapshot_garbage_application_deadline_never_breaks_parse(tmp_path):
+    """An unparseable deadline yields due_date None without aborting the snapshot.
+
+    Why this matters: "never fail the parse" — a typo'd or freeform deadline must leave the
+    item present (with its status) and simply carry no date, not raise.
+    """
+    text = "## 1. App (job)\n- **Status:** In progress\n- **Deadline:** sometime soon\n"
+    items = snapshot(_write_tracker(tmp_path, text))
+    assert items == (
+        ChecklistItem(text="App (job) - In progress", done=False, due_date=None),
+    )

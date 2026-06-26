@@ -159,11 +159,34 @@ def serialize_blob(blob: ReportBlob) -> str:
     # omit the key entirely (a producer without the feature), so a receiver that
     # predates the field is unaffected; an empty list ⇒ "enabled but no items", a
     # real state the relay uses to clear a stale live checklist. Each item is a named
-    # {text, done} object (not a positional pair) so the done-state reads explicitly.
+    # object (see serialize_checklist_item) so the done-state reads explicitly.
     if blob.checklist is not None:
-        payload["checklist"] = [
-            {"text": item.text, "done": item.done} for item in blob.checklist
-        ]
+        payload["checklist"] = [serialize_checklist_item(item) for item in blob.checklist]
     # sort_keys → byte-stable output for a given blob; the seam needs a predictable
     # wire format more than it needs human-friendly field order.
     return json.dumps(payload, sort_keys=True)
+
+
+def serialize_checklist_item(item: ChecklistItem) -> dict:
+    """Serialize one checklist item to its portable wire dict.
+
+    Args:
+        item: The ChecklistItem to serialize.
+
+    Returns:
+        A dict carrying "text" and "done" always, plus "due_date" ONLY when the item has
+        one (None → key omitted).
+
+    Why:
+        Two wire paths emit a checklist — the report blob (serialize_blob) and the
+        dedicated /checklist push (cli._checklist_payload) — so the per-item shape is
+        defined ONCE here to keep them in lockstep. The optional due_date follows the
+        same None-omitted rule as the top-level `checklist` key: an item without a
+        deadline serializes to exactly the old {text, done}, so a receiver predating
+        due_date is unaffected. Single-sourcing also makes the next additive field
+        (e.g. a milestone `group`) a one-line change in one place.
+    """
+    payload: dict = {"text": item.text, "done": item.done}
+    if item.due_date is not None:
+        payload["due_date"] = item.due_date
+    return payload

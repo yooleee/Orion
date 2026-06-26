@@ -34,7 +34,7 @@ import urllib.parse
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from .derive import DUE_SOON, OVERDUE, classify_item, today_in_tz
+from .derive import DUE_SOON, OVERDUE, classify_item, slipping_item_keys, today_in_tz
 
 # The DEFAULT display zone. The dashboard pins a FIXED IANA zone (not the server's
 # local time, not the reader's) so the displayed time is the same regardless of where
@@ -172,6 +172,7 @@ li.card .headline { margin: 0 0 0.4rem; }
 li.card .meta { display: block; }
 li.card .checklist-badge { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.875rem; }
 li.card .at-risk-badge { margin: 0 0 0.4rem; color: #d64545; font-size: 0.875rem; font-weight: 600; }
+li.card .slipping-badge { margin: 0 0 0.4rem; color: #8a5cf6; font-size: 0.875rem; font-weight: 600; }
 /* Live checklist (E2 Inc 2): current open/done items on the report page. Function-first,
    reusing the muted/accent tokens; the glyph carries state, the class adds the styling. */
 ul.checklist { list-style: none; padding: 0; margin: 0.5rem 0 0; }
@@ -186,6 +187,10 @@ ul.checklist li.done .task { text-decoration: line-through; color: var(--muted);
 ul.checklist li .due { color: var(--muted); margin-left: 0.5rem; font-size: 0.875rem; }
 ul.checklist li.at-risk .due { color: #c77700; }
 ul.checklist li.overdue .due { color: #d64545; font-weight: 600; }
+/* Slipping (E2 Inc 3 Unit 4): a HISTORY signal (deadline moved later / lingering past due),
+   distinct from the point-in-time due-date tint above. Violet so it reads as its own axis,
+   not a louder overdue; the "↘" marker carries it with no stylesheet. */
+ul.checklist li .slipping { color: #8a5cf6; margin-left: 0.5rem; font-size: 0.875rem; font-weight: 600; }
 """.strip()
 
 # A single, static progressive-enhancement script. It rewrites each <time datetime>
@@ -572,6 +577,13 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
         at_risk_html = (
             f"<p class='at-risk-badge'>{_esc(at_risk)} at risk</p>\n" if at_risk else ""
         )
+        # Slipping badge (E2 Inc 3 Unit 4): the count of items slipping per the observation
+        # history (deadline moved later / lingering past-due), precomputed by
+        # latest_report_per_project. Omitted when zero or None (not computed), like at-risk.
+        slipping = project.get("checklist_slipping")
+        slipping_html = (
+            f"<p class='slipping-badge'>↘ {_esc(slipping)} slipping</p>\n" if slipping else ""
+        )
         # Last-activity time: the latest report's generated_at when there is one, else
         # the checklist's updated_at (checklist-only project). One of the two is always
         # present for a card to exist, so activity_ts is never None — _time_tag is not
@@ -583,6 +595,7 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
             f"{headline_html}"
             f"{checklist_html}"
             f"{at_risk_html}"
+            f"{slipping_html}"
             f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
             f"last {_time_tag(activity_ts, tz)}</span>"
             "</li>"
@@ -596,6 +609,7 @@ def render_project(
     reports: list[dict],
     tz: ZoneInfo = _DISPLAY_TZ,
     checklist: list[dict] | None = None,
+    observations: list[dict] | None = None,
 ) -> str:
     """Render one project's report history, newest first.
 
@@ -607,6 +621,10 @@ def render_project(
         checklist: The project's live checklist (get_checklist() output) or None. When
             present and non-empty, a "Current checklist" block is rendered ABOVE the
             history. Defaulted/last so existing callers are unaffected.
+        observations: The project's observation history (observed_history() output) or None.
+            Used to compute which live items are SLIPPING (E2 Inc 3 Unit 4) so the checklist
+            can mark them. Defaulted so a caller that does not pass it shows no slipping
+            treatment — the project page is the one surface that does.
 
     Returns:
         A complete HTML page.
@@ -621,9 +639,15 @@ def render_project(
         from "no reports yet", and both mean the same thing to a viewer.
     """
     heading = f"<h1>{_esc(project_name)}</h1>"
+    # Which live items are slipping, derived from the observation history against today in
+    # the display zone (E2 Inc 3 Unit 4). Empty when no history was supplied — the report
+    # page passes none, so only the project page shows slipping.
+    slipping = (
+        slipping_item_keys(observations, today_in_tz(tz)) if observations else frozenset()
+    )
     # The live checklist sits above the history (or the empty-state); _render_checklist
     # returns "" when the project has no checklist, which the join below drops.
-    checklist_html = _render_checklist(checklist, tz)
+    checklist_html = _render_checklist(checklist, tz, slipping_keys=slipping)
     if not reports:
         empty = "<p class='empty'>No reports for this project yet.</p>"
         body = "\n".join(part for part in (heading, checklist_html, empty) if part)
@@ -652,32 +676,42 @@ def render_project(
 
 
 def _render_checklist(
-    checklist: list[dict] | None, tz: ZoneInfo = _DISPLAY_TZ, today: date | None = None
+    checklist: list[dict] | None,
+    tz: ZoneInfo = _DISPLAY_TZ,
+    today: date | None = None,
+    slipping_keys: frozenset = frozenset(),
 ) -> str:
     """Render the project's live checklist (open + done) as a titled block, or ''.
 
     Args:
-        checklist: The get_checklist() result — a list of {"text", "done"[, "due_date"]}
-            dicts in file order — or None when the project has no live checklist. An empty
-            list also renders nothing (an enabled-but-empty checklist is not worth a block).
+        checklist: The get_checklist() result — a list of {"text", "done"[, "due_date"]
+            [, "key"]} dicts in file order — or None when the project has no live checklist.
+            An empty list also renders nothing (an enabled-but-empty checklist is not worth
+            a block).
         tz: The display zone for rendering deadlines and anchoring overdue/due-soon.
             Defaults to the module's Pacific constant.
         today: The reference date for the overdue/due-soon classification. Defaults to
             today in `tz`; injected by tests to pin a deterministic result.
+        slipping_keys: The set of item_keys flagged as SLIPPING by the observation history
+            (E2 Inc 3 Unit 4). An item whose identity (`key`, else `text`) is in this set
+            gets a "↘ slipping" indicator. Empty by default, so a caller without observation
+            history (or the report page) shows no slipping treatment.
 
     Returns:
         An HTML <section> with a "Current checklist (X/Y done)" heading and a list of
         items (done items struck through; an open item with a deadline shows its due date,
-        with an overdue/at-risk class when applicable), or "" when there is nothing to show.
+        with an overdue/at-risk class when applicable, and a "↘ slipping" marker when its
+        history is slipping), or "" when there is nothing to show.
 
     Why:
         This is the dashboard's "live checklist" view — current state, not a delta. The
         done/open state is carried BOTH as a CSS class (for styling) AND as a leading
         glyph in the markup, so the state is legible even if the stylesheet is blocked
-        (function before looks, accessibility). The forward-looking deadline (E2 Inc 3)
-        extends that same pattern: an OPEN, dated item gains an overdue/at-risk class and a
-        trailing due date. EVERY item text is escaped — checklist items are arbitrary user
-        text — so a "<script>" in a task name renders inert.
+        (function before looks, accessibility). The forward-looking signals (E2 Inc 3)
+        extend that same pattern: an OPEN, dated item gains an overdue/at-risk class and a
+        trailing due date (point-in-time), and a "slipping" marker when its OBSERVED HISTORY
+        shows a deadline that moved later or has lingered past due. EVERY item text is
+        escaped — checklist items are arbitrary user text — so a "<script>" renders inert.
     """
     if not checklist:
         return ""
@@ -698,13 +732,23 @@ def _render_checklist(
         # Forward-looking (E2 Inc 3): an OPEN, dated item gets a second class (overdue /
         # at-risk) and a trailing due date; a done or undated item is unchanged.
         status = classify_item(item, today)
-        li_class = cls if status is None else f"{cls} {_STATUS_CLASS[status]}"
+        classes = [cls]
+        if status is not None:
+            classes.append(_STATUS_CLASS[status])
+        # Slipping (Unit 4) is a HISTORY signal, separate from the point-in-time at-risk:
+        # the item's identity (key, else text — matching how observations are stored) is in
+        # the precomputed slipping set. Open items only (a done item never slips).
+        is_slipping = (not is_done) and (item.get("key") or item["text"]) in slipping_keys
+        if is_slipping:
+            classes.append("slipping")
         # Show the deadline only for OPEN items — a finished item's due date is moot, and
         # classify_item already declines to flag a done item, so this just hides the noise.
         due_html = "" if is_done else _due_span(item.get("due_date"), tz, status)
+        # The "↘" marker keeps "slipping" legible with no stylesheet (function before looks).
+        slip_html = '<span class="slipping">↘ slipping</span>' if is_slipping else ""
         rows.append(
-            f'<li class="{li_class}"><span class="box">{box}</span>'
-            f'<span class="task">{_esc(item["text"])}</span>{due_html}</li>'
+            f'<li class="{" ".join(classes)}"><span class="box">{box}</span>'
+            f'<span class="task">{_esc(item["text"])}</span>{due_html}{slip_html}</li>'
         )
     return (
         "<section class='checklist'><h2>Current checklist "

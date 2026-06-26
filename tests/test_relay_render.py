@@ -979,3 +979,72 @@ def test_render_portfolio_omits_at_risk_badge_when_zero_or_none():
     # phrase inside the page's CSS comment, which ships on every page).
     assert "<p class='at-risk-badge'>" not in none_html
     assert "<p class='at-risk-badge'>" not in zero_html
+
+
+# --- slipping (E2 Inc 3 Unit 4) ------------------------------------------------------
+
+
+def test_render_checklist_marks_a_slipping_open_item():
+    """An open item whose key is in slipping_keys gets the ↘ slipping marker; others don't.
+
+    Why this matters: the per-item slipping treatment is membership in the precomputed set,
+    matched on the item's identity (key, else text). An item not in the set is untouched.
+    """
+    slipping = {"text": "App - In progress", "done": False, "key": "App"}
+    other = {"text": "Other - In progress", "done": False, "key": "Other"}
+    html = _render_checklist(
+        [slipping, other], today=_FIXED_TODAY, slipping_keys=frozenset({"App"})
+    )
+    assert "↘ slipping" in html
+    assert 'class="open slipping"' in html  # the slipping item's li
+    # Exactly one item is marked (the other is plain "open" with no slipping span).
+    assert html.count("↘ slipping") == 1
+
+
+def test_render_checklist_done_item_is_never_marked_slipping():
+    """A done item is never marked slipping, even if its key is in the set.
+
+    Why this matters: slipping is an OPEN-work signal; a finished item's bumpy history is
+    moot. The render gates on not-done, matching is_slipping's own done short-circuit.
+    """
+    item = {"text": "App", "done": True, "key": "App"}
+    html = _render_checklist([item], today=_FIXED_TODAY, slipping_keys=frozenset({"App"}))
+    assert "slipping" not in html  # _render_checklist emits no CSS, so this is the marker only
+
+
+def test_render_project_marks_slipping_from_observations():
+    """render_project derives the slipping set from observations and marks the live item.
+
+    Why this matters: end-to-end of the project-page surface — a postponed deadline in the
+    observation history (2026-07-01 → 2026-07-15) makes the live item slip. Postponement is
+    today-independent, so this is deterministic without injecting a date.
+    """
+    checklist = [{"text": "App - In progress", "done": False, "key": "App"}]
+    observations = [
+        {"item_key": "App", "due_date": "2026-07-01", "done": False, "observed_at": "2026-06-20T00:00:00+00:00"},
+        {"item_key": "App", "due_date": "2026-07-15", "done": False, "observed_at": "2026-06-25T00:00:00+00:00"},
+    ]
+    html = render_project("demo", [], checklist=checklist, observations=observations)
+    assert "↘ slipping" in html
+
+
+def test_render_portfolio_shows_slipping_badge():
+    """A card whose project has slipping items renders an "N slipping" badge.
+
+    Why this matters: the portfolio surfaces slippage at a glance; the count is precomputed
+    by the store. The "↘" marker keeps it legible without the stylesheet.
+    """
+    html = render_portfolio([_pcard(checklist_slipping=3)])
+    assert "3 slipping" in html
+
+
+def test_render_portfolio_omits_slipping_badge_when_zero_or_none():
+    """No slipping badge when the count is 0 or None (not computed / nothing slipping).
+
+    Why this matters: a healthy project shows no badge; assert the ELEMENT is absent (a loose
+    "slipping" substring would also match the page's CSS comment).
+    """
+    none_html = render_portfolio([_pcard(checklist_slipping=None)])
+    zero_html = render_portfolio([_pcard(checklist_slipping=0)])
+    assert "<p class='slipping-badge'>" not in none_html
+    assert "<p class='slipping-badge'>" not in zero_html

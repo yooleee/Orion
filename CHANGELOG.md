@@ -22,6 +22,19 @@ six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
 
 ### Added
 
+- **Slippage surfaced on the dashboard** (Unit 4, relay-side — deploy after merge). The first
+  consumer of the observation history: a pure `relay.derive.is_slipping()` / `slipping_item_keys()`
+  flags an **open** item as *slipping* when its history shows either (a) its **deadline moved later**
+  (postponed — the signal the rung's eyes-on exercises) or (b) it has **lingered open past due**
+  across ≥2 observations. Both arms require history, so slipping is deliberately distinct from Unit 2's
+  point-in-time at-risk (a brand-new overdue item is at-risk, not yet slipping; a done item never
+  slips). Surfaced as a per-item **"↘ slipping"** marker (violet — its own axis, not a louder overdue)
+  on the **project page** checklist, and an **"N slipping"** badge on the portfolio card (count from
+  the observation history, gated on today in the display zone). The report page keeps Unit 2's
+  treatment — slipping is a project-page signal. Verified eyes-on against the live tracker: a postponed
+  application deadline and a lingering-overdue course both show "↘ slipping", while a steady
+  due-in-4-days item shows at-risk but *not* slipping.
+
 - **Observed-state memory store** (Unit 3, vertical slice — deploy after merge). The "remember" half
   of the forward-looking layer: a new **append-only** `relay_observed_items(project, item_key,
   due_date, done, observed_at)` table records one observation per checklist item on **every** push

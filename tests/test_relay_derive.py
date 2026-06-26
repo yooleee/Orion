@@ -16,7 +16,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from relay.derive import DUE_SOON_DAYS, classify_item, count_at_risk, today_in_tz
+from relay.derive import (
+    DUE_SOON_DAYS,
+    classify_item,
+    count_at_risk,
+    is_slipping,
+    slipping_item_keys,
+    today_in_tz,
+)
 
 # Pacific, the relay's default display zone — the same zone the dashboard renders in.
 _LA = ZoneInfo("America/Los_Angeles")
@@ -130,3 +137,88 @@ def test_count_at_risk_handles_none_and_empty():
     """
     assert count_at_risk(None, _TODAY) == 0
     assert count_at_risk([], _TODAY) == 0
+
+
+# --- is_slipping() / slipping_item_keys(): the history signal (E2 Inc 3 Unit 4) ------
+
+
+def _o(due_date=None, done=False, at="2026-06-20T00:00:00+00:00", item_key="A"):
+    """Build one observation row (observed_history's shape)."""
+    return {"item_key": item_key, "due_date": due_date, "done": done, "observed_at": at}
+
+
+def test_is_slipping_when_deadline_moved_later():
+    """An open item whose deadline was postponed across observations is slipping.
+
+    Why this matters: this is the primary, history-only signal — and exactly what the rung's
+    eyes-on exercises ("push again with a moved deadline"). The later observation's due_date
+    is after the earlier one, with the item still open.
+    """
+    obs = [_o("2026-07-01"), _o("2026-07-10")]
+    assert is_slipping(obs, _TODAY) is True
+
+
+def test_is_slipping_when_lingering_open_past_due():
+    """An open item observed across ≥2 pushes and still past its deadline is slipping.
+
+    Why this matters: the second arm — an item that has SAT open past its date across pushes,
+    not one that only just became overdue (which is Unit 2's at-risk). Requires history (≥2
+    observations), so a brand-new overdue item is not yet "slipping".
+    """
+    obs = [_o("2026-06-10"), _o("2026-06-10")]  # overdue at both, still open
+    assert is_slipping(obs, _TODAY) is True
+
+
+def test_not_slipping_when_deadline_stable_and_in_future():
+    """A steady future deadline is not slipping, however many times it is observed.
+
+    Why this matters: slipping must not fire on a healthy item — only a moved or lapsed
+    deadline counts, so a stable upcoming date stays quiet.
+    """
+    obs = [_o("2026-07-10"), _o("2026-07-10")]
+    assert is_slipping(obs, _TODAY) is False
+
+
+def test_not_slipping_when_done_even_if_deadline_moved():
+    """A DONE item never slips, even if its deadline had moved later along the way.
+
+    Why this matters: the work landed; a bumpy path to completion is history, not a current
+    risk. The latest observation being done short-circuits the signal.
+    """
+    obs = [_o("2026-07-01"), _o("2026-07-10", done=True)]
+    assert is_slipping(obs, _TODAY) is False
+
+
+def test_not_slipping_with_a_single_observation():
+    """One observation carries no history, so nothing can be slipping yet.
+
+    Why this matters: both arms require a prior observation — slipping means "going wrong
+    over time". A just-created overdue item (one push) is at-risk (Unit 2), not slipping.
+    """
+    assert is_slipping([_o("2026-06-10")], _TODAY) is False  # overdue, but no history
+
+
+def test_not_slipping_with_no_deadlines_or_empty():
+    """No parseable deadlines (or no observations) → not slipping, never an error.
+
+    Why this matters: an item that never carried a deadline has no slip signal, and an empty
+    history must degrade cleanly to False rather than raising mid-render.
+    """
+    assert is_slipping([_o(None), _o(None)], _TODAY) is False
+    assert is_slipping([], _TODAY) is False
+
+
+def test_slipping_item_keys_groups_history_by_key():
+    """slipping_item_keys folds a project's interleaved log per item_key, returns the slippers.
+
+    Why this matters: the project's observed_history interleaves all items' rows. This groups
+    them and runs is_slipping per key, so both the per-item marker and the portfolio count
+    read ONE answer. Here A is postponed (slipping), B is a steady future date (not).
+    """
+    observations = [
+        _o("2026-07-01", item_key="A"),
+        _o("2026-07-10", item_key="B"),
+        _o("2026-07-09", item_key="A"),  # A's deadline moved later → slipping
+        _o("2026-07-10", item_key="B"),  # B steady, future → not
+    ]
+    assert slipping_item_keys(observations, _TODAY) == {"A"}

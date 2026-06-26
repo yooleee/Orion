@@ -67,6 +67,7 @@ from .store import (
     ingest,
     latest_report_per_project,
     list_users,
+    observed_history,
     open_relay_store,
     projects_for_user,
     record_admin_audit,
@@ -584,6 +585,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         history(conn, name),
                         self.server.display_tz,
                         checklist=get_checklist(conn, name),
+                        # The observation history drives the per-item "slipping" marker
+                        # (E2 Inc 3 Unit 4); the project page is the surface that shows it.
+                        observations=observed_history(conn, name),
                     ),
                 )
                 return

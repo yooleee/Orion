@@ -122,3 +122,76 @@ def count_at_risk(items: list[dict] | None, today: date, due_soon_days: int = DU
         can never disagree about what "at risk" means.
     """
     return sum(1 for item in (items or []) if classify_item(item, today, due_soon_days) is not None)
+
+
+def is_slipping(observations: list[dict], today: date) -> bool:
+    """Decide whether one item is SLIPPING from its observation history.
+
+    Args:
+        observations: One item_key's observation rows (observed_history's shape:
+            {"due_date", "done", "observed_at"} dicts), OLDEST first.
+        today: The reference date (display zone).
+
+    Returns:
+        True when the item is open (its latest observation is not done) AND either
+        (a) its deadline moved LATER over time (postponed: the latest non-null due_date is
+        after the earliest), or (b) it is "lingering past-due" — observed across at least
+        two pushes and currently overdue (latest due_date before today). False otherwise,
+        including a done item, a single-observation item, or one with no deadline history.
+
+    Why:
+        This is the signal Unit 3's history exists to support, and it is deliberately
+        DISTINCT from Unit 2's at-risk: both arms require HISTORY (a prior observation),
+        so slipping means "this has been going wrong over time," not just "it is due soon
+        right now." A DONE item never slips (the work landed, however bumpy the path). The
+        postponement arm is exactly what the rung's eyes-on exercises ("push again with a
+        moved deadline"); the lingering arm catches an item that has sat open past its date
+        across pushes rather than one that only just became overdue. Re-parse defensively so
+        a malformed stored date degrades to "no signal" instead of raising mid-render.
+    """
+    if not observations:
+        return False
+    latest = observations[-1]
+    if latest.get("done"):
+        return False
+    dues = []
+    for obs in observations:
+        raw = obs.get("due_date")
+        if not raw:
+            continue
+        try:
+            dues.append(date.fromisoformat(raw))
+        except (ValueError, TypeError):
+            continue  # a malformed stored date carries no usable signal
+    # (a) Postponed: the deadline moved later across the item's life.
+    if len(dues) >= 2 and dues[-1] > dues[0]:
+        return True
+    # (b) Lingering past-due: seen across >1 push and still open past its (latest) deadline.
+    if len(observations) >= 2 and dues and dues[-1] < today:
+        return True
+    return False
+
+
+def slipping_item_keys(observations: list[dict], today: date) -> set[str]:
+    """Return the set of item_keys that are slipping, from a project's FULL history.
+
+    Args:
+        observations: A project's observed_history (all items' rows interleaved, oldest
+            first), each carrying an "item_key".
+        today: The reference date (display zone).
+
+    Returns:
+        The set of item_keys whose per-item history is_slipping() flags.
+
+    Why:
+        Both surfaces need the same answer, so this is the single place that groups a
+        project's interleaved observation log by item_key and runs is_slipping over each
+        group. The per-item render checks membership; the portfolio badge counts the set —
+        so the indicator and the count can never disagree. Grouping preserves the oldest-
+        first order (observed_history already sorts), which is what the postponement check
+        relies on.
+    """
+    by_key: dict[str, list[dict]] = {}
+    for obs in observations:
+        by_key.setdefault(obs["item_key"], []).append(obs)
+    return {key for key, history in by_key.items() if is_slipping(history, today)}

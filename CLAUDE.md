@@ -48,9 +48,15 @@ architecture, phasing, and the decisions already settled.
 > **Privacy & safety** rules in the next section are the exception: those are permanent and
 > non-negotiable, regardless of how the architecture evolves.
 
-- **Open-source friendly, simple to set up.** This will be public. Favor the standard
-  library, keep dependencies minimal and justified, and keep install to one clear path with
-  good defaults. Apply the test: *could a new user clone this and run it in ten minutes?*
+- **Straightforward to set up; minimize complexity.** (Reframed 2026-06-26.) The earlier goal
+  was "stdlib-minimal, clone-and-run-in-ten-minutes." As the project grows (the E2 Inc 4 dashboard
+  rebuild adds a React/Vite frontend + build step), that hard gate **relaxes** to a softer aim:
+  setup and use should be **easy and straightforward across usability levels** (single developer to
+  multi-party). Still favor the standard library where it fits, justify every dependency, and keep
+  install to a clear path with good defaults — "minimize complexity" stays a live discipline — but a
+  richer stack is allowed when the task warrants it. **Open-source is now secondary** to the
+  developer's own goals (it remains a possible later direction, not the current priority). The
+  privacy/safety rules below and observe-not-originate are untouched by this reframe.
 - **Cross-platform (Windows, macOS, Linux).** Orion must run on all three. Make **every**
   change with cross-compatibility in mind — not one OS at a time. The core is mostly portable
   already (stdlib, `pathlib`); keep it that way: no OS-specific path/shell assumptions, prefer
@@ -105,8 +111,10 @@ architecture, phasing, and the decisions already settled.
 - Python; `subprocess` + `git` for git access; stdlib `sqlite3` for the state store;
   Anthropic Python SDK for the summarizer; incoming webhooks via stdlib `urllib.request` for
   delivery; a **TOML** config (stdlib `tomllib`) for the project registry; `.env` +
-  `python-dotenv` for secrets. Prefer these before adding any new dependency, and justify any
-  addition against the open-source-simplicity constraint.
+  `python-dotenv` for secrets. Prefer these before adding any new **backend** dependency, and
+  justify any addition against the "minimize complexity" discipline above. (The E2 Inc 4 dashboard
+  rebuild introduces a separate **frontend** stack — React/Vite — which is its own justified choice;
+  the lean-backend baseline here still governs the Python relay/CLI.)
 - **Phase 1 decisions settled (2026-06-14):** config format is **TOML** (zero-dep, read-only
   is fine since Orion never writes it); delivery uses stdlib **`urllib.request`** (one JSON
   POST needs no `requests`); the git payload to the LLM is a **hybrid** (commit messages +

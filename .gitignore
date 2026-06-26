@@ -27,3 +27,7 @@ dist/
 
 # OS noise — macOS Finder metadata, never useful in the repo.
 .DS_Store
+
+# Design handoff archive: the zip is redundant with the unpacked design/ files
+# (README + screenshots + .dc.html), which ARE committed as the visual spec.
+design/*.zip

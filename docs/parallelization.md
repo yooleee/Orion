@@ -13,11 +13,14 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE** — the forward-looking layer. Units 0
+_Last synced: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **next = Inc 4, the
+sectioned dashboard rebuild** — see the new coupling fact #3 and the Inc 4 map below, plus the kickoff
+[`docs/e2-inc4-dashboard-rebuild-kickoff.md`](e2-inc4-dashboard-rebuild-kickoff.md). The forward-looking
+layer. Units 0
 (strategy invariant), 1 (local parse/carry of `due_date`), 2 (relay derive + surface due-date/at-risk;
 deployed), 3 (the `relay_observed_items` memory store + a stable `item_key`; deployed), 4 (slippage
-derivation + surface, relay-side) and **5 (derived milestones)** have all shipped (Unit 5 PR pending →
-final rung-1 deploy). The coupling played out as mapped: Unit 2 was a clean relay-only slice once Unit 1
+derivation + surface, relay-side) and **5 (derived milestones)** have all shipped + deployed. The
+coupling played out as mapped: Unit 2 was a clean relay-only slice once Unit 1
 put `due_date` on the wire; Unit 4 was relay-only too (it reads the history Unit 3 stored); Units 3 and
 5 were the two **vertical slices** (local field → wire → relay consumer), because each needs a field
 only the producer can supply — Unit 3 a status-independent identity (`key`), Unit 5 the section grouping
@@ -63,6 +66,13 @@ P, decision-gated launch work._
 2. **The contention spine: `cli.py` + `config.py`.** Almost every *local* feature adds lines here, so
    two agents editing them collide even in separate worktrees. Local features that each touch the spine
    must be serialized, or an orchestrator owns the spine while workers produce isolated modules.
+3. **New for Inc 4: the SPA ⟂ relay-JSON-API seam.** The dashboard rebuild splits the hosted half into a
+   **React/Vite frontend** (new top-level `frontend/`) and the **relay as a read-only JSON API**. The
+   **JSON API contract is the seam**: define it first, and frontend screens and backend serializers fan
+   out in parallel against the agreed shapes — a second clean ⟂ split alongside fact #1. The frontend is
+   serial only at its start (shell + theming + routing before screens), then screen-parallel. The two new
+   backend bands (Disciplines collector, Connections derivation) and the Scheduling aggregation are
+   mutually file-disjoint; only their *sections* depend on the shell existing.
 
 ## Dependency graph (cannot parallelize across these edges)
 
@@ -74,6 +84,12 @@ P, decision-gated launch work._
   (checklist signal) is NOT** — it is a vertical slice spanning local `collectors/` → blob → `relay/`
   store+render, so it serializes against the `report.serialize_blob` contract and the relay schema; build
   it as one coordinated slice, not a relay-only change. **E2 Inc 3 ≡ E1 ≡ B5** (Tier 3, forward-state).
+- **E2 Inc 4 (sectioned dashboard rebuild): API contract → then frontend ∥ backend.** The JSON API
+  contract gates everything; once fixed, the SPA and the backend (JSON serializers + new derivations) run
+  in parallel. Within it: **4a** data-ready sections need only re-serialization (low coupling); **4b**
+  Disciplines and **4c** Connections each need a new backend band before their section — gate the section
+  on the derivation, not on each other. **E4-developer-view = Inc 4c** is unblocked (data is already
+  project-keyed); **E4-multi-party stays C3-gated.**
 
 ## Three tiers of parallelizability
 

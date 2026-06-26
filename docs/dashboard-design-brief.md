@@ -14,6 +14,12 @@ Role in project: Input for frontend/visual ideation (e.g. in a design tool).
 
 # Orion Dashboard Design Brief
 
+> **Update (2026-06-26):** the visual design this brief fed has been produced and committed under
+> [`design/`](../design/) (a Claude-design handoff: README + screenshots + 3 themes + `.dc.html`
+> prototypes). The redesign is now **E2 Inc 4** — see
+> [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](e2-inc4-dashboard-rebuild-kickoff.md). This brief
+> remains the *content/IA* source; `design/` is the *visual/behavioral* spec to build against.
+
 ## Purpose of this document
 
 This brief gathers, in one place, what the Orion dashboard is expected to contain and support

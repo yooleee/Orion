@@ -111,13 +111,25 @@ Content-Security-Policy + standard security headers on every dashboard response 
 change), resolving **KI-19**.
 
 
-**Framing.** Orion is **personal infrastructure + a portfolio piece, with eventual open-source** as
-the real aspiration (a product direction is *not foreclosed*, but is not the goal now). Horizon **D**
-is complete (D1–D5 shipped); the current near-term work is Horizon **E**'s **dashboard-visibility
-track**, now **building incrementally** (E2 Inc 1 shipped 2026-06-25). The rest of Horizon **E**
-(chat/E3, read-write/E5) stays a recorded direction with the seams kept clean — **not built**; the
-**forward-state planning layer (E1)** has since moved to **building incrementally as E2 Inc 3**
-(observe + remember, never originate — gate settled 2026-06-26). Forward bands stay coarse:
+**Framing.** Orion is **personal infrastructure + a portfolio piece** (open-source is now *secondary*
+to the developer's own goals — see the simplicity reframe below). Horizon **D** is complete (D1–D5
+shipped); the current near-term work is Horizon **E**'s **dashboard-visibility track**. E2 Inc 1–3
+have **shipped and deployed** (portfolio overview → live checklist → near-real-time push → status-aware
+tracker → the forward-looking layer ≡ E1, all observe + remember, never originate). The **active next
+work is E2 Inc 4 — the sectioned dashboard rebuild**: recreating the ingested Claude-design (`design/`)
+as a **React/Vite single-page app, single-host on the relay** (the relay becomes a read-only JSON API;
+the server-rendered HTML retires at parity). The rest of Horizon **E** (chat/E3, read-write/E5) stays a
+recorded direction with the seams kept clean — **not built**.
+
+**Two stage-appropriate framings shifted with Inc 4 (2026-06-26):** (1) **Stack** — the dashboard moves
+from a stdlib server-rendered surface to a richer client (React/Vite SPA), single-host on the existing
+Fly relay (two-host Cloudflare-Pages-plus-Fly was judged not worth the coordination cost; a
+Cloudflare-everything consolidation is a possible *future* migration, not now). (2) **Simplicity goal
+reframed** — from "stdlib-minimal / clone-and-run-in-ten-minutes" to **"easy and straightforward to set
+up across usability levels"** (single dev to multi-party). OSS is secondary to the developer's goals for
+now, the hard stdlib/10-min gate relaxes, and "minimize complexity" stays a live discipline. The
+**privacy/safety invariants and observe-not-originate are untouched** by both shifts. Forward bands stay
+coarse:
 sequenced by dependency, detail firms up as each nears. **Horizon P
 (Publish / OSS-launch)** sits outside that dependency order: it is **decision-gated** — the discrete
 work to make the repo public, consolidated in one band and triggered when the go-public decision is
@@ -148,10 +160,10 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
-| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; shares the "needs Orion's own forward state" threshold with the deferred scheduling layer (B5 / KI-13), but kept a **separate track** | 🛠️ **E2 Inc 3 rung 1 COMPLETE** (Units 0–5 shipped: due-dates/at-risk/observed-store/slippage/milestones; observe + remember, never originate; gate settled 2026-06-26). Unit 5 PR pending → final rung-1 deploy |
-| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time checklist push, PR #49), and Inc 2.6 (status-aware `tracker` collector + `tasks_file` bootstrapping, PR #50) all SHIPPED 2026-06-25/26.** Inc 2.6's first real workload — the `applications` tracker — is wired and pushed live (admin-visible; family viewer grants on hold). Validated by the founding family-visibility intent + personal use. A post-2.6 **consolidation slice** then SHIPPED 2026-06-25 (PRs #52–#54): dashboard home shows checklist-only projects, `add-project` tracker/incubator/`--seed-tasks-from` completeness, and KI-8 state cleanup. Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
+| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; shares the "needs Orion's own forward state" threshold with the deferred scheduling layer (B5 / KI-13), but kept a **separate track** | ✅ **E2 Inc 3 rung 1 COMPLETE + DEPLOYED 2026-06-26** (Units 0–5 shipped, PR #60: due-dates/at-risk/observed-store/slippage/milestones; observe + remember, never originate; gate settled 2026-06-26). Richer-group follow-ons (milestone slipping count, per-project `due_soon_days`) deferred-additive |
+| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + the to-do/milestone signal, a forward-looking layer, and a full **sectioned** redesign | 🛠️ **Inc 1–3 SHIPPED + DEPLOYED.** Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time push, PR #49), Inc 2.6 (status-aware `tracker` collector, PR #50), a consolidation slice (PRs #52–#54), and **Inc 3 (forward-looking layer ≡ E1, Units 0–5, deployed 2026-06-26)** all done. **NEXT: Inc 4 — sectioned dashboard rebuild (richer-client SPA).** Recreate the ingested Claude-design (`design/`) as a **React/Vite SPA, single-host on the relay** (relay → read-only JSON API); retire the server-rendered HTML at parity. Sub-steps: **4a** SPA shell + API + data-ready sections (Projects/Project/Report/Tracker/Login/viewer-scope/themes/mobile/Showcase + Scheduling); **4b** Disciplines & directions (new collector + section); **4c** Cross-project Connections (new derivation + section). Kickoff: [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](../docs/e2-inc4-dashboard-rebuild-kickoff.md). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
-| E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
+| E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🛠️ The **developer's own** cross-project view arrives as **E2 Inc 4c** (Connections section; data model already `(project, item_key)`-keyed). Multi-party cross-project coordination stays 🔭 Long-range (C3-gated) |
 | E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
 
 C3 (multi-party identity) is the prerequisite seam under much of Horizon E. The discipline holds: keep
@@ -260,9 +272,24 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   a **"Next: <group> by <date>"** hint on each portfolio card. At-risk roll-up only (a milestone
   slipping count is deferred — the seam is there). Verified eyes-on against the live tracker
   ("Applications — 0/4 done · next due Jun 12, 2026 · 2 at risk"). Grounding: **[`docs/e2-inc3-unit5-kickoff.md`](../docs/e2-inc3-unit5-kickoff.md)**.
-  **Rung 1 is now complete** (PR pending → final rung-1 deploy): the forward layer observes deadlines,
-  remembers them over time, flags at-risk and slipping, and rolls up milestones — all observe-not-originate.
-  Adjacent deferred rung recorded: a **disciplines & directions** signal + dashboard section.
+  **Rung 1 is COMPLETE and DEPLOYED** (PR #60, deployed to the live relay 2026-06-26): the forward layer
+  observes deadlines, remembers them over time, flags at-risk and slipping, and rolls up milestones — all
+  observe-not-originate. (The live dashboard reflects milestones after the next tracker push, since the
+  stored data predates `group`.) Richer-group follow-ons (milestone slipping count, per-project
+  `due_soon_days`) are recorded as deferred-additive, folded in where milestones are re-presented in Inc 4.
+- **Inc 4 — sectioned dashboard rebuild (richer-client SPA)** — the active next phase. A full Claude-design
+  handoff (committed under [`design/`](../design/): README + 11 screenshots + 3 themes + mobile + `.dc.html`
+  prototypes) specifies a sectioned SPA covering every band as a section. **Settled**: recreate it as a
+  **React/Vite (TS) SPA, single-host on the relay** (relay → read-only JSON API; reuses the existing
+  store/derive + auth/scoping; the server-rendered HTML retires at parity); themes via CSS-variable
+  `data-theme`; content stays observed-not-authored and text renders inert (React default binding).
+  **Sub-steps:** **4a** SPA shell + JSON API contract + data-ready sections (Projects, Project, Report,
+  Tracker, Login, viewer-scoping, themes, mobile, Showcase guest view [the deferred C3-Inc-3 item], plus
+  Scheduling — a small new cross-project deadline aggregation); **4b** Disciplines & directions (the
+  deferred doc-centric signal, promoted from "adjacent rung": a new collector reading CLAUDE.md/design/
+  decision docs + a section); **4c** Cross-project Connections (a new cross-project relationship derivation
+  + the SVG-graph section — E4's developer-view flavor). **Kickoff:**
+  [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](../docs/e2-inc4-dashboard-rebuild-kickoff.md).
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via
   `intake` or a new collector (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is

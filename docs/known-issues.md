@@ -4,10 +4,12 @@ A lightweight tracker for bugs, design questions, and tech debt that are **not t
 single phase** — the local stand-in for an issue tracker until the project is hosted
 (then these can migrate to GitHub Issues).
 
-**Lifecycle:** an item lives here while it is open. When it is resolved, it moves to the
-**Fixed** (or Changed) section of [`CHANGELOG.md`](../CHANGELOG.md) and is removed from
-here. Phase-specific work belongs in [`plans/orion-plan.md`](../plans/orion-plan.md), not
-here.
+**Lifecycle:** an item lives in the open list while it is open. When it is resolved, its
+full write-up moves to the relevant slice's section of [`CHANGELOG.md`](../CHANGELOG.md)
+(Added / Changed / Fixed / Removed) and the open entry is removed from here, leaving a
+one-line pointer in the **[Resolved](#resolved)** index at the bottom so the id and its
+fate stay traceable. Phase-specific work belongs in
+[`plans/orion-plan.md`](../plans/orion-plan.md), not here.
 
 **Fields per entry:** a stable id, a one-line title, the detail, *why it matters*, a
 severity (low / medium / high), and a status (Open / Needs decision / Monitored /
@@ -264,57 +266,16 @@ Deferred).
   increment), at which point an `author` field plus a config switch for optional anonymity is a clean
   additive step on the existing seam, not new infrastructure.
 
-## KI-19 — Dashboard serves inline CSS/JS; no Content-Security-Policy yet
+## Resolved
 
-- **Detail:** The dashboard's page scaffold (`relay/render.py._page`) serves an inline `<style>`
-  and (since the dashboard-maturation slice) an inline `<script>`. No `Content-Security-Policy`
-  header is sent. A future CSP that forbids `unsafe-inline` would block both unless each carries a
-  per-response nonce/hash, or they move to served static assets.
-- **Why it matters:** A CSP is strong defence-in-depth against XSS — it would neutralize an
-  injected script even if an escaping bug slipped past the `_esc` discipline, on what is now a
-  public, authenticated surface. Inline assets are the deliberate choice today (a single
-  self-contained process, no static-asset routing — the C1 stance), but they are exactly what a
-  strict CSP wants gone. The fix is additive and known: emit a nonce per request and reference it,
-  or split CSS/JS to a small static route. Recorded so the interaction isn't a surprise when a CSP
-  is considered. Pairs with the deferred "static CSS asset" option (the dashboard-maturation pass
-  chose inline + light JS over static assets).
-- **Severity:** low
-- **Status:** **Resolved (2026-06-24)** — the dashboard now sends a **hash-based**
-  Content-Security-Policy on every HTML response, plus the standard security headers. Rather than
-  the nonce-per-request or static-asset routes this entry sketched, the inline blocks are
-  allowlisted by the SHA-256 of their content: `relay/render.py` computes the hash of `_PAGE_CSS`
-  and `_PAGE_JS` at import (`PAGE_CSS_HASH` / `PAGE_JS_HASH`) from the SAME constants `_page()`
-  renders, and `relay/server.py` builds the policy (`default-src 'self'`; `style-src` / `script-src`
-  `'self'` + the matching hash; `base-uri 'none'`; `form-action 'self'`; `frame-ancestors 'none'`;
-  `object-src 'none'`) from them. Deriving the hash from the constant means the policy can never
-  drift from the markup (a render-side contract test pins this), so no `unsafe-inline` is needed and
-  the inline-asset choice (the C1 stance) is kept intact. Alongside the CSP: `X-Content-Type-Options:
-  nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` (HTML), and HSTS when
-  HTTPS-exposed. Verified eyes-on against the rendered page (styling and the relative-time JS both
-  run with no CSP violation). (`Referrer-Policy` is `same-origin`, not `no-referrer`: the latter
-  made browsers send the comment POST with `Origin: null` and no Referer, which the comment CSRF
-  check 403'd — fixed by switching to `same-origin`.)
+Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
+one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
-## KI-20 — Delivered Slack/Discord messages still timestamp in UTC, dashboard now in Pacific
-
-- **Detail:** The relay dashboard renders timestamps in California time (DST-correct PDT/PST) via
-  `relay/render.py._format_ts`, but the LOCAL core's message formatter
-  (`src/orion/compose.py._format_timestamp`, pinned by `tests/test_report_compose.py`) still
-  renders **UTC**. So the same report can show a UTC time in the chat message and a Pacific time on
-  the dashboard.
-- **Why it matters:** For a single Pacific-based user the message/dashboard mismatch is mildly
-  confusing. It was left intentionally one pass: UTC is defensible for messages that may be read
-  by recipients in any time zone, and the dashboard-maturation request was scoped to the dashboard.
-  Aligning the message formatter to Pacific — or, better, making the display time zone a config
-  value — is a small, additive change.
-- **Severity:** low
-- **Status:** **Resolved (2026-06-19)** — added a global `display_timezone` config field
-  (`config.py`, default `America/Los_Angeles`), consumed by the message formatter
-  (`compose._format_timestamp` now converts the stored UTC instant to that zone). So a delivered
-  message and the dashboard now read the SAME zone by default, and a user with non-Pacific
-  recipients can set e.g. `display_timezone = "UTC"`. **Remaining asymmetry (small follow-up):** the
-  relay dashboard's zone is still independently hardcoded to Pacific in `relay/render.py`, so if a
-  user *overrides* `display_timezone` to a non-Pacific zone, the dashboard would not follow. Making
-  the relay's display zone configurable too (a relay-serve flag / env, defaulting to the same zone)
-  is the additive next step — deliberately deferred to avoid changing the deployed relay alongside
-  this local-side fix.
+- **KI-20** — Delivered Slack/Discord messages timestamped in UTC while the dashboard rendered
+  Pacific. **Resolved 2026-06-19** by a global `display_timezone` config field (message formatter
+  honors it), with the relay-side follow-up (`orion relay-serve --timezone`) landed in Horizon D.
+  See CHANGELOG → *"KI-20 — configurable message timezone, aligned with the dashboard"*.
+- **KI-19** — Dashboard served inline CSS/JS with no Content-Security-Policy. **Resolved 2026-06-24**
+  by a hash-based CSP (SHA-256 of the inline blocks, derived from the same constants the page
+  renders) plus the standard security headers. See CHANGELOG → *"Dashboard security hardening — CSP
+  + headers"*.

@@ -34,7 +34,7 @@ orion comments myproject       # pull supervisor replies back to your machine
 | `orion status` | Show which projects have **unreported activity** across the config. Read-only — sends nothing. |
 | `orion projects` | List every project defined in the config. |
 | `orion show <project>` | Show one project's resolved config (paths, share level, collectors, recipients). |
-| `orion add-project [name]` | Register a new project in `orion.toml` (**the only command that writes config**). Name defaults to the repo directory. `--recipient "Name:channel:ENV_VAR"` (repeatable), `--like <project>` to copy recipients, `--repo-path`, `--share-level`, `--collectors git,tasks,notes`, `--tasks-file`/`--notes-file`; `--print` to preview the stanza, `--yes` to skip confirmation. |
+| `orion add-project [name]` | Register a new project in `orion.toml` (**the only command that writes config**). Name defaults to the repo directory. `--recipient "Name:channel:ENV_VAR"` (repeatable), `--like <project>` to copy recipients, `--repo-path`, `--share-level`, `--collectors git,tasks,notes`, `--tasks-file`/`--notes-file`; `--print` to preview the stanza, `--yes` to skip confirmation. When `tasks` is enabled and `--tasks-file` is omitted, it defaults to `<repo>/TODO.md` and **creates a starter checklist** there (preview-gated, never overwriting); pass an explicit `--tasks-file` to keep config-only. |
 | `orion baseline <project>` | Mark current state as already-reported **without sending** — so the next report covers only new activity (avoids dumping full history). |
 | `orion install-hook <project>` | Install a git hook so a push auto-reports. `--hook pre-push` (default) or `post-commit`; `--print` to review first, `--force` to overwrite. |
 | `orion graduate-idea "<idea>"` | Register a **graduated** incubator idea as a new project (delegates to `add-project`; name slugified from the title). `--force` to graduate a non-graduated idea, `--name` to override, `--incubator-file` to point at the index directly. |
@@ -44,7 +44,7 @@ orion comments myproject       # pull supervisor replies back to your machine
 | Command | What it does |
 |---|---|
 | `orion relay-serve` | Run the relay locally (ingest endpoint + read-only dashboard) on `127.0.0.1:8787`. Needs `ORION_RELAY_TOKEN` in `.env`. Blocks until Ctrl-C. |
-| `orion checklist-push <project>` | Push the project's **current checklist** to the relay dashboard **without a report** (needs `checklist = true` + an enabled `[relay]`). Add `--watch` for near-real-time: it polls `tasks_file` and pushes on every change until Ctrl-C (`--interval` seconds, default 3). |
+| `orion checklist-push <project>` | Push the project's **current checklist** to the relay dashboard **without a report** (needs `checklist = true` + a `tasks` or `tracker` source + an enabled `[relay]`). Add `--watch` for near-real-time: it polls the checklist source (`tasks_file` and/or `tracker_file`) and pushes on every change until Ctrl-C (`--interval` seconds, default 3). |
 | `orion bot` | Run the always-on **Slack bot**: a reply in a mapped channel becomes a comment on that project's latest report. Blocks until Ctrl-C. |
 
 **`orion bot` prerequisites:** `pip install orion[slack-bot]`, an enabled `[relay]` **and** `[bot]` in

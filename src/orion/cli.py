@@ -40,6 +40,9 @@ from orion.collectors.notes import collect as collect_notes
 from orion.collectors.tasks import ChecklistItem, TasksError
 from orion.collectors.tasks import collect as collect_tasks
 from orion.collectors.tasks import snapshot as snapshot_tasks
+from orion.collectors.tracker import TrackerError
+from orion.collectors.tracker import collect as collect_tracker
+from orion.collectors.tracker import snapshot as snapshot_tracker
 from orion.compose import ComposedMessage, compose
 from orion.config import (
     SHARE_LEVELS,
@@ -88,6 +91,7 @@ _COLLECTOR_TITLES = {
     "tasks": "Completed tasks",
     "notes": "Notes",
     "incubator": "Idea pipeline",
+    "tracker": "Application tracker",
 }
 
 
@@ -359,7 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         "--tasks-file",
         dest="tasks_file",
         default=None,
-        help="Path to the tasks checklist (required if 'tasks' is in --collectors).",
+        help="Path to the tasks checklist. If 'tasks' is enabled and this is omitted, "
+        "defaults to <repo>/TODO.md and creates a starter checklist there.",
     )
     add_parser.add_argument(
         "--notes-file",
@@ -1060,15 +1065,16 @@ def _run_report(
         lane = LANE_RAW if any_raw_lane else LANE_STRUCTURED
 
         # --- Capture the project's LIVE checklist (E2 Inc 2), if enabled ---
-        # A SEPARATE read of tasks_file from the tasks collector's delta: it carries
-        # the FULL current checklist (open + done) to the dashboard's live view. It
-        # rides on full_blob ONLY (the relay payload); the per-audience chat blobs
-        # below are unaffected (chat enrichment is out of scope). Each item's text
-        # passes through redact() — the structured-lane safety net the privacy rule
-        # requires — before it leaves the machine, and its hits join the run's count.
-        # None when the project has no checklist enabled, which omits it from the wire.
+        # A SEPARATE read of the checklist source(s) from any collector's delta: it
+        # carries the FULL current checklist (open + done) to the dashboard's live view.
+        # The source is a tasks_file and/or a tracker_file (E2 Inc 2.6). It rides on
+        # full_blob ONLY (the relay payload); the per-audience chat blobs below are
+        # unaffected (chat enrichment is out of scope). Each item's text passes through
+        # redact() — the structured-lane safety net the privacy rule requires — before
+        # it leaves the machine, and its hits join the run's count. None when the
+        # project has no checklist enabled, which omits it from the wire.
         checklist: tuple[ChecklistItem, ...] | None = None
-        if project.checklist and project.tasks_file is not None:
+        if project.checklist and _checklist_source_files(project):
             redacted_items, checklist_hits = _redacted_checklist(project)
             redaction_hits += checklist_hits
             checklist = tuple(redacted_items)
@@ -1187,7 +1193,7 @@ def _run_report(
         _relay_push(full_blob, relay_cfg)
         return STATUS_SENT
 
-    except (GitError, SummarizerError, TasksError, NotesError, IncubatorError, SecretsError) as exc:
+    except (GitError, SummarizerError, TasksError, NotesError, IncubatorError, TrackerError, SecretsError) as exc:
         # Per-project, fail-soft: print a clean message and report FAILED so an
         # --all run can continue with the next project. SecretsError here is the
         # ANTHROPIC key fetch on the raw lane (the webhook fetch is handled inside
@@ -1196,30 +1202,69 @@ def _run_report(
         return STATUS_FAILED
 
 
+def _checklist_source_files(project: ProjectConfig) -> list[Path]:
+    """The local file(s) a project's live checklist is read from.
+
+    Args:
+        project: The project to inspect.
+
+    Returns:
+        The configured checklist-source paths in a stable order: tasks_file first (if
+        set), then tracker_file (if set). Empty when the project has no checklist
+        source at all.
+
+    Why:
+        The checklist push (guard) and the watch loop (the polled/printed file) both
+        need to know "what feeds this project's checklist," and that became more than
+        just tasks_file once the tracker collector landed. Centralizing the answer
+        keeps the guard and the watch agreeing on the same set of sources.
+    """
+    files: list[Path] = []
+    if project.tasks_file is not None:
+        files.append(project.tasks_file)
+    if project.tracker_file is not None:
+        files.append(project.tracker_file)
+    return files
+
+
 def _redacted_checklist(project: ProjectConfig) -> tuple[list[ChecklistItem], int]:
     """Snapshot a project's current checklist and redact each item's text.
 
     Args:
-        project: The project to read; its tasks_file is read via the tasks snapshot.
+        project: The project to read. Its checklist comes from a tasks_file (checkbox
+            snapshot) and/or a tracker_file (status-aware snapshot) — both feed the
+            same {text, done} surface.
 
     Returns:
         A (items, hits) pair: the redacted ChecklistItem list (an item whose text is
         ENTIRELY a secret — empty after redaction — is dropped to avoid a blank row),
         and the count of secrets scrubbed across all items. Returns ([], 0) when the
-        project has no tasks_file.
+        project has neither a tasks_file nor a tracker_file.
 
     Why:
         BOTH the report push (_run_report) and the dedicated checklist push
         (cmd_checklist_push / its watch loop) must apply the SAME redaction to checklist
         item texts before they leave the machine — the non-negotiable privacy net.
         Factoring it here means that guarantee lives in ONE place and cannot drift
-        between the two lanes.
+        between the two lanes, and means a new checklist source (the tracker) is
+        redacted by construction without a second redaction site.
     """
     items: list[ChecklistItem] = []
     hits = 0
-    if project.tasks_file is None:
-        return items, hits
-    for item in snapshot_tasks(project.tasks_file):
+    # Gather raw items from every checklist source in a stable order (tasks first, then
+    # tracker), then dedup by RAW text (KI-6 identity-by-text) so a title present in
+    # both sources collapses to its first occurrence before redaction.
+    raw_items: list[ChecklistItem] = []
+    if project.tasks_file is not None:
+        raw_items.extend(snapshot_tasks(project.tasks_file))
+    if project.tracker_file is not None:
+        raw_items.extend(snapshot_tracker(project.tracker_file))
+
+    seen: set[str] = set()
+    for item in raw_items:
+        if item.text in seen:
+            continue
+        seen.add(item.text)
         scrub = redact(item.text)
         hits += scrub.hit_count
         # A secret inside an item name is replaced with a placeholder (not dropped), so
@@ -1278,10 +1323,10 @@ def _watch_tick(
 def _watch_checklist(
     project: ProjectConfig, relay_cfg: RelayConfig, token: str, interval: float
 ) -> int:
-    """Poll the project's tasks_file and push the checklist whenever it changes.
+    """Poll the project's checklist source and push the checklist whenever it changes.
 
     Args:
-        project: The project to watch (its tasks_file is polled).
+        project: The project to watch (its tasks_file and/or tracker_file is polled).
         relay_cfg: The relay config (push target).
         token: The relay ingest Bearer token.
         interval: Seconds between polls.
@@ -1298,8 +1343,9 @@ def _watch_checklist(
         transient relay failure is reported and retried on the next tick rather than
         killing the watch.
     """
+    watched = ", ".join(str(f) for f in _checklist_source_files(project))
     print(
-        f"Watching {project.tasks_file} for {project.name!r} "
+        f"Watching {watched} for {project.name!r} "
         f"(every {interval:g}s; Ctrl-C to stop)...",
         file=sys.stderr,
     )
@@ -1333,7 +1379,7 @@ def cmd_checklist_push(
         project_name: The project whose checklist to push.
         config_path: Path to orion.toml.
         watch: When True, run a foreground poll loop that pushes on every change to the
-            project's tasks_file until interrupted; when False, push once and exit.
+            project's checklist source until interrupted; when False, push once and exit.
         interval: Seconds between polls in --watch mode.
 
     Returns:
@@ -1341,10 +1387,11 @@ def cmd_checklist_push(
 
     Why:
         The dedicated checklist-only push (E2 Inc 2 follow-up): it updates ONLY the
-        project's live checklist on the dashboard — no report — so a tasks_file edit can
+        project's live checklist on the dashboard — no report — so a checklist edit can
         reach the dashboard in near-real-time. It reuses the report path's redaction
         (_redacted_checklist) and the relay's ingest token, and requires the project to
-        have `checklist` enabled (with a tasks_file) and an enabled [relay].
+        have `checklist` enabled (with a tasks_file or tracker_file) and an enabled
+        [relay].
     """
     try:
         config = load_config(config_path)
@@ -1359,11 +1406,13 @@ def cmd_checklist_push(
         if not project.checklist:
             raise ConfigError(
                 f"Project {project.name!r} does not enable `checklist`. Set "
-                f"`checklist = true` (with the 'tasks' collector) to push its checklist."
+                f"`checklist = true` (with a 'tasks' or 'tracker' collector) to push "
+                f"its checklist."
             )
-        if project.tasks_file is None:
+        if not _checklist_source_files(project):
             raise ConfigError(
-                f"Project {project.name!r} has no tasks_file to read a checklist from."
+                f"Project {project.name!r} has no tasks_file or tracker_file to read a "
+                f"checklist from."
             )
         token = get_required(relay_cfg.token_env_var)
     except (ConfigError, SecretsError) as exc:
@@ -1631,6 +1680,31 @@ def _git_toplevel(start: Path) -> Path | None:
     return Path(out) if out else None
 
 
+def _starter_checklist(project_name: str) -> str:
+    """Return the seed text for a tasks_file that add-project creates.
+
+    Args:
+        project_name: The project the checklist belongs to (named in the comment).
+
+    Returns:
+        A minimal Markdown checklist: a "# TODO" header and a short usage comment, with
+        NO checkbox items.
+
+    Why:
+        E2 Inc 2.6 lets add-project create a project's tasks_file so a new project has a
+        checklist surface from the start. Seeding a header + comment teaches the
+        "- [ ]" / "- [x]" format without inventing fake tasks — the snapshot parser
+        ignores the comment, so the dashboard checklist starts EMPTY (no placeholder
+        row) until the user adds real items.
+    """
+    return (
+        "# TODO\n"
+        "\n"
+        f'<!-- Orion checklist for "{project_name}". Use GitHub-style checkboxes:\n'
+        '     "- [ ]" is an open item, "- [x]" is done. Items appear on the dashboard. -->\n'
+    )
+
+
 def cmd_add_project(
     name: str | None,
     config_path: Path,
@@ -1655,7 +1729,10 @@ def cmd_add_project(
         recipient_specs: Explicit "Name:channel:ENV_VAR" recipients (may be empty).
         share_level: One of SHARE_LEVELS.
         collectors_csv: Comma-separated collector names (e.g. "git,tasks").
-        tasks_file: Path for the tasks collector (required if "tasks" enabled).
+        tasks_file: Path for the tasks collector. When "tasks" is enabled and this is
+            None, it defaults to <repo>/TODO.md and that file is CREATED (a starter
+            checklist), preview-gated and never overwriting an existing file. Pass an
+            explicit path to opt out of creation (config-only, as before).
         notes_file: Path for the notes collector (required if "notes" enabled).
         print_only: Print the stanza and write nothing.
         assume_yes: Skip the preview confirmation (for non-interactive callers).
@@ -1727,6 +1804,16 @@ def cmd_add_project(
         # 5. Render the stanza. This validates the name, share level, collectors,
         #    and collector/file pairing, and rejects values it cannot safely quote.
         collectors = tuple(c.strip() for c in collectors_csv.split(",") if c.strip())
+
+        # B-i (E2 Inc 2.6): when the tasks collector is enabled but no --tasks-file was
+        # given, default it to <repo>/TODO.md so a new project gets a checklist surface
+        # without a second flag. We remember that we DEFAULTED, because only a defaulted
+        # path is auto-created below — an explicit --tasks-file keeps the prior
+        # config-only behavior (passing your own path is the opt-out of file creation).
+        tasks_file_defaulted = "tasks" in collectors and tasks_file is None
+        if tasks_file_defaulted:
+            tasks_file = str(resolved_repo / "TODO.md")
+
         stanza = render_project_stanza(
             project_name,
             resolved_repo,
@@ -1741,6 +1828,12 @@ def cmd_add_project(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    # Will we also create a starter checklist? Only for a DEFAULTED tasks_file that does
+    # not already exist — never overwrite a user's file, and never touch an explicit
+    # path. tasks_file is a real str here whenever tasks_file_defaulted is True.
+    new_tasks_path = Path(tasks_file).expanduser() if tasks_file_defaulted else None
+    create_tasks_file = new_tasks_path is not None and not new_tasks_path.exists()
+
     # 6. --print: show exactly what would be written, change nothing.
     if print_only:
         print(stanza, end="")
@@ -1752,6 +1845,10 @@ def cmd_add_project(
         action = "create" if not config_exists else "append to"
         print(bar)
         print(f"PREVIEW — would {action} {config_path} (nothing written yet)")
+        if create_tasks_file:
+            # The file creation is a SECOND write surface; surface it in the same gate
+            # so a single decline declines both.
+            print(f"           and create a starter checklist at {new_tasks_path}")
         print(bar)
         print(stanza, end="")
         print(bar)
@@ -1770,6 +1867,15 @@ def cmd_add_project(
         combined = stanza
     config_path.write_text(combined, encoding="utf-8", newline="\n")
 
+    # 8b. Create the starter checklist for a defaulted tasks_file (E2 Inc 2.6). Re-check
+    #     existence right before writing so a file that appeared in the meantime is never
+    #     overwritten — the create is strictly additive, like the config append.
+    if create_tasks_file and not new_tasks_path.exists():
+        new_tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        new_tasks_path.write_text(
+            _starter_checklist(project_name), encoding="utf-8", newline="\n"
+        )
+
     # 9. Re-load to prove the written file parses and the project is present — the
     #    same belt-and-suspenders idea as report's "redact again before send".
     try:
@@ -1783,6 +1889,8 @@ def cmd_add_project(
 
     # 10. Confirm, and point at the remaining manual steps (secrets stay in .env).
     print(f"Registered {project_name!r} in {config_path}.")
+    if create_tasks_file:
+        print(f"  Created a starter checklist at {new_tasks_path}. Add your tasks there.")
     env_vars = sorted({r.webhook_env_var for r in recipients})
     print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
     print(f"  Then: python -m orion check {project_name}")
@@ -2031,7 +2139,7 @@ def cmd_status(config_path: Path) -> int:
                 # Reuse the exact report-flow detector — status must agree with what
                 # a real `report` would find. Read-only (git log/diff, file reads).
                 result = _collect_for(project, collector_name, prior)
-            except (GitError, TasksError, NotesError, IncubatorError):
+            except (GitError, TasksError, NotesError, IncubatorError, TrackerError):
                 # Fail-soft: a collector we can't read yet (missing repo path, an
                 # uncreated notes file) must not crash the whole digest.
                 unreadable.append(collector_name)
@@ -2124,6 +2232,8 @@ def cmd_show(project_name: str, config_path: Path) -> int:
         print(f"  tasks_file:   {project.tasks_file}")
     if project.notes_file is not None:
         print(f"  notes_file:   {project.notes_file}")
+    if project.tracker_file is not None:
+        print(f"  tracker_file: {project.tracker_file}")
     print(f"  state_db:     {config.state_db}")
     print("  recipients:")
     for recipient in project.recipients:
@@ -2184,7 +2294,11 @@ def cmd_check(config_path: Path) -> int:
                 problems += 1
 
         # Collector files are soft: they may be created before the next run.
-        for collector, path in (("tasks", project.tasks_file), ("notes", project.notes_file)):
+        for collector, path in (
+            ("tasks", project.tasks_file),
+            ("notes", project.notes_file),
+            ("tracker", project.tracker_file),
+        ):
             if collector in project.collectors and path is not None and not path.exists():
                 print(f"    ⚠   {collector}_file not found yet: {path}")
                 warnings += 1
@@ -2288,7 +2402,7 @@ def cmd_baseline(project_name: str, config_path: Path) -> int:
             # _collect_for returns the collector's CURRENT marker as new_marker,
             # regardless of whether there is activity — exactly what we baseline to.
             result = _collect_for(project, collector_name, prior)
-        except (GitError, TasksError, NotesError, IncubatorError) as exc:
+        except (GitError, TasksError, NotesError, IncubatorError, TrackerError) as exc:
             # A collector that can't be read yet (e.g. a notes file not created) has
             # nothing to baseline — skip it rather than fail the whole command.
             print(f"  skipped {collector_name}: {exc}", file=sys.stderr)
@@ -3190,6 +3304,8 @@ def _collect_for(project: ProjectConfig, collector: str, prior: str | None):
         return collect_notes(project.notes_file, prior)
     if collector == "incubator":
         return collect_incubator(project.incubator_file, prior)
+    if collector == "tracker":
+        return collect_tracker(project.tracker_file, prior)
     raise ConfigError(f"Unknown collector {collector!r}.")
 
 

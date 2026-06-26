@@ -148,7 +148,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
 | E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range — reached as **E2 Inc 3** (the forward-state ladder) |
-| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), and Inc 2.5 (near-real-time checklist push, PR #49) all SHIPPED + deployed 2026-06-25.** Validated by the founding family-visibility intent + personal use (not the dogfood, which tested reporting). Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
+| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time checklist push, PR #49) SHIPPED + deployed 2026-06-25; Inc 2.6 (status-aware `tracker` collector + `tasks_file` bootstrapping) BUILT on branch, suite green, pending merge/deploy + live wiring.** Validated by the founding family-visibility intent + personal use. Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
 | E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
@@ -199,16 +199,29 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   `- **Status:** …` fields + deadline **tables**, not `[ ]`/`[x]` checkboxes, so the shipped `tasks`
   collector reads nothing from it. The user chose to build a richer status-aware collector rather than
   reformat the file → **Inc 2.6 below**, kickoff written.
-- **Inc 2.6 — status-aware "tracker" collector + `tasks_file` bootstrapping (🔭 next; kickoff written
-  2026-06-25).** A new collector that reads the applications tracker's native format (per-application
-  `Status` → done/open, optionally the deadline tables) so it tracks without reformatting; the
-  applications project setup (tasks/checklist, **no git**); and **family-as-dashboard-viewers**
-  provisioning (`relay-user`) — the real "share with family" path now that the **Alex/Sam discord/slack
-  recipients are on-hold placeholders** and chat delivery is paused. Sibling idea (defer or parallel):
-  **default `tasks_file` on attach**, with content **derived from each project's roadmap** (for Orion,
-  this file) — the same "rich doc → checklist signal" capability as the collector. The tracker's real
-  **deadlines** make it the natural on-ramp to Inc 3. Kickoff:
-  [`docs/applications-tracker-kickoff.md`](../docs/applications-tracker-kickoff.md).
+- **Inc 2.6 — status-aware "tracker" collector + `tasks_file` bootstrapping (🛠️ Code BUILT on branch
+  `e2-inc2.6-tracker-collector`, full suite green; pending merge/deploy + live wiring, 2026-06-25).**
+  Two reviewable units, both committed:
+  - **Unit A — `tracker` collector.** Reads the applications tracker's native format (numbered
+    `## N.` sections with a `- **Status:**` field, plus the Non-Application / sub-goal **tables**) into
+    the existing `{text, done}` checklist surface, so **no relay/dashboard change**. A shared
+    `collectors/_markdown.py` (`parse_sections` + `parse_tables`) is the DRY seam. Settled forks: new
+    collector (not extend `tasks`); `Submitted`/`Closed` → done, `Not started`/`In progress` → open with
+    the status word embedded in the item text; identity by title; **table rows included** (surfaced as
+    open items); **deadlines deferred to Inc 3** (status-only v1). `checklist` config now accepts a
+    `tasks` *or* `tracker` source (`CHECKLIST_COLLECTORS`); `checklist-push`/`--watch` generalized to
+    either file. Verified eyes-on against the real `to_do.md` (15 items parsed).
+  - **Unit B — `tasks_file` bootstrapping (B-i only).** `add-project`, when `tasks` is enabled without
+    `--tasks-file`, defaults to `<repo>/TODO.md` and **creates a starter checklist** there (preview-gated,
+    never overwriting); explicit `--tasks-file` stays config-only (the opt-out). Roadmap-derived seeding
+    (`--seed-tasks-from`) was the parse-vs-generate fork — **deferred** to a later slice (chose structured
+    parse when it lands; B-i ships the structural "every project can have a checklist" fix first).
+  - **Still pending (live/outbound, not done):** the applications project stanza in the **live**
+    `orion.toml`, the `checklist-push` to the production Fly relay, and **family-as-dashboard-viewers**
+    provisioning (`relay-user`) — the real "share with family" path now that the **Alex/Sam discord/slack
+    recipients are on-hold placeholders** and chat delivery is paused. Also pending: the carried-over
+    **CSRF comment 403** live re-diagnosis (separate track). Kickoff:
+    [`docs/applications-tracker-kickoff.md`](../docs/applications-tracker-kickoff.md).
 - **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
   the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
   Inc 2.6's deadline parsing is its likely on-ramp.

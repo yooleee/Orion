@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Allowed values, kept as named constants so validation and error messages share
 # one source of truth (DRY) and adding a value later is a one-line change.
 SHARE_LEVELS = ("high_level", "detailed")  # "high_level" sends no code diff (safest).
-SUPPORTED_COLLECTORS = ("git", "tasks", "notes", "incubator")  # D4: incubator added.
+SUPPORTED_COLLECTORS = ("git", "tasks", "notes", "incubator", "tracker")  # E2 Inc 2.6: tracker added.
 SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
 
 # Which chat platforms the native two-way bot can listen on (C2-bots). Slack
@@ -55,7 +55,14 @@ COLLECTOR_FILE_KEYS = {
     "tasks": "tasks_file",  # a Markdown checklist (- [x] / - [ ])
     "notes": "notes_file",  # a hand-written "current note" file
     "incubator": "incubator_file",  # an idea-pipeline Markdown table (index.md)
+    "tracker": "tracker_file",  # a status-per-section "rich" doc (E2 Inc 2.6)
 }
+
+# Collectors that feed the dashboard's LIVE checklist surface ({text, done}). Both
+# read a local file and produce ChecklistItems via their snapshot(); the `checklist`
+# flag requires AT LEAST ONE of these. Kept as one constant so the config validation
+# and the CLI's checklist-push path agree on what counts as a checklist source.
+CHECKLIST_COLLECTORS = ("tasks", "tracker")
 
 DEFAULT_STATE_DB = "orion.sqlite3"
 
@@ -134,14 +141,19 @@ class ProjectConfig:
         incubator_file: Path to the idea-pipeline Markdown table (an incubator's
             index.md), or None when the "incubator" collector is not enabled.
             Resolved absolute at load time.
+        tracker_file: Path to a status-per-section "rich" tracker doc (e.g. an
+            applications to-do list), or None when the "tracker" collector is not
+            enabled. Resolved absolute at load time. Like tasks_file, it can back the
+            dashboard checklist (see `checklist`).
         auto_send: Whether this project may be delivered WITHOUT the human preview
             during an unattended run. Defaults to False (opt-in). It only takes
             effect when the `report` command is also given `--yes`; on its own it
             never bypasses the preview (see cli._run_report). Defense in depth.
         checklist: Whether to surface this project's LIVE checklist (open + done
-            items, parsed from tasks_file) on the dashboard. Defaults to False
-            (opt-in). Requires the `tasks` collector to be enabled (validated at
-            load), since that is what resolves tasks_file.
+            items) on the dashboard. Defaults to False (opt-in). Requires at least
+            one CHECKLIST_COLLECTORS collector — `tasks` (reads tasks_file) or
+            `tracker` (reads tracker_file) — to be enabled (validated at load), since
+            that is what resolves the file the checklist is read from.
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
@@ -160,6 +172,7 @@ class ProjectConfig:
     tasks_file: Path | None = None
     notes_file: Path | None = None
     incubator_file: Path | None = None
+    tracker_file: Path | None = None
     auto_send: bool = False
     checklist: bool = False
 
@@ -839,21 +852,22 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         )
 
     # checklist defaults to False (opt-in). When on, the dashboard surfaces this
-    # project's LIVE checklist (open + done) parsed from its tasks_file. It therefore
-    # requires the `tasks` collector to be enabled — that pairing is what guarantees
-    # tasks_file is resolved (see _parse_collector_file) — so we reject the
-    # contradiction here, at load time, with a fixable message rather than at run time.
+    # project's LIVE checklist (open + done), read from a CHECKLIST_COLLECTORS source —
+    # `tasks` (tasks_file) or `tracker` (tracker_file). It therefore requires at least
+    # one of those collectors to be enabled — that pairing is what guarantees the file
+    # is resolved (see _parse_collector_file) — so we reject the contradiction here, at
+    # load time, with a fixable message rather than at run time.
     # isinstance(..., bool) rejects ints/strings so `checklist = 1` is caught too.
     checklist = body.get("checklist", False)
     if not isinstance(checklist, bool):
         raise ConfigError(
             f"{where} has invalid checklist={checklist!r}. Expected true or false."
         )
-    if checklist and "tasks" not in collectors_raw:
+    if checklist and not any(c in collectors_raw for c in CHECKLIST_COLLECTORS):
         raise ConfigError(
-            f"{where} enables `checklist` but not the 'tasks' collector. The live "
-            f"checklist is read from `tasks_file`, so enable the 'tasks' collector "
-            f"(which is what sets `tasks_file`)."
+            f"{where} enables `checklist` but no checklist source. The live checklist "
+            f"is read from a 'tasks' (tasks_file) or 'tracker' (tracker_file) "
+            f"collector, so enable one of those (which is what sets its file)."
         )
 
     # Recipients are parsed AFTER collectors are validated so each recipient's
@@ -873,6 +887,9 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
     incubator_file = _parse_collector_file(
         body, "incubator", collectors_raw, config_path, where
     )
+    tracker_file = _parse_collector_file(
+        body, "tracker", collectors_raw, config_path, where
+    )
 
     return ProjectConfig(
         name=name,
@@ -883,6 +900,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         tasks_file=tasks_file,
         notes_file=notes_file,
         incubator_file=incubator_file,
+        tracker_file=tracker_file,
         auto_send=auto_send,
         checklist=checklist,
     )

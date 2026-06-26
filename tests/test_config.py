@@ -260,6 +260,57 @@ def test_checklist_true_without_tasks_collector_raises(tmp_path):
         load_config(path)
 
 
+def test_checklist_true_with_tracker_collector_parses(tmp_path):
+    """`checklist = true` is valid when the `tracker` collector (no `tasks`) is enabled.
+
+    Why this matters: E2 Inc 2.6 made the tracker a second checklist source, so a
+    tracker-only project (the applications use case: no git, no tasks) must satisfy the
+    checklist requirement and resolve its tracker_file absolute.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.apps]
+        repo_path = "/tmp/apps"
+        collectors = ["tracker"]
+        tracker_file = "to_do.md"
+        checklist = true
+
+        [[projects.apps.recipients]]
+        name = "Placeholder"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "apps")
+    assert project.checklist is True
+    # A relative tracker_file resolves against the config directory, like tasks_file.
+    assert project.tracker_file == (tmp_path / "to_do.md").resolve()
+
+
+def test_tracker_enabled_requires_tracker_file(tmp_path):
+    """Enabling the tracker collector without a tracker_file is a clear ConfigError.
+
+    Why this matters: the collector/file pairing is enforced at load time naming the
+    exact key to add (`tracker_file`), mirroring tasks/notes/incubator.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.apps]
+        repo_path = "/tmp/apps"
+        collectors = ["tracker"]
+
+        [[projects.apps.recipients]]
+        name = "Placeholder"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="tracker_file"):
+        load_config(path)
+
+
 def test_checklist_invalid_type_raises(tmp_path):
     """A non-boolean checklist is rejected rather than coerced.
 

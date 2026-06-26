@@ -820,6 +820,66 @@ def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_moc
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
 
 
+def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
+    """`checklist-push` reads a tracker_file (no tasks_file) and pushes redacted items.
+
+    Why this matters: E2 Inc 2.6 made the tracker a second checklist source. A
+    tracker-only project (the applications use case: no git, no tasks) must push its
+    status-aware checklist through the SAME redaction + relay path. We assert the
+    application item carries its status text, a table row surfaces as open, and a secret
+    in a row is scrubbed before it leaves the machine.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "to_do.md").write_text(
+        "## 1. Claude Corps Fellow (job)\n"
+        "- **Status:** Submitted\n"
+        "\n"
+        "## Non-Application To-Do\n"
+        "\n"
+        "| # | Task | Deadline |\n"
+        "|---|------|----------|\n"
+        "| 1 | Rotate AKIAIOSFODNN7EXAMPLE | Sun, Jun 14 |\n",
+        encoding="utf-8",
+    )
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.apps]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tracker"]
+        tracker_file = "to_do.md"
+        checklist = true
+
+          [[projects.apps.recipients]]
+          name = "Placeholder"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    code = cli.main(["checklist-push", "apps", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+
+    _url, project, checklist, _token = pushes[0]
+    assert project == "apps"
+    # The application item carries its status in the text and is done (Submitted).
+    assert checklist[0] == {"text": "Claude Corps Fellow (job) - Submitted", "done": True}
+    # The table row is an open item, with its secret scrubbed (privacy net holds here).
+    assert checklist[1]["done"] is False
+    assert "AKIAIOSFODNN7EXAMPLE" not in checklist[1]["text"]
+
+
 def test_checklist_push_requires_checklist_enabled(tmp_path, env_and_mocks):
     """`checklist-push` on a project without `checklist = true` errors, pushes nothing.
 

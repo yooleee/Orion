@@ -31,8 +31,10 @@ import base64
 import hashlib
 import html
 import urllib.parse
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
+
+from .derive import DUE_SOON, OVERDUE, classify_item, today_in_tz
 
 # The DEFAULT display zone. The dashboard pins a FIXED IANA zone (not the server's
 # local time, not the reader's) so the displayed time is the same regardless of where
@@ -46,6 +48,14 @@ from zoneinfo import ZoneInfo
 # without a system tz database (slim Docker, native Windows); it is a declared dependency,
 # so a missing-tzdata failure can't reach production.
 _DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
+
+# A fixed, locale-independent month-abbreviation table. Used by both _format_ts (for
+# timestamps) and _due_span (for date-only deadlines); kept module-level so the two
+# agree and neither reaches for strftime("%b"), which is locale-dependent.
+_MONTH_ABBR = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
 
 # Input limits for a supervisor comment (C2). They live HERE — the dependency-free
 # module — because BOTH sides need them: render.py uses them as the comment form's
@@ -161,6 +171,7 @@ li.card h2 { margin: 0 0 0.3rem; font-size: 1.05rem; }
 li.card .headline { margin: 0 0 0.4rem; }
 li.card .meta { display: block; }
 li.card .checklist-badge { margin: 0 0 0.4rem; color: var(--muted); font-size: 0.875rem; }
+li.card .at-risk-badge { margin: 0 0 0.4rem; color: #d64545; font-size: 0.875rem; font-weight: 600; }
 /* Live checklist (E2 Inc 2): current open/done items on the report page. Function-first,
    reusing the muted/accent tokens; the glyph carries state, the class adds the styling. */
 ul.checklist { list-style: none; padding: 0; margin: 0.5rem 0 0; }
@@ -168,6 +179,13 @@ ul.checklist li { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.
 ul.checklist li .box { color: var(--muted); }
 ul.checklist li.done .box { color: var(--accent); }
 ul.checklist li.done .task { text-decoration: line-through; color: var(--muted); }
+/* Forward-looking deadlines (E2 Inc 3): a trailing due date, tinted when at risk. The
+   overdue/at-risk class on the <li> recolours the date; the date text and the "⚠" marker
+   carry the signal even with no stylesheet (function before looks). Mid-tone red/amber so
+   they read on both the light and dark themes; an aesthetic pass is a separate later slice. */
+ul.checklist li .due { color: var(--muted); margin-left: 0.5rem; font-size: 0.875rem; }
+ul.checklist li.at-risk .due { color: #c77700; }
+ul.checklist li.overdue .due { color: #d64545; font-weight: 600; }
 """.strip()
 
 # A single, static progressive-enhancement script. It rewrites each <time datetime>
@@ -324,13 +342,10 @@ def _format_ts(iso: str, tz: ZoneInfo = _DISPLAY_TZ) -> str:
         # render. The caller still escapes it on the way into HTML.
         return iso
 
-    # A fixed, locale-independent month table. Using this instead of strftime("%b")
-    # keeps the output identical regardless of the host machine's locale.
-    months = (
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    )
-    month = months[parsed.month - 1]  # month is 1-indexed; the table is 0-indexed.
+    # A fixed, locale-independent month table (module-level _MONTH_ABBR, shared with
+    # _due_span). Using it instead of strftime("%b") keeps output identical regardless
+    # of the host machine's locale.
+    month = _MONTH_ABBR[parsed.month - 1]  # month is 1-indexed; the table is 0-indexed.
     # tzname() returns the zone's abbreviation for THIS instant ("PDT" or "PST"),
     # from the IANA database — so the label always matches the offset just applied.
     abbrev = parsed.tzname()
@@ -362,6 +377,53 @@ def _time_tag(iso: str, tz: ZoneInfo = _DISPLAY_TZ) -> str:
         purpose; the human-facing text is still the humanized form.
     """
     return f'<time datetime="{_esc(iso)}">{_esc(_format_ts(iso, tz))}</time>'
+
+
+def _due_span(due_date: str | None, tz: ZoneInfo, status: str | None) -> str:
+    """Render a checklist item's deadline as a small <span class="due">, or "".
+
+    Args:
+        due_date: The item's ISO "YYYY-MM-DD" deadline, or None when it has none.
+        tz: The display zone — used to anchor the date-only deadline at end-of-day so the
+            relative-time JS counts from the same instant the classification uses.
+        status: The classify_item() result (OVERDUE / DUE_SOON / None), used only to add a
+            leading "⚠" marker for an overdue item (legible even with no stylesheet).
+
+    Returns:
+        '<span class="due">[⚠ ]due <time datetime="…">Mon D, YYYY</time></span>' when
+        there is a parseable deadline, else "". The overdue/at-risk CSS class lives on the
+        <li> (set by the caller); this span just carries the date.
+
+    Why:
+        A date-only deadline can't go through _time_tag/_format_ts: those parse a full
+        timestamp and astimezone() it, so a bare "YYYY-MM-DD" would assume a spurious
+        midnight in the wrong zone and print a "00:00" time. Instead we anchor it at
+        END-OF-DAY in the display zone (the instant the deadline actually lapses, matching
+        the derivation's "date-only = end of day" rule) and emit our own <time> element.
+        The existing relative-time JS then enhances it ("in 3 days" / "2 days ago") with
+        NO change, while the no-JS fallback shows the human date. The "⚠" marker keeps an
+        overdue item legible if the stylesheet is blocked, mirroring the box-glyph idea.
+    """
+    if not due_date:
+        return ""
+    try:
+        deadline = date.fromisoformat(due_date)
+    except (ValueError, TypeError):
+        return ""  # never render a malformed deadline (defensive; the producer normalizes)
+    # End-of-day in the display zone: the instant a date-only deadline lapses, so the JS
+    # relative label aligns with the overdue/due-soon classification.
+    eod_iso = datetime(deadline.year, deadline.month, deadline.day, 23, 59, 59, tzinfo=tz).isoformat()
+    human = f"{_MONTH_ABBR[deadline.month - 1]} {deadline.day}, {deadline.year}"  # "Jul 17, 2026"
+    marker = "⚠ " if status == OVERDUE else ""
+    return (
+        f'<span class="due">{marker}due '
+        f'<time datetime="{_esc(eod_iso)}">{_esc(human)}</time></span>'
+    )
+
+
+# Maps a derive status to its checklist CSS class on the <li>. overdue keeps its name;
+# due_soon renders as the softer "at-risk" treatment. One source of truth for the pair.
+_STATUS_CLASS = {OVERDUE: "overdue", DUE_SOON: "at-risk"}
 
 
 def _page(title: str, body_html: str) -> str:
@@ -502,6 +564,14 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
             if total
             else ""
         )
+        # At-risk badge (E2 Inc 3): the count of overdue/due-soon items, precomputed by
+        # latest_report_per_project against today in the display zone. `if at_risk` omits
+        # the badge when there are none (or when the count was not computed: None), so a
+        # project with nothing at risk looks exactly as it did before.
+        at_risk = project.get("checklist_at_risk")
+        at_risk_html = (
+            f"<p class='at-risk-badge'>{_esc(at_risk)} at risk</p>\n" if at_risk else ""
+        )
         # Last-activity time: the latest report's generated_at when there is one, else
         # the checklist's updated_at (checklist-only project). One of the two is always
         # present for a card to exist, so activity_ts is never None — _time_tag is not
@@ -512,6 +582,7 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
             f'<h2><a href="{_esc(href)}">{_esc(name)}</a></h2>\n'
             f"{headline_html}"
             f"{checklist_html}"
+            f"{at_risk_html}"
             f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
             f"last {_time_tag(activity_ts, tz)}</span>"
             "</li>"
@@ -552,7 +623,7 @@ def render_project(
     heading = f"<h1>{_esc(project_name)}</h1>"
     # The live checklist sits above the history (or the empty-state); _render_checklist
     # returns "" when the project has no checklist, which the join below drops.
-    checklist_html = _render_checklist(checklist)
+    checklist_html = _render_checklist(checklist, tz)
     if not reports:
         empty = "<p class='empty'>No reports for this project yet.</p>"
         body = "\n".join(part for part in (heading, checklist_html, empty) if part)
@@ -580,28 +651,41 @@ def render_project(
     return _page(f"Orion — {project_name}", body)
 
 
-def _render_checklist(checklist: list[dict] | None) -> str:
+def _render_checklist(
+    checklist: list[dict] | None, tz: ZoneInfo = _DISPLAY_TZ, today: date | None = None
+) -> str:
     """Render the project's live checklist (open + done) as a titled block, or ''.
 
     Args:
-        checklist: The get_checklist() result — a list of {"text", "done"} dicts in
-            file order — or None when the project has no live checklist. An empty list
-            also renders nothing (an enabled-but-empty checklist is not worth a block).
+        checklist: The get_checklist() result — a list of {"text", "done"[, "due_date"]}
+            dicts in file order — or None when the project has no live checklist. An empty
+            list also renders nothing (an enabled-but-empty checklist is not worth a block).
+        tz: The display zone for rendering deadlines and anchoring overdue/due-soon.
+            Defaults to the module's Pacific constant.
+        today: The reference date for the overdue/due-soon classification. Defaults to
+            today in `tz`; injected by tests to pin a deterministic result.
 
     Returns:
         An HTML <section> with a "Current checklist (X/Y done)" heading and a list of
-        items (done items struck through via a CSS class), or "" when there is nothing
-        to show.
+        items (done items struck through; an open item with a deadline shows its due date,
+        with an overdue/at-risk class when applicable), or "" when there is nothing to show.
 
     Why:
         This is the dashboard's "live checklist" view — current state, not a delta. The
         done/open state is carried BOTH as a CSS class (for styling) AND as a leading
         glyph in the markup, so the state is legible even if the stylesheet is blocked
-        (function before looks, accessibility). EVERY item text is escaped — checklist
-        items are arbitrary user text — so a "<script>" in a task name renders inert.
+        (function before looks, accessibility). The forward-looking deadline (E2 Inc 3)
+        extends that same pattern: an OPEN, dated item gains an overdue/at-risk class and a
+        trailing due date. EVERY item text is escaped — checklist items are arbitrary user
+        text — so a "<script>" in a task name renders inert.
     """
     if not checklist:
         return ""
+
+    # "today" in the display zone anchors the overdue/due-soon decision; computed once for
+    # the whole list (deterministic, and injectable for tests).
+    if today is None:
+        today = today_in_tz(tz)
 
     total = len(checklist)
     done = sum(1 for item in checklist if item.get("done"))
@@ -611,9 +695,16 @@ def _render_checklist(checklist: list[dict] | None) -> str:
         # "done"/"open" drives the strikethrough; the glyph conveys state without CSS.
         cls = "done" if is_done else "open"
         box = "✓" if is_done else "○"  # ✓ (done) / ○ (open)
+        # Forward-looking (E2 Inc 3): an OPEN, dated item gets a second class (overdue /
+        # at-risk) and a trailing due date; a done or undated item is unchanged.
+        status = classify_item(item, today)
+        li_class = cls if status is None else f"{cls} {_STATUS_CLASS[status]}"
+        # Show the deadline only for OPEN items — a finished item's due date is moot, and
+        # classify_item already declines to flag a done item, so this just hides the noise.
+        due_html = "" if is_done else _due_span(item.get("due_date"), tz, status)
         rows.append(
-            f'<li class="{cls}"><span class="box">{box}</span>'
-            f'<span class="task">{_esc(item["text"])}</span></li>'
+            f'<li class="{li_class}"><span class="box">{box}</span>'
+            f'<span class="task">{_esc(item["text"])}</span>{due_html}</li>'
         )
     return (
         "<section class='checklist'><h2>Current checklist "
@@ -704,7 +795,7 @@ def render_report(
 
     # The live checklist is project-level CURRENT STATE shown as context after the
     # report's own content (renders nothing when the project has no checklist).
-    checklist_html = _render_checklist(checklist)
+    checklist_html = _render_checklist(checklist, tz)
 
     comments_html = _render_comments(report["id"], comments or [], tz, author_name)
 

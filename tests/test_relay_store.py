@@ -16,6 +16,7 @@
 # =============================================================================
 
 import sqlite3
+from datetime import date
 
 import pytest
 
@@ -331,6 +332,49 @@ def test_latest_report_per_project_carries_checklist_counts(tmp_path):
     # No checklist row for beta → both None (badge omitted).
     assert by_name["beta"]["checklist_done"] is None
     assert by_name["beta"]["checklist_total"] is None
+
+
+def test_latest_report_per_project_counts_at_risk_when_today_given(tmp_path):
+    """With a reference date, the portfolio row carries the overdue/due-soon count (E2 Inc 3).
+
+    Why this matters: the at-risk badge needs a precomputed count, derived against "today"
+    in the display zone. The store reuses its single items decode to count alongside
+    done/total, so the badge and the per-item render share one definition of "at risk".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(
+        conn,
+        "demo",
+        [
+            {"text": "Overdue", "done": False, "due_date": "2026-06-20"},
+            {"text": "Due soon", "done": False, "due_date": "2026-06-28"},
+            {"text": "Far off", "done": False, "due_date": "2026-12-01"},
+            {"text": "Done past", "done": True, "due_date": "2026-06-01"},
+        ],
+        "2026-06-26T00:00:00+00:00",
+    )
+
+    row = {r["project"]: r for r in latest_report_per_project(conn, today=date(2026, 6, 26))}["demo"]
+
+    # Overdue + due-soon = 2; the far-future and the done item are not at risk.
+    assert row["checklist_at_risk"] == 2
+
+
+def test_latest_report_per_project_at_risk_is_none_without_today(tmp_path):
+    """Without a reference date, at-risk derivation is skipped → checklist_at_risk is None.
+
+    Why this matters: `today` is the seam for the derivation. A caller that does not pass it
+    (or a test of the existing done/total behavior) must be unaffected — the field is None,
+    which the renderer reads as "omit the badge", not "0 at risk".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(
+        conn, "demo", _items(("Open", False)), "2026-06-26T00:00:00+00:00"
+    )
+
+    row = {r["project"]: r for r in latest_report_per_project(conn)}["demo"]
+
+    assert row["checklist_at_risk"] is None
 
 
 def test_latest_report_per_project_includes_checklist_only_projects(tmp_path):

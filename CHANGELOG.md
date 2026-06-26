@@ -22,6 +22,21 @@ six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
 
 ### Added
 
+- **Due dates, overdue/at-risk surfaced on the dashboard** (Unit 2, relay-side — deploy after merge).
+  The first visible forward-looking win. A new pure module `relay/derive.py` classifies each open,
+  dated item against **today in the relay's display zone** (KI-20): `overdue` (deadline before today),
+  `due_soon` (within 7 days, inclusive), or neither — done and undated items are never flagged, and a
+  date-only deadline is treated as end-of-day so a deadline of *today* is due-soon, not overdue. The
+  project page now shows each open item's due date as an enhanceable `<time>` (the existing
+  relative-time JS turns it into "in 3 days" / "1 week ago" with no JS change), tinted **overdue**
+  (red, with a `⚠` marker) or **at-risk** (amber); the portfolio card gains an **"N at risk" badge**,
+  counted in `latest_report_per_project` against the same "today". `due_date` already rode the stored
+  checklist JSON (Unit 1), so the store needed no decode change. The 7-day horizon is a constant with
+  a per-project `due_soon_days` knob deferred (the function parameter is the seam). Verified end-to-end
+  against the live applications tracker: an overdue course deadline renders red with `⚠`, an
+  internship due in 4 days renders amber, a fellowship 3 weeks out renders plain, and the card shows
+  "2 at risk".
+
 - **Tracker deadlines are parsed and carried** (Unit 1, local-only — no deploy). The `tracker`
   collector now reads the deadline each item already holds — a `- **Deadline:**` / `- **Due:**`
   field, or a `Deadline` / `Due` / `Target` table column — via a new `_parse_deadline` helper, and

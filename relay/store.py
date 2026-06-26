@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import date
 from pathlib import Path
+
+from .derive import count_at_risk
 
 # How long sqlite waits for a held write-lock before raising "database is locked".
 # The relay's server is threaded (CP6), so two pushes can arrive close together;
@@ -319,20 +322,27 @@ def list_projects(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
-def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
+def latest_report_per_project(
+    conn: sqlite3.Connection, today: date | None = None
+) -> list[dict]:
     """Summarize every project plus its single latest report, most recent first.
 
     Args:
         conn: An open relay-store connection.
+        today: The reference date (in the relay's display zone) used to count
+            at-risk checklist items. None (the default) skips that derivation, leaving
+            "checklist_at_risk" None — so a caller that does not care about the
+            forward-looking badge (or a test) is unaffected.
 
     Returns:
         A list of dicts, one per project that has a report OR a live checklist, each:
         {"project", "report_count", "latest_generated_at", "latest_report_id",
-        "latest_body", "checklist_updated_at", "checklist_done", "checklist_total"},
-        ordered with the most recently active project first. For a checklist-only
-        project (a live checklist but zero reports) the latest-report fields are None
-        and report_count is 0; for a report-only project checklist_updated_at and the
-        checklist counts are None.
+        "latest_body", "checklist_updated_at", "checklist_done", "checklist_total",
+        "checklist_at_risk"}, ordered with the most recently active project first. For a
+        checklist-only project (a live checklist but zero reports) the latest-report
+        fields are None and report_count is 0; for a report-only project
+        checklist_updated_at and the checklist counts are None. "checklist_at_risk" is
+        None when the project has no checklist OR when `today` was not supplied.
 
     Why:
         This backs the dashboard's portfolio HOME — a cross-project "see everything at
@@ -409,11 +419,18 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
         # presents "X/Y done" without parsing JSON. None for both when the project has
         # no checklist row — the renderer reads that as "omit the badge".
         items_json = row["checklist_items"]
-        checklist_done = checklist_total = None
+        checklist_done = checklist_total = checklist_at_risk = None
         if items_json is not None:
             items = json.loads(items_json)
             checklist_total = len(items)
             checklist_done = sum(1 for item in items if item.get("done"))
+            # Forward-looking (E2 Inc 3): count overdue/due-soon items for the card's
+            # at-risk badge, reusing the SAME decoded items (one decode). Only when a
+            # reference date was supplied — derivation needs a "today", and the count
+            # logic lives in the pure derive module so the badge and the per-item render
+            # agree on what "at risk" means.
+            if today is not None:
+                checklist_at_risk = count_at_risk(items, today)
         result.append(
             {
                 "project": row["project"],
@@ -424,6 +441,7 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
                 "checklist_updated_at": row["checklist_updated_at"],
                 "checklist_done": checklist_done,
                 "checklist_total": checklist_total,
+                "checklist_at_risk": checklist_at_risk,
             }
         )
     return result

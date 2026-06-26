@@ -22,6 +22,22 @@ six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
 
 ### Added
 
+- **Observed-state memory store** (Unit 3, vertical slice — deploy after merge). The "remember" half
+  of the forward-looking layer: a new **append-only** `relay_observed_items(project, item_key,
+  due_date, done, observed_at)` table records one observation per checklist item on **every** push
+  (both `/checklist` and report ingest), so the relay accumulates history a later slice derives
+  slippage from. It is a **downstream projection** — rebuildable from the pushes, authoring nothing.
+  The key design point is a **stable `item_key`**: the tracker now emits each application's bare
+  **title** as a new optional `ChecklistItem.key` (carried on the wire, redacted), because the item
+  `text` embeds the status (`"Title - In progress"`) and so changes when the status does; the relay
+  keys observations by `key` when present, else the item `text` (tasks/table items, which carry no
+  status, are already stable). This makes an item's identity **survive a status change** — verified
+  on the live tracker: advancing an application Not-started → Submitted keeps one `item_key`, so its
+  two observations accumulate under one identity. The table is additive (`IF NOT EXISTS`, no
+  migration); the read `observed_history()` folds latest-per-key to rebuild current state. Identity
+  model + edge cases documented in **KI-21** (complements KI-6). No new UI yet — surfacing slippage
+  is Unit 4.
+
 - **Due dates, overdue/at-risk surfaced on the dashboard** (Unit 2, relay-side — deploy after merge).
   The first visible forward-looking win. A new pure module `relay/derive.py` classifies each open,
   dated item against **today in the relay's display zone** (KI-20): `overdue` (deadline before today),

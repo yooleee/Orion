@@ -41,21 +41,28 @@ class ChecklistItem:
         due_date: The item's deadline as an ISO "YYYY-MM-DD" string, or None when it has
             no (parseable) deadline. Set by the tracker collector (E2 Inc 3); the tasks
             collector leaves it None — GitHub-style checkbox lists carry no deadline.
+        key: A STABLE identity for the item across pushes, or None to fall back to `text`.
+            Set by the tracker collector to the bare title (E2 Inc 3, Unit 3) because the
+            tracker EMBEDS status in `text` ("Title - In progress"), so text changes when
+            status does — the forward-store needs an identity that survives that. The tasks
+            collector and table rows leave it None: their text carries no status, so it is
+            already a stable key.
 
     Why:
         snapshot() reports the FULL current checklist (open + done), unlike collect()
         which reports only newly-completed items as prose. A tiny named record (rather
         than a bare (text, bool) tuple) makes the done-state explicit at every use site
         and leaves a clean seam for additive fields without churning positional unpacking
-        everywhere — due_date is the first such addition (the forward-looking deadline;
-        a milestone `group` may follow in a later rung). It defaults to None so every
-        existing two-arg construction stays valid and the wire shape is unchanged when
-        no deadline is present.
+        everywhere — due_date (the forward-looking deadline) and key (the forward-store's
+        stable identity) are the additions so far; a milestone `group` may follow. Each
+        defaults to None so every existing two-arg construction stays valid and the wire
+        shape is unchanged when the field is absent.
     """
 
     text: str
     done: bool
     due_date: str | None = None
+    key: str | None = None
 
 
 class TasksError(Exception):

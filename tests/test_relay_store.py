@@ -36,9 +36,11 @@ from relay.store import (
     latest_report_per_project,
     list_projects,
     list_users,
+    observed_history,
     open_relay_store,
     projects_for_user,
     record_admin_audit,
+    record_observations,
     revoke_user,
     update_last_login,
     upsert_checklist,
@@ -732,3 +734,128 @@ def test_record_admin_audit_appends_a_row(tmp_path):
     # projects is JSON-encoded for the TEXT column.
     import json
     assert json.loads(row["projects"]) == ["orion", "incubator"]
+
+
+# --- observed-state history (E2 Inc 3 Unit 3 — the forward-store's "remember") -------
+
+
+def _obs(text, done, due_date=None, key=None):
+    """Build a checklist wire-item dict (the shape record_observations consumes).
+
+    Why: mirrors the producer's optional-field shape — due_date / key present only when set
+    — so tests exercise the real "key absent → fall back to text" path.
+    """
+    item = {"text": text, "done": done}
+    if due_date is not None:
+        item["due_date"] = due_date
+    if key is not None:
+        item["key"] = key
+    return item
+
+
+def test_record_observations_accumulates_across_pushes(tmp_path):
+    """Each push APPENDS observation rows rather than replacing — history accumulates.
+
+    Why this matters: this is the difference from relay_project_checklists (current state,
+    upserted). The forward-store must keep every push's observation so slippage/history can
+    be derived later. Two pushes of the same item yield two rows, oldest first.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    record_observations(conn, "demo", [_obs("A", False, key="A")], "2026-06-25T00:00:00+00:00")
+    record_observations(conn, "demo", [_obs("A", True, key="A")], "2026-06-26T00:00:00+00:00")
+
+    hist = observed_history(conn, "demo")
+
+    assert len(hist) == 2
+    # Oldest first; done decoded back to a real bool.
+    assert [h["done"] for h in hist] == [False, True]
+    assert [h["observed_at"] for h in hist] == [
+        "2026-06-25T00:00:00+00:00",
+        "2026-06-26T00:00:00+00:00",
+    ]
+
+
+def test_observed_item_key_stable_across_a_status_change(tmp_path):
+    """A tracker application keeps ONE item_key as its status (and text) changes.
+
+    Why this matters: the whole reason for a producer-emitted key. The application's text
+    embeds status ("App - Not started" → "App - Submitted"), so a text-keyed store would see
+    two different items and lose the deadline history. With key=title, both pushes land under
+    the SAME item_key, so slippage (Unit 4) can track the one item — and see its deadline move
+    later — across the status change.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    record_observations(
+        conn,
+        "demo",
+        [_obs("App - Not started", False, due_date="2026-07-01", key="App")],
+        "2026-06-20T00:00:00+00:00",
+    )
+    record_observations(
+        conn,
+        "demo",
+        [_obs("App - Submitted", True, due_date="2026-07-15", key="App")],
+        "2026-06-26T00:00:00+00:00",
+    )
+
+    hist = observed_history(conn, "demo")
+
+    # One identity across both pushes, not two — despite the text changing.
+    assert {h["item_key"] for h in hist} == {"App"}
+    # And the deadline's move-later is visible in time order (the slippage signal).
+    assert [(h["due_date"], h["done"]) for h in hist] == [
+        ("2026-07-01", False),
+        ("2026-07-15", True),
+    ]
+
+
+def test_observed_history_rebuilds_current_state_as_latest_per_key(tmp_path):
+    """Folding the history (newest observation per key) reconstructs the live checklist.
+
+    Why this matters: the store is a PROJECTION — rebuildable from the append-only record.
+    Taking the latest observation for each item_key must match the final pushed state, which
+    is what makes "remember" a faithful downstream view rather than authored truth.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    record_observations(
+        conn,
+        "demo",
+        [_obs("A - Not started", False, key="A"), _obs("B", False)],
+        "2026-06-25T00:00:00+00:00",
+    )
+    record_observations(
+        conn,
+        "demo",
+        [_obs("A - Submitted", True, due_date="2026-07-01", key="A"), _obs("B", True)],
+        "2026-06-26T00:00:00+00:00",
+    )
+
+    # Fold oldest→newest, so the last write per item_key wins (a simple projection).
+    latest = {}
+    for h in observed_history(conn, "demo"):
+        latest[h["item_key"]] = (h["done"], h["due_date"])
+
+    assert latest == {"A": (True, "2026-07-01"), "B": (True, None)}
+
+
+def test_record_observations_falls_back_to_text_when_no_key(tmp_path):
+    """An item with no `key` is identified by its text (tasks/table items are stable).
+
+    Why this matters: only tracker applications need the separate key; a plain checkbox item
+    carries no status in its text, so the store keys it by text — no producer change for the
+    common case, mirroring KI-6's text identity.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    record_observations(conn, "demo", [_obs("Plain task", False)], "2026-06-26T00:00:00+00:00")
+
+    assert observed_history(conn, "demo")[0]["item_key"] == "Plain task"
+
+
+def test_observed_history_empty_for_project_with_no_observations(tmp_path):
+    """A project with no recorded observations returns an empty list, not an error.
+
+    Why this matters: a project that has never pushed a checklist simply has no forward
+    history; the read must degrade to [] so callers (and Unit 4's derivation) handle it cleanly.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert observed_history(conn, "demo") == []

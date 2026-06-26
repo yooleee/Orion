@@ -230,7 +230,11 @@ def _application_items(text: str) -> list[ChecklistItem]:
             # just its title so we never echo unrecognized free text onto the dashboard.
             text_ = title
             done = False
-        items.append(ChecklistItem(text=text_, done=done, due_date=deadline))
+        # The bare title is the STABLE forward-store identity (key): `text_` embeds the
+        # status, so it changes when the application advances (Not started -> Submitted),
+        # but the title does not. Carrying key=title lets the relay track the SAME item's
+        # deadline/done over time across that change (E2 Inc 3, Unit 3).
+        items.append(ChecklistItem(text=text_, done=done, due_date=deadline, key=title))
     return items
 
 

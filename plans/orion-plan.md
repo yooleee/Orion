@@ -245,11 +245,13 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   due-dates/at-risk/slippage/derived milestones; scheduling/KI-13 stays separate). On-ramp: the
   deadlines the Inc 2.6 tracker already held. **Progress:** Unit 0 (strategy invariant clarified,
   PR #55), Unit 1 (tracker `_parse_deadline` + `ChecklistItem.due_date`, carried on both wire paths;
-  local-only) and Unit 2 (new pure `relay/derive.py` → overdue/due-soon/at-risk; due dates + a `⚠`/red
+  local-only), Unit 2 (new pure `relay/derive.py` → overdue/due-soon/at-risk; due dates + a `⚠`/red
   overdue and amber at-risk treatment on the project page, an "N at risk" portfolio badge; relay-side,
-  **deploy after merge**) have shipped — the forward layer is now *visible*. Next: Unit 3 (the
-  `observed_item` memory store). Adjacent deferred rung recorded: a **disciplines & directions** signal
-  + dashboard section.
+  **deployed** to the live relay 2026-06-26) and Unit 3 (the **`relay_observed_items`** append-only
+  memory store + a stable `item_key` = the tracker's bare title, carried as `ChecklistItem.key`;
+  observations recorded on every push; **KI-21** documents the identity model; deploy after merge) have
+  shipped — the forward layer now *remembers*. Next: Unit 4 (slippage derivation from the observation
+  history). Adjacent deferred rung recorded: a **disciplines & directions** signal + dashboard section.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via
   `intake` or a new collector (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is

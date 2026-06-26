@@ -68,7 +68,14 @@ _ADMIN = "test-admin-token"
 
 
 @contextmanager
-def _running_relay(tmp_path, token=_TOKEN, view_token=None, require_view_auth=False, auth=None):
+def _running_relay(
+    tmp_path,
+    token=_TOKEN,
+    view_token=None,
+    require_view_auth=False,
+    auth=None,
+    public_origin=False,
+):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
     Args:
@@ -98,11 +105,19 @@ def _running_relay(tmp_path, token=_TOKEN, view_token=None, require_view_auth=Fa
     server = create_server(
         "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth
     )
+    _, port = server.server_address
+    base_url = f"http://127.0.0.1:{port}"
+    if public_origin:
+        # Mirror the hosted deploy (e.g. Fly), where ORION_RELAY_PUBLIC_ORIGIN is set so
+        # the comment CSRF check does an EXACT canonical-origin match instead of the Host
+        # fallback. The port is only known now, so we inject the real base_url onto the
+        # already-built server. (The prior origin tests never set this, so the production
+        # exact-match path went untested — the gap that hid the no-referrer CSRF bug.)
+        server.public_origin = base_url
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        _, port = server.server_address
-        yield f"http://127.0.0.1:{port}", db
+        yield base_url, db
     finally:
         server.shutdown()
         server.server_close()
@@ -1011,7 +1026,10 @@ def test_dashboard_html_carries_csp_and_security_headers(tmp_path):
         assert "default-src 'self'" in csp
         assert "frame-ancestors 'none'" in csp
         assert headers.get("X-Content-Type-Options") == "nosniff"
-        assert headers.get("Referrer-Policy") == "no-referrer"
+        # "same-origin", NOT "no-referrer": "no-referrer" makes a browser send a comment
+        # POST with Origin: null (and no Referer), which the CSRF check then 403s. The
+        # policy must keep a same-origin Origin/Referer for the comment loop to work.
+        assert headers.get("Referrer-Policy") == "same-origin"
         assert headers.get("X-Frame-Options") == "DENY"
 
 
@@ -1515,6 +1533,93 @@ def test_comment_missing_origin_with_foreign_referer_is_403(tmp_path):
         )
         assert status == 403
 
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+# --- The no-referrer CSRF bug: the production exact-match path + opaque Origin -------
+# The live bug: the dashboard sent `Referrer-Policy: no-referrer`, which makes a browser
+# send a comment POST with `Origin: null` and NO Referer (Fetch standard). With a
+# configured public_origin, the exact-match check then 403'd EVERY browser comment, and
+# the Referer fallback could not help (the same policy stripped Referer). The fix is two
+# parts: the response policy is now "same-origin" (so a real Origin is sent — covered by
+# test_dashboard_html_has_csp_and_security_headers), and _origin_error treats a literal
+# "null" Origin as opaque and falls back to Referer. These tests set public_origin, the
+# production path the earlier origin tests never exercised.
+
+
+def test_comment_with_public_origin_canonical_origin_is_allowed(tmp_path):
+    """With public_origin set, a same-origin Origin matches exactly and the comment stores.
+
+    Why this matters: this is the production (Fly) path — ORION_RELAY_PUBLIC_ORIGIN set,
+    so the check is an EXACT canonical-origin match, not the Host fallback. The previous
+    origin tests never set it, so this path was untested; under the fix a real same-origin
+    Origin (what a browser now sends under the "same-origin" policy) is accepted.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, headers, _ = _post_comment(
+            base_url, report_id, cookie=cookie, body="Canonical.", origin="__match__"
+        )
+        assert status == 303
+        assert headers.get("Location") == f"/report/{report_id}"
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id)[0]["body"] == "Canonical."
+
+
+def test_comment_with_public_origin_foreign_origin_is_403(tmp_path):
+    """With public_origin set, a foreign Origin still fails the exact-match (CSRF holds).
+
+    Why this matters: the exact-match must reject a cross-site Origin even with a valid
+    session — the fix must not weaken the guard. Nothing is stored.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, _, _ = _post_comment(
+            base_url, report_id, cookie=cookie, origin="https://evil.example"
+        )
+        assert status == 403
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_comment_with_public_origin_opaque_null_origin_falls_back_to_referer(tmp_path):
+    """A literal `Origin: null` with a matching Referer is accepted (opaque-origin path).
+
+    Why this matters: this is the defense-in-depth half of the fix. "null" is how an
+    opaque origin serializes; treating it as a real candidate (as the old code did) made
+    it fail the exact match and 403 a legitimate same-origin POST. We now treat "null" as
+    no-usable-Origin and fall back to the Referer — which, under the "same-origin" policy,
+    a same-origin request still carries. Accepted (303) and stored.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, headers, _ = _post_comment(
+            base_url, report_id, cookie=cookie, body="Via referer.",
+            origin="null", referer="__match__",
+        )
+        assert status == 303
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id)[0]["body"] == "Via referer."
+
+
+def test_comment_with_public_origin_null_origin_no_referer_is_403(tmp_path):
+    """A literal `Origin: null` with NO Referer fails closed (no usable same-origin proof).
+
+    Why this matters: the opaque-Origin fallback must not become a hole. With nothing to
+    prove same-origin (null Origin AND no Referer — exactly the old no-referrer combo),
+    the request is rejected 403 and nothing is stored.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, _, _ = _post_comment(
+            base_url, report_id, cookie=cookie, origin="null", referer=None
+        )
+        assert status == 403
         conn = open_relay_store(db)
         assert comments_for(conn, report_id) == []
 

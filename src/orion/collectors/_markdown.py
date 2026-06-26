@@ -59,16 +59,27 @@ class Table:
         rows: One dict per data row, mapping each header to that row's cell text.
             A row with fewer cells than headers leaves the missing columns absent;
             extra cells beyond the headers are dropped.
+        heading: The text of the nearest heading (any level, "#".."######") that
+            PRECEDES this table in the document, stripped, or None when no heading
+            comes before it. Lets a caller group a table by the section it sits under
+            (E2 Inc 3 Unit 5: the to-do table under "# Non-Application To-Do" and each
+            "### Task N" breakdown table become their own milestones). Additive and
+            defaulted last, so existing Table(headers=..., rows=...) construction and
+            unpacking are unaffected.
 
     Why:
         Both the Non-Application To-Do table and the roadmap table (Unit B) are read
         by column NAME ("Task", "Sub-goal", "Scope", "Status"), not position, so a
         per-row dict keyed by header is the natural shape. Keeping headers too lets a
-        caller decide which column carries the item text.
+        caller decide which column carries the item text. `heading` is the table's
+        document context — the parser already scans line-by-line, so remembering the
+        last heading seen costs nothing and gives the tracker a milestone label without
+        re-parsing the file.
     """
 
     headers: list[str]
     rows: list[dict[str, str]]
+    heading: str | None = None
 
 
 # An ATX heading at level 1 or 2: "# ..." or "## ...". We capture the level (the run
@@ -146,21 +157,37 @@ def parse_tables(text: str) -> list[Table]:
         One Table per recognized pipe table, in document order. A table is recognized
         only when a header row is immediately followed by a separator row (the
         "|---|---|" line); a lone pipe line with no separator is not a table and is
-        ignored. Empty list when the document has no tables.
+        ignored. Empty list when the document has no tables. Each Table carries the
+        text of the nearest heading preceding it (heading=None if none).
 
     Why:
         The Non-Application To-Do list and the sub-goal breakdowns are Markdown
         tables, and (Unit B) a roadmap is too. Requiring the separator row is what
         distinguishes a real table from an ordinary line that happens to contain a
-        "|", so prose with a pipe is never misread as a one-row table.
+        "|", so prose with a pipe is never misread as a one-row table. We also track
+        the most recent heading while scanning (one extra match per line, no second
+        pass) so each table knows the section it lives under — the milestone grouping
+        the tracker needs (Unit 5).
     """
     tables: list[Table] = []
     lines = text.splitlines()
     i = 0
     n = len(lines)
+    # The nearest heading seen so far while scanning top-to-bottom. Any heading line
+    # (levels 1-6) updates it, so a table is grouped by whatever section most recently
+    # opened above it. None until the first heading appears.
+    current_heading: str | None = None
 
     while i < n:
         line = lines[i]
+        # Track the section context: a heading line (any level) becomes the heading any
+        # following table is attributed to. Checked before the table test because a
+        # heading line never contains a leading pipe, so the two never collide.
+        heading = _HEADING_RE.match(line)
+        if heading is not None:
+            current_heading = heading.group(2).strip()
+            i += 1
+            continue
         # A header row is any line containing a pipe whose NEXT line is a separator.
         # We check the separator first because that is the cheap, decisive signal.
         if "|" in line and i + 1 < n and _TABLE_SEP_RE.match(lines[i + 1]):
@@ -175,7 +202,7 @@ def parse_tables(text: str) -> list[Table]:
                 # leaves trailing columns absent and an over-long row drops extras.
                 rows.append(dict(zip(headers, cells)))
                 j += 1
-            tables.append(Table(headers=headers, rows=rows))
+            tables.append(Table(headers=headers, rows=rows, heading=current_heading))
             i = j
             continue
         i += 1

@@ -26,7 +26,7 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from .derive import count_at_risk, slipping_item_keys
+from .derive import count_at_risk, milestones, slipping_item_keys
 
 # How long sqlite waits for a held write-lock before raising "database is locked".
 # The relay's server is threaded (CP6), so two pushes can arrive close together;
@@ -445,13 +445,15 @@ def latest_report_per_project(
         A list of dicts, one per project that has a report OR a live checklist, each:
         {"project", "report_count", "latest_generated_at", "latest_report_id",
         "latest_body", "checklist_updated_at", "checklist_done", "checklist_total",
-        "checklist_at_risk", "checklist_slipping"}, ordered with the most recently active
-        project first. For a checklist-only project (a live checklist but zero reports) the
-        latest-report fields are None and report_count is 0; for a report-only project
-        checklist_updated_at and the checklist counts are None. "checklist_at_risk" is None
-        when the project has no checklist OR when `today` was not supplied;
-        "checklist_slipping" (from the observation history) is None only when `today` was
-        not supplied.
+        "checklist_at_risk", "checklist_slipping", "nearest_milestone"}, ordered with the
+        most recently active project first. For a checklist-only project (a live checklist but
+        zero reports) the latest-report fields are None and report_count is 0; for a
+        report-only project checklist_updated_at and the checklist counts are None.
+        "checklist_at_risk" is None when the project has no checklist OR when `today` was not
+        supplied; "checklist_slipping" (from the observation history) is None only when
+        `today` was not supplied. "nearest_milestone" is {"group", "nearest_due"} for the
+        soonest-due milestone, or None when the project has no grouped+dated milestone or
+        `today` was not supplied.
 
     Why:
         This backs the dashboard's portfolio HOME — a cross-project "see everything at
@@ -529,6 +531,7 @@ def latest_report_per_project(
         # no checklist row — the renderer reads that as "omit the badge".
         items_json = row["checklist_items"]
         checklist_done = checklist_total = checklist_at_risk = None
+        nearest_milestone = None
         if items_json is not None:
             items = json.loads(items_json)
             checklist_total = len(items)
@@ -540,6 +543,10 @@ def latest_report_per_project(
             # agree on what "at risk" means.
             if today is not None:
                 checklist_at_risk = count_at_risk(items, today)
+                # The portfolio "next milestone" hint (Unit 5): the milestone group whose
+                # nearest OPEN deadline comes soonest, from the same decoded items. None when
+                # the project has no grouped+dated milestone (the card omits the line).
+                nearest_milestone = _nearest_milestone(items, today)
         # Forward-looking slippage (E2 Inc 3 Unit 4): count items slipping per the OBSERVED
         # HISTORY (a deadline that moved later, or one lingering open past due). This reads
         # the append-only observation log, NOT the current checklist row, so it is computed
@@ -562,9 +569,36 @@ def latest_report_per_project(
                 "checklist_total": checklist_total,
                 "checklist_at_risk": checklist_at_risk,
                 "checklist_slipping": checklist_slipping,
+                "nearest_milestone": nearest_milestone,
             }
         )
     return result
+
+
+def _nearest_milestone(items: list, today: date) -> dict | None:
+    """Return the milestone group whose nearest open deadline comes soonest, or None.
+
+    Args:
+        items: A project's live checklist items (decoded wire dicts).
+        today: The reference date (display zone), forwarded to the milestone derivation.
+
+    Returns:
+        {"group": str, "nearest_due": str} for the milestone with the EARLIEST nearest_due
+        across the project, or None when no milestone has a parseable open deadline.
+
+    Why:
+        The portfolio card shows a single "next milestone" hint — which section has the
+        soonest outstanding deadline — so the home needs just that one group + date, not the
+        full per-group breakdown (that lives on the project page). We derive the full
+        milestone list (one source of truth) and pick the earliest dated one; ISO date
+        strings sort chronologically, so a min over nearest_due is correct. None when nothing
+        is both grouped and dated, which the renderer reads as "omit the hint".
+    """
+    dated = [m for m in milestones(items, today) if m["nearest_due"] is not None]
+    if not dated:
+        return None
+    soonest = min(dated, key=lambda m: m["nearest_due"])
+    return {"group": soonest["group"], "nearest_due": soonest["nearest_due"]}
 
 
 def history(conn: sqlite3.Connection, project: str) -> list[dict]:

@@ -83,17 +83,22 @@ def test_snapshot_maps_status_to_done_open_with_status_in_text(tmp_path):
 
     # Application items come first, in heading order, with status embedded in text and the
     # bare title carried as the stable `key` (E2 Inc 3 Unit 3 — survives a status change).
+    # All numbered sections share the "Applications" milestone group (E2 Inc 3 Unit 5).
     assert items[0] == ChecklistItem(
-        text="Claude Corps Fellow (job) - Not started", done=False, key="Claude Corps Fellow (job)"
+        text="Claude Corps Fellow (job) - Not started", done=False,
+        key="Claude Corps Fellow (job)", group="Applications",
     )
     assert items[1] == ChecklistItem(
-        text="Hack Your Summer (program) - In progress", done=False, key="Hack Your Summer (program)"
+        text="Hack Your Summer (program) - In progress", done=False,
+        key="Hack Your Summer (program)", group="Applications",
     )
     assert items[2] == ChecklistItem(
-        text="Some Course (course) - Submitted", done=True, key="Some Course (course)"
+        text="Some Course (course) - Submitted", done=True,
+        key="Some Course (course)", group="Applications",
     )
     assert items[3] == ChecklistItem(
-        text="Old Internship (internship) - Closed", done=True, key="Old Internship (internship)"
+        text="Old Internship (internship) - Closed", done=True,
+        key="Old Internship (internship)", group="Applications",
     )
 
 
@@ -126,6 +131,20 @@ def test_snapshot_surfaces_table_rows_as_open_items(tmp_path):
     assert all(item.done is False for item in table_items)
 
 
+def test_snapshot_table_rows_grouped_by_their_nearest_heading(tmp_path):
+    """Each to-do table row carries its table's nearest heading as `group` (Unit 5).
+
+    Why this matters: milestones are derived from these groups, so the main-table rows
+    must land under "Non-Application To-Do" and the sub-goal rows under "Task 2 breakdown"
+    — the two tables become two distinct milestones, not one merged bucket.
+    """
+    by_text = {i.text: i.group for i in snapshot(_write_tracker(tmp_path))}
+    assert by_text["Review GitHub repo"] == "Non-Application To-Do"
+    assert by_text["Format repo — *see breakdown below*"] == "Non-Application To-Do"
+    assert by_text["Format the barebones repo"] == "Task 2 breakdown"
+    assert by_text["Switch the repo to public"] == "Task 2 breakdown"
+
+
 def test_snapshot_missing_status_keeps_application_as_open_title_only(tmp_path):
     """A numbered application with no Status line is kept (open) with just its title.
 
@@ -135,7 +154,10 @@ def test_snapshot_missing_status_keeps_application_as_open_title_only(tmp_path):
     text = "## 5. No Status App (job)\n- **Type:** Job\n"
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
-        ChecklistItem(text="No Status App (job)", done=False, key="No Status App (job)"),
+        ChecklistItem(
+            text="No Status App (job)", done=False,
+            key="No Status App (job)", group="Applications",
+        ),
     )
 
 
@@ -148,7 +170,10 @@ def test_snapshot_unknown_status_value_keeps_application_as_open_title_only(tmp_
     text = "## 5. Weird App (job)\n- **Status:** Pending review\n"
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
-        ChecklistItem(text="Weird App (job)", done=False, key="Weird App (job)"),
+        ChecklistItem(
+            text="Weird App (job)", done=False,
+            key="Weird App (job)", group="Applications",
+        ),
     )
 
 
@@ -164,7 +189,9 @@ def test_snapshot_dedupes_by_text_first_wins(tmp_path):
     )
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
-        ChecklistItem(text="Dup (job) - Submitted", done=True, key="Dup (job)"),
+        ChecklistItem(
+            text="Dup (job) - Submitted", done=True, key="Dup (job)", group="Applications",
+        ),
     )
 
 
@@ -312,6 +339,7 @@ def test_snapshot_carries_application_deadline_field(tmp_path):
             done=False,
             due_date="2026-07-17",
             key="Fellowship (job)",
+            group="Applications",
         ),
     )
 
@@ -335,7 +363,10 @@ def test_snapshot_application_without_deadline_has_none(tmp_path):
     text = "## 1. App (job)\n- **Status:** Submitted\n"
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
-        ChecklistItem(text="App (job) - Submitted", done=True, due_date=None, key="App (job)"),
+        ChecklistItem(
+            text="App (job) - Submitted", done=True, due_date=None,
+            key="App (job)", group="Applications",
+        ),
     )
 
 
@@ -375,7 +406,8 @@ def test_snapshot_garbage_application_deadline_never_breaks_parse(tmp_path):
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
         ChecklistItem(
-            text="App (job) - In progress", done=False, due_date=None, key="App (job)"
+            text="App (job) - In progress", done=False, due_date=None,
+            key="App (job)", group="Applications",
         ),
     )
 

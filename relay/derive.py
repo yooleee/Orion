@@ -124,6 +124,99 @@ def count_at_risk(items: list[dict] | None, today: date, due_soon_days: int = DU
     return sum(1 for item in (items or []) if classify_item(item, today, due_soon_days) is not None)
 
 
+def milestones(checklist: list[dict] | None, today: date) -> list[dict]:
+    """Roll the live checklist up into per-group milestones.
+
+    Args:
+        checklist: The live checklist items ({"text", "done"[, "due_date"][, "group"]}),
+            or None.
+        today: The reference date (display zone), forwarded to count_at_risk.
+
+    Returns:
+        One dict per milestone group, in FIRST-SEEN order:
+        {"group": str, "done": int, "total": int, "at_risk": int, "nearest_due": str|None}.
+        `nearest_due` is the soonest OPEN item's due_date (ISO string) in the group, or None
+        when no open item carries a parseable deadline. Items with no `group` are excluded;
+        the result is [] when nothing is grouped (or the checklist is None/empty).
+
+    Why:
+        A milestone is just a GROUP of checklist items, and the grouping is supplied by the
+        producer (the tracker tags items with a section `group`; a plain checkbox list tags
+        none). So this layer only has to bucket by that field and summarize each bucket —
+        progress (done/total), the nearest thing still due, and how many are at risk — which
+        is what the dashboard's "Milestones" view and the portfolio "next milestone" hint
+        read. First-seen order mirrors the checklist's own order (applications before the
+        to-do tables), so the view matches the document. nearest_due looks only at OPEN items
+        because a finished item's deadline is moot — the same reason count_at_risk and the
+        per-item render ignore done items, keeping the three consistent. This OBSERVES the
+        structure the source doc already has; it authors no grouping of its own.
+    """
+    if not checklist:
+        return []
+
+    # Bucket items by group, preserving first-seen group order. dict preserves insertion
+    # order (Python 3.7+), so the first time a group appears fixes its position.
+    groups: dict[str, list[dict]] = {}
+    for item in checklist:
+        group = item.get("group")
+        if not group:  # None or "" → ungrouped, contributes no milestone
+            continue
+        groups.setdefault(group, []).append(item)
+
+    result: list[dict] = []
+    for group, items in groups.items():
+        total = len(items)
+        done = sum(1 for item in items if item.get("done"))
+        # Reuse the at-risk rule (overdue ∪ due-soon, open items only) so a milestone's
+        # roll-up can never disagree with the per-item treatment or the card's at-risk badge.
+        at_risk = count_at_risk(items, today)
+        result.append(
+            {
+                "group": group,
+                "done": done,
+                "total": total,
+                "at_risk": at_risk,
+                "nearest_due": _nearest_open_due(items),
+            }
+        )
+    return result
+
+
+def _nearest_open_due(items: list[dict]) -> str | None:
+    """Return the soonest OPEN item's due_date (ISO string) in a group, or None.
+
+    Args:
+        items: The checklist items in one milestone group.
+
+    Returns:
+        The earliest parseable due_date among the group's OPEN items, as its original ISO
+        "YYYY-MM-DD" string, or None when no open item carries a parseable deadline.
+
+    Why:
+        The milestone's headline date is "what is due next" for work still outstanding, so a
+        done item never sets it (its deadline is moot). We compare as real dates (so ordering
+        is calendar-correct, not lexical-by-accident) but return the ORIGINAL string, since
+        the producer already normalized it to ISO and the renderer formats from that. Re-parse
+        defensively: a malformed stored value is skipped rather than raising mid-derive,
+        mirroring classify_item's never-fail stance.
+    """
+    best: date | None = None
+    best_iso: str | None = None
+    for item in items:
+        if item.get("done"):
+            continue  # an open milestone's next date comes from open work only
+        raw = item.get("due_date")
+        if not raw:
+            continue
+        try:
+            due = date.fromisoformat(raw)
+        except (ValueError, TypeError):
+            continue  # a malformed date carries no usable deadline
+        if best is None or due < best:
+            best, best_iso = due, raw
+    return best_iso
+
+
 def is_slipping(observations: list[dict], today: date) -> bool:
     """Decide whether one item is SLIPPING from its observation history.
 

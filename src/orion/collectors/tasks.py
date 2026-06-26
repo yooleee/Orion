@@ -47,14 +47,20 @@ class ChecklistItem:
             status does — the forward-store needs an identity that survives that. The tasks
             collector and table rows leave it None: their text carries no status, so it is
             already a stable key.
+        group: The milestone this item belongs to, or None when it is ungrouped. Set by
+            the tracker collector (E2 Inc 3, Unit 5): "Applications" for the numbered
+            application sections, and the table's nearest heading for to-do rows. The relay
+            groups items by this field to derive per-milestone progress and deadlines. The
+            tasks collector and any ungrouped item leave it None — a checkbox list has no
+            section structure, so it contributes no milestone.
 
     Why:
         snapshot() reports the FULL current checklist (open + done), unlike collect()
         which reports only newly-completed items as prose. A tiny named record (rather
         than a bare (text, bool) tuple) makes the done-state explicit at every use site
         and leaves a clean seam for additive fields without churning positional unpacking
-        everywhere — due_date (the forward-looking deadline) and key (the forward-store's
-        stable identity) are the additions so far; a milestone `group` may follow. Each
+        everywhere — due_date (the forward-looking deadline), key (the forward-store's
+        stable identity), and group (the milestone) are the additions so far. Each
         defaults to None so every existing two-arg construction stays valid and the wire
         shape is unchanged when the field is absent.
     """
@@ -63,6 +69,7 @@ class ChecklistItem:
     done: bool
     due_date: str | None = None
     key: str | None = None
+    group: str | None = None
 
 
 class TasksError(Exception):

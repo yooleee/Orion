@@ -23,6 +23,7 @@ from relay.render import (
     _format_ts,
     _headline,
     _render_checklist,
+    _render_milestones,
     render_not_found,
     render_portfolio,
     render_project,
@@ -1048,3 +1049,116 @@ def test_render_portfolio_omits_slipping_badge_when_zero_or_none():
     zero_html = render_portfolio([_pcard(checklist_slipping=0)])
     assert "<p class='slipping-badge'>" not in none_html
     assert "<p class='slipping-badge'>" not in zero_html
+
+
+# --- derived milestones (E2 Inc 3 Unit 5) --------------------------------------------
+
+
+def _ms(group, done=0, total=1, at_risk=0, nearest_due=None):
+    """Build one milestone dict (derive.milestones()'s shape) with defaults, overridable.
+
+    Why: _render_milestones renders five fields per row; defaulting keeps each test to the
+    field it exercises instead of restating the whole dict (DRY), like _pcard/_report.
+    """
+    return {
+        "group": group,
+        "done": done,
+        "total": total,
+        "at_risk": at_risk,
+        "nearest_due": nearest_due,
+    }
+
+
+def test_render_milestones_shows_group_progress_due_and_at_risk():
+    """A milestone row shows its group, "M/N done", "next due <date>", and the at-risk count.
+
+    Why this matters: this is the at-a-glance roll-up. All four facts must surface, with the
+    date humanized (no-JS-friendly) and the at-risk count in its own span so the amber tint
+    (shared with the checklist) applies to just the number.
+    """
+    html = _render_milestones(
+        [_ms("Applications", done=1, total=4, at_risk=2, nearest_due="2026-07-04")]
+    )
+    assert "<section class='milestones'>" in html
+    assert "<h2>Milestones</h2>" in html
+    assert "Applications" in html
+    assert "1/4 done" in html
+    assert "next due Jul 4, 2026" in html
+    assert "<span class='at-risk'>2 at risk</span>" in html
+
+
+def test_render_milestones_omits_date_and_at_risk_clauses_when_absent():
+    """A group with no open deadline and nothing at risk shows only "M/N done".
+
+    Why this matters: the live to-do tables use year-less dates (nearest_due None), so a real
+    milestone often has only progress. The optional clauses must drop cleanly — no dangling
+    "next due" with no date, no "0 at risk".
+    """
+    html = _render_milestones([_ms("Non-Application To-Do", done=0, total=8)])
+    assert "0/8 done" in html
+    assert "next due" not in html
+    assert "<span class='at-risk'>" not in html
+
+
+def test_render_milestones_escapes_group_name():
+    """A milestone group name (user heading text) is escaped, never live markup.
+
+    Why this matters: the group comes from a tracker heading — arbitrary user text — so a
+    "<script>" in a heading must render inert, the same stored-XSS defense as everywhere else.
+    """
+    html = _render_milestones([_ms(_XSS, done=0, total=1)])
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_render_milestones_empty_renders_nothing():
+    """No milestones → "" (the caller's join drops the section entirely).
+
+    Why this matters: a project without a structured tracker has no groups; it must take the
+    no-section path, never an empty "Milestones" heading.
+    """
+    assert _render_milestones([]) == ""
+
+
+def test_render_project_shows_milestones_above_the_checklist():
+    """render_project derives milestones from the grouped checklist and places them first.
+
+    Why this matters: end-to-end of the project-page surface, and the settled placement — the
+    summary-first roll-up sits ABOVE the per-item checklist. Group/progress/next-due are
+    today-independent, so this is deterministic without injecting a date.
+    """
+    checklist = [
+        {"text": "App A", "done": True, "group": "Applications", "due_date": "2026-07-04"},
+        {"text": "App B", "done": False, "group": "Applications"},
+    ]
+    html = render_project("demo", [], checklist=checklist)
+    assert "<section class='milestones'>" in html
+    assert "1/2 done" in html
+    # Placement: the milestones section comes before the checklist section.
+    assert html.index("<section class='milestones'>") < html.index("<section class='checklist'>")
+
+
+def test_render_portfolio_shows_next_milestone_hint():
+    """A card whose project has a soonest-due milestone renders a "Next: <group> by <date>" line.
+
+    Why this matters: the home's forward hint points a viewer at the section due next without
+    opening the project. The group + date come precomputed from the store as nearest_milestone.
+    """
+    html = render_portfolio(
+        [_pcard(nearest_milestone={"group": "Applications", "nearest_due": "2026-06-12"})]
+    )
+    assert "<p class='milestone-hint'>" in html
+    assert "Applications" in html
+    assert "Jun 12, 2026" in html
+
+
+def test_render_portfolio_omits_milestone_hint_when_none():
+    """No hint when nearest_milestone is None or the key is absent (no milestone / no today).
+
+    Why this matters: a project without a grouped+dated milestone must look exactly as before;
+    assert the ELEMENT is absent (a loose "milestone" substring matches the CSS comment).
+    """
+    none_html = render_portfolio([_pcard(nearest_milestone=None)])
+    absent_html = render_portfolio([_pcard()])  # _pcard has no nearest_milestone key at all
+    assert "<p class='milestone-hint'>" not in none_html
+    assert "<p class='milestone-hint'>" not in absent_html

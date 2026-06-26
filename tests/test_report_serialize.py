@@ -213,6 +213,25 @@ def test_serialize_blob_emits_key_when_item_has_one_else_omits():
     ]
 
 
+def test_serialize_blob_emits_group_when_item_has_one_else_omits():
+    """A checklist item with a milestone `group` serializes it; one without keeps the old shape.
+
+    Why this matters: the tracker tags each item with a milestone group (Unit 5) so the relay
+    can roll items up into per-section milestones. Like due_date and key, it must cross the
+    seam, and stay omitted for items that have none so their wire shape is unchanged.
+    """
+    checklist = (
+        ChecklistItem(text="App - Submitted", done=True, key="App", group="Applications"),
+        ChecklistItem(text="Plain task", done=False),
+    )
+    parsed = json.loads(serialize_blob(_blob(checklist=checklist)))
+
+    assert parsed["checklist"] == [
+        {"text": "App - Submitted", "done": True, "key": "App", "group": "Applications"},
+        {"text": "Plain task", "done": False},  # no group → exact old {text, done} shape
+    ]
+
+
 def test_serialize_blob_round_trips_checklist_with_due_date():
     """A checklist carrying due_dates survives serialize → parse → rebuild losslessly.
 

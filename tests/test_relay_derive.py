@@ -21,6 +21,7 @@ from relay.derive import (
     classify_item,
     count_at_risk,
     is_slipping,
+    milestones,
     slipping_item_keys,
     today_in_tz,
 )
@@ -222,3 +223,111 @@ def test_slipping_item_keys_groups_history_by_key():
         _o("2026-07-10", item_key="B"),  # B steady, future → not
     ]
     assert slipping_item_keys(observations, _TODAY) == {"A"}
+
+
+# --- milestones(): per-group roll-up (E2 Inc 3 Unit 5) -------------------------------
+
+
+def _gi(group=None, done=False, due_date=None, text="task"):
+    """Build a checklist item dict, attaching group/due_date only when given.
+
+    Why: mirrors the producer's optional-field shape — an ungrouped or undated item has no
+    such key at all — so the tests exercise the real "key absent" path, like _item above.
+    """
+    item = {"text": text, "done": done}
+    if group is not None:
+        item["group"] = group
+    if due_date is not None:
+        item["due_date"] = due_date
+    return item
+
+
+def test_milestones_groups_progress_and_order():
+    """Items roll up per group, in first-seen order, with done/total progress.
+
+    Why this matters: a milestone is a group of items; the view shows "M/N done" per group
+    and must list groups in the document's own order (applications before to-dos), so the
+    first appearance of each group fixes its position.
+    """
+    checklist = [
+        _gi(group="Applications", done=True, text="App A"),
+        _gi(group="Applications", done=False, text="App B"),
+        _gi(group="Non-Application To-Do", done=False, text="Chore"),
+        _gi(group="Applications", done=False, text="App C"),  # back to first group
+    ]
+    result = milestones(checklist, _TODAY)
+    assert [(m["group"], m["done"], m["total"]) for m in result] == [
+        ("Applications", 1, 3),
+        ("Non-Application To-Do", 0, 1),
+    ]
+
+
+def test_milestones_nearest_due_is_soonest_open_deadline():
+    """nearest_due is the earliest OPEN item's deadline; a done item never sets it.
+
+    Why this matters: the milestone's headline date is "what's due next" for outstanding
+    work, so a finished item's (earlier) deadline must not win — and the comparison must be
+    calendar-correct, returning the original ISO string.
+    """
+    checklist = [
+        # A done item with the earliest date — must be ignored for nearest_due.
+        _gi(group="G", done=True, due_date="2026-06-01"),
+        _gi(group="G", done=False, due_date="2026-08-15"),
+        _gi(group="G", done=False, due_date="2026-07-04"),  # the soonest OPEN one
+    ]
+    assert milestones(checklist, _TODAY)[0]["nearest_due"] == "2026-07-04"
+
+
+def test_milestones_nearest_due_none_when_no_open_deadline():
+    """A group whose open items carry no parseable deadline has nearest_due None.
+
+    Why this matters: the live to-do tables use year-less dates that parse to None, so a real
+    milestone often has progress but no date — it must report None, not crash or guess.
+    """
+    checklist = [
+        _gi(group="G", done=False),  # no due_date
+        _gi(group="G", done=False, due_date="not-a-date"),  # unparseable → skipped
+        _gi(group="G", done=True, due_date="2026-07-04"),  # done → ignored
+    ]
+    assert milestones(checklist, _TODAY)[0]["nearest_due"] is None
+
+
+def test_milestones_at_risk_rollup_matches_count_at_risk():
+    """A milestone's at_risk count is the group's overdue ∪ due-soon open items.
+
+    Why this matters: the roll-up reuses count_at_risk so a milestone, the per-item render,
+    and the card badge can never disagree on "at risk". Here one item is overdue and one is
+    safely in the future, so exactly one is at risk.
+    """
+    checklist = [
+        _gi(group="G", done=False, due_date="2026-06-01"),  # overdue (before _TODAY)
+        _gi(group="G", done=False, due_date="2026-12-31"),  # far future → not at risk
+    ]
+    assert milestones(checklist, _TODAY)[0]["at_risk"] == 1
+
+
+def test_milestones_excludes_ungrouped_items():
+    """Items with no group contribute no milestone (and don't crash).
+
+    Why this matters: a plain checkbox list (tasks collector) tags no groups, so it must
+    yield no milestones — the feature degrades to nothing rather than inventing a bucket.
+    """
+    checklist = [
+        _gi(done=False, text="ungrouped 1"),  # no group key
+        _gi(group="", done=False, text="empty group"),  # falsy group → excluded too
+        _gi(group="Real", done=False, text="grouped"),
+    ]
+    result = milestones(checklist, _TODAY)
+    assert [m["group"] for m in result] == ["Real"]
+
+
+def test_milestones_empty_when_nothing_grouped_or_none():
+    """No grouped items, an empty checklist, or None all yield [].
+
+    Why this matters: the renderer omits the Milestones section on []. A project without a
+    structured tracker (or with no checklist at all) must take that path, never a half-built
+    section.
+    """
+    assert milestones(None, _TODAY) == []
+    assert milestones([], _TODAY) == []
+    assert milestones([_gi(done=False, text="ungrouped")], _TODAY) == []

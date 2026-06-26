@@ -334,6 +334,65 @@ def test_latest_report_per_project_carries_checklist_counts(tmp_path):
     assert by_name["beta"]["checklist_total"] is None
 
 
+def test_latest_report_per_project_includes_checklist_only_projects(tmp_path):
+    """A project with a live checklist but ZERO reports still appears on the portfolio.
+
+    Why this matters: this is the whole point of the fix. A dashboard-only project (a
+    pushed checklist, no git, never report-ed — exactly the applications tracker) used
+    to vanish from the home because the query ran FROM relay_reports, so family had no
+    card to click. The row set is now project-driven (report OR checklist), so the
+    checklist-only project shows up with report_count 0, None for every latest_* field,
+    a populated checklist_updated_at to use as its last-activity time, and real
+    done/total counts for the badge.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(
+        conn,
+        "applications",
+        _items(("Applied to X", True), ("Heard back from Y", False)),
+        "2026-06-25T10:00:00+00:00",
+    )
+
+    by_name = {r["project"]: r for r in latest_report_per_project(conn)}
+
+    assert "applications" in by_name
+    card = by_name["applications"]
+    assert card["report_count"] == 0
+    assert card["latest_report_id"] is None
+    assert card["latest_body"] is None
+    assert card["latest_generated_at"] is None
+    assert card["checklist_updated_at"] == "2026-06-25T10:00:00+00:00"
+    assert card["checklist_done"] == 1
+    assert card["checklist_total"] == 2
+
+
+def test_latest_report_per_project_interleaves_checklist_only_by_recency(tmp_path):
+    """Checklist-only and report-bearing projects sort together by last activity.
+
+    Why this matters: the home orders freshest-first across BOTH kinds. The order key is
+    COALESCE(latest_generated_at, checklist_updated_at), so a checklist-only project with
+    a fresher updated_at must outrank an older report, and an older checklist must fall
+    below a newer report. We place a report between two checklist-only timestamps and
+    assert the interleaving. A report+checklist project appears exactly once (UNION
+    dedupe), keyed by its report time.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # Checklist-only, freshest.
+    upsert_checklist(conn, "fresh_list", _items(("a", False)), "2026-06-25T12:00:00+00:00")
+    # Report-only, middle.
+    ingest(conn, _blob("mid_report", generated_at="2026-06-25T11:00:00+00:00"), "2026-06-25T11:00:01+00:00")
+    # Checklist-only, oldest.
+    upsert_checklist(conn, "old_list", _items(("b", True)), "2026-06-25T10:00:00+00:00")
+    # Report+checklist on one project — must appear ONCE, keyed by its report time.
+    ingest(conn, _blob("both", generated_at="2026-06-25T09:00:00+00:00"), "2026-06-25T09:00:01+00:00")
+    upsert_checklist(conn, "both", _items(("c", False)), "2026-06-25T08:00:00+00:00")
+
+    rows = latest_report_per_project(conn)
+    assert [r["project"] for r in rows] == ["fresh_list", "mid_report", "old_list", "both"]
+    # 'both' is deduped to a single row (UNION, not UNION ALL).
+    assert [r["project"] for r in rows].count("both") == 1
+
+
 # --- C2: report comments (append-only, flat) ----------------------------------
 
 

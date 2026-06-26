@@ -684,6 +684,27 @@ def test_project_page_shows_the_live_checklist(tmp_path):
         assert "Wire it" in project_html  # an item from _checklist_body's default
 
 
+def test_home_shows_checklist_only_project_card(tmp_path):
+    """A checklist-only project (no report) appears on the home with a clickable card.
+
+    Why this matters: this is the end-to-end payoff of the slice. Before, the home only
+    listed projects that had reports, so a dashboard-only project (a pushed checklist, no
+    git, never report-ed — the applications tracker) was reachable solely by typing the
+    direct /project/<name> URL. We push ONLY a checklist for 'applications', GET the home,
+    and assert its card and /project/ link now render alongside no crash.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, _ = _post(
+            base_url, _checklist_body(project="applications"), path="/checklist"
+        )
+        assert status == 200
+
+        code, home_html = _get(base_url, "/")
+        assert code == 200
+        assert 'href="/project/applications"' in home_html
+        assert "0 report(s)" in home_html  # checklist-only → zero reports
+
+
 def test_dashboard_unknown_report_id_is_404(tmp_path):
     """A GET for a report id that does not exist returns 404.
 

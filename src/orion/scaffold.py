@@ -157,6 +157,8 @@ def render_project_stanza(
     recipients: tuple[Recipient, ...],
     tasks_file: Path | str | None = None,
     notes_file: Path | str | None = None,
+    incubator_file: Path | str | None = None,
+    tracker_file: Path | str | None = None,
     *,
     with_state_db: bool = False,
 ) -> str:
@@ -171,6 +173,8 @@ def render_project_stanza(
             on load, so we refuse to write one).
         tasks_file: Required iff "tasks" is in `collectors`; ignored otherwise.
         notes_file: Required iff "notes" is in `collectors`; ignored otherwise.
+        incubator_file: Required iff "incubator" is in `collectors`; ignored otherwise.
+        tracker_file: Required iff "tracker" is in `collectors`; ignored otherwise.
         with_state_db: When True (creating a brand-new orion.toml), prepend the
             global `state_db` line so the file is valid on its own. When appending
             to an existing config, leave it off (state_db already lives there).
@@ -209,8 +213,15 @@ def render_project_stanza(
         raise ConfigError(f"{where} needs at least one recipient.")
 
     # Pair each enabled file-backed collector with its required file path, mirroring
-    # config._parse_collector_file's contract (enabled ⇒ a path is required).
-    collector_files = {"tasks": tasks_file, "notes": notes_file}
+    # config._parse_collector_file's contract (enabled ⇒ a path is required). One entry
+    # per key in COLLECTOR_FILE_KEYS, which the loop below iterates — a missing entry for
+    # an enabled collector would KeyError, so all four file-backed collectors are present.
+    collector_files = {
+        "tasks": tasks_file,
+        "notes": notes_file,
+        "incubator": incubator_file,
+        "tracker": tracker_file,
+    }
 
     lines: list[str] = []
     if with_state_db:

@@ -1450,3 +1450,99 @@ def test_bot_token_env_var_rejects_a_pasted_value(tmp_path):
     msg = str(exc.value)
     assert "token_env_var" in msg
     assert leaked not in msg  # the secret must NOT be echoed back
+
+
+# --- E2 Inc 4: the project/tracker `kind` flag --------------------------------------
+
+
+def test_kind_defaults_to_project(tmp_path):
+    """An omitted `kind` defaults to "project" — the common case.
+
+    Why this matters: most entries are real projects, so the safe default keeps existing
+    configs working unchanged and only trackers need to opt in.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    assert get_project(load_config(path), "demo").kind == "project"
+
+
+def test_kind_tracker_loads_with_checklist(tmp_path):
+    """A checklist-backed entry may declare kind = "tracker".
+
+    Why this matters: this is how the applications tracker is marked a To-do, not a project.
+    It pairs with `checklist` + a checklist collector (the carrier the kind rides on).
+    """
+    (tmp_path / "TODO.md").write_text("- [ ] Apply\n", encoding="utf-8")
+    path = _write(
+        tmp_path,
+        """
+        [projects.apps]
+        repo_path = "/tmp/apps"
+        collectors = ["tasks"]
+        checklist = true
+        kind = "tracker"
+        tasks_file = "TODO.md"
+
+        [[projects.apps.recipients]]
+        name = "Family"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    assert get_project(load_config(path), "apps").kind == "tracker"
+
+
+def test_invalid_kind_raises(tmp_path):
+    """An unknown kind value is a clear ConfigError, not a silent unrecognized kind.
+
+    Why this matters: a typo (kind = "tracke") would otherwise sail through and confuse the
+    home's split; catching it at load points the user at the exact key.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        kind = "tracke"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="invalid kind"):
+        load_config(path)
+
+
+def test_tracker_without_checklist_raises(tmp_path):
+    """kind = "tracker" without `checklist` is rejected (it would never reach the relay).
+
+    Why this matters: kind rides the checklist push, so a tracker with no checklist would
+    silently never appear as one. Failing at load turns that no-op into a fixable error.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.apps]
+        repo_path = "/tmp/apps"
+        kind = "tracker"
+
+        [[projects.apps.recipients]]
+        name = "Family"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="checklist"):
+        load_config(path)

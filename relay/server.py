@@ -28,6 +28,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import mimetypes
 import secrets
 import sqlite3
 import sys
@@ -40,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import api
 from .derive import today_in_tz
 from .render import (
     _DISPLAY_TZ,
@@ -60,6 +62,7 @@ from .store import (
     comments_for_project,
     get,
     get_checklist,
+    get_project_kind,
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
@@ -73,6 +76,7 @@ from .store import (
     record_admin_audit,
     record_observations,
     revoke_user,
+    set_project_kind,
     update_last_login,
     upsert_checklist,
 )
@@ -149,6 +153,27 @@ _CONTENT_SECURITY_POLICY = (
     f"style-src 'self' '{PAGE_CSS_HASH}'; "
     f"script-src 'self' '{PAGE_JS_HASH}'; "
     "img-src 'self'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'"
+)
+
+# E2 Inc 4: the CSP for the React SPA (the --web-dir static responses). Vite emits EXTERNAL
+# hashed JS/CSS (no inline <script>/<style>), so script-src stays STRICT 'self' — that is the
+# XSS guarantee, the same one the old hash-based policy gave. style-src adds 'unsafe-inline'
+# ONLY because the SPA uses data-driven inline style ATTRIBUTES (progress-bar widths, status
+# colours) that a static stylesheet cannot express; this allows no script execution, so the
+# XSS property is unaffected. font-src 'self' because the fonts are self-hosted (not a CDN);
+# connect-src 'self' for the SPA's same-origin fetch('/api/...'); img-src adds data: for any
+# tiny inlined SVG (assetsInlineLimit is 0, but data: is harmless and future-proofs icons).
+_SPA_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
     "base-uri 'none'; "
     "form-action 'self'; "
     "frame-ancestors 'none'; "
@@ -331,6 +356,12 @@ def _checklist_items_error(checklist: object) -> str | None:
     return None
 
 
+# E2 Inc 4: the project kinds the relay accepts (a checklist push may declare one). Kept
+# as a relay-local constant — relay/ shares no code with orion/ (see store.py's header), so
+# the wire's valid set is restated here, the same way _BUSY_TIMEOUT_SECONDS is duplicated.
+_VALID_PROJECT_KINDS = ("project", "tracker")
+
+
 def _validate_checklist_request(payload: object) -> str | None:
     """Check a parsed payload against the checklist-push contract (POST /checklist).
 
@@ -338,21 +369,29 @@ def _validate_checklist_request(payload: object) -> str | None:
         payload: The JSON-parsed request body (any type — untrusted input).
 
     Returns:
-        None when the payload is a valid `{project, checklist}` request; otherwise a
-        short human-readable 400 reason.
+        None when the payload is a valid `{project, checklist[, kind]}` request; otherwise
+        a short human-readable 400 reason.
 
     Why:
         The checklist-only push is an untrusted inbound surface like /ingest, so it
         validates shape BEFORE storing. Unlike the blob's optional checklist, here the
         checklist is REQUIRED (the request exists to set it), and `project` must be a
         non-empty string (it is the upsert key). The item shape reuses the shared helper.
+        `kind` is OPTIONAL (a producer predating the flag omits it ⇒ the relay defaults to
+        "project"), so it is validated only WHEN PRESENT, to a known value.
     """
     if not isinstance(payload, dict):
         return "payload must be a JSON object"
     project = payload.get("project")
     if not isinstance(project, str) or not project.strip():
         return "field 'project' must be a non-empty string"
-    return _checklist_items_error(payload.get("checklist"))
+    items_error = _checklist_items_error(payload.get("checklist"))
+    if items_error is not None:
+        return items_error
+    kind = payload.get("kind")
+    if kind is not None and kind not in _VALID_PROJECT_KINDS:
+        return f"field 'kind' must be one of {_VALID_PROJECT_KINDS}"
+    return None
 
 
 def _validate_blob(payload: object) -> str | None:
@@ -527,6 +566,34 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_list_users()
             return
 
+        # E2 Inc 4: the SPA's read-only JSON API. Unlike /api/comments + /api/users (machine
+        # surfaces authed by a Bearer/admin token), these are consumed by the browser SPA and
+        # use the SAME cookie session + scope the dashboard routes do — but answer with JSON
+        # (and a 401 instead of a 303 redirect, so the SPA's fetch routes itself to /login).
+        if (
+            path in ("/api/me", "/api/portfolio")
+            or path.startswith("/api/projects/")
+            or path.startswith("/api/reports/")
+        ):
+            self._handle_spa_api(path)
+            return
+
+        # E2 Inc 4: when serving the SPA single-host, GET routing diverges from the legacy
+        # server-rendered dashboard — the SPA owns every page (/, /project/*, /report/*,
+        # /login) via client-side routing. So serve a real asset if the path maps to one,
+        # else fall back to index.html. The data is still gated (the /api routes 401); the
+        # index shell itself is public (the SPA then calls /api/me and routes to /login).
+        # /logout stays a real action (clear the cookie, then the SPA loads). The legacy
+        # HTML branch below is retained until parity and only runs when web_dir is unset.
+        if self.server.web_dir is not None:
+            if path == "/logout":
+                self._handle_logout()
+                return
+            if self._serve_static(path):
+                return
+            self._serve_spa_index()
+            return
+
         # The login surface is reachable WITHOUT a session — you must get here to log in.
         if path == "/login":
             self._send_html(200, render_login())
@@ -676,6 +743,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_login()
             return
 
+        # E2 Inc 4: the SPA's JSON auth siblings of the form /login + GET /logout.
+        if path == "/api/login":
+            self._handle_api_login()
+            return
+        if path == "/api/logout":
+            self._handle_api_logout()
+            return
+
         comment_report_id = _parse_comment_path(path)
         if comment_report_id is not None:
             self._handle_comment(comment_report_id)
@@ -801,6 +876,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
             record_observations(
                 conn, payload["project"], payload["checklist"], received_at
             )
+            # E2 Inc 4: record the project's kind (project | tracker) so the home can split
+            # projects from trackers. Optional on the wire — absent ⇒ "project" (the safe
+            # default, and what a producer predating the flag means). Its own meta row.
+            set_project_kind(conn, payload["project"], payload.get("kind") or "project")
         finally:
             conn.close()
         count = len(payload["checklist"])
@@ -1520,44 +1599,247 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 except UnicodeDecodeError:
                     key = ""
 
-            sub = sv = None
-            if key and self.server.user_pepper is not None:
-                user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, key))
-                if user is not None and user["active"]:
-                    sub, sv = user["id"], user["session_version"]
-                    update_last_login(conn, user["id"], _utc_now_iso())
-            if (
-                sub is None
-                and key
-                and self.server.view_token
-                and self._legacy_admin_allowed(conn)
-                and hmac.compare_digest(key, self.server.view_token)
-            ):
-                sub, sv = 0, 0  # legacy bootstrap admin
-
-            if sub is None:
+            resolved = self._resolve_login(conn, key)
+            if resolved is None:
                 self._send_html(401, render_login("Invalid or expired access key."))
                 return
-
-            now = int(time.time())
-            value = make_session_value(
-                self.server.session_key, sub, sv, now, now + self.server.session_seconds
-            )
+            sub, sv, _identity = resolved
             self._send_redirect(
-                303,
-                "/",
-                extra_headers={
-                    "Set-Cookie": self._cookie_header(value, self.server.session_seconds)
-                },
+                303, "/", extra_headers={"Set-Cookie": self._mint_cookie(sub, sv)}
             )
         finally:
             conn.close()
+
+    def _resolve_login(self, conn, key: str) -> tuple | None:
+        """Verify an access key and resolve it to (sub, sv, identity), or None on a miss.
+
+        Args:
+            conn: An open relay-store connection.
+            key: The posted access key (free text — untrusted).
+
+        Returns:
+            (sub, sv, identity) on success — `sub`/`sv` the session cookie's subject +
+            version, `identity` = {"name", "role"} — or None when the key matches no active
+            user (and is not the still-permitted legacy admin key). Updates last_login on a
+            real-user success.
+
+        Why:
+            BOTH the form login (/login → 303) and the JSON login (/api/login → JSON) need
+            the exact same verify-and-mint logic; factoring it here is the one place that can
+            never drift between them. All key compares stay constant-time (key_verifier /
+            compare_digest) and the key is never logged. A generic None on any miss keeps the
+            callers from leaking which part failed. Returns identity too, so the JSON caller
+            can echo {name, role} without a second lookup.
+        """
+        if not key or self.server.session_key is None:
+            return None
+        if self.server.user_pepper is not None:
+            user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, key))
+            if user is not None and user["active"]:
+                update_last_login(conn, user["id"], _utc_now_iso())
+                return user["id"], user["session_version"], {
+                    "name": user["name"],
+                    "role": user["role"],
+                }
+        if (
+            self.server.view_token
+            and self._legacy_admin_allowed(conn)
+            and hmac.compare_digest(key, self.server.view_token)
+        ):
+            # Legacy bootstrap admin: reserved sentinel id/version, synthetic identity.
+            return 0, 0, {"name": "legacy-admin", "role": "admin"}
+        return None
+
+    def _mint_cookie(self, sub: int, sv: int) -> str:
+        """Build the Set-Cookie header value for a freshly-minted session.
+
+        Args:
+            sub: The session subject (a user id, or 0 for the legacy admin).
+            sv: The session_version the cookie is bound to (for stateless revocation).
+
+        Returns:
+            The Set-Cookie header value carrying the signed session, valid for the
+            configured session lifetime.
+
+        Why:
+            The form and JSON logins both mint the identical cookie; sharing one builder
+            keeps the signing, lifetime, and cookie flags (HttpOnly/SameSite/Secure) in one
+            place so the two paths cannot diverge on a security-relevant attribute.
+        """
+        now = int(time.time())
+        value = make_session_value(
+            self.server.session_key, sub, sv, now, now + self.server.session_seconds
+        )
+        return self._cookie_header(value, self.server.session_seconds)
+
+    def _handle_api_login(self) -> None:
+        """Verify a JSON-posted access key and set the session cookie (POST /api/login).
+
+        Why:
+            The SPA's login: it POSTs {"key": ...} and needs to tell success from failure
+            without parsing a redirect, plus get {name, role} back to populate the account
+            card. It reuses _resolve_login + _mint_cookie (so it cannot drift from the form
+            route) and applies the same same-origin CSRF check as the comment POST — the SPA
+            fetch is same-origin (single host in prod, Vite proxy in dev), so it passes.
+        """
+        # CSRF: this sets a cookie, so guard it like the other state-changing POSTs.
+        origin_error = self._origin_error()
+        if origin_error is not None:
+            self._send_json(403, {"ok": False, "error": origin_error})
+            return
+        if self.server.session_key is None:
+            self._send_json(404, {"ok": False, "error": "login is not configured"})
+            return
+        raw = self._read_raw_body()
+        key = ""
+        if raw is not None:
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+                key = parsed.get("key", "") if isinstance(parsed, dict) else ""
+            except (ValueError, UnicodeDecodeError):
+                key = ""
+        conn = open_relay_store(self.server.db_path)
+        try:
+            resolved = self._resolve_login(conn, key if isinstance(key, str) else "")
+            if resolved is None:
+                self._send_json(401, {"ok": False})
+                return
+            sub, sv, identity = resolved
+            self._send_json(
+                200,
+                {"ok": True, "user": identity},
+                extra_headers={"Set-Cookie": self._mint_cookie(sub, sv)},
+            )
+        finally:
+            conn.close()
+
+    def _handle_api_logout(self) -> None:
+        """Clear the session cookie via JSON (POST /api/logout).
+
+        Why:
+            The SPA's logout sibling of _handle_logout (the form GET). Same-origin CSRF
+            check (a forged logout is a mild annoyance worth blocking), then it clears the
+            cookie and returns JSON the SPA can act on without a navigation.
+        """
+        origin_error = self._origin_error()
+        if origin_error is not None:
+            self._send_json(403, {"ok": False, "error": origin_error})
+            return
+        self._send_json(
+            200, {"ok": True}, extra_headers={"Set-Cookie": self._cookie_header("", 0)}
+        )
 
     def _handle_logout(self) -> None:
         """Clear the session cookie and redirect to /login (GET /logout)."""
         self._send_redirect(
             303, "/login", extra_headers={"Set-Cookie": self._cookie_header("", 0)}
         )
+
+    def _handle_spa_api(self, path: str) -> None:
+        """Serve the SPA's read-only JSON API (/api/me|portfolio|projects/*|reports/*).
+
+        Args:
+            path: The request path (already stripped of its query string).
+
+        Why:
+            One handler shares the cookie gate + scope resolution across the four read
+            endpoints, exactly as the dashboard GET routes do — but answers JSON and a 401
+            (not a 303) when a gated relay has no valid session, so the SPA's fetch can route
+            itself to /login. Scope is enforced identically to the HTML routes: a viewer's
+            out-of-scope project/report returns a 404 byte-identical to a missing one
+            (existence-hiding). All derivation runs against "today" in the display zone, the
+            same day every viewer sees.
+        """
+        conn = open_relay_store(self.server.db_path)
+        try:
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            allowed = self._allowed_projects(conn, principal)
+            today = today_in_tz(self.server.display_tz)
+
+            # /api/me is the ONE read that must answer even when unauthenticated — it is
+            # how the SPA LEARNS it must log in (gated + authenticated:false). So it is
+            # exempt from the 401 gate below and always returns 200 with the current state.
+            if path == "/api/me":
+                self._send_json(
+                    200,
+                    api.serialize_me(
+                        gated=gated,
+                        principal=principal,
+                        allowed=allowed,
+                        display_tz=self.server.display_tz,
+                    ),
+                )
+                return
+
+            # Every OTHER read requires a session on a gated relay: answer 401 JSON (not a
+            # 303) so the SPA's fetch can route itself to /login.
+            if gated and principal is None:
+                self._send_json(401, {"error": "login required"})
+                return
+
+            if path == "/api/portfolio":
+                rows = latest_report_per_project(conn, today=today)
+                if allowed is not None:
+                    rows = [r for r in rows if r["project"] in allowed]
+                # Enrich each row with its checklist items, which the deadline / segmented-bar
+                # / chip derivations need (the row carries counts, not the items themselves).
+                entries = [
+                    {**r, "items": get_checklist(conn, r["project"])} for r in rows
+                ]
+                self._send_json(200, api.serialize_portfolio(entries, allowed, today))
+                return
+
+            if path.startswith("/api/projects/"):
+                name = urllib.parse.unquote(path[len("/api/projects/"):])
+                if allowed is not None and name not in allowed:
+                    self._send_json(404, {"error": "not found"})
+                    return
+                reports = history(conn, name)
+                checklist = get_checklist(conn, name)
+                # A project with neither reports nor a checklist does not exist; 404 it
+                # (existence-hiding, same as an out-of-scope one above).
+                if not reports and checklist is None:
+                    self._send_json(404, {"error": "not found"})
+                    return
+                self._send_json(
+                    200,
+                    api.serialize_project(
+                        name=name,
+                        kind=get_project_kind(conn, name),
+                        reports=reports,
+                        checklist=checklist,
+                        observations=observed_history(conn, name),
+                        comments=comments_for_project(conn, name),
+                        today=today,
+                    ),
+                )
+                return
+
+            if path.startswith("/api/reports/"):
+                id_str = path[len("/api/reports/"):]
+                report = get(conn, int(id_str)) if id_str.isdigit() else None
+                if report is None or (
+                    allowed is not None and report["project"] not in allowed
+                ):
+                    self._send_json(404, {"error": "not found"})
+                    return
+                self._send_json(
+                    200,
+                    api.serialize_report(
+                        report=report,
+                        checklist=get_checklist(conn, report["project"]),
+                        comments=comments_for(conn, report["id"]),
+                        history=history(conn, report["project"]),
+                        today=today,
+                    ),
+                )
+                return
+
+            # No SPA route matched (the do_GET prefix check is broader than the exact set).
+            self._send_json(404, {"error": "not found"})
+        finally:
+            conn.close()
 
     def _origin_error(self) -> str | None:
         """Return None if the request is same-origin, else a 403 reason string.
@@ -1781,6 +2063,95 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
 
+    # --- E2 Inc 4: serving the built SPA single-host (when web_dir is set) -----------
+
+    def _send_file(
+        self, body: bytes, content_type: str, *, cache: str, spa_html: bool
+    ) -> None:
+        """Write a static-file response (an asset or the SPA index.html).
+
+        Args:
+            body: The file bytes.
+            content_type: The resolved Content-Type.
+            cache: The Cache-Control value (immutable for hashed assets; no-cache for
+                index.html so a deploy is picked up).
+            spa_html: True for the SPA index.html, which additionally carries the SPA CSP
+                + X-Frame-Options (an HTML document a browser renders); False for assets.
+
+        Why:
+            One writer for both asset and index responses keeps the header sequence in one
+            place. The SPA gets its OWN CSP (script-src strict 'self'), distinct from the
+            legacy hash-based policy that still covers the server-rendered HTML.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache)
+        headers = self._security_headers(html=False)
+        if spa_html:
+            headers["Content-Security-Policy"] = _SPA_CONTENT_SECURITY_POLICY
+            headers["X-Frame-Options"] = "DENY"
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_static(self, path: str) -> bool:
+        """Serve a built asset under web_dir, if the path maps to a real file. Return served?
+
+        Args:
+            path: The request path (already stripped of its query string).
+
+        Returns:
+            True if a file was found and sent; False if no such file (so the caller falls
+            back to the SPA index for client-side routing).
+
+        Why:
+            Path-traversal safety is the whole job here: we percent-decode, reject NULs,
+            resolve the candidate, and confirm it is STILL inside web_dir (is_relative_to)
+            before reading — so "../" or a symlink cannot escape the asset root. Hashed
+            assets under /assets/ are immutable (content-hashed filenames), so they get a
+            long immutable cache; anything else served as a file gets no-cache.
+        """
+        root = self.server.web_dir
+        if root is None:
+            return False
+        rel = urllib.parse.unquote(path).lstrip("/")
+        if "\x00" in rel or rel == "":
+            return False
+        candidate = (root / rel).resolve()
+        # Containment check: the resolved path must remain under the asset root.
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            return False
+        body = candidate.read_bytes()
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        # Content-hashed assets never change under their name → cache hard; else no-cache.
+        cache = (
+            "public, max-age=31536000, immutable"
+            if path.startswith("/assets/")
+            else "no-cache"
+        )
+        self._send_file(body, content_type, cache=cache, spa_html=False)
+        return True
+
+    def _serve_spa_index(self) -> None:
+        """Serve the SPA's index.html (the client-side-routing fallback).
+
+        Why:
+            Any GET that is not an API route and not a real asset file is a client-side
+            route (/, /project/orion, /report/26, /login, …), so the server returns
+            index.html and lets the React router render it. no-cache so a new deploy's
+            index (which references the new hashed asset names) is always fetched fresh.
+            A 404 here only happens if web_dir has no index.html (a broken build/deploy).
+        """
+        index = self.server.web_dir / "index.html"
+        if not index.is_file():
+            self._send_json(404, {"error": "SPA index.html not found"})
+            return
+        self._send_file(
+            index.read_bytes(), "text/html; charset=utf-8", cache="no-cache", spa_html=True
+        )
+
 
 @dataclass(frozen=True)
 class AuthConfig:
@@ -1853,6 +2224,7 @@ class RelayServer(ThreadingHTTPServer):
         view_token: str | None = None,
         display_tz: ZoneInfo = _DISPLAY_TZ,
         auth: "AuthConfig | None" = None,
+        web_dir: Path | None = None,
     ):
         # Set config before binding so it is available to any request handled after
         # serve_forever() starts.
@@ -1860,6 +2232,10 @@ class RelayServer(ThreadingHTTPServer):
         self.token = token
         self.view_token = view_token
         self.display_tz = display_tz
+        # E2 Inc 4: when set, the built SPA (web/dist) is served from here single-host —
+        # static assets + an index.html fallback for client-side routes — and GET routing
+        # serves the SPA instead of the legacy server-rendered HTML. None = legacy HTML.
+        self.web_dir = web_dir.resolve() if web_dir is not None else None
         # Spread the auth bundle onto the server so each handler reads the individual
         # knobs via self.server.<name> (the existing per-request access pattern).
         auth = auth or AuthConfig()
@@ -1908,6 +2284,7 @@ def create_server(
     require_view_auth: bool = False,
     display_tz: ZoneInfo = _DISPLAY_TZ,
     auth: "AuthConfig | None" = None,
+    web_dir: Path | None = None,
 ) -> RelayServer:
     """Build and bind a RelayServer (does not start serving).
 
@@ -1959,7 +2336,9 @@ def create_server(
             "secret: the read-only dashboard would be world-readable. Set a view "
             "secret (relay-serve --view-token-env) before binding beyond loopback."
         )
-    return RelayServer((host, port), db_path, token, view_token, display_tz, auth)
+    return RelayServer(
+        (host, port), db_path, token, view_token, display_tz, auth, web_dir
+    )
 
 
 def serve(
@@ -1971,6 +2350,7 @@ def serve(
     require_view_auth: bool = False,
     display_tz: ZoneInfo = _DISPLAY_TZ,
     auth: "AuthConfig | None" = None,
+    web_dir: Path | None = None,
 ) -> None:
     """Run the relay server until interrupted (the blocking entry point).
 
@@ -1996,15 +2376,16 @@ def serve(
         rather than a traceback.
     """
     server = create_server(
-        host, port, db_path, token, view_token, require_view_auth, display_tz, auth
+        host, port, db_path, token, view_token, require_view_auth, display_tz, auth, web_dir
     )
     bound_host, bound_port = server.server_address
     # Surface read-auth state at startup — the operator's confirmation that a
     # world-reachable bind is gated (the fail-closed guard guarantees it is).
     auth_state = "login required" if view_token else "open (loopback only)"
+    frontend = f"SPA from {web_dir}" if web_dir is not None else "server-rendered HTML"
     print(
         f"[relay] listening on http://{bound_host}:{bound_port}  "
-        f"(db: {db_path}; dashboard: {auth_state})",
+        f"(db: {db_path}; dashboard: {auth_state}; frontend: {frontend})",
         file=sys.stderr,
     )
     try:

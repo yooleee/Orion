@@ -1,0 +1,508 @@
+# =============================================================================
+# relay/api.py
+# -----------------------------------------------------------------------------
+# Responsible for: PURE serializers that turn the relay's stored data into the
+#                  read-only JSON the dashboard SPA consumes. One function per
+#                  screen (me / portfolio / project / report), each taking
+#                  already-fetched store rows + the reference date and returning a
+#                  JSON-able dict. No I/O, no HTTP, no database.
+# Role in project: The "api" layer of the E2 Inc 4 SPA rebuild — the serializer
+#                  half of the SPA<->relay seam. server.py fetches (store/derive),
+#                  calls these, and _send_json's the result. It MIRRORS render.py's
+#                  pattern (pure presentation functions over fetched data), but emits
+#                  JSON instead of HTML. The contract these shapes implement lives in
+#                  docs/dashboard-api-contract.md.
+# Observe, don't originate: every field here is a reframing of data observed from
+#                  external sources (git, the tracker doc, sessions) — this layer
+#                  authors no domain facts, it only reshapes them for the wire.
+# Assumptions: a checklist item is a {"text","done"[, "due_date"][, "key"][, "group"]}
+#              dict (the wire shape get_checklist decodes); a report is _row_to_report's
+#              shape; `today` is already computed in the relay's display zone.
+# =============================================================================
+
+from __future__ import annotations
+
+from datetime import date
+from zoneinfo import ZoneInfo
+
+from .derive import (
+    OVERDUE,
+    bucket_counts,
+    classify_item,
+    milestones,
+    next_open_due,
+    slipping_item_keys,
+)
+
+# The display title / portfolio headline is the report body's first line. render.py owns
+# that extraction today; we borrow it so the SPA's title and the old HTML headline agree
+# byte-for-byte. When render.py retires (at parity), this helper moves here. Importing it
+# does not create a cycle: render imports from store/derive, never from api.
+from .render import _headline as headline
+
+# An open deadline that is neither overdue nor due-soon: dated, but beyond the at-risk
+# horizon. Not a "flagged" state (no glyph/colour in the design vocabulary) — the SPA
+# renders it as a neutral relative time — but the relay still owns the classification, so
+# it is named here rather than re-derived client-side.
+_UPCOMING = "upcoming"
+
+
+def _item_key(item: dict) -> str:
+    """Return a checklist item's stable identity (its `key`, else its text).
+
+    Args:
+        item: A checklist wire dict.
+
+    Returns:
+        The producer's `key` when present, else the item `text` — the SAME identity
+        record_observations/slipping use, so a per-item slipping lookup matches.
+
+    Why:
+        Slippage is keyed by item_key (the tracker's bare title survives a status change in
+        the text); to mark a checklist item slipping we must resolve the same key the
+        observation history stored. One helper keeps that rule in lockstep with store.py.
+    """
+    return item.get("key") or item["text"]
+
+
+def _deadline_state(due_iso: str | None, today: date) -> str | None:
+    """Classify a deadline date as overdue / due_soon / upcoming, or None when absent.
+
+    Args:
+        due_iso: An ISO "YYYY-MM-DD" deadline string, or None.
+        today: The reference date (display zone).
+
+    Returns:
+        "overdue" / "due_soon" from the shared classify_item rule, "upcoming" for a dated
+        open deadline beyond the due-soon horizon, or None when there is no deadline.
+
+    Why:
+        The project header's "NEXT DUE" and a card's deadline chip need a state for ANY
+        next deadline, not only the at-risk ones — so this wraps classify_item (an OPEN,
+        undone synthetic item) and fills the one gap it leaves: a far-future open deadline,
+        which classify_item returns None for, is reported as "upcoming" so the SPA can show
+        a neutral relative time. None only when there is genuinely no date.
+    """
+    if not due_iso:
+        return None
+    # A synthetic OPEN item so classify_item applies its overdue/due_soon rule to the date.
+    state = classify_item({"due_date": due_iso, "done": False}, today)
+    return state if state is not None else _UPCOMING
+
+
+def _next_due(checklist: list | None, today: date) -> dict | None:
+    """Build the {"due_date","state"} for a checklist's nearest open deadline, or None.
+
+    Args:
+        checklist: A project's live checklist items (or None).
+        today: The reference date (display zone).
+
+    Returns:
+        {"due_date": <iso>, "state": <overdue|due_soon|upcoming>} for the soonest open
+        deadline across the checklist, or None when nothing open is dated.
+
+    Why:
+        The home row and the project header both show "the next thing due"; this pairs the
+        date (next_open_due) with its derived state so the SPA renders the urgency without
+        re-deriving. None ⇒ omit the field.
+    """
+    due = next_open_due(checklist)
+    if due is None:
+        return None
+    return {"due_date": due, "state": _deadline_state(due, today)}
+
+
+def _item_state(item: dict, today: date) -> str:
+    """Resolve one checklist item's per-row state (4a vocabulary).
+
+    Args:
+        item: A checklist wire dict.
+        today: The reference date (display zone).
+
+    Returns:
+        "done" when finished; else "overdue" / "due_soon" from classify_item; else
+        "not_started" (open, no near deadline). 4a does not parse the tracker's embedded
+        status, so "in_progress"/"submitted" are not emitted here (see contract gap 8).
+
+    Why:
+        The project page's LIVE CHECKLIST colours each row by state. Built on classify_item
+        so a row's treatment can never disagree with the at-risk count. "not_started" is the
+        honest 4a default for an open, undated item until the richer status vocabulary lands.
+    """
+    if item.get("done"):
+        return "done"
+    state = classify_item(item, today)
+    return state if state is not None else "not_started"
+
+
+def _progress(done: int, total: int) -> dict:
+    """Build a {"done","total","pct"} progress block (pct None when total is 0).
+
+    Args:
+        done: Count of finished items.
+        total: Count of all items.
+
+    Returns:
+        {"done","total","pct"} where pct = round(done/total*100), or None when total is 0
+        (so the SPA hides the bar rather than dividing by zero).
+
+    Why:
+        Every card and the project header show the same done/total/percent shape; computing
+        it once keeps the percentage rule identical everywhere.
+    """
+    pct = round(done / total * 100) if total else None
+    return {"done": done, "total": total, "pct": pct}
+
+
+def serialize_me(
+    *, gated: bool, principal: dict | None, allowed: set | None, display_tz: ZoneInfo
+) -> dict:
+    """Serialize the current viewer's identity, scope, and server context (/api/me).
+
+    Args:
+        gated: Whether dashboard access is access-gated (server._auth_required).
+        principal: The authenticated principal {"user_id","role","name"} or None.
+        allowed: The viewer's read scope — None for unrestricted (admin / open relay), else
+            the set of granted project names (server._allowed_projects).
+        display_tz: The relay's display timezone.
+
+    Returns:
+        The /api/me shape: gated / authenticated / identity / scope / display_tz /
+        showcase_enabled.
+
+    Why:
+        The SPA reads this once on boot to pick the full / scoped / empty shell and to know
+        whether to redirect to login. We surface display_tz so the SPA formats relative time
+        in the SAME zone the relay derives "today" in (one zone, KI-20). scope mirrors
+        _allowed_projects' None-vs-set distinction explicitly as unrestricted + a sorted
+        list, so the membership question reads the same on both sides of the wire.
+    """
+    return {
+        "gated": gated,
+        "authenticated": principal is not None,
+        "identity": (
+            {"name": principal["name"], "role": principal["role"]}
+            if principal is not None
+            else None
+        ),
+        "scope": {
+            "unrestricted": allowed is None,
+            "projects": None if allowed is None else sorted(allowed),
+        },
+        "display_tz": display_tz.key,
+        "showcase_enabled": False,  # reserved; the guest surface is a later slice (4d)
+    }
+
+
+def _at_risk_items(checklist: list | None, today: date) -> list[dict]:
+    """List a checklist's at-risk items as forward-signal chips, most urgent first.
+
+    Args:
+        checklist: A project's live checklist items (or None).
+        today: The reference date (display zone).
+
+    Returns:
+        One {"state","label","due_date"} dict per OPEN at-risk item (overdue or due_soon),
+        ordered overdue-before-due_soon then by due_date ascending. [] when none.
+
+    Why:
+        The tracker card shows a few forward-signal chips ("▲ Hack Your Summer 2d overdue",
+        "◷ Claude Corps Fellow in 6d", "+N more"). Shipping every at-risk item (the SPA
+        truncates) keeps the "+N more" count honest. Ordering overdue-first then by date
+        puts the most pressing chip first, matching the design's read. `label` uses the
+        stable key (the tracker's bare title) so a chip reads "Hack Your Summer", not the
+        status-suffixed text.
+    """
+    chips = []
+    for item in checklist or []:
+        state = classify_item(item, today)
+        if state is None:
+            continue
+        chips.append(
+            {"state": state, "label": _item_key(item), "due_date": item.get("due_date")}
+        )
+    # overdue (0) before due_soon (1), then by due_date ascending. due_date is present on
+    # every at-risk item (classify needs it), so the date key is always a real string.
+    chips.sort(key=lambda c: (0 if c["state"] == OVERDUE else 1, c["due_date"]))
+    return chips
+
+
+def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
+    """Serialize one portfolio row (project or tracker) from its store row + checklist.
+
+    Args:
+        row: One latest_report_per_project row (carries kind, counts, latest_body, times).
+        items: That project's live checklist items (get_checklist), or None.
+        today: The reference date (display zone).
+
+    Returns:
+        The project-row or tracker-card JSON shape (tracker adds segments + at_risk_items).
+
+    Why:
+        Projects and trackers share most fields (name, kind, progress, at-risk, slipping,
+        next_due, time); a tracker only ADDS the segmented-bar buckets and the chip list.
+        Building the common part once and extending it for trackers keeps the two in sync
+        and the projects-vs-todos split a single `kind` branch.
+    """
+    done = row["checklist_done"] or 0
+    total = row["checklist_total"] or 0
+    entry = {
+        "name": row["project"],
+        "kind": row["kind"],
+        "progress": _progress(done, total),
+        "at_risk": row["checklist_at_risk"] or 0,
+        "slipping": row["checklist_slipping"] or 0,
+        "next_due": _next_due(items, today),
+        # Last activity: a report's time when there is one, else the checklist's receive
+        # clock — the same fallback the old portfolio card used.
+        "updated_at": row["latest_generated_at"] or row["checklist_updated_at"],
+    }
+    if row["kind"] == "tracker":
+        # A general checklist: the segmented bar + the chip list, plus an item count.
+        entry["item_count"] = total
+        entry["segments"] = bucket_counts(items, today)
+        entry["at_risk_items"] = _at_risk_items(items, today)
+    else:
+        # A software project: the one-line headline from the latest report + its id.
+        entry["headline"] = headline(row["latest_body"]) if row["latest_body"] else ""
+        entry["report_id"] = row["latest_report_id"]
+    return entry
+
+
+def serialize_portfolio(entries: list[dict], allowed: set | None, today: date) -> dict:
+    """Serialize the home dataset, split into projects and trackers (/api/portfolio).
+
+    Args:
+        entries: Scope-FILTERED rows, each a latest_report_per_project row plus an "items"
+            key holding that project's checklist (get_checklist result, or None). The server
+            applies scope before calling, mirroring the old "/" route.
+        allowed: The viewer's read scope (None unrestricted, else granted names) — used only
+            to report the scope back; filtering already happened.
+        today: The reference date (display zone).
+
+    Returns:
+        {"scope", "projects", "trackers"} — the home split by kind.
+
+    Why:
+        The core IA decision is distinct sections, not one flat list, so the split happens
+        HERE (server-side) and the SPA renders two sections without re-deriving kind. scope
+        rides along so the SPA can show the viewer's "N projects granted" banner from the
+        same response.
+    """
+    projects = []
+    trackers = []
+    for row in entries:
+        entry = _portfolio_entry(row, row.get("items"), today)
+        (trackers if entry["kind"] == "tracker" else projects).append(entry)
+    return {
+        "scope": {
+            "unrestricted": allowed is None,
+            "projects": None if allowed is None else sorted(allowed),
+        },
+        "projects": projects,
+        "trackers": trackers,
+    }
+
+
+def serialize_project(
+    *,
+    name: str,
+    kind: str,
+    reports: list[dict],
+    checklist: list | None,
+    observations: list[dict],
+    comments: list[dict],
+    today: date,
+) -> dict:
+    """Serialize one project's full detail (/api/projects/:name).
+
+    Args:
+        name: The project name.
+        kind: The project's kind ("project" | "tracker").
+        reports: The project's reports newest-first (store.history).
+        checklist: The live checklist items (store.get_checklist), or None.
+        observations: The project's observed history (store.observed_history), for slippage.
+        comments: The project's comments (store.comments_for_project).
+        today: The reference date (display zone).
+
+    Returns:
+        The project-detail shape: stats, milestones, checklist, reports, comments.
+
+    Why:
+        One project page draws from four stores (reports, live checklist, observation
+        history, comments) plus three derivations (milestones, slippage, per-item state).
+        Assembling them here keeps server.py a thin fetch-and-emit and makes the whole shape
+        unit-testable with fixed inputs and a fixed `today`. slipping is resolved once (a set
+        of keys) and applied to both the per-item rows and the milestone roll-ups so they
+        always agree.
+    """
+    slipping = slipping_item_keys(observations, today)
+    items = checklist or []
+    done = sum(1 for item in items if item.get("done"))
+
+    # Per-milestone slipping: a group slips when any of its OPEN items is in the slipping
+    # set. milestones() returns group summaries without item keys, so we resolve membership
+    # here from the same checklist + slipping set.
+    milestone_rows = []
+    for m in milestones(checklist, today):
+        group_slipping = any(
+            _item_key(item) in slipping
+            for item in items
+            if item.get("group") == m["group"] and not item.get("done")
+        )
+        milestone_rows.append({**m, "slipping": group_slipping})
+
+    checklist_rows = [
+        {
+            "text": item["text"],
+            "done": bool(item.get("done")),
+            "due_date": item.get("due_date"),
+            "key": item.get("key"),
+            "group": item.get("group"),
+            "state": _item_state(item, today),
+            "slipping": _item_key(item) in slipping,
+        }
+        for item in items
+    ]
+
+    return {
+        "name": name,
+        "kind": kind,
+        "description": None,  # contract gap 5: no project description field stored yet
+        "stats": {
+            "progress": _progress(done, len(items)),
+            "next_due": _next_due(checklist, today),
+            "reports_count": len(reports),
+        },
+        "milestones": milestone_rows,
+        "checklist": checklist_rows,
+        "reports": [
+            {
+                "id": r["id"],
+                # The report's display title for the timeline — the body headline (its first
+                # line), the same rule serialize_report uses, so the timeline entry and the
+                # report page agree on the title.
+                "title": headline(r["body"]) if r["body"] else "",
+                "generated_at": r["generated_at"],
+                "lane": r["lane"],
+                "share_level": r["share_level"],
+                "section_count": len(r["sections"]),
+                "source_tags": [],  # contract gap 4: collector set not stored
+            }
+            for r in reports
+        ],
+        "comments": [_comment(c) for c in comments],
+    }
+
+
+def _comment(c: dict) -> dict:
+    """Serialize one comment to the wire shape (role is null in 4a).
+
+    Args:
+        c: A store comment dict ({"id","author","body","created_at", ...}).
+
+    Returns:
+        {"id","author","role","body","created_at"} — role is None until comment authors
+        carry an identity (contract gap 7).
+
+    Why:
+        Comments appear on both the project page and the report page, so the per-comment
+        shape is defined once. report_id is intentionally dropped: the SPA renders comments
+        inline, not linked, in 4a.
+    """
+    return {
+        "id": c["id"],
+        "author": c["author"],
+        "role": None,
+        "body": c["body"],
+        "created_at": c["created_at"],
+    }
+
+
+def _report_nav(report_id: int, history: list[dict]) -> dict:
+    """Find the older/newer report ids around `report_id` in a project's history.
+
+    Args:
+        report_id: The current report's id.
+        history: The project's reports newest-first (store.history).
+
+    Returns:
+        {"prev_id","next_id"}: prev_id the OLDER neighbour, next_id the NEWER one, each None
+        at the ends. None for both when the id is not in the history (defensive).
+
+    Why:
+        The report header offers "Report #25 →" (older) and a back-link. history is
+        newest-first, so the newer neighbour sits at index-1 and the older at index+1.
+        Naming by recency (prev = older) matches the contract: the latest report has a
+        prev (older) but no next (newer).
+    """
+    ids = [r["id"] for r in history]
+    if report_id not in ids:
+        return {"prev_id": None, "next_id": None}
+    i = ids.index(report_id)
+    newer = ids[i - 1] if i > 0 else None
+    older = ids[i + 1] if i + 1 < len(ids) else None
+    return {"prev_id": older, "next_id": newer}
+
+
+def serialize_report(
+    *,
+    report: dict,
+    checklist: list | None,
+    comments: list[dict],
+    history: list[dict],
+    today: date,
+) -> dict:
+    """Serialize one report in full (/api/reports/:id).
+
+    Args:
+        report: The report (store.get / _row_to_report shape).
+        checklist: The report's project's live checklist (store.get_checklist), for the rail
+            snapshot, or None.
+        comments: The report's comments (store.comments_for).
+        history: The project's reports newest-first (store.history), for prev/next nav.
+        today: The reference date (display zone), for the snapshot rows' states.
+
+    Returns:
+        The report-detail shape: body + sections, metadata, participants, checklist
+        snapshot, comments, and prev/next nav.
+
+    Why:
+        The report reader's body+rail layout pulls the report, its project's live checklist
+        (the snapshot), its comments, and the neighbouring report ids together. Assembling
+        it here keeps the shape testable and the title rule (the body headline, distinct from
+        the section labels) in one place.
+    """
+    snapshot_items = checklist or []
+    snapshot_done = sum(1 for item in snapshot_items if item.get("done"))
+    return {
+        "id": report["id"],
+        "project": report["project"],
+        "title": headline(report["body"]) if report["body"] else "",
+        "sections": report["sections"],
+        "body": report["body"],
+        "lane": report["lane"],
+        "share_level": report["share_level"],
+        "generated_at": report["generated_at"],
+        "ingested_at": report["ingested_at"],
+        "orion_version": report["orion_version"],
+        # participants are stored as plain name strings; role is null until they carry an
+        # identity (contract gap 3).
+        "participants": [{"name": p, "role": None} for p in report["participants"]],
+        "source_tags": [],  # contract gap 4
+        "checklist_snapshot": {
+            "done": snapshot_done,
+            "total": len(snapshot_items),
+            "rows": [
+                {
+                    "text": item["text"],
+                    "done": bool(item.get("done")),
+                    "state": _item_state(item, today),
+                    "due_date": item.get("due_date"),
+                }
+                for item in snapshot_items
+            ],
+        },
+        "comments": [_comment(c) for c in comments],
+        "nav": _report_nav(report["id"], history),
+    }

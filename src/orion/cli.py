@@ -681,6 +681,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--web-dir",
+        default=None,
+        help=(
+            "Path to the built SPA assets (e.g. web/dist) to serve single-host. When set, "
+            "the relay serves the React dashboard (static assets + an index.html fallback) "
+            "instead of the legacy server-rendered HTML. Omit to serve the legacy HTML."
+        ),
+    )
+    relay_parser.add_argument(
         "--config",
         default=default_config,
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
@@ -821,6 +830,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.config),
             session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
+            web_dir=Path(args.web_dir) if args.web_dir else None,
         )
     if args.command == "relay-user":
         if args.relay_user_command == "add":
@@ -1362,7 +1372,7 @@ def _watch_tick(
     payload = _checklist_payload(project)
     if payload == last_pushed:
         return last_pushed, False
-    push_checklist(relay_cfg.url, project.name, payload, token)
+    push_checklist(relay_cfg.url, project.name, payload, token, kind=project.kind)
     return payload, True
 
 
@@ -1472,7 +1482,7 @@ def cmd_checklist_push(
     # (unlike the watch loop, which retries), so the user sees a non-zero exit.
     try:
         payload = _checklist_payload(project)
-        push_checklist(relay_cfg.url, project.name, payload, token)
+        push_checklist(relay_cfg.url, project.name, payload, token, kind=project.kind)
     except DeliveryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -2927,6 +2937,7 @@ def cmd_relay_serve(
     config_path: Path,
     session_days: int = 30,
     allow_legacy_admin: bool = False,
+    web_dir: Path | None = None,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
 
@@ -2996,6 +3007,14 @@ def cmd_relay_serve(
                 'Use a name like "America/Los_Angeles" or "UTC".'
             ) from exc
 
+        # When asked to serve the SPA, fail fast on a missing build rather than 404-ing
+        # every page at request time — a clear, actionable startup error.
+        if web_dir is not None and not (web_dir / "index.html").is_file():
+            raise ConfigError(
+                f"--web-dir {web_dir} has no index.html — build the SPA first "
+                "(cd web && npm run build), or omit --web-dir to serve the legacy HTML."
+            )
+
         serve = _load_relay_serve()
         # AuthConfig + the loopback test live in the relay package, importable now that
         # _load_relay_serve has put the repo root on sys.path if it was needed.
@@ -3036,7 +3055,7 @@ def cmd_relay_serve(
         # view secret — surfaced here as a clean, actionable error, not a traceback.
         serve(
             host, port, db_path, token, view_token, require_view_auth, display_tz,
-            auth=auth,
+            auth=auth, web_dir=web_dir,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

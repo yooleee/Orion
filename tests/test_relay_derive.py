@@ -18,10 +18,12 @@ import pytest
 
 from relay.derive import (
     DUE_SOON_DAYS,
+    bucket_counts,
     classify_item,
     count_at_risk,
     is_slipping,
     milestones,
+    next_open_due,
     slipping_item_keys,
     today_in_tz,
 )
@@ -331,3 +333,65 @@ def test_milestones_empty_when_nothing_grouped_or_none():
     assert milestones(None, _TODAY) == []
     assert milestones([], _TODAY) == []
     assert milestones([_gi(done=False, text="ungrouped")], _TODAY) == []
+
+
+# --- bucket_counts(): the segmented-bar partition (E2 Inc 4) -------------------------
+
+
+def test_bucket_counts_partitions_into_four_that_tile_the_total():
+    """overdue / due_soon / remaining-open / done sum to the item total.
+
+    Why this matters: the tracker card's segmented bar needs disjoint widths that fill the
+    whole bar. The four buckets must tile every item exactly once — done items are never at
+    risk, and `remaining` is the open-but-not-soon complement.
+    """
+    items = [
+        _item(due_date="2026-06-20"),                 # overdue (past)
+        _item(due_date="2026-06-26"),                 # due_soon (today, end-of-day)
+        _item(due_date="2026-06-30"),                 # due_soon (+4 days)
+        _item(due_date="2026-09-01"),                 # remaining (far future, open)
+        _item(text="no-date"),                        # remaining (open, undated)
+        _item(done=True, due_date="2026-06-20"),      # done (never at risk)
+    ]
+    counts = bucket_counts(items, _TODAY)
+    assert counts == {"overdue": 1, "due_soon": 2, "remaining": 2, "done": 1}
+    assert sum(counts.values()) == len(items)
+
+
+def test_bucket_counts_empty_and_none_are_all_zero():
+    """No items → every bucket 0 (so an empty tracker draws an empty bar, not a crash)."""
+    zero = {"overdue": 0, "due_soon": 0, "remaining": 0, "done": 0}
+    assert bucket_counts([], _TODAY) == zero
+    assert bucket_counts(None, _TODAY) == zero
+
+
+def test_bucket_counts_agrees_with_count_at_risk():
+    """overdue + due_soon equals count_at_risk over the same items (one truth-table)."""
+    items = [
+        _item(due_date="2026-06-20"),
+        _item(due_date="2026-06-29"),
+        _item(done=True),
+        _item(text="undated"),
+    ]
+    counts = bucket_counts(items, _TODAY)
+    assert counts["overdue"] + counts["due_soon"] == count_at_risk(items, _TODAY)
+
+
+# --- next_open_due(): the project-wide nearest open deadline (E2 Inc 4) --------------
+
+
+def test_next_open_due_returns_soonest_open_deadline_across_all_items():
+    """The earliest OPEN item's due_date wins, regardless of group or list order."""
+    items = [
+        _item(due_date="2026-07-10"),
+        _item(due_date="2026-06-28"),  # soonest open
+        _item(due_date="2026-06-25", done=True),  # done → ignored even though earlier
+    ]
+    assert next_open_due(items) == "2026-06-28"
+
+
+def test_next_open_due_is_none_when_nothing_open_is_dated():
+    """No open dated item → None (the header omits NEXT DUE), for empty/None too."""
+    assert next_open_due([_item(done=True, due_date="2026-06-20"), _item(text="x")]) is None
+    assert next_open_due([]) is None
+    assert next_open_due(None) is None

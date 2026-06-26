@@ -124,6 +124,65 @@ def count_at_risk(items: list[dict] | None, today: date, due_soon_days: int = DU
     return sum(1 for item in (items or []) if classify_item(item, today, due_soon_days) is not None)
 
 
+def bucket_counts(items: list[dict] | None, today: date, due_soon_days: int = DUE_SOON_DAYS) -> dict:
+    """Partition a checklist into the four states the segmented progress bar shows.
+
+    Args:
+        items: The checklist items (or None).
+        today: The reference date (display zone).
+        due_soon_days: The "due soon" horizon (inclusive), forwarded to classify_item.
+
+    Returns:
+        A dict {"overdue", "due_soon", "remaining", "done"} of counts that SUM TO the
+        item total: `done` counts finished items; `overdue`/`due_soon` are the open at-risk
+        split from classify_item; `remaining` is every other open item (open, no near
+        deadline). {0,0,0,0} for None/empty.
+
+    Why:
+        The home's tracker card draws a SEGMENTED bar — distinct widths for overdue vs.
+        due-soon vs. the rest — which count_at_risk's single "N at risk" number cannot feed.
+        This is the same truth-table as classify_item (so the segments and the per-item
+        treatment can never disagree), just bucketed rather than summed. `remaining` is the
+        complement (total - done - overdue - due_soon) so the four always tile the whole
+        checklist, which is exactly what a stacked bar needs to fill its width.
+    """
+    items = items or []
+    done = sum(1 for item in items if item.get("done"))
+    overdue = due_soon = 0
+    for item in items:
+        state = classify_item(item, today, due_soon_days)
+        if state == OVERDUE:
+            overdue += 1
+        elif state == DUE_SOON:
+            due_soon += 1
+    # The complement: open items carrying no near deadline. Derived (not counted) so the
+    # four buckets provably tile the total — done items are never at risk, so they and the
+    # at-risk split are disjoint and `remaining` is whatever is left.
+    remaining = len(items) - done - overdue - due_soon
+    return {"overdue": overdue, "due_soon": due_soon, "remaining": remaining, "done": done}
+
+
+def next_open_due(checklist: list[dict] | None) -> str | None:
+    """Return the soonest OPEN item's due_date (ISO string) across the whole checklist.
+
+    Args:
+        checklist: A project's live checklist items (or None).
+
+    Returns:
+        The earliest parseable due_date among ALL open items, as its original ISO
+        "YYYY-MM-DD" string, or None when no open item carries a parseable deadline.
+
+    Why:
+        The project header's "NEXT DUE" is the single nearest outstanding deadline for the
+        project as a whole — across every item, not bucketed by milestone group. It is the
+        same "soonest open deadline" rule milestones use per group (_nearest_open_due), so
+        this delegates to that one helper applied to the full list, keeping the project-wide
+        figure and the per-group figures consistent. None when nothing open is dated, which
+        the serializer reads as "omit NEXT DUE".
+    """
+    return _nearest_open_due(checklist or [])
+
+
 def milestones(checklist: list[dict] | None, today: date) -> list[dict]:
     """Roll the live checklist up into per-group milestones.
 

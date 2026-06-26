@@ -98,6 +98,21 @@ CREATE TABLE IF NOT EXISTS relay_observed_items (
 CREATE INDEX IF NOT EXISTS idx_relay_observed_items_project_key
     ON relay_observed_items(project, item_key, observed_at);
 
+-- E2 Inc 4: per-project metadata that is not a report or a checklist. Today it carries one
+-- field, `kind`, which splits the dashboard home into "Projects" (real software projects)
+-- and "To-dos / Trackers" (general checklists like the applications tracker). The fact is
+-- OBSERVED from the user's own orion.toml (an explicit `kind` flag), not inferred — it
+-- arrives on each push and is upserted here. A SEPARATE new table (not a column on
+-- relay_project_checklists) keeps the relay's no-column-migration property: every prior
+-- addition was a fresh "IF NOT EXISTS" table, so an already-deployed relay gains this with
+-- no ALTER. kind is a property of the PROJECT (a report-only project has one too — it just
+-- defaults), so a project-keyed table is its natural home; default 'project' means an
+-- absent row reads as a plain project.
+CREATE TABLE IF NOT EXISTS relay_project_meta (
+    project TEXT PRIMARY KEY,
+    kind    TEXT NOT NULL DEFAULT 'project'   -- "project" | "tracker"
+);
+
 -- C2: supervisor comments on a report. Append-only and flat (no threading, edit, or
 -- delete) — the v1 model. report_id points at relay_reports.id but is deliberately
 -- NOT a foreign key: sqlite enforces FKs only when explicitly enabled per-connection,
@@ -307,6 +322,57 @@ def get_checklist(conn: sqlite3.Connection, project: str) -> list | None:
     return json.loads(row["items"]) if row is not None else None
 
 
+def set_project_kind(conn: sqlite3.Connection, project: str, kind: str) -> None:
+    """Record a project's kind ("project" | "tracker"), upserting the meta row.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the kind belongs to.
+        kind: The project kind, already validated by the server to be a known value.
+
+    Why:
+        The home splits projects from trackers, and that distinction is an explicit flag in
+        the user's orion.toml that rides each push (observe-not-originate: the relay records
+        what config says, it does not guess). Like upsert_checklist this is CURRENT STATE —
+        one row per project, REPLACED on each push — so ON CONFLICT(project) DO UPDATE makes
+        it a single idempotent statement: first push inserts, later pushes overwrite. Stored
+        separately from the checklist (its own table) so an already-deployed relay needs no
+        column migration.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_meta (project, kind)
+        VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET kind = excluded.kind
+        """,
+        (project, kind),
+    )
+    conn.commit()
+
+
+def get_project_kind(conn: sqlite3.Connection, project: str) -> str:
+    """Return a project's kind, defaulting to "project" when none was recorded.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to look up.
+
+    Returns:
+        The stored kind ("project" | "tracker"), or "project" when the project has no meta
+        row (a report-only project, or one pushed by a producer predating the flag).
+
+    Why:
+        The default is the safe, common case: anything that has not been explicitly marked a
+        tracker is a project, so an old push or a missing row reads as a plain project rather
+        than an error. Backs the per-project serializer (the portfolio query reads kind via a
+        LEFT JOIN instead, to stay one round-trip).
+    """
+    row = conn.execute(
+        "SELECT kind FROM relay_project_meta WHERE project = ?", (project,)
+    ).fetchone()
+    return row["kind"] if row is not None else "project"
+
+
 def record_observations(
     conn: sqlite3.Connection, project: str, items: list, observed_at: str
 ) -> None:
@@ -443,10 +509,11 @@ def latest_report_per_project(
 
     Returns:
         A list of dicts, one per project that has a report OR a live checklist, each:
-        {"project", "report_count", "latest_generated_at", "latest_report_id",
+        {"project", "kind", "report_count", "latest_generated_at", "latest_report_id",
         "latest_body", "checklist_updated_at", "checklist_done", "checklist_total",
         "checklist_at_risk", "checklist_slipping", "nearest_milestone"}, ordered with the
-        most recently active project first. For a checklist-only project (a live checklist but
+        most recently active project first. "kind" is "project" | "tracker" (E2 Inc 4),
+        defaulting to "project" when the project has no recorded meta row. For a checklist-only project (a live checklist but
         zero reports) the latest-report fields are None and report_count is 0; for a
         report-only project checklist_updated_at and the checklist counts are None.
         "checklist_at_risk" is None when the project has no checklist OR when `today` was not
@@ -499,7 +566,10 @@ def latest_report_per_project(
                r.body         AS latest_body,
                r.generated_at AS latest_generated_at,
                pc.items       AS checklist_items,
-               pc.updated_at  AS checklist_updated_at
+               pc.updated_at  AS checklist_updated_at,
+               -- E2 Inc 4: the project/tracker split. COALESCE so an absent meta row (a
+               -- report-only project, or a pre-flag push) reads as a plain "project".
+               COALESCE(pm.kind, 'project') AS kind
         FROM projects p
         -- LEFT JOIN the latest report: NULL for a checklist-only project. The correlated
         -- subquery picks the exact row history() calls newest (generated_at DESC, id
@@ -521,6 +591,9 @@ def latest_report_per_project(
         -- The project key is the checklist PK, so this adds at most one row per project.
         LEFT JOIN relay_project_checklists pc
           ON pc.project = p.project
+        -- LEFT JOIN the project kind: NULL (→ 'project' via COALESCE above) when unmarked.
+        LEFT JOIN relay_project_meta pm
+          ON pm.project = p.project
         ORDER BY COALESCE(r.generated_at, pc.updated_at) DESC, p.project ASC
         """
     ).fetchall()
@@ -560,6 +633,7 @@ def latest_report_per_project(
         result.append(
             {
                 "project": row["project"],
+                "kind": row["kind"],
                 "report_count": row["report_count"],
                 "latest_generated_at": row["latest_generated_at"],
                 "latest_report_id": row["latest_report_id"],

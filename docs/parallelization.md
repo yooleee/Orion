@@ -13,8 +13,9 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **next = Inc 4, the
-sectioned dashboard rebuild** — see the new coupling fact #3 and the Inc 4 map below, plus the kickoff
+_Last synced: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
+the SPA ⟂ JSON-API seam realized, single-host serving shipped — see the (updated) coupling fact #3 and the
+Inc 4 map below, plus the kickoff
 [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](e2-inc4-dashboard-rebuild-kickoff.md). The forward-looking
 layer. Units 0
 (strategy invariant), 1 (local parse/carry of `due_date`), 2 (relay derive + surface due-date/at-risk;
@@ -66,13 +67,15 @@ P, decision-gated launch work._
 2. **The contention spine: `cli.py` + `config.py`.** Almost every *local* feature adds lines here, so
    two agents editing them collide even in separate worktrees. Local features that each touch the spine
    must be serialized, or an orchestrator owns the spine while workers produce isolated modules.
-3. **New for Inc 4: the SPA ⟂ relay-JSON-API seam.** The dashboard rebuild splits the hosted half into a
-   **React/Vite frontend** (new top-level `frontend/`) and the **relay as a read-only JSON API**. The
-   **JSON API contract is the seam**: define it first, and frontend screens and backend serializers fan
-   out in parallel against the agreed shapes — a second clean ⟂ split alongside fact #1. The frontend is
-   serial only at its start (shell + theming + routing before screens), then screen-parallel. The two new
-   backend bands (Disciplines collector, Connections derivation) and the Scheduling aggregation are
-   mutually file-disjoint; only their *sections* depend on the shell existing.
+3. **Inc 4: the SPA ⟂ relay-JSON-API seam — REALIZED in 4a.** The dashboard rebuild splits the hosted half
+   into a **React/Vite frontend** (top-level `web/`, not `frontend/`) and the **relay as a read-only JSON
+   API**. The **JSON API contract was the seam** (`docs/dashboard-api-contract.md` + `relay/api.py`), fixed
+   first in 4a.0; frontend screens and backend serializers then fanned out against the agreed shapes — the
+   split held in practice. The frontend was serial only at its start (shell + theming + routing before
+   screens), then screen-parallel (Projects/Project/Report). Single-host won over two-host: the relay
+   serves the built SPA (`--web-dir`), so there is no Cloudflare/Fly coordination edge. The two new backend
+   bands (Disciplines collector, Connections derivation) and the Scheduling aggregation remain mutually
+   file-disjoint; only their *sections* depend on the (now-built) shell.
 
 ## Dependency graph (cannot parallelize across these edges)
 

@@ -1,0 +1,114 @@
+/* =============================================================================
+   web/src/theme/tokens.css
+   ---------------------------------------------------------------------------
+   Responsible for: The three theme token sets (Dark / Sepia / Light) as CSS custom
+                    properties on a [data-theme] root, plus the shared typography
+                    variables. This is the design's "build this first" layer: every
+                    screen reads these vars, so a theme switch is purely swapping the
+                    data-theme attribute — no markup or component change.
+   Source of truth: design/README.md "Theme token sets" (exact hex values copied).
+   Default theme: Sepia (the user's preferred scheme) — set by ThemeProvider, with a
+                  :root fallback here so a no-JS / pre-mount render is already sepia.
+   ============================================================================= */
+
+:root {
+  /* Typography families (design tokens). Self-hosted via @fontsource (imported in
+     main.tsx) so the production CSP can stay font-src 'self'. */
+  --font-ui: "Hanken Grotesk", system-ui, sans-serif;
+  --font-serif: "Newsreader", Georgia, serif;
+  --font-mono: "Spline Sans Mono", ui-monospace, monospace;
+}
+
+/* --- Sepia (default) ------------------------------------------------------- */
+:root,
+[data-theme="sepia"] {
+  --bg: #f4f1ea;
+  --side: #ece7dc;
+  --panel: #ffffff;
+  --panel2: #faf8f3;
+  --border: #e3ddd0;
+  --sideborder: #ddd6c7;
+  --thi: #26231d;
+  --tmid: #5b564b;
+  --tlow: #6b665c;
+  --tfaint: #9a9384;
+  --accent: #5a6b8c;
+  --accent-soft: #e6e9f0;
+  --accent-ink: #ffffff;
+  --track: #e8e2d5;
+  --nav-active-bg: #ffffff;
+  --proj-active-bg: #e6e9f0;
+  --rowb: #e8e2d5;
+  --due: #a8843a;
+  --due-bg: #f4ecda;
+  --over: #bd6a4a;
+  --over-bg: #f6e6df;
+  --slip: #9163a8;
+  --slip-bg: #efe6f2;
+  --ok: #5a8c6b;
+  --ok-bg: #e6f0ea;
+  --todo: #9a9384;
+  --todo-bg: #efeadf;
+}
+
+/* --- Dark ------------------------------------------------------------------ */
+[data-theme="dark"] {
+  --bg: #1b1a17;
+  --side: #171612;
+  --panel: #211f1b;
+  --panel2: #26241f;
+  --border: #322e28;
+  --sideborder: #272420;
+  --thi: #f2efe9;
+  --tmid: #a8a39a;
+  --tlow: #8a857c;
+  --tfaint: #6f6a61;
+  --accent: #93b8a0;
+  --accent-soft: rgba(147, 184, 160, 0.14);
+  --accent-ink: #1b1a17;
+  --track: #2c2a25;
+  --nav-active-bg: #211f1b;
+  --proj-active-bg: rgba(147, 184, 160, 0.12);
+  --rowb: #242220;
+  --due: #d9b56a;
+  --due-bg: rgba(217, 181, 106, 0.13);
+  --over: #e0876f;
+  --over-bg: rgba(224, 135, 111, 0.13);
+  --slip: #c99fc0;
+  --slip-bg: rgba(201, 159, 192, 0.13);
+  --ok: #93b8a0;
+  --ok-bg: rgba(147, 184, 160, 0.14);
+  --todo: #9a948a;
+  --todo-bg: #26241f;
+}
+
+/* --- Light ----------------------------------------------------------------- */
+[data-theme="light"] {
+  --bg: #f6f7f9;
+  --side: #eef0f3;
+  --panel: #ffffff;
+  --panel2: #f4f6f8;
+  --border: #e4e7ec;
+  --sideborder: #e1e4e9;
+  --thi: #191c22;
+  --tmid: #5a626e;
+  --tlow: #6b727e;
+  --tfaint: #99a0ab;
+  --accent: #4a6491;
+  --accent-soft: #e7ecf4;
+  --accent-ink: #ffffff;
+  --track: #e9ebef;
+  --nav-active-bg: #ffffff;
+  --proj-active-bg: #e7ecf4;
+  --rowb: #edeff2;
+  --due: #b07d2a;
+  --due-bg: #f7efdd;
+  --over: #c2603f;
+  --over-bg: #f9e8e1;
+  --slip: #8a52a8;
+  --slip-bg: #f1e8f5;
+  --ok: #3f8a6f;
+  --ok-bg: #e4f1ea;
+  --todo: #8a909a;
+  --todo-bg: #eef0f3;
+}

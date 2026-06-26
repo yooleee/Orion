@@ -18,6 +18,12 @@
 **/.venv
 **/venv
 
+# Node deps + Vite cache: the SPA build stage runs `npm ci` itself, so the host's
+# web/node_modules must NOT enter the build context (huge + would overlay the clean
+# install). web/dist is covered by **/dist below — the build regenerates it.
+**/node_modules
+**/.vite
+
 # Python build / cache artifacts.
 **/__pycache__
 **/*.py[cod]

@@ -1,0 +1,1054 @@
+/* =============================================================================
+   web/src/styles/base.css
+   ---------------------------------------------------------------------------
+   Responsible for: Global reset + base type, the theme transition, and the layout
+                    that is shared across screens — the two-part desktop shell
+                    (sidebar + content), the sidebar's nav/list/account blocks, the
+                    theme switcher, and the full-bleed login screen.
+   Role in project: The structural CSS the shell (4a.2) needs. Per-screen card/row
+                    styles (home, project, report) are added in their own slices. All
+                    colours come from tokens.css vars, so every rule re-themes for free.
+   Measurements: from design/README.md "Global Layout & Shell" + "Design Tokens".
+   ============================================================================= */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--thi);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Theme transition: backgrounds/borders animate on a data-theme swap (design: 0.25s). */
+body,
+.side,
+.panel,
+.nav-item,
+.proj-item,
+.account,
+.seg {
+  transition: background 0.25s, border-color 0.25s, color 0.25s;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-serif);
+  letter-spacing: -0.015em;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* A mono "eyebrow"/label: uppercased, letter-spaced, faint — used for section labels. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--tfaint);
+}
+
+/* --- The two-part desktop shell -------------------------------------------- */
+
+.shell {
+  display: flex;
+  min-height: 100%;
+}
+
+.side {
+  width: 236px;
+  flex-shrink: 0;
+  padding: 26px 18px;
+  background: var(--side);
+  border-right: 1px solid var(--sideborder);
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 40px 48px;
+}
+
+/* Brand lockup: a small accent dot + the serif wordmark. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 600;
+}
+.brand-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 99px;
+  background: var(--accent);
+}
+
+/* A sidebar group (SECTIONS / PROJECTS / TRACKERS): an eyebrow header + items. */
+.side-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.side-group-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--tfaint);
+  margin-bottom: 8px;
+}
+
+/* SECTIONS nav row: label on the left, an optional count or NEW pill on the right. */
+.nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  color: var(--tmid);
+  font-size: 14px;
+  cursor: pointer;
+}
+.nav-item:hover {
+  color: var(--thi);
+}
+.nav-item.active {
+  background: var(--nav-active-bg);
+  border-color: var(--border);
+  color: var(--thi);
+  font-weight: 600;
+}
+.nav-item.disabled {
+  cursor: default;
+  color: var(--tfaint);
+}
+.nav-item.disabled:hover {
+  color: var(--tfaint);
+}
+.nav-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+}
+
+/* The NEW pill on not-yet-built sections. */
+.pill-new {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* PROJECTS / TRACKERS list item. */
+.proj-item {
+  padding: 6px 12px;
+  border-radius: 8px;
+  color: var(--tmid);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.proj-item:hover {
+  color: var(--thi);
+}
+.proj-item.active {
+  background: var(--proj-active-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Pushes the account/theme block to the bottom of the sidebar column. */
+.side-spacer {
+  margin-top: auto;
+}
+
+/* Showcase link (bottom of sidebar). */
+.showcase-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--tmid);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Theme switcher (segmented control), reused on login + sidebar. */
+.theme-switch {
+  display: flex;
+  gap: 2px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 3px;
+}
+.seg {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--tlow);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.seg.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+/* Account card: avatar + name/role + a power (logout) glyph. */
+.account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 99px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.account-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.account-role {
+  font-size: 11px;
+  color: var(--tlow);
+}
+.account-logout {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--tlow);
+  cursor: pointer;
+  font-size: 15px;
+}
+
+/* A status signal: glyph + label, coloured by state (colour set inline from status.ts). */
+.status-signal {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+/* --- Login (full-bleed) ---------------------------------------------------- */
+
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+}
+.login-card {
+  width: 100%;
+  max-width: 392px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 30px 28px;
+}
+.login-card h1 {
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+.login-sub {
+  font-size: 13.5px;
+  color: var(--tlow);
+  margin-bottom: 22px;
+}
+.field-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--tfaint);
+  display: block;
+  margin-bottom: 8px;
+}
+.field {
+  width: 100%;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--thi);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+.btn-primary {
+  width: 100%;
+  margin-top: 16px;
+  padding: 11px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.login-error {
+  color: var(--over);
+  font-size: 13px;
+  margin-top: 12px;
+}
+.brand-login {
+  margin-bottom: 6px;
+}
+
+/* A small centered status line (loading / error fallbacks). */
+.center-note {
+  display: flex;
+  min-height: 60vh;
+  align-items: center;
+  justify-content: center;
+  color: var(--tlow);
+  font-size: 14px;
+}
+
+/* =============================================================================
+   Home — portfolio overview (slice 4a.3)
+   Project rows, the differentiated tracker card, section headers, scope banner,
+   and the empty state. Measurements from design/README "Home — Portfolio Overview".
+   ============================================================================= */
+
+.page-header {
+  margin-bottom: 26px;
+}
+.page-title {
+  font-size: 30px;
+  margin: 6px 0 10px;
+}
+.page-sub {
+  color: var(--tlow);
+  font-size: 14.5px;
+  max-width: 540px;
+  margin: 0;
+}
+
+.home-section {
+  margin-top: 30px;
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.section-header h2 {
+  font-size: 20px;
+}
+.section-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.row-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --- Project row ----------------------------------------------------------- */
+
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 17px 20px;
+  cursor: pointer;
+}
+.project-row:hover {
+  border-color: var(--accent);
+}
+.row-main {
+  flex: 1;
+  min-width: 0;
+}
+.row-name {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.row-headline {
+  font-size: 13px;
+  color: var(--tlow);
+  margin-top: 3px;
+}
+.row-progress {
+  width: 128px;
+  flex-shrink: 0;
+}
+.progress-row {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tmid);
+  margin-bottom: 6px;
+}
+.row-signals {
+  width: 150px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.row-time {
+  width: 64px;
+  flex-shrink: 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+}
+
+/* Progress bars (plain + segmented). */
+.bar {
+  height: 5px;
+  width: 100%;
+  background: var(--track);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 99px;
+}
+.seg-bar {
+  display: flex;
+  height: 6px;
+}
+.seg-bar > div {
+  height: 100%;
+}
+
+/* --- Tracker card (deliberately distinct from a project row) --------------- */
+
+.tracker-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 13px;
+  padding: 16px 20px;
+  cursor: pointer;
+}
+.tracker-card:hover {
+  border-color: var(--accent);
+}
+.tracker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tracker-pill {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tracker-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.tracker-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+}
+.tracker-done {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tmid);
+}
+.tracker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+}
+.more-link {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--accent);
+}
+
+/* --- Scope banner ---------------------------------------------------------- */
+
+.scope-banner {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 9px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+/* --- Empty / first-run state ---------------------------------------------- */
+
+.empty-state {
+  max-width: 520px;
+  margin: 80px auto 0;
+  text-align: center;
+}
+.empty-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 18px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+}
+.empty-state h1 {
+  font-size: 26px;
+  margin-bottom: 12px;
+}
+.empty-state p {
+  color: var(--tlow);
+  font-size: 14px;
+}
+.empty-cmd {
+  display: inline-block;
+  margin: 18px 0;
+  padding: 10px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--tmid);
+}
+.empty-foot {
+  color: var(--tfaint) !important;
+  font-size: 13px !important;
+}
+
+/* =============================================================================
+   Detail pages — project + report (slice 4a.4)
+   Measurements from design/README "Project page" + "Report detail".
+   ============================================================================= */
+
+.breadcrumb {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+  margin-bottom: 14px;
+}
+.crumb-link {
+  color: var(--tlow);
+}
+.crumb-link:hover {
+  color: var(--thi);
+}
+.crumb-sep {
+  color: var(--tfaint);
+}
+
+/* Header row: headline on the left, stat blocks / nav on the right. */
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 26px;
+}
+.detail-headline {
+  min-width: 0;
+}
+.stat-blocks {
+  display: flex;
+  gap: 30px;
+  flex-shrink: 0;
+}
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--tfaint);
+  margin-bottom: 5px;
+}
+.stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.stat-sub {
+  color: var(--tfaint);
+  font-size: 15px;
+  font-weight: 500;
+}
+.stat-due {
+  color: var(--due);
+  font-family: var(--font-serif);
+}
+
+/* A mono block label above a section (FORWARD LOOK, LIVE CHECKLIST, REPORTS …). */
+.block-label {
+  margin-bottom: 12px;
+}
+.detail-left section + section,
+.detail-right section + section {
+  margin-top: 28px;
+}
+
+/* Project page two-column grid. */
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1.55fr 1fr;
+  gap: 30px;
+  align-items: start;
+}
+
+/* --- Milestone cards ------------------------------------------------------- */
+
+.milestone-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.milestone-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 15px 18px;
+}
+.milestone-card.at-risk {
+  border-color: var(--over);
+}
+.milestone-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.milestone-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.milestone-signals {
+  display: flex;
+  gap: 12px;
+}
+.milestone-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.milestone-bar .bar {
+  flex: 1;
+}
+.milestone-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tmid);
+}
+
+/* --- Live checklist -------------------------------------------------------- */
+
+.check-list {
+  display: flex;
+  flex-direction: column;
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rowb);
+}
+.checkbox {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--tfaint);
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--accent-ink);
+}
+.checkbox.done {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.checkbox.overdue {
+  border-color: var(--over);
+}
+.check-label {
+  flex: 1;
+  font-size: 13.5px;
+  color: var(--thi);
+}
+.check-label.done {
+  text-decoration: line-through;
+  color: var(--tfaint);
+}
+.check-signals {
+  display: flex;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* --- Reports timeline ------------------------------------------------------ */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+}
+.timeline-entry {
+  display: flex;
+  gap: 12px;
+  padding-bottom: 18px;
+  position: relative;
+}
+.timeline-entry:not(:last-child)::before {
+  /* connector line down from this dot to the next. */
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 12px;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+.timeline-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 99px;
+  background: var(--tfaint);
+  margin-top: 3px;
+  flex-shrink: 0;
+  z-index: 1;
+}
+.timeline-dot.latest {
+  background: var(--accent);
+}
+.timeline-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.timeline-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+  margin-top: 2px;
+}
+
+/* --- Comments + composer --------------------------------------------------- */
+
+.comments-empty {
+  color: var(--tlow);
+  font-size: 13px;
+  padding: 6px 0;
+}
+.comment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.comment {
+  display: flex;
+  gap: 10px;
+}
+.comment-body-wrap {
+  min-width: 0;
+}
+.comment-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.comment-author {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.comment-role,
+.comment-time {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--tfaint);
+}
+.comment-text {
+  font-size: 13.5px;
+  color: var(--tmid);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.composer {
+  margin-top: 16px;
+}
+.composer-as {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+  margin-bottom: 6px;
+}
+.composer-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--thi);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  resize: vertical;
+}
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.composer-note {
+  font-size: 11.5px;
+  color: var(--tfaint);
+}
+.btn-inline {
+  width: auto;
+  margin-top: 0;
+  padding: 8px 16px;
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --- Report detail --------------------------------------------------------- */
+
+.report-nav {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.nav-btn {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--tmid);
+  font-size: 12.5px;
+}
+.nav-btn:hover {
+  color: var(--thi);
+  border-color: var(--accent);
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: 1fr 308px;
+  gap: 32px;
+  align-items: start;
+}
+.report-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px 30px;
+}
+.report-title {
+  font-size: 19px;
+  margin-bottom: 18px;
+}
+.report-section {
+  margin-top: 20px;
+}
+.report-section-label {
+  margin-bottom: 8px;
+}
+.report-prose {
+  font-size: 14px;
+  color: var(--tmid);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.report-comments {
+  margin-top: 28px;
+}
+
+/* Context rail. */
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.rail-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+.rail-label {
+  margin-bottom: 12px;
+}
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  margin: 0;
+}
+.kv dt {
+  font-size: 12.5px;
+  color: var(--tlow);
+}
+.kv dd {
+  margin: 0;
+  text-align: right;
+  font-size: 12.5px;
+  color: var(--thi);
+}
+.kv-mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.pill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--panel2);
+  color: var(--tmid);
+}
+.pill-accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.recipient {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 0;
+}
+.avatar-sm {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+.recipient-name {
+  font-size: 13px;
+  color: var(--thi);
+}
+.recipient-role {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--tfaint);
+}
+.source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.source-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+.snapshot-head {
+  margin-bottom: 6px;
+}
+.snapshot-rows {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.snapshot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.snapshot-text {
+  font-size: 12.5px;
+  color: var(--tmid);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snapshot-text.done {
+  text-decoration: line-through;
+  color: var(--tfaint);
+}
+.snapshot-more {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+  margin-top: 2px;
+}

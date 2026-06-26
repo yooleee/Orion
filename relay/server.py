@@ -40,6 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .derive import today_in_tz
 from .render import (
     _DISPLAY_TZ,
     MAX_AUTHOR_CHARS,
@@ -557,7 +558,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 # so the cards can show a one-line headline and link straight in. Scope
                 # filtering is unchanged — the same per-project `in allowed` predicate the
                 # index used, applied before render, so a viewer sees only granted cards.
-                projects = latest_report_per_project(conn)
+                # "today" in the relay's display zone, so the at-risk badge counts
+                # against the same day every viewer sees (E2 Inc 3).
+                today = today_in_tz(self.server.display_tz)
+                projects = latest_report_per_project(conn, today=today)
                 if allowed is not None:
                     projects = [p for p in projects if p["project"] in allowed]
                 self._send_html(

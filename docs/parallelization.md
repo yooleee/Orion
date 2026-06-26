@@ -13,11 +13,14 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-25 (after the dashboard CSP/headers hardening, **E2 Inc 1 — portfolio
-overview**, **E2 Inc 2 — live checklist signal** [PR #47], **E2 Inc 2.5 — near-real-time checklist
-push** [PR #49], and a **relay CSRF comment-bug fix** [PR #48] — all shipped + deployed; E2 Inc 3 +
-D follow-ons + deferred C-track ahead). Excludes Horizon P, which is
-decision-gated launch work._
+_Last synced: 2026-06-26 (E2 **Inc 3 rung 1** underway — the forward-looking layer. Units 0
+(strategy invariant), 1 (local parse/carry of `due_date`) and 2 (relay-side derive + surface:
+`relay/derive.py` + due-date/at-risk render + portfolio badge) have shipped. Unit 2 confirmed the
+predicted relay⟂CLI split — it was a clean relay-only slice once Unit 1 put `due_date` on the wire.
+The per-unit coupling map (Unit 1 upstream; Units 2∥3 independent; 4→3; 5→1+2) lives in
+[`docs/e2-inc3-kickoff.md`](e2-inc3-kickoff.md). Earlier: dashboard CSP/headers hardening, **E2 Inc 1
+— portfolio overview**, **Inc 2 — live checklist signal** [PR #47], **Inc 2.5** [PR #49], the **CSRF
+fix** [PR #48] — all shipped + deployed.) Excludes Horizon P, decision-gated launch work._
 
 ## Remaining buildable inventory + file footprint
 

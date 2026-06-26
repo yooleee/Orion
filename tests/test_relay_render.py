@@ -14,6 +14,7 @@
 import base64
 import hashlib
 import re
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from relay.render import (
@@ -21,6 +22,7 @@ from relay.render import (
     PAGE_JS_HASH,
     _format_ts,
     _headline,
+    _render_checklist,
     render_not_found,
     render_portfolio,
     render_project,
@@ -875,3 +877,105 @@ def test_report_comment_author_is_escaped():
     html = render_report(_report(), comments=[_comment(author=_XSS)])
     assert _XSS not in html  # the raw <script> payload never appears unescaped
     assert "&lt;script&gt;" in html
+
+
+# --- forward-looking deadlines on the checklist (E2 Inc 3) ---------------------------
+# These call _render_checklist directly with a FIXED today so the overdue/due-soon
+# classification is deterministic (no real clock); the date 2026-06-26 is the reference.
+
+_FIXED_TODAY = date(2026, 6, 26)
+
+
+def _cl_item(text, done=False, due_date=None):
+    """Build a checklist item dict, attaching due_date only when given (the real shape)."""
+    item = {"text": text, "done": done}
+    if due_date is not None:
+        item["due_date"] = due_date
+    return item
+
+
+def test_render_checklist_shows_open_item_due_date():
+    """An open item with a deadline renders its due date as an enhanceable <time>.
+
+    Why this matters: the due date is the visible forward signal. We pin the human date
+    text (no-JS fallback) and that it rides a <time datetime> so the existing relative-time
+    JS can turn it into "in N days" client-side.
+    """
+    html = _render_checklist([_cl_item("Apply", due_date="2026-07-17")], today=_FIXED_TODAY)
+    assert "Jul 17, 2026" in html
+    assert 'class="due"' in html
+    assert "<time datetime=" in html
+
+
+def test_render_checklist_overdue_item_gets_class_and_marker():
+    """A past-due open item gets the 'overdue' li class and a ⚠ marker (legible sans CSS).
+
+    Why this matters: overdue is the strongest signal. The class drives the red styling and
+    the ⚠ keeps it legible even if the stylesheet is blocked (function before looks).
+    """
+    html = _render_checklist([_cl_item("Late", due_date="2026-06-12")], today=_FIXED_TODAY)
+    assert 'class="open overdue"' in html
+    assert "⚠" in html
+
+
+def test_render_checklist_due_soon_item_gets_at_risk_class_without_marker():
+    """A within-7-days open item gets the softer 'at-risk' class and NO ⚠ marker.
+
+    Why this matters: due-soon is a lighter warning than overdue. It shares the at-risk
+    treatment but should not carry the overdue ⚠, so the two states stay distinguishable.
+    """
+    html = _render_checklist([_cl_item("Soon", due_date="2026-06-29")], today=_FIXED_TODAY)
+    assert 'class="open at-risk"' in html
+    assert "⚠" not in html
+
+
+def test_render_checklist_done_item_is_never_flagged_or_dated():
+    """A done item shows neither an at-risk class nor a due date, even with a past deadline.
+
+    Why this matters: a finished item is not "at risk", and its deadline is moot — surfacing
+    either would be misleading noise. It must render exactly as a plain done item.
+    """
+    html = _render_checklist(
+        [_cl_item("Did it", done=True, due_date="2026-06-01")], today=_FIXED_TODAY
+    )
+    assert "overdue" not in html
+    assert "at-risk" not in html
+    assert 'class="due"' not in html
+    assert 'class="done"' in html
+
+
+def test_render_checklist_item_without_due_date_is_unchanged():
+    """An open item with no deadline renders as the plain open item it always was.
+
+    Why this matters: the deadline is additive — a project that never sets one must look
+    exactly as it did before Inc 3 (no due span, no status class).
+    """
+    html = _render_checklist([_cl_item("No date")], today=_FIXED_TODAY)
+    assert 'class="due"' not in html
+    assert 'class="open"' in html
+
+
+def test_render_portfolio_shows_at_risk_badge():
+    """A card whose project has at-risk items renders an 'N at risk' badge.
+
+    Why this matters: the portfolio is the at-a-glance home; the badge is how a viewer sees
+    a project is slipping without opening it. The count comes precomputed from the store.
+    """
+    html = render_portfolio(
+        [_pcard(checklist_done=1, checklist_total=4, checklist_at_risk=2)]
+    )
+    assert "2 at risk" in html
+
+
+def test_render_portfolio_omits_at_risk_badge_when_zero_or_none():
+    """No badge when the at-risk count is 0 or None (no derivation / nothing at risk).
+
+    Why this matters: a project with nothing at risk — or one whose count was not computed
+    — must look exactly as it did before, never showing a "0 at risk" badge.
+    """
+    none_html = render_portfolio([_pcard(checklist_at_risk=None)])
+    zero_html = render_portfolio([_pcard(checklist_at_risk=0)])
+    # Assert the badge ELEMENT is absent (a loose "at risk" substring would also match the
+    # phrase inside the page's CSS comment, which ships on every page).
+    assert "<p class='at-risk-badge'>" not in none_html
+    assert "<p class='at-risk-badge'>" not in zero_html

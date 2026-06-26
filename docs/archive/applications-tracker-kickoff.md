@@ -15,6 +15,14 @@ Role in project: A kickoff doc (like the archived phase/dashboard kickoffs). Rea
 
 # Kickoff: applications tracking via a status-aware "tracker" collector (E2 Inc 2.6)
 
+> **✅ SHIPPED + ARCHIVED (2026-06-26).** This kickoff is a historical record. Inc 2.6 (the tracker
+> collector + `tasks_file` bootstrapping) shipped in **PR #50**; the `applications` project is wired
+> and pushed live. The carried-over CSRF bug below was **RESOLVED in PR #51** — and its real root cause
+> was NOT the hypothesis recorded below (`public_origin` not live): the actual cause was the dashboard's
+> own `Referrer-Policy: no-referrer` forcing every browser comment POST to `Origin: null`. The original
+> (now-superseded) text is preserved unchanged for the record. Current state lives in the
+> `plans/orion-plan.md` roadmap (E2 ladder). Remaining open item: family viewer provisioning (on hold).
+
 ## ⚠ Carried-over bug (unrelated to this kickoff) — CSRF comment 403 still failing
 
 The relay CSRF comment fix from **PR #48** (this cycle) **did NOT resolve the bug**. The error is

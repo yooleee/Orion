@@ -125,20 +125,6 @@ Deferred).
 - **Severity:** low
 - **Status:** By-design (revisit if an append-log notes workflow is actually wanted).
 
-## KI-8 — Vestigial state columns/fields after the Phase-2 marker migration
-
-- **Detail:** Phase 2 moved delta markers to a per-(project, collector) `collector_markers`
-  table. Two Phase-1 artifacts are now vestigial: the `project_state.last_commit`/
-  `last_reported` columns (kept only as the one-time backfill source in `open_state`) and
-  `ReportBlob.source_marker` (now always `""`, since no single marker is meaningful when
-  several collectors run).
-- **Why it matters:** Dead schema/fields can mislead a future reader into thinking they are
-  still authoritative. They are retained deliberately: dropping a SQLite column is not an
-  idempotent "IF NOT EXISTS" operation, and `source_marker` is a frozen part of the
-  portable `ReportBlob`. Removing them is a future migration, not a Phase-2 change.
-- **Severity:** low
-- **Status:** Deferred (remove in a dedicated state-schema migration).
-
 ## KI-10 — `_to_slack_mrkdwn` is a structural translator, not a full converter
 
 - **Detail:** `compose._to_slack_mrkdwn` converts only the two Markdown constructs Orion
@@ -271,6 +257,11 @@ Deferred).
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-8** — Vestigial Phase-1 state artifacts after the Phase-2 marker migration: the
+  `project_state` table (backfill source) and the always-`""` `ReportBlob.source_marker`.
+  **Resolved 2026-06-25** by dropping both — the Phase-1→Phase-2 backfill window closed long
+  ago (Phase 2 shipped 2026-06-15) and the relay never required `source_marker`. See CHANGELOG
+  → *"Consolidation slice — dashboard-home visibility, add-project completeness, KI-8 cleanup"*.
 - **KI-20** — Delivered Slack/Discord messages timestamped in UTC while the dashboard rendered
   Pacific. **Resolved 2026-06-19** by a global `display_timezone` config field (message formatter
   honors it), with the relay-side follow-up (`orion relay-serve --timezone`) landed in Horizon D.

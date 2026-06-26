@@ -32,11 +32,6 @@ class ReportBlob:
         lane: "raw" (an LLM summarized at least part of this run) or "structured"
             (everything passed through) — provenance.
         body: The redacted, channel-agnostic report text.
-        source_marker: VESTIGIAL since Phase 2 — always "". Phase 1 stored the
-            single git HEAD sha here, but delta markers are now per-collector and
-            live in the state store (collector_markers), so no single value is
-            meaningful when several signals run. Kept (frozen) for the portable
-            blob's shape; see docs/known-issues.md KI-8.
         generated_at: ISO 8601 UTC timestamp of when the report was built.
         orion_version: The Orion version that produced it (forward-compat).
         sections: The ordered (title, body) sections this report is composed of,
@@ -66,7 +61,6 @@ class ReportBlob:
     share_level: str
     lane: str
     body: str
-    source_marker: str
     generated_at: str
     orion_version: str
     # Defaulted last so existing positional construction stays valid; () is an
@@ -82,7 +76,6 @@ def build_report(
     project: ProjectConfig,
     body: str,
     lane: str,
-    source_marker: str,
     generated_at: str,
     sections: tuple[tuple[str, str], ...] = (),
     checklist: tuple[ChecklistItem, ...] | None = None,
@@ -93,7 +86,6 @@ def build_report(
         project: The project's config (for name + recipients).
         body: The redacted report text (from the LLM or a passthrough).
         lane: The lane that produced the body ("raw" or "structured").
-        source_marker: The git HEAD sha covered by this report.
         generated_at: ISO 8601 UTC timestamp.
         sections: The ordered (title, body) sections the body was assembled from,
             each already twice-redacted. Defaults to empty for callers (like
@@ -119,7 +111,6 @@ def build_report(
         share_level=project.share_level,
         lane=lane,
         body=body,
-        source_marker=source_marker,
         generated_at=generated_at,
         orion_version=__version__,
         sections=sections,
@@ -158,7 +149,6 @@ def serialize_blob(blob: ReportBlob) -> str:
         "share_level": blob.share_level,
         "lane": blob.lane,
         "body": blob.body,
-        "source_marker": blob.source_marker,
         "generated_at": blob.generated_at,
         "orion_version": blob.orion_version,
         # Each section is an ordered (title, body) pair; JSON has no tuple, so emit

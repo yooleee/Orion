@@ -295,7 +295,6 @@ def _real_blob_json():
         project,
         body="Shipped the relay seam.",
         lane="raw",
-        source_marker="",
         generated_at="2026-06-18T00:00:00+00:00",
         sections=(("Code activity", "Shipped the seam."),),
     )
@@ -343,7 +342,6 @@ def _blob_json_with_checklist(checklist):
         project,
         body="Shipped the relay seam.",
         lane="raw",
-        source_marker="",
         generated_at="2026-06-18T00:00:00+00:00",
         sections=(("Code activity", "Shipped the seam."),),
         checklist=checklist,

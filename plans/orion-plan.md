@@ -148,7 +148,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
 | E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range — reached as **E2 Inc 3** (the forward-state ladder) |
-| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time checklist push, PR #49), and Inc 2.6 (status-aware `tracker` collector + `tasks_file` bootstrapping, PR #50) all SHIPPED 2026-06-25/26.** Inc 2.6's first real workload — the `applications` tracker — is wired and pushed live (admin-visible; family viewer grants on hold). Validated by the founding family-visibility intent + personal use. Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
+| E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time checklist push, PR #49), and Inc 2.6 (status-aware `tracker` collector + `tasks_file` bootstrapping, PR #50) all SHIPPED 2026-06-25/26.** Inc 2.6's first real workload — the `applications` tracker — is wired and pushed live (admin-visible; family viewer grants on hold). Validated by the founding family-visibility intent + personal use. A post-2.6 **consolidation slice** then SHIPPED 2026-06-25 (PRs #52–#54): dashboard home shows checklist-only projects, `add-project` tracker/incubator/`--seed-tasks-from` completeness, and KI-8 state cleanup. Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
 | E5 | dashboard | The **read-only → read-write dashboard** inflection — the architectural watershed (write paths, auth, hosting-as-primary). The point to watch | 🔭 Aspirational |
@@ -216,6 +216,7 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
     never overwriting); explicit `--tasks-file` stays config-only (the opt-out). Roadmap-derived seeding
     (`--seed-tasks-from`) was the parse-vs-generate fork — **deferred** to a later slice (chose structured
     parse when it lands; B-i ships the structural "every project can have a checklist" fix first).
+    *(→ shipped as Unit 3 of the consolidation slice below.)*
   - **Live wiring DONE:** the `applications` project stanza is in the live `orion.toml` (tracker-only,
     no git; a placeholder recipient with an intentionally-unset env var so this private project can
     never be auto-delivered to the on-hold Alex/Sam chat channels), and its checklist is pushed to the
@@ -227,6 +228,15 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
     (PR #48's Safari/`public_origin` hypotheses were both wrong); fixed by `Referrer-Policy: same-origin`
     + opaque-Origin Referer fallback, verified live. Kickoff (archived):
     [`docs/archive/applications-tracker-kickoff.md`](../docs/archive/applications-tracker-kickoff.md).
+- **Consolidation slice — dashboard-home visibility + `add-project` completeness + KI-8 (✅ SHIPPED
+  2026-06-25, PRs #52–#54).** A post-2.6 cleanup, each unit its own PR. **Unit 1** — the dashboard home
+  now shows checklist-only projects, so the `applications` card (previously reachable only by direct
+  URL) appears in the portfolio; relay-only + deployed. **Units 2+3** — `add-project` gains
+  `--tracker-file`/`--incubator-file` (fixes the tracker `KeyError` that forced hand-editing
+  `orion.toml`) and `--seed-tasks-from` (the deferred Inc 2.6 Unit B-ii: seed a created `tasks_file`
+  from a doc's Markdown tables, parse not LLM). **Unit 4** — KI-8: dropped the vestigial Phase-1
+  `project_state` table and the always-`""` `source_marker`. Kickoff:
+  [`docs/consolidation-slice-kickoff.md`](../docs/consolidation-slice-kickoff.md).
 - **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
   the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
   Inc 2.6's deadline parsing is its likely on-ramp.

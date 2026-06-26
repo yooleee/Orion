@@ -108,50 +108,24 @@ def test_markers_are_per_collector(tmp_path):
     assert get_marker(conn, "demo", "tasks") == '["Ship it"]'
 
 
-def test_backfill_migrates_legacy_last_commit(tmp_path):
-    """A pre-Phase-2 project_state row is migrated into collector_markers on open.
+def test_open_state_creates_no_legacy_project_state_table(tmp_path):
+    """A fresh state DB has no `project_state` table (KI-8: the vestigial table is gone).
 
-    Why this matters: upgrading a live state DB must NOT reset a project's git
-    delta and re-send its whole history. We simulate a Phase-1 DB by writing a
-    legacy project_state row directly, then assert a fresh open exposes it as the
-    git marker via the new helper.
+    Why this matters: `project_state` existed only to source a one-time Phase-1→Phase-2
+    git-marker backfill, which has long since run on every live DB. Dropping it means a
+    fresh open must not recreate it — this pins that the schema no longer carries the
+    dead table (and that the removed backfill left no reference behind).
     """
-    db = tmp_path / "state.sqlite3"
-    conn = open_state(db)
-    # Simulate a Phase-1 row that only the legacy table knows about.
-    conn.execute(
-        "INSERT INTO project_state (project, last_commit, last_reported) "
-        "VALUES (?, ?, ?)",
-        ("legacy", "oldsha", "2026-06-13T12:00:00Z"),
-    )
-    conn.commit()
-    conn.close()
-
-    # Reopening triggers the idempotent backfill.
-    conn2 = open_state(db)
-    assert get_marker(conn2, "legacy", "git") == "oldsha"
-
-
-def test_backfill_does_not_clobber_advanced_marker(tmp_path):
-    """Backfill never overwrites a git marker already advanced post-upgrade.
-
-    Why this matters: INSERT OR IGNORE must leave a newer collector_markers value
-    alone, or every reopen would drag git's marker back to the stale legacy sha.
-    """
-    db = tmp_path / "state.sqlite3"
-    conn = open_state(db)
-    conn.execute(
-        "INSERT INTO project_state (project, last_commit, last_reported) "
-        "VALUES (?, ?, ?)",
-        ("legacy", "oldsha", "2026-06-13T12:00:00Z"),
-    )
-    conn.commit()
-    # Advance past the legacy value under the new helper.
-    set_marker(conn, "legacy", "git", "newsha", "2026-06-14T12:00:00Z")
-    conn.close()
-
-    conn2 = open_state(db)
-    assert get_marker(conn2, "legacy", "git") == "newsha"
+    conn = open_state(tmp_path / "state.sqlite3")
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    assert "project_state" not in tables
+    # The live marker table is still present (sanity: we dropped the right thing).
+    assert "collector_markers" in tables
 
 
 def test_record_report_persists_history(tmp_path):

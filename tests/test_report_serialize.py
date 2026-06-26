@@ -6,7 +6,7 @@
 # Role in project: serialize_blob is the wire format local Orion POSTs to a relay
 #                  and the receiver stores/renders. If a field is dropped, mistyped,
 #                  or mangled here, every hosted surface downstream is wrong — so we
-#                  pin all eight fields and the tuple→array conversions explicitly.
+#                  pin all seven fields and the tuple→array conversions explicitly.
 # =============================================================================
 
 import json
@@ -35,7 +35,6 @@ def _blob(sections=(), checklist=None):
         share_level="detailed",
         lane="raw",
         body="Shipped the relay seam.",
-        source_marker="",
         generated_at="2026-06-17T00:00:00+00:00",
         orion_version=__version__,
         sections=sections,
@@ -50,7 +49,7 @@ def test_serialize_blob_round_trips_all_fields():
     lost crossing the seam. We serialize, parse the JSON back, rebuild a ReportBlob
     (converting the JSON arrays back to the tuples the dataclass uses), and assert
     it equals what we started with. Covering a blob with sections exercises all
-    eight fields at once.
+    seven fields at once.
     """
     original = _blob(sections=(("Code activity", "Did X."), ("Tasks", "Did Y.")))
 
@@ -61,7 +60,6 @@ def test_serialize_blob_round_trips_all_fields():
         share_level=parsed["share_level"],
         lane=parsed["lane"],
         body=parsed["body"],
-        source_marker=parsed["source_marker"],
         generated_at=parsed["generated_at"],
         orion_version=parsed["orion_version"],
         sections=tuple((title, body) for title, body in parsed["sections"]),

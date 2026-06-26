@@ -115,9 +115,10 @@ change), resolving **KI-19**.
 the real aspiration (a product direction is *not foreclosed*, but is not the goal now). Horizon **D**
 is complete (D1–D5 shipped); the current near-term work is Horizon **E**'s **dashboard-visibility
 track**, now **building incrementally** (E2 Inc 1 shipped 2026-06-25). The rest of Horizon **E**
-(chat/E3, read-write/E5, the forward-state planning layer/E1) stays a recorded direction with the
-seams kept clean — **not built**. Forward bands stay coarse: sequenced by dependency, detail firms up
-as each nears. **Horizon P
+(chat/E3, read-write/E5) stays a recorded direction with the seams kept clean — **not built**; the
+**forward-state planning layer (E1)** has since moved to **building incrementally as E2 Inc 3**
+(observe + remember, never originate — gate settled 2026-06-26). Forward bands stay coarse:
+sequenced by dependency, detail firms up as each nears. **Horizon P
 (Publish / OSS-launch)** sits outside that dependency order: it is **decision-gated** — the discrete
 work to make the repo public, consolidated in one band and triggered when the go-public decision is
 made, not after any particular horizon.
@@ -147,7 +148,7 @@ independently (chat = discussion · dashboard = structured overview · Orion = c
 
 | Phase | Track | Scope | Status |
 | ----- | ----- | ----- | ------ |
-| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; converges with the deferred scheduling layer (B5 / KI-13) — both need Orion's own forward state | 🔭 Long-range — reached as **E2 Inc 3** (the forward-state ladder) |
+| E1 | dashboard | Light planning/tracking layer — derived milestones/sprints/due-dates/at-risk, *reframing not originating*; shares the "needs Orion's own forward state" threshold with the deferred scheduling layer (B5 / KI-13), but kept a **separate track** | 🛠️ **Building — E2 Inc 3 rung 1** (observe + remember, never originate; gate settled 2026-06-26) — the forward-state ladder |
 | E2 | dashboard | Dashboard as a richer multi-signal, multi-project visibility/showcase surface (idea #5) — portfolio map + cross-project visibility + (later) the to-do/milestone signal and a forward-looking layer | 🛠️ **Building incrementally — Inc 1 (portfolio overview), Inc 2 (live checklist signal, PR #47), Inc 2.5 (near-real-time checklist push, PR #49), and Inc 2.6 (status-aware `tracker` collector + `tasks_file` bootstrapping, PR #50) all SHIPPED 2026-06-25/26.** Inc 2.6's first real workload — the `applications` tracker — is wired and pushed live (admin-visible; family viewer grants on hold). Validated by the founding family-visibility intent + personal use. A post-2.6 **consolidation slice** then SHIPPED 2026-06-25 (PRs #52–#54): dashboard home shows checklist-only projects, `add-project` tracker/incubator/`--seed-tasks-from` completeness, and KI-8 state cleanup. Next: Inc 3 (forward-looking layer ≡ E1). Ladder below. |
 | E3 | chat | Enriched Slack/Discord bots — leverage channel features (threads, slash commands, per-channel/topic routing); more ways to drive Orion from chat. A distinct direction (build/maintain bots), continuing C2b/C2c | 🔭 Long-range — **parked** (secondary to the dashboard) |
 | E4 | both | Surface-plural coordination across multiple projects / cross-project (the registry already holds many) | 🔭 Long-range |
@@ -1336,7 +1337,9 @@ coordination/visibility-hub* vision are recorded under "Horizon-C direction sett
 detail in `[docs/orion-strategy.md](../docs/orion-strategy.md)`. Same discipline: seams kept clean,
 not built. **Update (2026-06-25):** the *dashboard-visibility* slice of that hub has since been
 validated (the founding family-visibility intent) and moved to **building incrementally** — Horizon E2;
-the rest (chat/E3, read-write/E5, the forward-state planning layer/E1) stays seam-only.
+the rest (chat/E3, read-write/E5) stays seam-only. **Update (2026-06-26):** the *forward-state
+planning layer (E1)* has also moved to **building incrementally as E2 Inc 3** — gate settled
+*observe + remember, never originate* (see [`docs/e2-inc3-kickoff.md`](../docs/e2-inc3-kickoff.md)).
 
 ### Cross-platform & future-direction rationale (recorded Phase 3.5, 2026-06-15)
 

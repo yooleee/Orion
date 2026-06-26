@@ -14,6 +14,23 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## E2 Inc 3 — forward-looking planning layer, rung 1 (observe + remember) — in progress
+
+The forward-looking layer (E1): due-dates, at-risk, slippage, and derived milestones, built on an
+**observe-and-remember, never originate** model. Shipped unit by unit (each its own PR); see the
+six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
+
+### Changed
+
+- **Strategy invariant clarified — observe vs originate** (Unit 0, docs-only, 2026-06-26). The
+  forward-state gate is settled: Orion may persist *observed* state — a rebuildable, append-only
+  **downstream projection** of what the source docs claimed over time — without violating
+  *reframing, not originating*. The invariant is **no *authored* forward state**, not "no *persisted*
+  forward state": the line is **observe vs originate**, not derive vs persist. Reconciled
+  `docs/orion-strategy.md` (the planning-layer direction moves from "deferred" to "in build") and the
+  `plans/orion-plan.md` roadmap framing (E1 lifted out of the not-built grouping → building as E2
+  Inc 3). Adds *live, purposeful* memory, distinct from the *dead* Phase-1 state KI-8 removed.
+
 ## Consolidation slice — dashboard-home visibility, add-project completeness, KI-8 cleanup (2026-06-25)
 
 A small post-E2-Inc-2.6 cleanup: one dashboard-visibility fix plus three deferred CLI/state

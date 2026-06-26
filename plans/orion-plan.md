@@ -237,9 +237,13 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   from a doc's Markdown tables, parse not LLM). **Unit 4** — KI-8: dropped the vestigial Phase-1
   `project_state` table and the always-`""` `source_marker`. Kickoff:
   [`docs/consolidation-slice-kickoff.md`](../docs/consolidation-slice-kickoff.md).
-- **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**, gated on
-  the forward-state schema decision (≡ B5 / KI-13). The heavy one; do it when Inc 2's signal is real.
-  Inc 2.6's deadline parsing is its likely on-ramp.
+- **Inc 3 — forward-looking planning layer** (milestones/due-dates/at-risk) — this is **E1**. The
+  forward-state gate is **settled (2026-06-26): observe + remember, never originate** — Orion is a
+  knowledge base that persists *observed* state (a downstream projection), not authored forward facts.
+  **Kickoff + six-unit ladder: [`docs/e2-inc3-kickoff.md`](../docs/e2-inc3-kickoff.md)** (rung 1 =
+  due-dates/at-risk/slippage/derived milestones; scheduling/KI-13 stays separate). On-ramp: the
+  deadlines already parsed-but-discarded by the Inc 2.6 tracker. Adjacent deferred rung recorded: a
+  **disciplines & directions** signal + dashboard section.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via
   `intake` or a new collector (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is

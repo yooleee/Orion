@@ -194,6 +194,25 @@ def test_serialize_blob_omits_due_date_when_none():
     assert "due_date" not in parsed["checklist"][0]
 
 
+def test_serialize_blob_emits_key_when_item_has_one_else_omits():
+    """A checklist item with a stable `key` serializes it; one without keeps the old shape.
+
+    Why this matters: the tracker emits the bare title as `key` so the relay's forward-store
+    can track an item across status changes (Unit 3). It must cross the seam, and — like
+    due_date — stay omitted for items that have none, so their wire shape is unchanged.
+    """
+    checklist = (
+        ChecklistItem(text="App - Submitted", done=True, key="App"),
+        ChecklistItem(text="Plain task", done=False),
+    )
+    parsed = json.loads(serialize_blob(_blob(checklist=checklist)))
+
+    assert parsed["checklist"] == [
+        {"text": "App - Submitted", "done": True, "key": "App"},
+        {"text": "Plain task", "done": False},  # no key → exact old {text, done} shape
+    ]
+
+
 def test_serialize_blob_round_trips_checklist_with_due_date():
     """A checklist carrying due_dates survives serialize → parse → rebuild losslessly.
 

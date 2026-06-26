@@ -81,11 +81,20 @@ def test_snapshot_maps_status_to_done_open_with_status_in_text(tmp_path):
     """
     items = snapshot(_write_tracker(tmp_path))
 
-    # Application items come first, in heading order, with status embedded.
-    assert items[0] == ChecklistItem(text="Claude Corps Fellow (job) - Not started", done=False)
-    assert items[1] == ChecklistItem(text="Hack Your Summer (program) - In progress", done=False)
-    assert items[2] == ChecklistItem(text="Some Course (course) - Submitted", done=True)
-    assert items[3] == ChecklistItem(text="Old Internship (internship) - Closed", done=True)
+    # Application items come first, in heading order, with status embedded in text and the
+    # bare title carried as the stable `key` (E2 Inc 3 Unit 3 — survives a status change).
+    assert items[0] == ChecklistItem(
+        text="Claude Corps Fellow (job) - Not started", done=False, key="Claude Corps Fellow (job)"
+    )
+    assert items[1] == ChecklistItem(
+        text="Hack Your Summer (program) - In progress", done=False, key="Hack Your Summer (program)"
+    )
+    assert items[2] == ChecklistItem(
+        text="Some Course (course) - Submitted", done=True, key="Some Course (course)"
+    )
+    assert items[3] == ChecklistItem(
+        text="Old Internship (internship) - Closed", done=True, key="Old Internship (internship)"
+    )
 
 
 def test_snapshot_excludes_non_numbered_prose_heading(tmp_path):
@@ -125,7 +134,9 @@ def test_snapshot_missing_status_keeps_application_as_open_title_only(tmp_path):
     """
     text = "## 5. No Status App (job)\n- **Type:** Job\n"
     items = snapshot(_write_tracker(tmp_path, text))
-    assert items == (ChecklistItem(text="No Status App (job)", done=False),)
+    assert items == (
+        ChecklistItem(text="No Status App (job)", done=False, key="No Status App (job)"),
+    )
 
 
 def test_snapshot_unknown_status_value_keeps_application_as_open_title_only(tmp_path):
@@ -136,7 +147,9 @@ def test_snapshot_unknown_status_value_keeps_application_as_open_title_only(tmp_
     """
     text = "## 5. Weird App (job)\n- **Status:** Pending review\n"
     items = snapshot(_write_tracker(tmp_path, text))
-    assert items == (ChecklistItem(text="Weird App (job)", done=False),)
+    assert items == (
+        ChecklistItem(text="Weird App (job)", done=False, key="Weird App (job)"),
+    )
 
 
 def test_snapshot_dedupes_by_text_first_wins(tmp_path):
@@ -150,7 +163,9 @@ def test_snapshot_dedupes_by_text_first_wins(tmp_path):
         "## 2. Dup (job)\n- **Status:** Submitted\n"
     )
     items = snapshot(_write_tracker(tmp_path, text))
-    assert items == (ChecklistItem(text="Dup (job) - Submitted", done=True),)
+    assert items == (
+        ChecklistItem(text="Dup (job) - Submitted", done=True, key="Dup (job)"),
+    )
 
 
 def test_snapshot_missing_file_returns_empty_not_error(tmp_path):
@@ -292,7 +307,12 @@ def test_snapshot_carries_application_deadline_field(tmp_path):
     text = "## 1. Fellowship (job)\n- **Status:** In progress\n- **Deadline:** July 17, 2026\n"
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
-        ChecklistItem(text="Fellowship (job) - In progress", done=False, due_date="2026-07-17"),
+        ChecklistItem(
+            text="Fellowship (job) - In progress",
+            done=False,
+            due_date="2026-07-17",
+            key="Fellowship (job)",
+        ),
     )
 
 
@@ -314,7 +334,9 @@ def test_snapshot_application_without_deadline_has_none(tmp_path):
     """
     text = "## 1. App (job)\n- **Status:** Submitted\n"
     items = snapshot(_write_tracker(tmp_path, text))
-    assert items == (ChecklistItem(text="App (job) - Submitted", done=True, due_date=None),)
+    assert items == (
+        ChecklistItem(text="App (job) - Submitted", done=True, due_date=None, key="App (job)"),
+    )
 
 
 def test_snapshot_year_less_table_deadline_is_ignored(tmp_path):
@@ -352,5 +374,45 @@ def test_snapshot_garbage_application_deadline_never_breaks_parse(tmp_path):
     text = "## 1. App (job)\n- **Status:** In progress\n- **Deadline:** sometime soon\n"
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
-        ChecklistItem(text="App (job) - In progress", done=False, due_date=None),
+        ChecklistItem(
+            text="App (job) - In progress", done=False, due_date=None, key="App (job)"
+        ),
     )
+
+
+# --- stable item identity for the forward-store (E2 Inc 3, Unit 3) --------------------
+
+
+def test_snapshot_key_is_the_title_stable_across_status(tmp_path):
+    """An application's `key` is its bare title regardless of status — the Unit 3 identity.
+
+    Why this matters: the relay's forward-store keys observations by this, so it MUST be the
+    status-INDEPENDENT title. We render the same application at two statuses and confirm the
+    text changes (status is embedded) while the key stays identical — the exact property
+    that lets slippage tracking follow one item across "Not started" → "Submitted".
+    """
+    not_started = snapshot(
+        _write_tracker(tmp_path, "## 1. My App (job)\n- **Status:** Not started\n")
+    )
+    submitted = snapshot(
+        _write_tracker(tmp_path, "## 1. My App (job)\n- **Status:** Submitted\n")
+    )
+
+    assert not_started[0].text != submitted[0].text  # status embedded → text differs
+    assert not_started[0].key == submitted[0].key == "My App (job)"  # title is stable
+
+
+def test_snapshot_table_item_has_no_key(tmp_path):
+    """A table row leaves `key` None — its text carries no status, so it is already stable.
+
+    Why this matters: only the status-embedding application text needs a separate key; a
+    table row (and a tasks checkbox) is keyed by its text via the relay's fallback, so the
+    collector must NOT invent a key for it (keeping the wire minimal).
+    """
+    text = (
+        "| # | Task | Deadline |\n"
+        "|---|------|----------|\n"
+        "| 1 | A table task | 2026-07-01 |\n"
+    )
+    items = snapshot(_write_tracker(tmp_path, text))
+    assert items[0].key is None

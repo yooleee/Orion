@@ -70,6 +70,7 @@ from .store import (
     open_relay_store,
     projects_for_user,
     record_admin_audit,
+    record_observations,
     revoke_user,
     update_last_login,
     upsert_checklist,
@@ -732,6 +733,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
             checklist = payload.get("checklist")
             if checklist is not None:
                 upsert_checklist(conn, payload["project"], checklist, received_at)
+                # E2 Inc 3: also APPEND each item to the observed-state history (the
+                # forward-store's "remember"), sharing the report's receive clock.
+                record_observations(conn, payload["project"], checklist, received_at)
         finally:
             conn.close()
         print(
@@ -783,8 +787,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # connection per request keeps each sqlite handle on its own thread.
         conn = open_relay_store(self.server.db_path)
         try:
+            # One receive clock shared by the live-state upsert and its history append, so
+            # the current checklist and its newest observation never disagree by a second.
+            received_at = _utc_now_iso()
             upsert_checklist(
-                conn, payload["project"], payload["checklist"], _utc_now_iso()
+                conn, payload["project"], payload["checklist"], received_at
+            )
+            # E2 Inc 3: append each item to the observed-state history (forward-store).
+            record_observations(
+                conn, payload["project"], payload["checklist"], received_at
             )
         finally:
             conn.close()

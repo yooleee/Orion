@@ -252,6 +252,30 @@ Deferred).
   increment), at which point an `author` field plus a config switch for optional anonymity is a clean
   additive step on the existing seam, not new infrastructure.
 
+## KI-21 — Forward-store item identity is the title, so a renamed item is a new item
+
+- **Detail:** The observed-state store (`relay_observed_items`, E2 Inc 3 Unit 3) records each
+  checklist item's deadline/done over time, keyed by a stable `item_key`. For tracker applications
+  that key is the **bare title** (the producer emits it as `key`, because the item `text` embeds the
+  status — "Title - In progress" — and so changes when the status does); for tasks/table items, which
+  carry no status in their text, the key falls back to the **text**. This deliberately makes identity
+  status-independent (the whole point — an application's history must survive Not-started → Submitted).
+  Consequences, inherited from the same title/text identity model as KI-6: (a) **renaming** an item's
+  title makes the old key's history stop and a brand-new key begin (the prior observations are
+  orphaned, not migrated); (b) **two items with the same title** (e.g. in different tracker sections)
+  collapse to one `item_key` and their observations interleave; (c) `group` is not yet part of the key,
+  so cross-section disambiguation waits for Unit 5.
+- **Why it matters:** Slippage and history (Units 4+) read this key to track one item across pushes.
+  The title-based key is the simplest identity that meets the rung's needs and is correct for the
+  common case (a stable title that advances through statuses). The edge cases are minor for the
+  current single-tracker workload, and surfacing them keeps the behavior intentional. The seam stays
+  additive: once `group` lands (Unit 5), the key can become group+title without a migration (the store
+  is an append-only **projection**, rebuildable from the pushes). Complements **KI-6** (the tasks
+  collector's text identity) — same model, applied forward.
+- **Severity:** low
+- **Status:** By-design (documented limitation; revisit if a rename/duplicate-title case bites in real
+  use, or when `group` disambiguation lands in Unit 5).
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

@@ -174,19 +174,23 @@ def serialize_checklist_item(item: ChecklistItem) -> dict:
         item: The ChecklistItem to serialize.
 
     Returns:
-        A dict carrying "text" and "done" always, plus "due_date" ONLY when the item has
-        one (None → key omitted).
+        A dict carrying "text" and "done" always, plus "due_date" and "key" each ONLY when
+        the item has one (None → that key omitted).
 
     Why:
         Two wire paths emit a checklist — the report blob (serialize_blob) and the
         dedicated /checklist push (cli._checklist_payload) — so the per-item shape is
-        defined ONCE here to keep them in lockstep. The optional due_date follows the
-        same None-omitted rule as the top-level `checklist` key: an item without a
-        deadline serializes to exactly the old {text, done}, so a receiver predating
-        due_date is unaffected. Single-sourcing also makes the next additive field
-        (e.g. a milestone `group`) a one-line change in one place.
+        defined ONCE here to keep them in lockstep. Each optional field follows the same
+        None-omitted rule as the top-level `checklist` key: an item without them serializes
+        to exactly the old {text, done}, so a receiver predating a field is unaffected.
+        `due_date` is the forward-looking deadline; `key` is the forward-store's stable
+        identity (the tracker's bare title) used relay-side to track an item across status
+        changes. Single-sourcing makes the next additive field (e.g. a milestone `group`)
+        a one-line change in one place.
     """
     payload: dict = {"text": item.text, "done": item.done}
     if item.due_date is not None:
         payload["due_date"] = item.due_date
+    if item.key is not None:
+        payload["key"] = item.key
     return payload

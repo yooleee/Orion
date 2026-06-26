@@ -873,8 +873,13 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
 
     _url, project, checklist, _token = pushes[0]
     assert project == "apps"
-    # The application item carries its status in the text and is done (Submitted).
-    assert checklist[0] == {"text": "Claude Corps Fellow (job) - Submitted", "done": True}
+    # The application item carries its status in the text and is done (Submitted); it also
+    # emits the bare title as the stable forward-store `key` (Unit 3).
+    assert checklist[0] == {
+        "text": "Claude Corps Fellow (job) - Submitted",
+        "done": True,
+        "key": "Claude Corps Fellow (job)",
+    }
     # The table row is an open item, with its secret scrubbed (privacy net holds here).
     assert checklist[1]["done"] is False
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[1]["text"]
@@ -930,6 +935,7 @@ def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_an
         "text": "Claude Corps Fellow (job) - In progress",
         "done": False,
         "due_date": "2026-07-17",
+        "key": "Claude Corps Fellow (job)",
     }
 
 

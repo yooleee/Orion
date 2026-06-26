@@ -1301,11 +1301,20 @@ def _redacted_checklist(project: ProjectConfig) -> tuple[list[ChecklistItem], in
         # empty AFTER redaction (the whole label was a secret), to avoid a blank row.
         safe_text = scrub.text.strip()
         if safe_text:
-            # Carry due_date through untouched: it is already a normalized ISO date (or
-            # None), never raw user text, so it needs no redaction — but the rebuild must
-            # preserve it or the deadline would be lost before it reaches the wire.
+            # due_date is already a normalized ISO date (or None), never raw user text, so
+            # it rides through untouched — but the rebuild must preserve it (and key) or
+            # they would be lost before reaching the wire. The `key` (a title) IS user text,
+            # so it is redacted here too as a safety net; its hits are NOT re-counted,
+            # because the title is a substring of `text` whose redaction already counted
+            # any secret. None (tasks/table items) stays None.
+            safe_key = redact(item.key).text if item.key is not None else None
             items.append(
-                ChecklistItem(text=safe_text, done=item.done, due_date=item.due_date)
+                ChecklistItem(
+                    text=safe_text,
+                    done=item.done,
+                    due_date=item.due_date,
+                    key=safe_key,
+                )
             )
     return items, hits
 

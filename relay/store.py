@@ -75,6 +75,29 @@ CREATE TABLE IF NOT EXISTS relay_project_checklists (
     updated_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay last received it
 );
 
+-- E2 Inc 3: an APPEND-ONLY log of each checklist item's observed forward state over time
+-- — the "remember" half of the forward-looking layer. Unlike relay_project_checklists
+-- (current state, one upserted row per project), this ACCUMULATES: one row per item per
+-- push, so the dashboard can later derive slippage (a due_date that moved later) and other
+-- history. It is a DOWNSTREAM PROJECTION — rebuildable from the pushes, authoring nothing.
+-- item_key is the item's STABLE identity (the producer's `key` — the tracker's bare title —
+-- else the item text): it must survive a status change, which the status-embedding `text`
+-- does not (see the forward-store identity KI). done is 0/1 (sqlite has no bool). A new
+-- table, so "IF NOT EXISTS" adds it on the already-deployed relay with no column migration.
+CREATE TABLE IF NOT EXISTS relay_observed_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project     TEXT NOT NULL,
+    item_key    TEXT NOT NULL,      -- stable identity (producer key, else item text)
+    due_date    TEXT,              -- ISO YYYY-MM-DD, or NULL when the item has no deadline
+    done        INTEGER NOT NULL,   -- 0 | 1 (sqlite has no boolean)
+    observed_at TEXT NOT NULL       -- ISO 8601 UTC, the relay's receive clock
+);
+
+-- The projection/slippage queries fetch one project's items in time order (often for a
+-- single item_key); this composite index serves both shapes.
+CREATE INDEX IF NOT EXISTS idx_relay_observed_items_project_key
+    ON relay_observed_items(project, item_key, observed_at);
+
 -- C2: supervisor comments on a report. Append-only and flat (no threading, edit, or
 -- delete) — the v1 model. report_id points at relay_reports.id but is deliberately
 -- NOT a foreign key: sqlite enforces FKs only when explicitly enabled per-connection,
@@ -282,6 +305,89 @@ def get_checklist(conn: sqlite3.Connection, project: str) -> list | None:
         "SELECT items FROM relay_project_checklists WHERE project = ?", (project,)
     ).fetchone()
     return json.loads(row["items"]) if row is not None else None
+
+
+def record_observations(
+    conn: sqlite3.Connection, project: str, items: list, observed_at: str
+) -> None:
+    """Append one observation row per checklist item (the forward-store's "remember").
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the items belong to.
+        items: The checklist items as validated wire dicts ({"text", "done"[, "due_date"]
+            [, "key"]}), the same list upsert_checklist receives.
+        observed_at: ISO 8601 UTC timestamp of when the relay received this push.
+
+    Why:
+        Where relay_project_checklists keeps only CURRENT state (one upserted row), this is
+        the APPEND-ONLY history that lets the dashboard later see a deadline slip or an item
+        sit open past due. Every item becomes a row stamped with the receive clock, so the
+        record is a faithful, rebuildable projection of what each push claimed over time —
+        it observes, it does not author. The stable identity is `item_key`: the producer's
+        `key` (the tracker's bare title) when present, else the item `text`. We fall back to
+        text because tasks/table items carry no status in their text, so it is already
+        stable; only the tracker's status-embedding application text needs the separate key.
+        done is stored as 0/1 since sqlite has no boolean. executemany keeps the whole push
+        one statement + one commit.
+    """
+    rows = [
+        (
+            project,
+            item.get("key") or item["text"],
+            item.get("due_date"),
+            1 if item.get("done") else 0,
+            observed_at,
+        )
+        for item in items
+    ]
+    conn.executemany(
+        """
+        INSERT INTO relay_observed_items (project, item_key, due_date, done, observed_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+
+
+def observed_history(conn: sqlite3.Connection, project: str) -> list[dict]:
+    """Return a project's observation rows, oldest first (the append-only projection).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project whose observation history to read.
+
+    Returns:
+        A list of {"item_key", "due_date", "done", "observed_at"} dicts, ordered by
+        observed_at then id (insertion order within a timestamp), oldest first. done is
+        decoded back to a bool. Empty when the project has no observations.
+
+    Why:
+        The read side of the projection — what slippage derivation (Unit 4) and the
+        "rebuild the current state from history" property are checked against. Ordering
+        oldest-first makes "the latest observation per item_key" a simple last-wins fold,
+        and lets a slippage check walk an item_key's due_date forward in time. Kept a plain
+        per-project read (no item_key filter yet) — that filter is the seam Unit 4 adds.
+    """
+    rows = conn.execute(
+        """
+        SELECT item_key, due_date, done, observed_at
+        FROM relay_observed_items
+        WHERE project = ?
+        ORDER BY observed_at ASC, id ASC
+        """,
+        (project,),
+    ).fetchall()
+    return [
+        {
+            "item_key": row["item_key"],
+            "due_date": row["due_date"],
+            "done": bool(row["done"]),
+            "observed_at": row["observed_at"],
+        }
+        for row in rows
+    ]
 
 
 def list_projects(conn: sqlite3.Connection) -> list[dict]:

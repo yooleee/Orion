@@ -52,6 +52,7 @@ from relay.store import (
     get,
     get_checklist,
     list_projects,
+    observed_history,
     open_relay_store,
 )
 
@@ -453,6 +454,27 @@ def test_checklist_push_replaces_prior_checklist(tmp_path):
 
         conn = open_relay_store(db)
         assert get_checklist(conn, "demo") == [{"text": "New", "done": True}]
+
+
+def test_checklist_push_records_an_observation_per_push(tmp_path):
+    """Each /checklist push APPENDS to the observed-state history (E2 Inc 3 Unit 3).
+
+    Why this matters: where the live checklist is replaced on each push, the forward-store
+    accumulates — so the dashboard can later see history/slippage. We push the same item
+    twice (open, then done) and confirm two observations landed under one stable item_key,
+    keyed by the producer-supplied `key`, with the done-state change visible in order.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        item_open = [{"text": "App - Not started", "done": False, "key": "App"}]
+        item_done = [{"text": "App - Submitted", "done": True, "key": "App"}]
+        assert _post(base_url, _checklist_body(items=item_open), path="/checklist")[0] == 200
+        assert _post(base_url, _checklist_body(items=item_done), path="/checklist")[0] == 200
+
+        conn = open_relay_store(db)
+        hist = observed_history(conn, "demo")
+        # Two observations, one stable identity (the key survived the status/text change).
+        assert [h["item_key"] for h in hist] == ["App", "App"]
+        assert [h["done"] for h in hist] == [False, True]
 
 
 def test_checklist_push_malformed_is_400_and_stores_nothing(tmp_path):

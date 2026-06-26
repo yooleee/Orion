@@ -249,9 +249,13 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   overdue and amber at-risk treatment on the project page, an "N at risk" portfolio badge; relay-side,
   **deployed** to the live relay 2026-06-26) and Unit 3 (the **`relay_observed_items`** append-only
   memory store + a stable `item_key` = the tracker's bare title, carried as `ChecklistItem.key`;
-  observations recorded on every push; **KI-21** documents the identity model; deploy after merge) have
-  shipped — the forward layer now *remembers*. Next: Unit 4 (slippage derivation from the observation
-  history). Adjacent deferred rung recorded: a **disciplines & directions** signal + dashboard section.
+  observations recorded on every push; **KI-21** documents the identity model; deployed 2026-06-26) and
+  Unit 4 (slippage from the observation history — `is_slipping`/`slipping_item_keys`: deadline moved
+  later, or lingering open past due; a per-item "↘ slipping" marker + an "N slipping" portfolio badge;
+  deploy after merge) have shipped — the forward layer now *remembers and flags slippage*. **Only Unit
+  5 remains** in rung 1: derived milestones (group items → per-group progress / nearest deadline /
+  at-risk roll-up), which needs `ChecklistItem.group` (the Unit-1-style field deferred to here).
+  Adjacent deferred rung recorded: a **disciplines & directions** signal + dashboard section.
 - **Deferred seams (not now):** the no-login guest/showcase view (C3 Inc 3 — viewer logins suffice for
   family today), and non-project/non-code items (e.g. **the applications to-do list above**) via
   `intake` or a new collector (reachable, no recorded pattern yet). Chat-surface enrichment (E3) is

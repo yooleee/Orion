@@ -26,7 +26,7 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from .derive import count_at_risk
+from .derive import count_at_risk, slipping_item_keys
 
 # How long sqlite waits for a held write-lock before raising "database is locked".
 # The relay's server is threaded (CP6), so two pushes can arrive close together;
@@ -435,20 +435,23 @@ def latest_report_per_project(
 
     Args:
         conn: An open relay-store connection.
-        today: The reference date (in the relay's display zone) used to count
-            at-risk checklist items. None (the default) skips that derivation, leaving
-            "checklist_at_risk" None — so a caller that does not care about the
-            forward-looking badge (or a test) is unaffected.
+        today: The reference date (in the relay's display zone) used to count both the
+            at-risk and the slipping checklist items. None (the default) skips both
+            derivations, leaving "checklist_at_risk" and "checklist_slipping" None — so a
+            caller that does not care about the forward-looking badges (or a test) is
+            unaffected.
 
     Returns:
         A list of dicts, one per project that has a report OR a live checklist, each:
         {"project", "report_count", "latest_generated_at", "latest_report_id",
         "latest_body", "checklist_updated_at", "checklist_done", "checklist_total",
-        "checklist_at_risk"}, ordered with the most recently active project first. For a
-        checklist-only project (a live checklist but zero reports) the latest-report
-        fields are None and report_count is 0; for a report-only project
-        checklist_updated_at and the checklist counts are None. "checklist_at_risk" is
-        None when the project has no checklist OR when `today` was not supplied.
+        "checklist_at_risk", "checklist_slipping"}, ordered with the most recently active
+        project first. For a checklist-only project (a live checklist but zero reports) the
+        latest-report fields are None and report_count is 0; for a report-only project
+        checklist_updated_at and the checklist counts are None. "checklist_at_risk" is None
+        when the project has no checklist OR when `today` was not supplied;
+        "checklist_slipping" (from the observation history) is None only when `today` was
+        not supplied.
 
     Why:
         This backs the dashboard's portfolio HOME — a cross-project "see everything at
@@ -537,6 +540,16 @@ def latest_report_per_project(
             # agree on what "at risk" means.
             if today is not None:
                 checklist_at_risk = count_at_risk(items, today)
+        # Forward-looking slippage (E2 Inc 3 Unit 4): count items slipping per the OBSERVED
+        # HISTORY (a deadline that moved later, or one lingering open past due). This reads
+        # the append-only observation log, NOT the current checklist row, so it is computed
+        # outside the items block and gated only on a reference date. One observed_history
+        # read per project (small N; batchable later if the portfolio grows large).
+        checklist_slipping = (
+            len(slipping_item_keys(observed_history(conn, row["project"]), today))
+            if today is not None
+            else None
+        )
         result.append(
             {
                 "project": row["project"],
@@ -548,6 +561,7 @@ def latest_report_per_project(
                 "checklist_done": checklist_done,
                 "checklist_total": checklist_total,
                 "checklist_at_risk": checklist_at_risk,
+                "checklist_slipping": checklist_slipping,
             }
         )
     return result

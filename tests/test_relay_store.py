@@ -859,3 +859,38 @@ def test_observed_history_empty_for_project_with_no_observations(tmp_path):
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     assert observed_history(conn, "demo") == []
+
+
+def test_latest_report_per_project_counts_slipping_from_history(tmp_path):
+    """The portfolio row carries a slipping count derived from the observation history.
+
+    Why this matters: the "N slipping" badge needs a precomputed count. Two pushes postpone
+    item A's deadline (2026-07-01 → 2026-07-15) — A is slipping — while the project's live
+    checklist makes it appear in the portfolio set. The count must be 1.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    push1 = [{"text": "A - Not started", "done": False, "due_date": "2026-07-01", "key": "A"}]
+    push2 = [{"text": "A - In progress", "done": False, "due_date": "2026-07-15", "key": "A"}]
+    # Mirror the server: upsert the live checklist AND append observations on each push.
+    upsert_checklist(conn, "demo", push1, "2026-06-20T00:00:00+00:00")
+    record_observations(conn, "demo", push1, "2026-06-20T00:00:00+00:00")
+    upsert_checklist(conn, "demo", push2, "2026-06-25T00:00:00+00:00")
+    record_observations(conn, "demo", push2, "2026-06-25T00:00:00+00:00")
+
+    row = {r["project"]: r for r in latest_report_per_project(conn, today=date(2026, 6, 26))}["demo"]
+
+    assert row["checklist_slipping"] == 1
+
+
+def test_latest_report_per_project_slipping_is_none_without_today(tmp_path):
+    """Without a reference date, slippage derivation is skipped → checklist_slipping is None.
+
+    Why this matters: `today` gates the derivation (mirroring at-risk). A caller that omits it
+    (or a test of the existing counts) is unaffected — None reads as "omit the badge".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(conn, "demo", _items(("A", False)), "2026-06-26T00:00:00+00:00")
+
+    row = {r["project"]: r for r in latest_report_per_project(conn)}["demo"]
+
+    assert row["checklist_slipping"] is None

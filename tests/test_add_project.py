@@ -17,6 +17,7 @@ from pathlib import Path
 from conftest import _answer, _make_repo, _write_config
 
 from orion import cli
+from orion.collectors.tasks import snapshot as snapshot_tasks
 from orion.config import get_project, load_config
 
 
@@ -240,3 +241,154 @@ def test_invalid_project_name_errors(tmp_path):
     )
     assert code == 1
     assert not cfg.exists()
+
+
+# --- tasks_file bootstrapping (E2 Inc 2.6, Unit B) ----------------------------
+# When the tasks collector is enabled without --tasks-file, add-project defaults the
+# path to <repo>/TODO.md AND creates a starter checklist there (preview-gated, never
+# overwriting). An explicit --tasks-file opts out of creation (config-only, as before).
+
+
+def test_tasks_enabled_without_file_defaults_and_creates_checklist(tmp_path):
+    """tasks + no --tasks-file → tasks_file=<repo>/TODO.md, and the file is created.
+
+    Why this matters: this is the structural fix for "no project has a tasks_file" —
+    enabling tasks alone now yields a ready checklist surface, no second flag, and the
+    written config loads with that path.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+
+    project = get_project(load_config(cfg), "demo")
+    assert project.tasks_file == repo / "TODO.md"
+    # The starter checklist exists with the format-teaching header, and the snapshot
+    # parser finds NO items in it (the usage comment is not a bullet line), so the
+    # dashboard checklist starts empty rather than showing a placeholder row.
+    todo = repo / "TODO.md"
+    assert todo.exists()
+    assert todo.read_text(encoding="utf-8").startswith("# TODO")
+    assert snapshot_tasks(todo) == ()
+
+
+def test_explicit_tasks_file_is_not_created(tmp_path):
+    """An explicit --tasks-file keeps the prior config-only behavior (no file created).
+
+    Why this matters: passing your own path is the opt-out — add-project records it in
+    config but must not create it, so a user who manages the file themselves is
+    unaffected by the new defaulting.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    explicit = repo / "MY_TASKS.md"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--tasks-file",
+            str(explicit),
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    assert get_project(load_config(cfg), "demo").tasks_file == explicit
+    assert not explicit.exists()  # explicit path is config-only, not created
+
+
+def test_default_tasks_file_never_overwrites_existing(tmp_path):
+    """A pre-existing <repo>/TODO.md is referenced, never clobbered.
+
+    Why this matters: file creation is strictly additive (like the config append). A
+    user's existing checklist content must survive add-project untouched.
+    """
+    repo = _make_repo(tmp_path)
+    existing = repo / "TODO.md"
+    existing.write_text("# TODO\n\n- [x] Pre-existing work\n", encoding="utf-8")
+    cfg = tmp_path / "orion.toml"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--yes",
+        ],
+        cfg,
+    )
+    assert code == 0
+    # Content is exactly what we wrote — the starter seed did not overwrite it.
+    assert existing.read_text(encoding="utf-8") == "# TODO\n\n- [x] Pre-existing work\n"
+
+
+def test_print_only_creates_no_tasks_file(tmp_path, capsys):
+    """--print with tasks enabled creates neither the config nor the TODO.md.
+
+    Why this matters: --print is a side-effect-free inspect path; the new file-creation
+    write surface must respect it too.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+            "--print",
+        ],
+        cfg,
+    )
+    assert code == 0
+    assert not cfg.exists()
+    assert not (repo / "TODO.md").exists()
+
+
+def test_declined_preview_creates_no_tasks_file(tmp_path, monkeypatch):
+    """Declining the preview creates neither the config nor the TODO.md.
+
+    Why this matters: the file creation rides on the SAME preview gate as the config
+    write, so a single 'n' must decline both.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    _answer(monkeypatch, "n")
+    code = _run_add(
+        [
+            "demo",
+            "--repo-path",
+            str(repo),
+            "--collectors",
+            "git,tasks",
+            "--recipient",
+            "Mom:slack:ORION_SLACK_MOM",
+        ],
+        cfg,
+    )
+    assert code == 0
+    assert not cfg.exists()
+    assert not (repo / "TODO.md").exists()

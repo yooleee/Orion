@@ -363,7 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         "--tasks-file",
         dest="tasks_file",
         default=None,
-        help="Path to the tasks checklist (required if 'tasks' is in --collectors).",
+        help="Path to the tasks checklist. If 'tasks' is enabled and this is omitted, "
+        "defaults to <repo>/TODO.md and creates a starter checklist there.",
     )
     add_parser.add_argument(
         "--notes-file",
@@ -1679,6 +1680,31 @@ def _git_toplevel(start: Path) -> Path | None:
     return Path(out) if out else None
 
 
+def _starter_checklist(project_name: str) -> str:
+    """Return the seed text for a tasks_file that add-project creates.
+
+    Args:
+        project_name: The project the checklist belongs to (named in the comment).
+
+    Returns:
+        A minimal Markdown checklist: a "# TODO" header and a short usage comment, with
+        NO checkbox items.
+
+    Why:
+        E2 Inc 2.6 lets add-project create a project's tasks_file so a new project has a
+        checklist surface from the start. Seeding a header + comment teaches the
+        "- [ ]" / "- [x]" format without inventing fake tasks — the snapshot parser
+        ignores the comment, so the dashboard checklist starts EMPTY (no placeholder
+        row) until the user adds real items.
+    """
+    return (
+        "# TODO\n"
+        "\n"
+        f'<!-- Orion checklist for "{project_name}". Use GitHub-style checkboxes:\n'
+        '     "- [ ]" is an open item, "- [x]" is done. Items appear on the dashboard. -->\n'
+    )
+
+
 def cmd_add_project(
     name: str | None,
     config_path: Path,
@@ -1703,7 +1729,10 @@ def cmd_add_project(
         recipient_specs: Explicit "Name:channel:ENV_VAR" recipients (may be empty).
         share_level: One of SHARE_LEVELS.
         collectors_csv: Comma-separated collector names (e.g. "git,tasks").
-        tasks_file: Path for the tasks collector (required if "tasks" enabled).
+        tasks_file: Path for the tasks collector. When "tasks" is enabled and this is
+            None, it defaults to <repo>/TODO.md and that file is CREATED (a starter
+            checklist), preview-gated and never overwriting an existing file. Pass an
+            explicit path to opt out of creation (config-only, as before).
         notes_file: Path for the notes collector (required if "notes" enabled).
         print_only: Print the stanza and write nothing.
         assume_yes: Skip the preview confirmation (for non-interactive callers).
@@ -1775,6 +1804,16 @@ def cmd_add_project(
         # 5. Render the stanza. This validates the name, share level, collectors,
         #    and collector/file pairing, and rejects values it cannot safely quote.
         collectors = tuple(c.strip() for c in collectors_csv.split(",") if c.strip())
+
+        # B-i (E2 Inc 2.6): when the tasks collector is enabled but no --tasks-file was
+        # given, default it to <repo>/TODO.md so a new project gets a checklist surface
+        # without a second flag. We remember that we DEFAULTED, because only a defaulted
+        # path is auto-created below — an explicit --tasks-file keeps the prior
+        # config-only behavior (passing your own path is the opt-out of file creation).
+        tasks_file_defaulted = "tasks" in collectors and tasks_file is None
+        if tasks_file_defaulted:
+            tasks_file = str(resolved_repo / "TODO.md")
+
         stanza = render_project_stanza(
             project_name,
             resolved_repo,
@@ -1789,6 +1828,12 @@ def cmd_add_project(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    # Will we also create a starter checklist? Only for a DEFAULTED tasks_file that does
+    # not already exist — never overwrite a user's file, and never touch an explicit
+    # path. tasks_file is a real str here whenever tasks_file_defaulted is True.
+    new_tasks_path = Path(tasks_file).expanduser() if tasks_file_defaulted else None
+    create_tasks_file = new_tasks_path is not None and not new_tasks_path.exists()
+
     # 6. --print: show exactly what would be written, change nothing.
     if print_only:
         print(stanza, end="")
@@ -1800,6 +1845,10 @@ def cmd_add_project(
         action = "create" if not config_exists else "append to"
         print(bar)
         print(f"PREVIEW — would {action} {config_path} (nothing written yet)")
+        if create_tasks_file:
+            # The file creation is a SECOND write surface; surface it in the same gate
+            # so a single decline declines both.
+            print(f"           and create a starter checklist at {new_tasks_path}")
         print(bar)
         print(stanza, end="")
         print(bar)
@@ -1818,6 +1867,15 @@ def cmd_add_project(
         combined = stanza
     config_path.write_text(combined, encoding="utf-8", newline="\n")
 
+    # 8b. Create the starter checklist for a defaulted tasks_file (E2 Inc 2.6). Re-check
+    #     existence right before writing so a file that appeared in the meantime is never
+    #     overwritten — the create is strictly additive, like the config append.
+    if create_tasks_file and not new_tasks_path.exists():
+        new_tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        new_tasks_path.write_text(
+            _starter_checklist(project_name), encoding="utf-8", newline="\n"
+        )
+
     # 9. Re-load to prove the written file parses and the project is present — the
     #    same belt-and-suspenders idea as report's "redact again before send".
     try:
@@ -1831,6 +1889,8 @@ def cmd_add_project(
 
     # 10. Confirm, and point at the remaining manual steps (secrets stay in .env).
     print(f"Registered {project_name!r} in {config_path}.")
+    if create_tasks_file:
+        print(f"  Created a starter checklist at {new_tasks_path}. Add your tasks there.")
     env_vars = sorted({r.webhook_env_var for r in recipients})
     print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
     print(f"  Then: python -m orion check {project_name}")

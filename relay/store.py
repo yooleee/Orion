@@ -326,9 +326,13 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
         conn: An open relay-store connection.
 
     Returns:
-        A list of dicts, one per project that has reports, each:
+        A list of dicts, one per project that has a report OR a live checklist, each:
         {"project", "report_count", "latest_generated_at", "latest_report_id",
-        "latest_body"}, ordered with the most recently active project first.
+        "latest_body", "checklist_updated_at", "checklist_done", "checklist_total"},
+        ordered with the most recently active project first. For a checklist-only
+        project (a live checklist but zero reports) the latest-report fields are None
+        and report_count is 0; for a report-only project checklist_updated_at and the
+        checklist counts are None.
 
     Why:
         This backs the dashboard's portfolio HOME — a cross-project "see everything at
@@ -338,41 +342,65 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
         widening of list_projects: list_projects has its own documented contract and
         callers, and keeping the two apart means neither's shape drifts under the other.
 
+        The driving row set is PROJECT-driven, not report-driven: the union of projects
+        that have a report OR a live checklist. This is what lets a dashboard-only
+        project (a live checklist but no reports — e.g. the applications tracker) appear
+        on the home at all; querying FROM relay_reports alone dropped it entirely (no
+        report → no row → no card → reachable only by direct URL). The latest-report
+        fields are LEFT-JOINed onto that set, so they are NULL for a checklist-only
+        project.
+
         "Latest" is defined EXACTLY as history() defines newest — ORDER BY generated_at
         DESC, id DESC — so the home's latest report agrees with the project page's
         history()[0]. The id tiebreak matters when two reports share a generated_at
         second (or arrive out of generation order): picking MAX(id) alone would select
         the latest-INGESTED, which can differ from the latest-GENERATED; the correlated
         subquery below picks the row history() would call first, keeping the two views
-        consistent. report_count comes from a grouped COUNT joined on project. The outer
-        ORDER BY puts the freshest project on top — what a viewer glancing at the
-        portfolio wants first (generated_at is an ISO-8601 UTC string, so a lexical sort
-        is also chronological).
+        consistent. report_count comes from a grouped COUNT LEFT-JOINed on project
+        (COALESCEd to 0 for the checklist-only case). The outer ORDER BY puts the
+        freshest project on top using COALESCE(latest_generated_at, checklist_updated_at)
+        — so the two kinds interleave by recency — then project name as a stable
+        tiebreak. Both timestamps are ISO-8601 UTC strings, so a lexical sort is also
+        chronological.
     """
     rows = conn.execute(
         """
-        SELECT r.project,
-               cnt.report_count,
+        -- The row set is every project that has a report OR a live checklist. UNION
+        -- (not UNION ALL) dedupes a project that has both, so each project is one row.
+        WITH projects(project) AS (
+            SELECT project FROM relay_reports
+            UNION
+            SELECT project FROM relay_project_checklists
+        )
+        SELECT p.project,
+               COALESCE(cnt.report_count, 0) AS report_count,
                r.id           AS latest_report_id,
                r.body         AS latest_body,
                r.generated_at AS latest_generated_at,
-               pc.items       AS checklist_items
-        FROM relay_reports r
-        JOIN (SELECT project, COUNT(*) AS report_count
-              FROM relay_reports GROUP BY project) cnt
-          ON cnt.project = r.project
-        -- LEFT JOIN: a project may have reports but no live checklist (feature off),
-        -- in which case checklist_items is NULL and the badge is simply omitted. The
-        -- project key is the checklist PK, so this adds at most one row per project.
-        LEFT JOIN relay_project_checklists pc
-          ON pc.project = r.project
-        WHERE r.id = (
+               pc.items       AS checklist_items,
+               pc.updated_at  AS checklist_updated_at
+        FROM projects p
+        -- LEFT JOIN the latest report: NULL for a checklist-only project. The correlated
+        -- subquery picks the exact row history() calls newest (generated_at DESC, id
+        -- DESC), so the home agrees with the project page. r.project IS NULL when the
+        -- project has no reports, which is fine — the latest-* fields just come back NULL.
+        LEFT JOIN relay_reports r
+          ON r.project = p.project
+         AND r.id = (
             SELECT id FROM relay_reports r2
-            WHERE r2.project = r.project
+            WHERE r2.project = p.project
             ORDER BY generated_at DESC, id DESC
             LIMIT 1
         )
-        ORDER BY r.generated_at DESC, r.project ASC
+        -- LEFT JOIN the grouped count (NULL → 0 via COALESCE above for checklist-only).
+        LEFT JOIN (SELECT project, COUNT(*) AS report_count
+                   FROM relay_reports GROUP BY project) cnt
+          ON cnt.project = p.project
+        -- LEFT JOIN the live checklist: NULL for a report-only project (badge omitted).
+        -- The project key is the checklist PK, so this adds at most one row per project.
+        LEFT JOIN relay_project_checklists pc
+          ON pc.project = p.project
+        ORDER BY COALESCE(r.generated_at, pc.updated_at) DESC, p.project ASC
         """
     ).fetchall()
     result = []
@@ -393,6 +421,7 @@ def latest_report_per_project(conn: sqlite3.Connection) -> list[dict]:
                 "latest_generated_at": row["latest_generated_at"],
                 "latest_report_id": row["latest_report_id"],
                 "latest_body": row["latest_body"],
+                "checklist_updated_at": row["checklist_updated_at"],
                 "checklist_done": checklist_done,
                 "checklist_total": checklist_total,
             }

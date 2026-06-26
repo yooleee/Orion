@@ -182,6 +182,37 @@ def test_portfolio_card_omits_badge_when_checklist_empty():
     assert "class='checklist-badge'" not in html
 
 
+def test_portfolio_renders_checklist_only_card_without_a_report():
+    """A checklist-only card (no report) renders with its badge, link, time, and 0 reports.
+
+    Why this matters: this is the slice's payoff — the applications tracker has a live
+    checklist but zero reports, so its card carries None for latest_body/
+    latest_generated_at and falls back to checklist_updated_at for its last-activity
+    time. render_portfolio must NOT crash on those Nones (neither _headline nor _time_tag
+    is None-safe), must omit the headline, show "0 report(s)", render the badge, and link
+    to the project page.
+    """
+    card = _pcard(
+        project="applications",
+        report_count=0,
+        latest_body=None,
+        latest_generated_at=None,
+        latest_report_id=None,
+        checklist_updated_at="2026-06-25T10:00:00+00:00",
+        checklist_done=1,
+        checklist_total=2,
+    )
+    html = render_portfolio([card])
+
+    assert 'href="/project/applications"' in html
+    assert "0 report(s)" in html
+    assert "1/2 done" in html
+    # Last-activity time falls back to the checklist's updated_at.
+    assert '<time datetime="2026-06-25T10:00:00+00:00">' in html
+    # No report body → no headline element (honest omission, not a blank line).
+    assert "class='headline'" not in html
+
+
 def test_project_lists_reports_linking_to_each_report():
     """A project page lists its reports, each linking to /report/<id>.
 

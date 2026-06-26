@@ -446,7 +446,11 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
 
     Args:
         projects: The latest_report_per_project() output — dicts of project /
-            report_count / latest_generated_at / latest_report_id / latest_body.
+            report_count / latest_generated_at / latest_report_id / latest_body /
+            checklist_updated_at / checklist_done / checklist_total. A checklist-only
+            project carries None for the latest_* fields and 0 for report_count; the card
+            falls back to checklist_updated_at for its last-activity time and omits the
+            headline.
         tz: The IANA zone each project's last-activity time is rendered in (threaded to
             _time_tag). Defaults to the module's Pacific constant.
 
@@ -479,7 +483,10 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
         href = "/project/" + _url(name)
         # The headline is the latest report's first line; omit the line entirely when the
         # body has no usable content (honest fallback — never a blank/placeholder line).
-        headline = _headline(project["latest_body"])
+        # latest_body is None for a checklist-only project (no report); guard the call
+        # since _headline() runs .splitlines() and is NOT None-safe.
+        latest_body = project["latest_body"]
+        headline = _headline(latest_body) if latest_body else ""
         headline_html = (
             f"<p class='headline'>{_esc(headline)}</p>\n" if headline else ""
         )
@@ -495,13 +502,18 @@ def render_portfolio(projects: list[dict], tz: ZoneInfo = _DISPLAY_TZ) -> str:
             if total
             else ""
         )
+        # Last-activity time: the latest report's generated_at when there is one, else
+        # the checklist's updated_at (checklist-only project). One of the two is always
+        # present for a card to exist, so activity_ts is never None — _time_tag is not
+        # None-safe, hence the COALESCE-style fallback here rather than in the helper.
+        activity_ts = project["latest_generated_at"] or project.get("checklist_updated_at")
         cards.append(
             '<li class="card">'
             f'<h2><a href="{_esc(href)}">{_esc(name)}</a></h2>\n'
             f"{headline_html}"
             f"{checklist_html}"
             f"<span class='meta'>{_esc(project['report_count'])} report(s) · "
-            f"last {_time_tag(project['latest_generated_at'], tz)}</span>"
+            f"last {_time_tag(activity_ts, tz)}</span>"
             "</li>"
         )
     body = "<h1>Projects</h1>\n<ul class='portfolio'>\n" + "\n".join(cards) + "\n</ul>"

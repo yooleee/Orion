@@ -163,8 +163,11 @@ A few rules are permanent, not stage-appropriate conveniences.
 - **Hardening headers.** Every dashboard HTML response carries a hash-based
   `Content-Security-Policy` (only same-origin resources, plus the SHA-256 of the page's own inline
   style/script, so no `unsafe-inline` is needed and nothing external loads) and `X-Frame-Options:
-  DENY`. All responses carry `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`,
-  and `Strict-Transport-Security` when the relay is HTTPS-exposed. This is defense-in-depth behind
+  DENY`. All responses carry `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`,
+  and `Strict-Transport-Security` when the relay is HTTPS-exposed. (`Referrer-Policy` is
+  `same-origin`, not `no-referrer`: under `no-referrer` a browser sends a comment POST with
+  `Origin: null` and no Referer, which the comment CSRF check then 403s — the bug fixed by switching
+  to `same-origin`, which still leaks no referrer to other origins.) This is defense-in-depth behind
   the `_esc` escaping discipline: a CSP would neutralize an injected script even if an escaping bug
   slipped through.
 

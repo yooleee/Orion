@@ -289,9 +289,11 @@ Deferred).
   `object-src 'none'`) from them. Deriving the hash from the constant means the policy can never
   drift from the markup (a render-side contract test pins this), so no `unsafe-inline` is needed and
   the inline-asset choice (the C1 stance) is kept intact. Alongside the CSP: `X-Content-Type-Options:
-  nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` (HTML), and HSTS when
+  nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` (HTML), and HSTS when
   HTTPS-exposed. Verified eyes-on against the rendered page (styling and the relative-time JS both
-  run with no CSP violation).
+  run with no CSP violation). (`Referrer-Policy` is `same-origin`, not `no-referrer`: the latter
+  made browsers send the comment POST with `Origin: null` and no Referer, which the comment CSRF
+  check 403'd — fixed by switching to `same-origin`.)
 
 ## KI-20 — Delivered Slack/Discord messages still timestamp in UTC, dashboard now in Pacific
 

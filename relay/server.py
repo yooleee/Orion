@@ -1554,12 +1554,16 @@ class _RelayHandler(BaseHTTPRequestHandler):
             the primary defense (SameSite=Lax on the cookie is a second layer).
 
             We check the Origin header FIRST, then fall back to the Referer header's
-            origin. The fallback exists because some browsers (notably Safari) OMIT
-            Origin on a SAME-origin form POST, so requiring Origin alone rejected
-            legitimate comments with a "CSRF" 403 — the bug this fixes. OWASP's CSRF
-            guidance is explicitly "verify Origin OR Referer": a cross-site attacker
-            cannot forge a Referer that points at our origin (the browser sets it from
-            the real page URL), and if BOTH headers are absent we still fail closed.
+            origin. The fallback covers a request whose Origin is absent OR the literal
+            "null" (an opaque origin — e.g. a non-GET request under a strict referrer
+            policy serializes Origin as "null"), so requiring a usable Origin alone
+            rejected legitimate comments with a "CSRF" 403. OWASP's CSRF guidance is
+            explicitly "verify Origin OR Referer": a cross-site attacker cannot forge a
+            Referer that points at our origin (the browser sets it from the real page
+            URL), and if BOTH headers are absent we still fail closed. The companion to
+            this is the response Referrer-Policy: it MUST keep a same-origin Referer
+            (see _security_headers — "same-origin", not "no-referrer"), or this fallback
+            has nothing to read.
 
             When a canonical public origin is configured (the deployed HTTPS URL), we
             require an EXACT match — scheme+host+port — rather than trusting the Host
@@ -1569,14 +1573,19 @@ class _RelayHandler(BaseHTTPRequestHandler):
             dev relay with none configured, we fall back to matching the origin's netloc
             against the Host header.
         """
-        # Prefer the Origin header. When it is absent, fall back to the Referer's
-        # origin: reduce the Referer (a full URL with a path) to scheme://netloc so both
-        # paths below compare the same shape. Both absent ⇒ fail closed.
+        # Prefer the Origin header. When it is absent — OR the literal "null", which is
+        # how an OPAQUE origin serializes (a sandboxed context, or a non-GET request
+        # under a strict referrer policy) — fall back to the Referer's origin: reduce the
+        # Referer (a full URL with a path) to scheme://netloc so both paths below compare
+        # the same shape. "null" can never equal our canonical origin, so treating it as a
+        # candidate would needlessly 403 a possibly-legitimate same-origin POST; the
+        # Referer (present for a same-origin request under our "same-origin" policy) is the
+        # correct thing to check instead. Both absent ⇒ fail closed.
         candidate = self.headers.get("Origin")
-        if not candidate:
+        if not candidate or candidate == "null":
             referer = self.headers.get("Referer")
             if not referer:
-                return "missing Origin and Referer headers"
+                return "missing or opaque Origin and no Referer"
             parsed = urllib.parse.urlparse(referer)
             if not parsed.scheme or not parsed.netloc:
                 return "malformed Referer header"
@@ -1633,10 +1642,21 @@ class _RelayHandler(BaseHTTPRequestHandler):
             browser). The CSP (from _CONTENT_SECURITY_POLICY) and the legacy
             X-Frame-Options clickjacking cover go on HTML only, where a browser renders
             or frames the response — they are meaningless on a JSON API reply.
+
+            Referrer-Policy is "same-origin", NOT "no-referrer": "no-referrer" is what
+            broke the comment loop. Per the Fetch standard, a non-GET request under a
+            "no-referrer" policy is sent with `Origin: null` (and no Referer), so EVERY
+            browser comment POST arrived as Origin: null — which the canonical-origin
+            CSRF check (_origin_error) rejects with a 403, and the Referer fallback could
+            not rescue because the same policy strips Referer too. "same-origin" keeps
+            the privacy intent (nothing leaks to OTHER origins) while letting a
+            same-origin POST carry its real Origin (and a same-origin Referer), which is
+            exactly what the CSRF check needs. Verified with real Chromium: no-referrer ->
+            Origin: null; same-origin -> the real Origin.
         """
         headers = {
             "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
+            "Referrer-Policy": "same-origin",
         }
         # HSTS only in a hosted HTTPS posture: a plain-http loopback dev relay must not
         # send an HTTPS-only directive (the browser would then refuse plain http to it).

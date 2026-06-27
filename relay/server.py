@@ -571,7 +571,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # use the SAME cookie session + scope the dashboard routes do — but answer with JSON
         # (and a 401 instead of a 303 redirect, so the SPA's fetch routes itself to /login).
         if (
-            path in ("/api/me", "/api/portfolio")
+            path in ("/api/me", "/api/portfolio", "/api/scheduling")
             or path.startswith("/api/projects/")
             or path.startswith("/api/reports/")
         ):
@@ -1834,6 +1834,25 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         today=today,
                     ),
                 )
+                return
+
+            if path == "/api/scheduling":
+                # Cross-project deadline view: enumerate every project (latest_report_per_project
+                # carries kind + includes checklist-only trackers), scope-filter, and hand each
+                # project's checklist + observation history to the serializer for time-bucketing.
+                rows = latest_report_per_project(conn, today=today)
+                if allowed is not None:
+                    rows = [r for r in rows if r["project"] in allowed]
+                projects = [
+                    {
+                        "name": r["project"],
+                        "kind": r["kind"],
+                        "items": get_checklist(conn, r["project"]),
+                        "observations": observed_history(conn, r["project"]),
+                    }
+                    for r in rows
+                ]
+                self._send_json(200, api.serialize_scheduling(projects, today))
                 return
 
             # No SPA route matched (the do_GET prefix check is broader than the exact set).

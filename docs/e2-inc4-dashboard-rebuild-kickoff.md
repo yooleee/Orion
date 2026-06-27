@@ -15,16 +15,21 @@ Role in project: Read this at the START of the next session, THEN plan the
 ## Status — 4a core SHIPPED (2026-06-26, PR #61, in review)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. 4a's core (PR #61) and the **Tracker page** are both built;
-> next is **Scheduling** (`desktop-05`) — a new cross-project deadline aggregation + `Scheduling.tsx`.
-> Start with a plan-mode pass per the repo discipline.
+> `design/README.md` + `design/screenshots/`. 4a's core (PR #61), the **Tracker page**, and **Scheduling**
+> are all built. The **first production deployment** (SPA cutover to a new Fly app `project-orion.fly.dev`)
+> is the in-flight step; after a healthy deploy the next slice is **comment writes** (KI-23), which closes
+> the one feature the cutover temporarily drops. Start each with a plan-mode pass per the repo discipline.
 >
-> **Tracker page — SHIPPED** (branch `e2-inc4-4a-tracker-page`, built on PR #61). gap-8 (KI-22) was
-> closed via **option 2**: the producer ships a first-class semantic `status` field end-to-end (additive,
-> legacy text embed kept), the relay folds `in_progress` into `state` + passes raw `status` through, and
-> `web/src/routes/Tracker.tsx` (+ `TrackerRow`/`TrackerGroup`) renders the circular indicators, legend, and
-> grouped roll-ups. Verified eyes-on vs `desktop-04-tracker-sepia.png` across all three themes with live
-> relay data (the real `applications` tracker). Backend 759 + Vitest 19 green.
+> **Tracker page — SHIPPED** (branch `e2-inc4-4a-tracker-page`, PR #62, on PR #61). gap-8 (KI-22) closed
+> via **option 2**: the producer ships a first-class semantic `status` field end-to-end (additive, legacy
+> text embed kept), the relay folds `in_progress` into `state` + passes raw `status` through, and
+> `Tracker.tsx` (+ `TrackerRow`/`TrackerGroup`) renders circular indicators, legend, grouped roll-ups.
+>
+> **Scheduling — SHIPPED** (branch `e2-inc4-4a-scheduling`, on PR #62). Pure read-only cross-project
+> derivation: `GET /api/scheduling` (`api.serialize_scheduling`) buckets every open dated deadline into
+> OVERDUE / THIS WEEK / LATER with a per-row source tag (◇ project / ⊟ tracker) + a summary chip row;
+> `Scheduling.tsx` + `ScheduleRow`. Verified eyes-on vs `desktop-05-scheduling-sepia.png` across all three
+> themes with live data (applications tracker + an orion project). Backend 764 + Vitest 23 green.
 
 The JSON API seam (`relay/api.py` + [`docs/dashboard-api-contract.md`](dashboard-api-contract.md)), the
 explicit `kind` project/tracker flag, the React/Vite SPA (`web/`: three-theme tokens, shell, routing,
@@ -42,14 +47,18 @@ working). The comment composer is rendered but **inert** (writes deferred).
    not a relay/client text parse — see the contract's Data-gaps §8 and KI-22). `Tracker.tsx` +
    `TrackerRow`/`TrackerGroup` render against `/api/projects/:name`; verified vs the screenshot across all
    three themes.
-2. **Scheduling** (`desktop-05`) — a SMALL new cross-project derivation: aggregate every project's + the
-   tracker's open deadlines into time buckets (OVERDUE / THIS WEEK / LATER) with source tags. New
-   `/api/scheduling` endpoint (derive over all scoped projects' checklists) + `Scheduling.tsx`.
-3. **Comment writes** — wire the inert composer to a write path (a JSON `POST /api/comments` or the
-   existing form route) with its own CSRF/auth review. Its own focused slice (KI-23).
-4. **Showcase guest view** (`desktop-08`, full-bleed) + **mobile pass** (`mobile-all-screens`) — the
+2. **Scheduling** (`desktop-05`) — **SHIPPED.** A SMALL new cross-project derivation: every project's + the
+   tracker's open dated deadlines bucketed into OVERDUE / THIS WEEK / LATER with source tags + a summary.
+   `GET /api/scheduling` (`api.serialize_scheduling`, open+dated only, reuses `_deadline_state` /
+   `slipping_item_keys` — no new derivation) + `Scheduling.tsx` + `ScheduleRow`.
+3. **First production deployment** — **in flight.** SPA cutover to a NEW Fly app `project-orion.fly.dev`
+   (Fly has no in-place rename); retire the old `orion-relay-horizon-c`. Production cutover accepted (the
+   inert composer is the only regression, closed by the next slice). See the approved plan's Unit D.
+4. **Comment writes** — wire the inert composer to a write path (a JSON `POST /api/comments` or the
+   existing form route) with its own CSRF/auth review. Its own focused slice (KI-23); closes the cutover gap.
+5. **Showcase guest view** (`desktop-08`, full-bleed) + **mobile pass** (`mobile-all-screens`) — the
    curated no-login surface, and the responsive adaptation (sidebar → bottom tab bar; rails → stacked).
-5. **Retire `render.py` at parity** (KI-23) — once every legacy URL has an SPA equivalent and comment
+6. **Retire `render.py` at parity** (KI-23) — once every legacy URL has an SPA equivalent and comment
    writes are wired, remove the server-rendered views (keep store / derive / api / auth).
 
 ### Then 4b / 4c (each its own PR)

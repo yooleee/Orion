@@ -214,6 +214,51 @@ One progress report in full. `404` when missing or out of scope (scope resolved 
 - `nav.prev_id` / `next_id` are the neighbouring report ids in `generated_at DESC, id DESC` order
   (the same ordering as `history`), `null` at the ends.
 
+### `GET /api/scheduling`
+
+The cross-project forward view: every **open, dated** deadline across all in-scope projects + trackers,
+grouped into three time buckets, plus a summary. Scope-filtered identically to `/api/portfolio`.
+
+```json
+{
+  "summary": { "overdue": 2, "due_this_week": 1, "slipping": 1 },
+  "buckets": {
+    "overdue": [
+      { "state": "overdue", "label": "Introduction to Cooperative AI (course)",
+        "due_date": "2026-06-12", "slipping": false,
+        "source": { "name": "applications", "kind": "tracker" } }
+    ],
+    "this_week": [
+      { "state": "due_soon", "label": "Wire comment writes", "due_date": "2026-07-01",
+        "slipping": true, "source": { "name": "orion", "kind": "project" } }
+    ],
+    "later": [
+      { "state": "upcoming", "label": "Claude Corps Fellow (job)", "due_date": "2026-07-17",
+        "slipping": false, "source": { "name": "applications", "kind": "tracker" } }
+    ]
+  }
+}
+```
+
+- **Only open, dated items appear.** Done items and items with no `due_date` are excluded — a timeline has
+  no place for them. This is the honest reading of "every deadline."
+- **Buckets** come from the same per-deadline classifier the rest of the dashboard uses
+  (`_deadline_state` → `overdue` / `due_soon` / `upcoming`), mapped `overdue→overdue`,
+  `due_soon→this_week`, `upcoming→later`. Each bucket is sorted by `due_date` ascending (soonest /
+  most-overdue first). `LATER` has no horizon cap.
+- **`label`** is `key ?? text` — the clean title (any embedded status stripped), the same rule the tracker
+  page uses. **`source`** is `{name, kind}`; the tracker shows its project name (`applications`), since the
+  "current focus" rename is an authoring surface (gap 2, held). The SPA renders `◇` for a project, `⊟` for
+  a tracker.
+- **`summary`** `{overdue, due_this_week, slipping}`: `overdue`/`due_this_week` are the bucket counts;
+  `slipping` counts surfaced rows whose key is in `derive.slipping_item_keys` (the same set the project
+  page uses). Each row also carries a `slipping` flag.
+- **No `scope` block** (unlike `/api/portfolio`): the design has no scope banner here and the aggregation
+  is already scope-filtered server-side. Additive if ever needed.
+- Source: `latest_report_per_project(today)` (enumeration + `kind`, includes checklist-only trackers) +
+  `get_checklist` + `observed_history` per project → `api.serialize_scheduling`. Pure read-only
+  re-aggregation — no new derivation, no producer/wire/store change.
+
 ### `POST /api/login`
 
 Body `{"key": "<access key>"}`. Verifies the key and, on success, sets the same signed session cookie the

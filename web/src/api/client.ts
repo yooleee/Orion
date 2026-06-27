@@ -20,6 +20,7 @@ import type {
   Portfolio,
   ProjectDetail,
   ReportDetail,
+  SchedulingData,
 } from "./types";
 
 /** A failed API call. `status` lets callers branch (e.g. 401 → route to login). */
@@ -62,6 +63,7 @@ export const getProject = (name: string) =>
   apiFetch<ProjectDetail>(`/api/projects/${encodeURIComponent(name)}`);
 export const getReport = (id: number | string) =>
   apiFetch<ReportDetail>(`/api/reports/${encodeURIComponent(String(id))}`);
+export const getScheduling = () => apiFetch<SchedulingData>("/api/scheduling");
 
 // --- Auth (the only writes in 4a) -------------------------------------------
 

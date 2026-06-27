@@ -1198,3 +1198,86 @@ h3 {
   gap: 14px;
   flex-shrink: 0;
 }
+
+/* =============================================================================
+   Scheduling page — cross-project deadline view (slice 4a, remaining band)
+   A summary chip row + three time buckets (overdue / this week / later), each a
+   list of rows with a fixed-width relative-time column + a source-tag pill.
+   Measurements from design/README "Scheduling" + the desktop-05 screenshot.
+   ============================================================================= */
+
+.schedule-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+/* A tinted summary pill (background set inline from the state's --<state>-bg token). */
+.schedule-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 8px;
+}
+
+.schedule-bucket {
+  margin-top: 26px;
+}
+.schedule-bucket-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.schedule-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  flex-shrink: 0;
+}
+.schedule-bucket-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--tmid);
+}
+
+.schedule-rows {
+  display: flex;
+  flex-direction: column;
+}
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--rowb);
+}
+/* The fixed-width relative-time column (glyph + compact magnitude). */
+.schedule-time {
+  width: 96px;
+  flex-shrink: 0;
+}
+.schedule-label {
+  flex: 1;
+  font-size: 13.5px;
+  color: var(--thi);
+}
+/* Source-tag pill: accent-tinted for a project (◇), neutral for a tracker (⊟). */
+.schedule-source {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.schedule-source.project {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.schedule-source.tracker {
+  background: var(--panel2);
+  color: var(--tmid);
+}

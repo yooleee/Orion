@@ -113,3 +113,21 @@ export function deadlineLabel(dueDate: string, tz: string, now: number = Date.no
   if (days === 1) return "due in 1d";
   return `due in ${days}d`;
 }
+
+/**
+ * The compact relative-day label for the Scheduling time column ("2d ago" / "today" / "in 3d").
+ *
+ * Args:
+ *   dueDate: the ISO deadline.
+ *   tz: the display timezone.
+ *
+ * Why: the schedule's fixed-width time column pairs a glyph + this compact magnitude (the
+ * design's wording), distinct from `deadlineLabel`'s "Nd overdue" / "due in Nd" used by the
+ * inline deadline chips. Past reads "Nd ago", future "in Nd".
+ */
+export function scheduleTime(dueDate: string, tz: string, now: number = Date.now()): string {
+  const days = daysUntil(dueDate, tz, now);
+  if (days < 0) return `${Math.abs(days)}d ago`;
+  if (days === 0) return "today";
+  return `in ${days}d`;
+}

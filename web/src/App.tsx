@@ -19,6 +19,7 @@ import { Login } from "./routes/Login";
 import { Project } from "./routes/Project";
 import { Report } from "./routes/Report";
 import { Tracker } from "./routes/Tracker";
+import { Scheduling } from "./routes/Scheduling";
 import { NotFound, Todos } from "./routes/placeholders";
 
 export function App() {
@@ -55,6 +56,7 @@ export function App() {
         <Route path="report/:id" element={<Report />} />
         <Route path="todos" element={<Todos />} />
         <Route path="tracker/:name" element={<Tracker />} />
+        <Route path="scheduling" element={<Scheduling />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

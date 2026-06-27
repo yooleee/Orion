@@ -223,6 +223,42 @@ export interface ReportDetail {
   nav: ReportNav;
 }
 
+// --- GET /api/scheduling ----------------------------------------------------
+
+/** Where a scheduled deadline comes from — a project (◇) or a tracker (⊟). */
+export interface ScheduleSource {
+  name: string;
+  kind: ProjectKind;
+}
+
+/** One open, dated deadline on the schedule. `state` is an open-deadline state
+ *  (overdue | due_soon | upcoming); the SPA colours the time column by it. */
+export interface ScheduleItem {
+  state: Status;
+  label: string;
+  due_date: string;
+  slipping: boolean;
+  source: ScheduleSource;
+}
+
+/** The three time buckets, each sorted by due_date ascending (server-side). */
+export interface ScheduleBuckets {
+  overdue: ScheduleItem[];
+  this_week: ScheduleItem[];
+  later: ScheduleItem[];
+}
+
+export interface ScheduleSummary {
+  overdue: number;
+  due_this_week: number;
+  slipping: number;
+}
+
+export interface SchedulingData {
+  summary: ScheduleSummary;
+  buckets: ScheduleBuckets;
+}
+
 // --- POST /api/login, POST /api/logout --------------------------------------
 
 export interface LoginResult {

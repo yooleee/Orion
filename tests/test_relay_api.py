@@ -399,3 +399,91 @@ def test_report_detail_nav_points_prev_to_older_next_to_newer():
         report=_report(27), checklist=None, comments=[], history=history, today=_TODAY
     )
     assert out_latest["nav"] == {"prev_id": 26, "next_id": None}
+
+
+# --- serialize_scheduling: cross-project deadline buckets --------------------
+
+
+def test_scheduling_buckets_open_dated_items_with_source_and_excludes_the_rest():
+    """Open, dated items bucket by deadline urgency; done/undated are excluded.
+
+    Why this matters: Scheduling is the cross-project "by when" lens. Only OPEN, DATED
+    items belong on a timeline — a done item or an undated one has no place — and each
+    must carry where it came from (source name + kind) so the SPA can tag it ◇/⊟. The
+    bucket must agree with the same overdue/due_soon/upcoming classification the rest of
+    the dashboard uses (today = 2026-06-26).
+    """
+    projects = [
+        {
+            "name": "alpha",
+            "kind": "project",
+            "items": [
+                _item("Past thing", due_date="2026-06-20"),       # overdue
+                _item("Soon thing", due_date="2026-06-29"),       # this week (<=7d)
+                _item("Far thing", due_date="2026-08-01"),        # later (>7d)
+                _item("Undated open"),                            # excluded (no date)
+                _item("Done past", done=True, due_date="2026-06-19"),  # excluded (done)
+            ],
+            "observations": [],
+        },
+        {
+            "name": "applications",
+            "kind": "tracker",
+            # The tracker embeds status in text; key is the clean title used as the label.
+            "items": [_item("App (job) - In progress", due_date="2026-06-22", key="App (job)")],
+            "observations": [],
+        },
+    ]
+    out = api.serialize_scheduling(projects, _TODAY)
+
+    # OVERDUE holds both past-due open items, soonest (most overdue) first.
+    overdue = out["buckets"]["overdue"]
+    assert [r["due_date"] for r in overdue] == ["2026-06-20", "2026-06-22"]
+    assert [r["label"] for r in overdue] == ["Past thing", "App (job)"]  # tracker uses key
+    # Source tag carries name + kind so the SPA can render ◇ project / ⊟ tracker.
+    assert overdue[1]["source"] == {"name": "applications", "kind": "tracker"}
+    assert overdue[0]["source"] == {"name": "alpha", "kind": "project"}
+
+    assert [r["label"] for r in out["buckets"]["this_week"]] == ["Soon thing"]
+    assert [r["label"] for r in out["buckets"]["later"]] == ["Far thing"]
+
+    # The undated-open and the done item never appear in any bucket.
+    all_labels = [r["label"] for b in out["buckets"].values() for r in b]
+    assert "Undated open" not in all_labels and "Done past" not in all_labels
+
+    # Summary counts mirror the buckets; nothing is slipping here.
+    assert out["summary"] == {"overdue": 2, "due_this_week": 1, "slipping": 0}
+
+
+def test_scheduling_marks_and_counts_slipping_items():
+    """An item whose deadline moved later (slipping) is flagged + counted in the summary.
+
+    Why this matters: the design's summary shows "↝ N slipping". Slippage reuses the same
+    observation-history derivation the project page uses, so the count agrees across views.
+    """
+    projects = [
+        {
+            "name": "alpha",
+            "kind": "project",
+            "items": [_item("Slipping task", due_date="2026-06-29", key="todo-x")],
+            # Two observations of todo-x with the deadline pushed LATER → slipping.
+            "observations": [
+                {"item_key": "todo-x", "due_date": "2026-06-20", "done": False,
+                 "observed_at": "2026-06-22T00:00:00+00:00"},
+                {"item_key": "todo-x", "due_date": "2026-06-29", "done": False,
+                 "observed_at": "2026-06-26T00:00:00+00:00"},
+            ],
+        }
+    ]
+    out = api.serialize_scheduling(projects, _TODAY)
+    row = out["buckets"]["this_week"][0]
+    assert row["slipping"] is True
+    assert out["summary"]["slipping"] == 1
+
+
+def test_scheduling_empty_when_nothing_open_and_dated():
+    """No open dated items anywhere → empty buckets and zeroed summary (not an error)."""
+    projects = [{"name": "alpha", "kind": "project", "items": [_item("x")], "observations": []}]
+    out = api.serialize_scheduling(projects, _TODAY)
+    assert out["buckets"] == {"overdue": [], "this_week": [], "later": []}
+    assert out["summary"] == {"overdue": 0, "due_this_week": 0, "slipping": 0}

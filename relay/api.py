@@ -312,6 +312,64 @@ def serialize_portfolio(entries: list[dict], allowed: set | None, today: date) -
     }
 
 
+def serialize_scheduling(projects: list[dict], today: date) -> dict:
+    """Aggregate every scoped project's open, dated deadlines into time buckets.
+
+    Args:
+        projects: Scope-FILTERED per-project data, each a dict with "name", "kind",
+            "items" (that project's checklist, or None), and "observations" (its
+            observed_history, for slippage). The server fetches + filters before calling,
+            mirroring serialize_portfolio.
+        today: The reference date (display zone).
+
+    Returns:
+        {"summary": {"overdue","due_this_week","slipping"},
+         "buckets": {"overdue":[...], "this_week":[...], "later":[...]}} where each bucket
+        is a list of {state, label, due_date, slipping, source:{name,kind}} sorted by
+        due_date ascending (soonest / most-overdue first).
+
+    Why:
+        The Scheduling view is the cross-project "by when" lens: the SAME deadlines the
+        portfolio/project pages show, re-grouped by time. Only OPEN, DATED items appear —
+        a timeline has no place for undated or finished items. Bucketing reuses the relay's
+        existing per-deadline classifier (_deadline_state → overdue/due_soon/upcoming) so a
+        row's bucket can never disagree with the urgency the rest of the dashboard shows;
+        slippage reuses slipping_item_keys so the count matches the project page. The label
+        is `key ?? text` (the clean title with any embedded status stripped), the same rule
+        the tracker page uses. No new derivation — this is pure re-aggregation.
+    """
+    buckets: dict[str, list] = {"overdue": [], "this_week": [], "later": []}
+    summary = {"overdue": 0, "due_this_week": 0, "slipping": 0}
+    # _deadline_state's three open-deadline states → the design's three time buckets.
+    bucket_of = {OVERDUE: "overdue", "due_soon": "this_week", _UPCOMING: "later"}
+    for proj in projects:
+        items = proj.get("items") or []
+        slipping = slipping_item_keys(proj.get("observations") or [], today)
+        for item in items:
+            if item.get("done"):
+                continue  # finished — off the timeline
+            state = _deadline_state(item.get("due_date"), today)
+            if state is None:
+                continue  # open but undated — no place on a timeline
+            is_slipping = _item_key(item) in slipping
+            buckets[bucket_of[state]].append(
+                {
+                    "state": state,
+                    "label": item.get("key") or item["text"],
+                    "due_date": item.get("due_date"),
+                    "slipping": is_slipping,
+                    "source": {"name": proj["name"], "kind": proj["kind"]},
+                }
+            )
+            if is_slipping:
+                summary["slipping"] += 1
+    for rows in buckets.values():
+        rows.sort(key=lambda r: r["due_date"])
+    summary["overdue"] = len(buckets["overdue"])
+    summary["due_this_week"] = len(buckets["this_week"])
+    return {"summary": summary, "buckets": buckets}
+
+
 def serialize_project(
     *,
     name: str,

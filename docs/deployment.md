@@ -68,7 +68,7 @@ admin token is named by your local `[relay].admin_token_env_var`. Keep all five 
 
 **Also set `ORION_RELAY_PUBLIC_ORIGIN` when you deploy behind a TLS proxy (Fly, Caddy, any
 reverse proxy).** This is NOT a secret. It is the canonical public URL the dashboard is
-reached at, for example `https://orion-relay-horizon-c.fly.dev`. The relay uses it for the
+reached at, for example `https://project-orion.fly.dev`. The relay uses it for the
 comment form's CSRF origin check: with it set, the check compares the browser's Origin (or
 Referer) against this exact value, instead of falling back to the request's `Host` header,
 which a proxy can rewrite. Because it is not a secret it can go straight in `fly.toml` under

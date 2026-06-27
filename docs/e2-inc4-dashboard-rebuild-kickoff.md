@@ -12,15 +12,19 @@ Role in project: Read this at the START of the next session, THEN plan the
 
 # Kickoff: E2 Inc 4 — the sectioned dashboard rebuild (richer-client SPA)
 
-## Status — 4a nearly done; **live in production**; Showcase + mobile + render.py-retire remain (2026-06-27)
+## Status — Showcase + mobile SHIPPED to main; **only render.py-retire remains in 4a** (2026-06-27)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. **Finish the 4a band**, then start 4b/4c as length allows.
-> The 4a remainder, in order: (5) **Showcase guest view** (`desktop-08`, full-bleed, no-login) + the
-> **mobile pass** (`mobile-all-screens`); (6) **retire `render.py` at parity** (also removes the legacy
-> form comment route). Then **4b** Disciplines & **4c** Connections (each its own PR). Start each slice
-> with a plan-mode pass per the repo discipline; eyes-on every screen vs `design/screenshots/` across all
-> three themes; ship + redeploy (see **Deployment** below).
+> `design/README.md` + `design/screenshots/`. The 4a band is **almost done**: only (6) **retire
+> `render.py` at parity** remains (also removes the legacy form comment route, closes KI-23). Then **4b**
+> Disciplines & **4c** Connections (each its own PR). Start each slice with a plan-mode pass per the repo
+> discipline; eyes-on every screen vs `design/screenshots/` across all three themes; ship + redeploy (see
+> **Deployment** below).
+>
+> **Pending deploy:** PR #65 (Showcase) + PR #66 (mobile) are merged to `main` but **not yet deployed** —
+> the next `fly deploy -a project-orion` ships the mobile fix. The public Showcase stays **off** in prod
+> until the live relay's launch command gains `--showcase` + `--showcase-project` flags (an explicit,
+> privacy-gated opt-in the operator chooses).
 >
 > **Already SHIPPED + merged to `main` + deployed:** 4a core (JSON API + SPA shell + Projects home /
 > Project / Report + single-host serving), the **Tracker page** (gap-8/KI-22 closed via a first-class
@@ -58,10 +62,18 @@ and **destroyed**.
 4. **Comment writes** — **SHIPPED.** `POST /api/reports/:id/comments` (cookie-authed JSON, reusing the
    form route's CSRF/auth/scope/identity guards) + the interactive composer; closes the cutover's one gap.
    Verified eyes-on incl. XSS-inert render.
-5. **Showcase guest view** (`desktop-08`, full-bleed) + **mobile pass** (`mobile-all-screens`) — the
-   curated no-login surface, and the responsive adaptation (sidebar → bottom tab bar; rails → stacked).
+5. **Showcase guest view** (`desktop-08`, full-bleed) + **mobile pass** (`mobile-all-screens`) —
+   **SHIPPED** (PR #65 + #66, merged to `main`; deploy pending). The **Showcase** is opt-in + default-deny:
+   `GET /api/showcase` (summary cards only — no checklist/reports/comments/deadlines; 404 when disabled),
+   gated by relay `--showcase` / `--showcase-project NAME:"blurb"` flags; description = curated blurb
+   else the observed headline; status derived from completion. `serialize_me` now surfaces
+   `showcase_enabled`. The **mobile pass** adds the first `@media (max-width:768px)` rules: sidebar →
+   `BottomTabBar` (+ a "More" sheet) and `MobileTopBar`, both toggled by CSS (no JS resize); `navState.ts`
+   shares the active-section rule between the two navs; two-column grids collapse to one. Eyes-on verified
+   vs `desktop-08` + `mobile-all-screens` across all three themes.
 6. **Retire `render.py` at parity** (KI-23) — once every legacy URL has an SPA equivalent and comment
-   writes are wired, remove the server-rendered views (keep store / derive / api / auth).
+   writes are wired, remove the server-rendered views (keep store / derive / api / auth). **This is the
+   only remaining 4a item.**
 
 ### Then 4b / 4c (each its own PR)
 

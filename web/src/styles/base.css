@@ -1494,3 +1494,164 @@ h3 {
   padding-top: 24px;
   border-top: 1px solid var(--border);
 }
+
+/* --- Mobile chrome: top app bar + bottom tab bar --------------------------- */
+/* Both are mounted on every screen but hidden on desktop; the @media block below
+   reveals them and collapses the desktop layouts to a single column. The bars are
+   position-fixed/sticky, so they never disturb the desktop flex row. */
+
+.mobile-topbar {
+  display: none; /* desktop: the sidebar carries the brand */
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--side);
+  border-bottom: 1px solid var(--sideborder);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.mobile-brand {
+  font-size: 17px;
+}
+
+.bottom-tabbar {
+  display: none; /* desktop: hidden */
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  background: var(--side);
+  border-top: 1px solid var(--sideborder);
+  padding: 6px 4px;
+  /* Clear the iOS home indicator when present. */
+  padding-bottom: max(6px, env(safe-area-inset-bottom, 0px));
+}
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 48px; /* ≥44px tap target */
+  border: 0;
+  background: transparent;
+  color: var(--tfaint);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.tab.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.tab-glyph {
+  font-family: var(--font-mono);
+  font-size: 16px;
+}
+
+/* "More" sheet: a small panel above the tab bar with theme/showcase/account. */
+.more-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(0, 0, 0, 0.3);
+}
+.more-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(58px + env(safe-area-inset-bottom, 0px)); /* sit just above the tab bar */
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--side);
+  border-top: 1px solid var(--sideborder);
+}
+.more-account {
+  margin: 0;
+}
+
+/* --- Breakpoint: phones / narrow viewports --------------------------------- */
+@media (max-width: 768px) {
+  /* Swap the sidebar for the mobile bars. */
+  .side {
+    display: none;
+  }
+  .mobile-topbar,
+  .bottom-tabbar {
+    display: flex;
+  }
+
+  /* The shell becomes a single column; the fixed bottom bar sits outside the flow,
+     so the content just needs bottom padding to clear it. */
+  .shell {
+    flex-direction: column;
+  }
+  .content {
+    padding: 16px 16px 84px;
+  }
+
+  /* Project rows: stack the fixed-width progress/forward/time columns. */
+  .project-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .row-progress,
+  .row-signals,
+  .row-time {
+    width: auto;
+  }
+  .row-signals {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+  }
+  .row-time {
+    text-align: left;
+  }
+
+  /* Detail header: headline above the stat blocks (the 3-up stays a row, just tighter). */
+  .detail-header {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .stat-blocks {
+    gap: 24px;
+  }
+
+  /* Two-column detail/report grids collapse to one column (rail drops below the body). */
+  .detail-grid,
+  .report-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  /* The legend and tracker compact grids wrap / single-column. */
+  .legend {
+    flex-wrap: wrap;
+  }
+
+  /* Showcase (full-bleed, its own chrome — no bottom bar): single-column, smaller hero. */
+  .showcase-topbar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px 16px;
+  }
+  .showcase-body {
+    padding: 20px 16px 48px;
+  }
+  .showcase-hero-title {
+    font-size: 29px;
+  }
+  .showcase-grid,
+  .showcase-howiwork {
+    grid-template-columns: 1fr;
+  }
+}

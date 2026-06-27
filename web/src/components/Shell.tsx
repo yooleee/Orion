@@ -16,6 +16,8 @@ import { Navigate, Outlet, useNavigate } from "react-router-dom";
 import type { Me, Portfolio } from "../api/types";
 import { getPortfolio, logout } from "../api/client";
 import { Sidebar } from "./Sidebar";
+import { MobileTopBar } from "./MobileTopBar";
+import { BottomTabBar } from "./BottomTabBar";
 
 /** What child routes can read from the shell via useOutletContext(). */
 export interface ShellContext {
@@ -63,10 +65,15 @@ export function Shell({ me, onAuthChange }: ShellProps) {
 
   return (
     <div className="shell">
+      {/* All three navs are always mounted; CSS shows the sidebar on desktop and the two
+          mobile bars below the breakpoint (no JS resize listener). The mobile bars are
+          position-fixed/sticky, so they sit outside the content flow on either layout. */}
+      <MobileTopBar me={me} />
       <Sidebar me={me} portfolio={portfolio} onLogout={handleLogout} />
       <main className="content">
         <Outlet context={context} />
       </main>
+      <BottomTabBar me={me} onLogout={handleLogout} />
     </div>
   );
 }

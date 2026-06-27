@@ -15,6 +15,7 @@
 
 import { Link, useLocation } from "react-router-dom";
 import type { Me, Portfolio } from "../api/types";
+import { navActive } from "../lib/navState";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 // The not-yet-built sections, shown as disabled NEW stubs (built in 4b/4c). Scheduling is
@@ -33,12 +34,9 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
   const projects = portfolio?.projects ?? [];
   const trackers = portfolio?.trackers ?? [];
 
-  // "Projects" is active across the project surfaces (home, a project, a report) — the
-  // design's rule that a nav item owns a SET of related views.
-  const projectsActive =
-    path === "/" || path.startsWith("/project/") || path.startsWith("/report/");
-  const todosActive = path === "/todos" || path.startsWith("/tracker/");
-  const schedulingActive = path === "/scheduling";
+  // Active-section state (shared with the mobile bottom bar via navActive, so the two
+  // navs can't disagree about which section a route belongs to).
+  const active = navActive(path);
 
   return (
     <nav className="side" aria-label="Primary">
@@ -50,18 +48,18 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
       {/* SECTIONS */}
       <div className="side-group">
         <div className="side-group-label">Sections</div>
-        <Link to="/" className={`nav-item${projectsActive ? " active" : ""}`}>
+        <Link to="/" className={`nav-item${active.projects ? " active" : ""}`}>
           <span>Projects</span>
           <span className="nav-count">{projects.length}</span>
         </Link>
         {/* To-dos / Trackers — only when the viewer has any (a scoped viewer may not). */}
         {trackers.length > 0 && (
-          <Link to="/todos" className={`nav-item${todosActive ? " active" : ""}`}>
+          <Link to="/todos" className={`nav-item${active.todos ? " active" : ""}`}>
             <span>To-dos</span>
             <span className="nav-count">{trackers.length}</span>
           </Link>
         )}
-        <Link to="/scheduling" className={`nav-item${schedulingActive ? " active" : ""}`}>
+        <Link to="/scheduling" className={`nav-item${active.scheduling ? " active" : ""}`}>
           <span>Scheduling</span>
           <span className="pill-new">NEW</span>
         </Link>

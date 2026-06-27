@@ -86,20 +86,55 @@ def test_snapshot_maps_status_to_done_open_with_status_in_text(tmp_path):
     # All numbered sections share the "Applications" milestone group (E2 Inc 3 Unit 5).
     assert items[0] == ChecklistItem(
         text="Claude Corps Fellow (job) - Not started", done=False,
-        key="Claude Corps Fellow (job)", group="Applications",
+        key="Claude Corps Fellow (job)", group="Applications", status="not_started",
     )
     assert items[1] == ChecklistItem(
         text="Hack Your Summer (program) - In progress", done=False,
-        key="Hack Your Summer (program)", group="Applications",
+        key="Hack Your Summer (program)", group="Applications", status="in_progress",
     )
     assert items[2] == ChecklistItem(
         text="Some Course (course) - Submitted", done=True,
-        key="Some Course (course)", group="Applications",
+        key="Some Course (course)", group="Applications", status="submitted",
     )
     assert items[3] == ChecklistItem(
         text="Old Internship (internship) - Closed", done=True,
-        key="Old Internship (internship)", group="Applications",
+        key="Old Internship (internship)", group="Applications", status="closed",
     )
+
+
+def test_snapshot_sets_structured_status_field(tmp_path):
+    """Application items carry a semantic `status` field, not just status-in-text (gap-8).
+
+    Why this matters: E2 Inc 4 makes status a first-class wire field so the relay/SPA can
+    tell in_progress from not_started (the tracker's circular indicator) without re-parsing
+    `text`. The canonical display status ("In progress") maps to its semantic enum value
+    ("in_progress"); table rows (no status column) stay None.
+    """
+    items = snapshot(_write_tracker(tmp_path))
+    by_key = {i.key: i.status for i in items if i.group == "Applications"}
+    assert by_key["Claude Corps Fellow (job)"] == "not_started"
+    assert by_key["Hack Your Summer (program)"] == "in_progress"
+    assert by_key["Some Course (course)"] == "submitted"
+    assert by_key["Old Internship (internship)"] == "closed"
+    # Table to-do rows have no status column, so they carry no structured status.
+    table_row = next(i for i in items if i.text == "Review GitHub repo")
+    assert table_row.status is None
+
+
+def test_snapshot_missing_or_unknown_status_leaves_status_none(tmp_path):
+    """A numbered application with absent/unrecognized status carries status=None.
+
+    Why this matters: we never invent a status. An unparseable status word leaves the
+    item open and title-only (existing contract), and the new structured field stays None
+    rather than guessing — the relay then falls back to its deadline/done-derived state.
+    """
+    text = (
+        "## 5. No Status App (job)\n- **Type:** Job\n"
+        "## 6. Weird App (job)\n- **Status:** Pending review\n"
+    )
+    by_key = {i.key: i.status for i in snapshot(_write_tracker(tmp_path, text))}
+    assert by_key["No Status App (job)"] is None
+    assert by_key["Weird App (job)"] is None
 
 
 def test_snapshot_excludes_non_numbered_prose_heading(tmp_path):
@@ -190,7 +225,8 @@ def test_snapshot_dedupes_by_text_first_wins(tmp_path):
     items = snapshot(_write_tracker(tmp_path, text))
     assert items == (
         ChecklistItem(
-            text="Dup (job) - Submitted", done=True, key="Dup (job)", group="Applications",
+            text="Dup (job) - Submitted", done=True, key="Dup (job)",
+            group="Applications", status="submitted",
         ),
     )
 
@@ -340,6 +376,7 @@ def test_snapshot_carries_application_deadline_field(tmp_path):
             due_date="2026-07-17",
             key="Fellowship (job)",
             group="Applications",
+            status="in_progress",
         ),
     )
 
@@ -365,7 +402,7 @@ def test_snapshot_application_without_deadline_has_none(tmp_path):
     assert items == (
         ChecklistItem(
             text="App (job) - Submitted", done=True, due_date=None,
-            key="App (job)", group="Applications",
+            key="App (job)", group="Applications", status="submitted",
         ),
     )
 
@@ -407,7 +444,7 @@ def test_snapshot_garbage_application_deadline_never_breaks_parse(tmp_path):
     assert items == (
         ChecklistItem(
             text="App (job) - In progress", done=False, due_date=None,
-            key="App (job)", group="Applications",
+            key="App (job)", group="Applications", status="in_progress",
         ),
     )
 

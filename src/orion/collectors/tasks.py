@@ -53,6 +53,15 @@ class ChecklistItem:
             groups items by this field to derive per-milestone progress and deadlines. The
             tasks collector and any ungrouped item leave it None — a checkbox list has no
             section structure, so it contributes no milestone.
+        status: The item's structured, first-class status, or None when it carries no
+            status. One of "not_started"/"in_progress"/"submitted"/"closed" (the semantic
+            form of the tracker's canonical status). Set by the tracker collector for
+            application items (E2 Inc 4, closing gap-8): the status was previously only
+            EMBEDDED in `text` ("Title - In progress"), so the relay could not tell an
+            in-progress item from a not-started one. Carrying it as a field lets the relay
+            and SPA render the tracker's circular in_progress/submitted indicators without
+            re-parsing the text. The tasks collector and table rows leave it None — a
+            checkbox list / table row carries no status.
 
     Why:
         snapshot() reports the FULL current checklist (open + done), unlike collect()
@@ -70,6 +79,7 @@ class ChecklistItem:
     due_date: str | None = None
     key: str | None = None
     group: str | None = None
+    status: str | None = None
 
 
 class TasksError(Exception):

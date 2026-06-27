@@ -1052,3 +1052,149 @@ h3 {
   color: var(--tfaint);
   margin-top: 2px;
 }
+
+/* =============================================================================
+   Tracker page — "current focus" (slice 4a, remaining band)
+   A general checklist (not a project): circular indicators (vs the project page's
+   square checkboxes), a legend strip, and grouped checklists with roll-ups.
+   Measurements from design/README "Tracker page" + the desktop-04 screenshot.
+   ============================================================================= */
+
+/* TRACKER pill + "a general checklist, not a project" caption, above the H1. */
+.tracker-caption-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.tracker-caption {
+  font-size: 13px;
+  color: var(--tlow);
+}
+
+/* done/total DONE + a segmented overdue/due-soon/remaining bar. */
+.tracker-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-width: 380px;
+  margin: 18px 0 22px;
+}
+.tracker-done-count {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.tracker-done-sub {
+  color: var(--tfaint);
+  font-weight: 500;
+}
+
+/* Legend strip: the full state vocabulary as mono chips, with a divider between the
+   item states and the deadline/slip states. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  margin-bottom: 28px;
+}
+.legend-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+}
+
+/* A group: serif title + rule + roll-up, then the rows. */
+.tracker-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+.tracker-group-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.tracker-group-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.tracker-group-rollup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.tracker-group-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tmid);
+}
+.rollup-sep {
+  color: var(--tfaint);
+}
+
+.tracker-rows {
+  display: flex;
+  flex-direction: column;
+}
+.tracker-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--rowb);
+}
+
+/* The circular indicator — the tracker's signature, distinct from the project checkbox.
+   FILL: done = solid accent ✓; in-progress = a conic arc. BORDER: overdue = --over.
+   The modifiers are additive (an item can be in-progress AND overdue). */
+.check-circle {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--tfaint);
+  border-radius: 99px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--accent-ink);
+}
+.check-circle.in-progress {
+  /* A half-filled arc signalling "started". The fraction is decorative (the wire carries
+     no percentage) — it marks in-progress, it does not measure it. */
+  background: conic-gradient(var(--due) 0 50%, transparent 50% 100%);
+  border-color: var(--due);
+}
+.check-circle.overdue {
+  border-color: var(--over);
+}
+.check-circle.done {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tracker-label {
+  flex: 1;
+  font-size: 13.5px;
+  color: var(--thi);
+}
+.tracker-label.done {
+  text-decoration: line-through;
+  color: var(--tfaint);
+}
+.tracker-signals {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}

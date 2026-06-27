@@ -232,6 +232,26 @@ def test_serialize_blob_emits_group_when_item_has_one_else_omits():
     ]
 
 
+def test_serialize_blob_emits_status_when_item_has_one_else_omits():
+    """A checklist item with a structured `status` serializes it; one without keeps the old shape.
+
+    Why this matters: E2 Inc 4 ships the tracker's status as a first-class wire field (gap-8)
+    so the relay/SPA render in_progress without re-parsing text. Like due_date/key/group it
+    must cross the seam, and stay omitted for items that have none so their wire shape is
+    unchanged (a receiver predating the field is unaffected).
+    """
+    checklist = (
+        ChecklistItem(text="App - In progress", done=False, key="App", status="in_progress"),
+        ChecklistItem(text="Plain task", done=False),
+    )
+    parsed = json.loads(serialize_blob(_blob(checklist=checklist)))
+
+    assert parsed["checklist"] == [
+        {"text": "App - In progress", "done": False, "key": "App", "status": "in_progress"},
+        {"text": "Plain task", "done": False},  # no status → exact old {text, done} shape
+    ]
+
+
 def test_serialize_blob_round_trips_checklist_with_due_date():
     """A checklist carrying due_dates survives serialize → parse → rebuild losslessly.
 

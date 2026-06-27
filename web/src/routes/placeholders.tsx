@@ -8,8 +8,6 @@
 //                  nav + breadcrumbs work end to end before those screens exist.
 // =============================================================================
 
-import { useParams } from "react-router-dom";
-
 function Placeholder({ eyebrow, title, note }: { eyebrow: string; title: string; note: string }) {
   return (
     <div>
@@ -26,17 +24,6 @@ export function Todos() {
       eyebrow="to-dos"
       title="To-dos"
       note="The trackers overview renders in a later slice."
-    />
-  );
-}
-
-export function Tracker() {
-  const { name = "" } = useParams();
-  return (
-    <Placeholder
-      eyebrow={`to-dos / ${name}`}
-      title={name}
-      note="The tracker page renders in a later slice."
     />
   );
 }

@@ -1327,6 +1327,10 @@ def _redacted_checklist(project: ProjectConfig) -> tuple[list[ChecklistItem], in
                     due_date=item.due_date,
                     key=safe_key,
                     group=safe_group,
+                    # `status` is a semantic enum value (not user free text), so it rides
+                    # through untouched like done/due_date — but the rebuild must carry it
+                    # or it would be lost before reaching the wire (E2 Inc 4, gap-8).
+                    status=item.status,
                 )
             )
     return items, hits

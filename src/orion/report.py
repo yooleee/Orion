@@ -174,8 +174,8 @@ def serialize_checklist_item(item: ChecklistItem) -> dict:
         item: The ChecklistItem to serialize.
 
     Returns:
-        A dict carrying "text" and "done" always, plus "due_date", "key", and "group"
-        each ONLY when the item has one (None → that key omitted).
+        A dict carrying "text" and "done" always, plus "due_date", "key", "group", and
+        "status" each ONLY when the item has one (None → that key omitted).
 
     Why:
         Two wire paths emit a checklist — the report blob (serialize_blob) and the
@@ -185,8 +185,9 @@ def serialize_checklist_item(item: ChecklistItem) -> dict:
         to exactly the old {text, done}, so a receiver predating a field is unaffected.
         `due_date` is the forward-looking deadline; `key` is the forward-store's stable
         identity (the tracker's bare title); `group` is the milestone the relay rolls items
-        up by (E2 Inc 3 Unit 5). Single-sourcing made each additive field a one-line change
-        in one place.
+        up by (E2 Inc 3 Unit 5); `status` is the tracker's structured first-class status
+        (E2 Inc 4, closing gap-8). Single-sourcing made each additive field a one-line
+        change in one place.
     """
     payload: dict = {"text": item.text, "done": item.done}
     if item.due_date is not None:
@@ -195,4 +196,6 @@ def serialize_checklist_item(item: ChecklistItem) -> dict:
         payload["key"] = item.key
     if item.group is not None:
         payload["group"] = item.group
+    if item.status is not None:
+        payload["status"] = item.status
     return payload

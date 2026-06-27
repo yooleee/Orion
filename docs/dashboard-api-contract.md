@@ -31,10 +31,12 @@ comments, whose write path is unchanged and out of 4a scope (the composer render
   ("upcoming" is an open, dated deadline beyond the due-soon horizon: rendered as a neutral relative time,
   no glyph — used by `next_due`.)
   ("at_risk" is the union overdue-or-due-soon used for roll-up counts. "on_track" is a roll-up state for a
-  milestone or a project row, not a per-item state.) In 4a the relay emits only the deadline- and
-  done-derived per-item states (`done | overdue | due_soon | not_started`); `in_progress` / `submitted`
-  come from the tracker's embedded status text, which 4a does not parse (gap 8). The full vocabulary still
-  lives in `theme/status.ts` so later slices add no wire change.
+  milestone or a project row, not a per-item state.) The relay derives `state` as: `done` when finished;
+  else `overdue` / `due_soon` from the deadline; else `in_progress` when the producer marked it so; else
+  `not_started`. Deadline urgency leads (an overdue in-progress item reports `overdue`). The tracker's
+  `in_progress` (gap 8, closed in the Tracker slice) now arrives as a first-class `status` field on the
+  producer wire (see the `ChecklistItem` shape below), so the relay no longer parses the embedded status
+  text. `submitted`/`closed` are done items whose `status` carries the finish-kind; both render via `done`.
 - **Derivation runs server-side.** The serializers reuse `relay/derive.py` (`classify_item`, `milestones`,
   `slipping_item_keys`, and the new `bucket_counts` / `next_open_due`) so the at-risk / slipping / bucket
   math has one source of truth and the SPA stays thin.
@@ -150,7 +152,7 @@ Everything observed about one project. `404` when missing or out of scope.
   ],
   "checklist": [
     { "text": "…", "done": false, "due_date": "2026-06-29", "key": "…",
-      "group": "Sectioned home", "state": "due_soon", "slipping": false }
+      "group": "Sectioned home", "state": "due_soon", "status": null, "slipping": false }
   ],
   "reports": [
     { "id": 26, "title": "Orion progress update", "generated_at": "2026-06-26T10:00:00+00:00",
@@ -167,9 +169,12 @@ Everything observed about one project. `404` when missing or out of scope.
   `slipping_item_keys`, `derive.milestones`, `classify_item` per item, `comments_for_project`.
 - `stats.next_due` is the soonest open deadline across the checklist (`derive.next_open_due` + its state),
   or `null`. `milestones[].slipping` is `true` when any open item in the group is in the slipping set.
-- `checklist[].state` in 4a is `done | overdue | due_soon | not_started`: `done` when done, else
-  `overdue` / `due_soon` from `classify_item`, else `not_started` (open, no near deadline).
-  `checklist[].slipping` is membership in `slipping_item_keys`.
+- `checklist[].state` is `done | overdue | due_soon | in_progress | not_started`: `done` when done, else
+  `overdue` / `due_soon` from `classify_item`, else `in_progress` when `status == "in_progress"`, else
+  `not_started`. `checklist[].status` is the raw producer status (`not_started | in_progress | submitted |
+  closed`) or `null` for status-less items (e.g. table to-do rows). It rides alongside `state` so the
+  tracker's circular indicator shows the in-progress arc and the submitted/closed label independently of
+  the single derived state. `checklist[].slipping` is membership in `slipping_item_keys`.
 
 ### `GET /api/reports/:id`
 
@@ -252,8 +257,11 @@ backend scope). Each is shown above with its 4a value.
 5. **Project `description`** — none stored. 4a ships `description: null`.
 6. **Report `title`** — no separate title field. 4a uses the first section title, else the body headline.
 7. **Comment author `role`** — free-text author name only. 4a ships `role: null`.
-8. **Embedded item status** (`in_progress` / `submitted`, the tracker's circular indicators) — the relay
-   stores `text` (with status embedded in the string) + `done`, not a parsed status field. 4a does not
-   parse it, so per-item `state` is deadline/done-derived only. The tracker page (next slice) is where the
-   richer status vocabulary is needed; closing it means parsing the status or adding a status field to the
-   wire.
+8. **Embedded item status** (`in_progress` / `submitted`, the tracker's circular indicators) — **CLOSED**
+   (Tracker slice, E2 Inc 4). The producer now ships a first-class `status` field (`not_started |
+   in_progress | submitted | closed`, the semantic form of its canonical status) alongside the still-present
+   text embed (so legacy `render.py`/reports are untouched). The relay folds `in_progress` into `state` and
+   passes the raw `status` through; the SPA renders the circular in-progress arc and the submitted/closed
+   label from it. We chose the producer-field path over a relay-side text parse so status is a clean
+   observed property end-to-end (the foundation later supervisor-side features build on), not a string the
+   relay reverse-engineers across the process boundary.

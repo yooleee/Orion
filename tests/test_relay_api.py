@@ -258,8 +258,10 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
     assert by_text["Overdue thing"]["state"] == "overdue" and by_text["Overdue thing"]["slipping"] is False
 
     # Reports summary: title (body headline) + section count + empty source_tags (gap 4).
+    # number is the per-project ordinal — 1 here (this project has a single report).
     assert out["reports"][0] == {
         "id": 26,
+        "number": 1,
         "title": "Update",
         "generated_at": "2026-06-26T10:00:00+00:00",
         "lane": "structured",
@@ -386,19 +388,43 @@ def test_report_detail_checklist_snapshot_counts_and_states():
 
 
 def test_report_detail_nav_points_prev_to_older_next_to_newer():
-    """nav.prev_id is the older neighbour, next_id the newer; both None at the ends."""
-    # history is newest-first: 27, 26, 25.
+    """nav.prev_* is the older neighbour, next_* the newer; ids route, numbers label."""
+    # history is newest-first: 27, 26, 25. Per-PROJECT ordinals: 25→1, 26→2, 27→3.
     history = [_report(27), _report(26), _report(25)]
     out = api.serialize_report(
         report=_report(26), checklist=None, comments=[], history=history, today=_TODAY
     )
-    assert out["nav"] == {"prev_id": 25, "next_id": 27}
+    # The middle report: older=25 (#1), newer=27 (#3). ids drive links, numbers the labels.
+    assert out["nav"] == {
+        "prev_id": 25, "prev_number": 1, "next_id": 27, "next_number": 3
+    }
 
     # The newest report has a previous (older) but no next (newer).
     out_latest = api.serialize_report(
         report=_report(27), checklist=None, comments=[], history=history, today=_TODAY
     )
-    assert out_latest["nav"] == {"prev_id": 26, "next_id": None}
+    assert out_latest["nav"] == {
+        "prev_id": 26, "prev_number": 2, "next_id": None, "next_number": None
+    }
+
+
+def test_report_number_is_per_project_ordinal_not_global_id():
+    """A report's display `number` is its 1-based position in THIS project, not the global id.
+
+    Why this matters: the relay `id` is a single global autoincrement across all projects, so
+    per project the ids are gappy (e.g. orion #1-5 then #18-29). The dashboard shows a
+    per-project ordinal (oldest = 1) for legibility while `id` stays the routing identity.
+    """
+    # A project whose three reports took non-contiguous global ids (29, 18, 5), newest-first.
+    history = [_report(29), _report(18), _report(5)]
+    # Oldest (id 5) is #1, then 18 → #2, newest 29 → #3 — independent of the global ids.
+    nums = {
+        r["id"]: api.serialize_report(
+            report=r, checklist=None, comments=[], history=history, today=_TODAY
+        )["number"]
+        for r in history
+    }
+    assert nums == {5: 1, 18: 2, 29: 3}
 
 
 # --- serialize_scheduling: cross-project deadline buckets --------------------

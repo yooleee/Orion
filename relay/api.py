@@ -436,6 +436,9 @@ def serialize_project(
         for item in items
     ]
 
+    # Per-project ordinal for each report (the timeline shows #N, not the gappy global id).
+    report_numbers = _report_numbers(reports)
+
     return {
         "name": name,
         "kind": kind,
@@ -450,6 +453,7 @@ def serialize_project(
         "reports": [
             {
                 "id": r["id"],
+                "number": report_numbers[r["id"]],  # per-project ordinal (id stays identity)
                 # The report's display title for the timeline — the body headline (its first
                 # line), the same rule serialize_report uses, so the timeline entry and the
                 # report page agree on the title.
@@ -490,30 +494,59 @@ def _comment(c: dict) -> dict:
     }
 
 
-def _report_nav(report_id: int, history: list[dict]) -> dict:
-    """Find the older/newer report ids around `report_id` in a project's history.
+def _report_numbers(history: list[dict]) -> dict:
+    """Map each report id to its per-PROJECT ordinal (#1 = oldest, this project only).
+
+    Args:
+        history: The project's reports newest-first (store.history).
+
+    Returns:
+        {report_id: ordinal}, where the OLDEST report in THIS project is 1 and the newest is
+        len(history).
+
+    Why:
+        The relay's report `id` is a single GLOBAL autoincrement across all projects, so per
+        project it reads gappy (e.g. orion #1-5 then #18-29 because another project's reports
+        took the ids in between). The dashboard shows a per-project ordinal for legibility
+        while keeping `id` as the stable identity for URLs / fetching / comment attachment.
+        history is newest-first, so the oldest (last) report gets 1. The ordinal is
+        position-derived, so it is stable only because reports are append-only and
+        time-ordered; `id` remains the permanent identity.
+    """
+    n = len(history)
+    return {r["id"]: n - i for i, r in enumerate(history)}
+
+
+def _report_nav(report_id: int, history: list[dict], numbers: dict) -> dict:
+    """Find the older/newer reports around `report_id`, with their ids AND per-project numbers.
 
     Args:
         report_id: The current report's id.
         history: The project's reports newest-first (store.history).
+        numbers: The id->ordinal map from _report_numbers (for the neighbours' display labels).
 
     Returns:
-        {"prev_id","next_id"}: prev_id the OLDER neighbour, next_id the NEWER one, each None
-        at the ends. None for both when the id is not in the history (defensive).
+        {"prev_id","prev_number","next_id","next_number"}: prev_* the OLDER neighbour, next_*
+        the NEWER one, each None at the ends. The ids drive routing; the numbers drive the
+        "Report #N" labels. None throughout when the id is not in the history (defensive).
 
     Why:
-        The report header offers "Report #25 →" (older) and a back-link. history is
-        newest-first, so the newer neighbour sits at index-1 and the older at index+1.
-        Naming by recency (prev = older) matches the contract: the latest report has a
-        prev (older) but no next (newer).
+        The report header offers "Report #N →" (older) and a back-link. history is
+        newest-first, so the newer neighbour sits at index-1 and the older at index+1. The
+        label shows the per-project ordinal, not the global id (see _report_numbers).
     """
     ids = [r["id"] for r in history]
     if report_id not in ids:
-        return {"prev_id": None, "next_id": None}
+        return {"prev_id": None, "prev_number": None, "next_id": None, "next_number": None}
     i = ids.index(report_id)
     newer = ids[i - 1] if i > 0 else None
     older = ids[i + 1] if i + 1 < len(ids) else None
-    return {"prev_id": older, "next_id": newer}
+    return {
+        "prev_id": older,
+        "prev_number": numbers.get(older),
+        "next_id": newer,
+        "next_number": numbers.get(newer),
+    }
 
 
 def serialize_report(
@@ -546,8 +579,10 @@ def serialize_report(
     """
     snapshot_items = checklist or []
     snapshot_done = sum(1 for item in snapshot_items if item.get("done"))
+    numbers = _report_numbers(history)
     return {
         "id": report["id"],
+        "number": numbers.get(report["id"]),  # per-project ordinal (id stays the identity)
         "project": report["project"],
         "title": headline(report["body"]) if report["body"] else "",
         "sections": report["sections"],
@@ -575,5 +610,5 @@ def serialize_report(
             ],
         },
         "comments": [_comment(c) for c in comments],
-        "nav": _report_nav(report["id"], history),
+        "nav": _report_nav(report["id"], history, numbers),
     }

@@ -151,6 +151,7 @@ export interface ChecklistItem {
 
 export interface ReportSummary {
   id: number;
+  number: number; // per-project ordinal (#1 = oldest in this project); id stays the identity
   title: string; // the body headline, for the timeline entry
   generated_at: string;
   lane: string;
@@ -201,12 +202,15 @@ export interface ChecklistSnapshot {
 }
 
 export interface ReportNav {
-  prev_id: number | null;
-  next_id: number | null;
+  prev_id: number | null; // older neighbour — drives the link
+  prev_number: number | null; // older neighbour's per-project ordinal — drives the label
+  next_id: number | null; // newer neighbour — drives the link
+  next_number: number | null; // newer neighbour's per-project ordinal — drives the label
 }
 
 export interface ReportDetail {
   id: number;
+  number: number; // per-project ordinal (#1 = oldest in this project); id stays the identity
   project: string;
   title: string;
   sections: Section[];

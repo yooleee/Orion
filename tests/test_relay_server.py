@@ -2774,7 +2774,11 @@ def test_api_report_detail_carries_nav_and_404s_unknown(tmp_path):
         report_id = created["id"]
         status, detail = _get_json(base_url, f"/api/reports/{report_id}")
         assert status == 200 and detail["id"] == report_id
-        assert detail["nav"] == {"prev_id": None, "next_id": None}  # the only report
+        assert detail["number"] == 1  # per-project ordinal: the only report is #1
+        # The only report has no neighbours; ids route, numbers label (both null at the ends).
+        assert detail["nav"] == {
+            "prev_id": None, "prev_number": None, "next_id": None, "next_number": None
+        }
 
         missing, body = _get_json(base_url, "/api/reports/999999")
         assert missing == 404 and body == {"error": "not found"}

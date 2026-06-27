@@ -22,9 +22,9 @@ export function ReportTimeline({ reports }: { reports: ReportSummary[] }) {
           {/* The most-recent entry (index 0) gets the accent dot; older are faint. */}
           <span className={`timeline-dot${i === 0 ? " latest" : ""}`} aria-hidden="true" />
           <div className="timeline-body">
-            <div className="timeline-title">{r.title || `Report #${r.id}`}</div>
+            <div className="timeline-title">{r.title || `Report #${r.number}`}</div>
             <div className="timeline-meta">
-              #{r.id} · {relativeTime(r.generated_at)}
+              #{r.number} · {relativeTime(r.generated_at)}
               {r.source_tags.length > 0 && <> · {r.source_tags.join(" ")}</>}
             </div>
           </div>

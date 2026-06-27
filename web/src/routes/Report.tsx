@@ -37,7 +37,7 @@ export function Report() {
         items={[
           { label: "projects", to: "/" },
           { label: data.project, to: `/project/${encodeURIComponent(data.project)}` },
-          { label: `report #${data.id}` },
+          { label: `report #${data.number}` },
         ]}
       />
 
@@ -45,21 +45,22 @@ export function Report() {
         <div className="detail-headline">
           <h1 className="page-title">{data.project}</h1>
           <p className="page-sub">
-            Progress report #{data.id} · {relativeTime(data.generated_at)}
+            Progress report #{data.number} · {relativeTime(data.generated_at)}
           </p>
         </div>
         <div className="report-nav">
           <Link className="nav-btn" to={`/project/${encodeURIComponent(data.project)}`}>
             ← Back to {data.project}
           </Link>
+          {/* Links route by the stable global id; labels show the per-project ordinal. */}
           {data.nav.next_id !== null && (
             <Link className="nav-btn" to={`/report/${data.nav.next_id}`}>
-              ← Report #{data.nav.next_id}
+              ← Report #{data.nav.next_number}
             </Link>
           )}
           {data.nav.prev_id !== null && (
             <Link className="nav-btn" to={`/report/${data.nav.prev_id}`}>
-              Report #{data.nav.prev_id} →
+              Report #{data.nav.prev_number} →
             </Link>
           )}
         </div>

@@ -15,7 +15,8 @@ Role in project: Defines the seam fixed in slice 4a.0 so the backend
 
 This is the seam between the React SPA and the relay. The relay becomes a read-only JSON API. Every
 domain object is observed from external sources and read-only in the UI. The only user-authored content is
-comments, whose write path is unchanged and out of 4a scope (the composer renders inert in 4a).
+comments; the SPA write path is `POST /api/reports/:id/comments` (below). (4a originally shipped the
+composer inert; the comment-writes slice wired it.)
 
 ## Conventions
 
@@ -276,6 +277,34 @@ On a bad or revoked key: `401 {"ok": false}` (no cookie set).
 
 Clears the session cookie and returns `{"ok": true}`. The `_origin_error()` CSRF check applies. The
 existing `GET /logout` form route stays until parity.
+
+### `POST /api/reports/:id/comments`
+
+Post a comment on a report — the **only user-authored write**. Cookie session (not Bearer), JSON in/out.
+The SPA's `apiFetch` sends it same-origin with credentials (like `/api/login`), so the cookie rides
+automatically and the CSRF check passes.
+
+Body `{"body": "<text>", "author"?: "<name>"}`. Returns `201` with the created comment in the same shape
+the read path emits (so the SPA appends it without a refetch):
+
+```json
+{ "id": 12, "author": "Yusuf", "role": null, "body": "Looks great.", "created_at": "2026-06-27T01:00:00+00:00" }
+```
+
+- **Guards, in order** (mirroring the form route `_handle_comment`, reusing the same helpers):
+  `401 {"error":"login required"}` when gated + no session → `403 {"error":"origin check failed"}` on an
+  Origin/Referer mismatch (`_origin_error`) → `400` for a non-object body, a non-string/empty `body`, or
+  `body`/`author` over `MAX_COMMENT_BODY_CHARS` (4000) / `MAX_AUTHOR_CHARS` (200) → `404 {"error":"not
+  found"}` when the report is missing **or** out of the viewer's scope (identical response —
+  existence-hiding).
+- **Identity:** when authenticated, the comment is attributed to the **session identity** —
+  the client-supplied `author` is ignored (no posting under another name). On an open loopback relay (not
+  gated) the typed `author` stands, or `""` → rendered "Anonymous".
+- **XSS:** the body is stored verbatim and rendered as an inert React text node (never
+  `dangerouslySetInnerHTML`), so a `<script>` body displays as literal text.
+- This is **distinct** from the machine `POST /api/comments` (Bearer-authed, for bots — no cookie, no
+  CSRF). The legacy form route `POST /report/:id/comment` stays until `render.py` retires.
+- Source: `_authenticate` / `_allowed_projects` / `_origin_error` / `get` / `add_comment` (all reused).
 
 ## The `kind` flag (projects vs trackers)
 

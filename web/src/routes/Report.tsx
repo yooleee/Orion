@@ -8,8 +8,10 @@
 //                  not-found (out-of-scope reports are 404 too — existence-hiding).
 // =============================================================================
 
+import { useEffect, useState } from "react";
 import { Link, useOutletContext, useParams } from "react-router-dom";
 import type { ShellContext } from "../components/Shell";
+import type { Comment } from "../api/types";
 import { ApiError, getReport } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import { relativeTime } from "../lib/time";
@@ -23,6 +25,11 @@ export function Report() {
   const { id = "" } = useParams();
   const { me } = useOutletContext<ShellContext>();
   const { data, error, loading } = useApiData(() => getReport(id), [id]);
+  // Comments posted this session, appended to the fetched thread (no full refetch flicker).
+  // Reset when the report changes so they never bleed across navigations.
+  const [posted, setPosted] = useState<Comment[]>([]);
+  useEffect(() => setPosted([]), [id]);
+  const canComment = me.authenticated || !me.gated;
 
   if (loading) return <div className="center-note">Loading…</div>;
   if (error) {
@@ -71,8 +78,13 @@ export function Report() {
           <ReportBody report={data} />
           <section className="report-comments">
             <div className="eyebrow block-label">Comments</div>
-            <CommentList comments={data.comments} />
-            <CommentComposer authorName={me.identity?.name ?? null} />
+            <CommentList comments={[...data.comments, ...posted]} />
+            <CommentComposer
+              reportId={data.id}
+              authorName={me.identity?.name ?? null}
+              canComment={canComment}
+              onPosted={(c) => setPosted((prev) => [...prev, c])}
+            />
           </section>
         </div>
         <ContextRail report={data} />

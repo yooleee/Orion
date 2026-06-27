@@ -2976,3 +2976,96 @@ def test_api_scheduling_is_scoped_for_a_viewer(tmp_path):
         _, out = _get_json(base_url, "/api/scheduling", cookie=_login(base_url, "mum-key"))
         labels = [r["label"] for b in out["buckets"].values() for r in b]
         assert labels == ["Mine"]  # the out-of-scope project's deadline never appears
+
+
+# --- POST /api/reports/<id>/comments: the SPA's cookie-authed JSON comment write -------
+
+
+def test_api_report_comment_stores_and_returns_created(tmp_path):
+    """Authed + same-origin JSON comment → 201, stored, attributed to the session identity.
+
+    Why this matters: the happy path of the SPA write. The returned shape matches the read
+    path (_comment) so the SPA appends it directly. A logged-in user CANNOT post under
+    another name — the client-supplied author is ignored in favour of the session identity.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users yet)
+
+        status, body, _ = _post_api_json(
+            base_url, f"/api/reports/{report_id}/comments",
+            {"body": "Ship it.", "author": "Mallory"}, cookie=cookie,
+        )
+        assert status == 201
+        assert body["body"] == "Ship it." and body["role"] is None
+        assert body["author"] == "legacy-admin"  # session identity, NOT the spoofed "Mallory"
+        assert isinstance(body["id"], int) and body["created_at"]
+
+        conn = open_relay_store(db)
+        stored = comments_for(conn, report_id)
+        assert len(stored) == 1
+        assert stored[0]["author"] == "legacy-admin" and stored[0]["body"] == "Ship it."
+
+
+def test_api_report_comment_requires_session_when_gated(tmp_path):
+    """A gated relay rejects an unauthenticated comment write with 401 (and stores nothing)."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        status, body, _ = _post_api_json(
+            base_url, f"/api/reports/{report_id}/comments", {"body": "hi"}  # no cookie
+        )
+        assert status == 401 and body == {"error": "login required"}
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_report_comment_rejects_foreign_origin(tmp_path):
+    """A cross-site Origin is rejected with 403 even with a valid session (CSRF guard)."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+        status, _body, _ = _post_api_json(
+            base_url, f"/api/reports/{report_id}/comments", {"body": "x"},
+            cookie=cookie, origin="https://evil.example",
+        )
+        assert status == 403
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_report_comment_404_out_of_scope_and_missing(tmp_path):
+    """An out-of-scope report and a missing id both 404 (existence-hiding), storing nothing."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)  # project "demo"
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["other"])  # not demo
+        cookie = _login(base_url, "mum-key")
+
+        s1, b1, _ = _post_api_json(
+            base_url, f"/api/reports/{report_id}/comments", {"body": "x"}, cookie=cookie
+        )
+        assert s1 == 404 and b1 == {"error": "not found"}  # out of scope == missing
+        s2, _, _ = _post_api_json(
+            base_url, "/api/reports/999999/comments", {"body": "x"}, cookie=cookie
+        )
+        assert s2 == 404
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []
+
+
+def test_api_report_comment_rejects_empty_and_oversized_body(tmp_path):
+    """A whitespace-only body and an over-cap body are both 400 (and store nothing)."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        report_id = _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+
+        s_empty, _, _ = _post_api_json(
+            base_url, f"/api/reports/{report_id}/comments", {"body": "   "}, cookie=cookie
+        )
+        assert s_empty == 400
+        s_big, _, _ = _post_api_json(
+            base_url, f"/api/reports/{report_id}/comments",
+            {"body": "x" * (MAX_COMMENT_BODY_CHARS + 1)}, cookie=cookie,
+        )
+        assert s_big == 400
+        conn = open_relay_store(db)
+        assert comments_for(conn, report_id) == []

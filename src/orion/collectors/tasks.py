@@ -51,8 +51,9 @@ class ChecklistItem:
             the tracker collector (E2 Inc 3, Unit 5): "Applications" for the numbered
             application sections, and the table's nearest heading for to-do rows. The relay
             groups items by this field to derive per-milestone progress and deadlines. The
-            tasks collector and any ungrouped item leave it None — a checkbox list has no
-            section structure, so it contributes no milestone.
+            tasks collector sets it to the item's nearest preceding Markdown heading (so a
+            checkbox list's `##`/`###` sections become dashboard milestones); an item with
+            no heading above it stays None — ungrouped, contributing no milestone.
         status: The item's structured, first-class status, or None when it carries no
             status. One of "not_started"/"in_progress"/"submitted"/"closed" (the semantic
             form of the tracker's canonical status). Set by the tracker collector for
@@ -104,6 +105,11 @@ _COMPLETED_RE = re.compile(r"^\s*[-*]\s+\[[xX]\]\s+(.+?)\s*$")
 # SEPARATE pattern from _COMPLETED_RE (not a generalization of it) so the retrospective
 # collect() path is untouched — the two only need to AGREE on what a checklist line is.
 _ITEM_RE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.+?)\s*$")
+
+# A Markdown ATX heading ("## Title"). snapshot() tracks the most recent heading so each
+# item is grouped under it — turning a checkbox list's sections into dashboard milestones.
+# Only snapshot() (the live-checklist read) uses this; collect()'s report delta is unaffected.
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+?)\s*$")
 
 
 def collect(tasks_file: Path, prior_marker: str | None) -> CollectorResult:
@@ -175,7 +181,9 @@ def snapshot(tasks_file: Path) -> tuple[ChecklistItem, ...]:
 
     Returns:
         The checklist items in FILE ORDER, de-duplicated by text, each carrying its
-        done-state. Empty tuple when the file is missing/unreadable or has no items.
+        done-state and its `group` (the nearest preceding Markdown heading, or None when
+        the item sits above any heading). Empty tuple when the file is missing/unreadable
+        or has no items.
 
     Why:
         This is the dashboard's "live checklist" read — current state, NOT a delta —
@@ -197,7 +205,14 @@ def snapshot(tasks_file: Path) -> tuple[ChecklistItem, ...]:
 
     items: list[ChecklistItem] = []
     seen: set[str] = set()
+    # The most recent heading seen while scanning, used as each item's group. Resets to
+    # the new heading's text at every heading line; stays None until the first heading.
+    current_group: str | None = None
     for line in text.splitlines():
+        heading = _HEADING_RE.match(line)
+        if heading is not None:
+            current_group = heading.group(1).strip()
+            continue
         match = _ITEM_RE.match(line)
         if match is None:
             continue
@@ -205,8 +220,11 @@ def snapshot(tasks_file: Path) -> tuple[ChecklistItem, ...]:
         if not item_text or item_text in seen:
             continue
         seen.add(item_text)
-        # The box is one of " ", "x", or "X"; normalize case for the done check.
-        items.append(ChecklistItem(text=item_text, done=box.lower() == "x"))
+        # The box is one of " ", "x", or "X"; normalize case for the done check. group is
+        # the section heading above this item (None when it precedes any heading).
+        items.append(
+            ChecklistItem(text=item_text, done=box.lower() == "x", group=current_group)
+        )
     return tuple(items)
 
 

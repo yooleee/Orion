@@ -13,7 +13,7 @@
 #   ORION_RELAY_ADMIN_TOKEN  — provisioning API (`relay-user`), independent of the ingest token
 # =============================================================================
 
-app = "orion-relay-horizon-c"
+app = "project-orion"
 primary_region = "sjc"   # pick one near you / your supervisors: `fly platform regions`
 
 [build]
@@ -23,7 +23,7 @@ primary_region = "sjc"   # pick one near you / your supervisors: `fly platform r
 # reached at; the relay checks the comment form's Origin/Referer against it (CSRF), instead of
 # trusting the proxy-rewritten Host header. CHANGE this to match your own `app` name above.
 [env]
-  ORION_RELAY_PUBLIC_ORIGIN = "https://orion-relay-horizon-c.fly.dev"
+  ORION_RELAY_PUBLIC_ORIGIN = "https://project-orion.fly.dev"
 
 # Fly terminates HTTPS and forwards to the container's port 8787. The relay binds
 # 0.0.0.0:8787 (the Dockerfile entrypoint), so the fail-closed guard REQUIRES the

@@ -2686,7 +2686,7 @@ def test_api_routes_require_session_when_gated(tmp_path):
     HTML login page would be useless to a JSON client.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        for path in ("/api/portfolio", "/api/projects/orion", "/api/reports/1"):
+        for path in ("/api/portfolio", "/api/projects/orion", "/api/reports/1", "/api/scheduling"):
             status, body = _get_json(base_url, path)
             assert status == 401, path
             assert body == {"error": "login required"}
@@ -2774,7 +2774,11 @@ def test_api_report_detail_carries_nav_and_404s_unknown(tmp_path):
         report_id = created["id"]
         status, detail = _get_json(base_url, f"/api/reports/{report_id}")
         assert status == 200 and detail["id"] == report_id
-        assert detail["nav"] == {"prev_id": None, "next_id": None}  # the only report
+        assert detail["number"] == 1  # per-project ordinal: the only report is #1
+        # The only report has no neighbours; ids route, numbers label (both null at the ends).
+        assert detail["nav"] == {
+            "prev_id": None, "prev_number": None, "next_id": None, "next_number": None
+        }
 
         missing, body = _get_json(base_url, "/api/reports/999999")
         assert missing == 404 and body == {"error": "not found"}
@@ -2921,3 +2925,54 @@ def test_legacy_html_still_served_without_web_dir(tmp_path):
         _, body = _get(base_url, "/")
         # The legacy portfolio renders its own HTML (not the SPA root div).
         assert "id=root" not in body
+
+
+def test_api_scheduling_buckets_deadlines_across_sources(tmp_path):
+    """/api/scheduling returns {summary, buckets} and time-buckets open dated items.
+
+    Why this matters: this pins the endpoint end to end — routing, the cross-project
+    enumeration, and the bucketing — against a running relay. Dates are computed relative to
+    today (the relay buckets in its display zone) with wide margins so a TZ-boundary day-off
+    can't reclassify them.
+    """
+    from datetime import date, timedelta
+
+    iso = lambda days: (date.today() + timedelta(days=days)).isoformat()
+    with _running_relay(tmp_path) as (base_url, _db):
+        _push_checklist(
+            base_url, "applications",
+            [
+                {"text": "Overdue app", "done": False, "due_date": iso(-5)},
+                {"text": "Soon app", "done": False, "due_date": iso(3)},
+                {"text": "Far app", "done": False, "due_date": iso(30)},
+                {"text": "No date", "done": False},          # excluded
+                {"text": "Done app", "done": True, "due_date": iso(-2)},  # excluded
+            ],
+            kind="tracker",
+        )
+        status, out = _get_json(base_url, "/api/scheduling")
+        assert status == 200
+        assert set(out) == {"summary", "buckets"}
+        assert set(out["buckets"]) == {"overdue", "this_week", "later"}
+
+        assert [r["label"] for r in out["buckets"]["overdue"]] == ["Overdue app"]
+        assert [r["label"] for r in out["buckets"]["this_week"]] == ["Soon app"]
+        assert [r["label"] for r in out["buckets"]["later"]] == ["Far app"]
+        # Source tag carries the tracker's kind so the SPA renders ⊟.
+        assert out["buckets"]["overdue"][0]["source"] == {"name": "applications", "kind": "tracker"}
+        assert out["summary"]["overdue"] == 1 and out["summary"]["due_this_week"] == 1
+
+
+def test_api_scheduling_is_scoped_for_a_viewer(tmp_path):
+    """A scoped viewer's scheduling only aggregates deadlines from granted projects."""
+    from datetime import date, timedelta
+
+    overdue = (date.today() - timedelta(days=5)).isoformat()
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _push_checklist(base_url, "granted", [{"text": "Mine", "done": False, "due_date": overdue}])
+        _push_checklist(base_url, "secret", [{"text": "Hidden", "done": False, "due_date": overdue}])
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["granted"])
+
+        _, out = _get_json(base_url, "/api/scheduling", cookie=_login(base_url, "mum-key"))
+        labels = [r["label"] for b in out["buckets"].values() for r in b]
+        assert labels == ["Mine"]  # the out-of-scope project's deadline never appears

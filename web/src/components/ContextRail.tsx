@@ -28,7 +28,7 @@ export function ContextRail({ report }: { report: ReportDetail }) {
         <div className="eyebrow rail-label">Details</div>
         <dl className="kv">
           <dt>Report</dt>
-          <dd>#{report.id}</dd>
+          <dd>#{report.number}</dd>
           <dt>Generated</dt>
           <dd>{relativeTime(report.generated_at)}</dd>
           <dt>Received</dt>

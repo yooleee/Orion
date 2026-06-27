@@ -17,8 +17,9 @@ import { Link, useLocation } from "react-router-dom";
 import type { Me, Portfolio } from "../api/types";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
-// The not-yet-built sections, shown as disabled NEW stubs (built in 4b/4c/4d).
-const COMING_SOON = ["Scheduling", "Disciplines", "Connections"];
+// The not-yet-built sections, shown as disabled NEW stubs (built in 4b/4c). Scheduling is
+// now a real route (below); it keeps its NEW pill as a recently-added section.
+const COMING_SOON = ["Disciplines", "Connections"];
 
 interface SidebarProps {
   me: Me;
@@ -37,6 +38,7 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
   const projectsActive =
     path === "/" || path.startsWith("/project/") || path.startsWith("/report/");
   const todosActive = path === "/todos" || path.startsWith("/tracker/");
+  const schedulingActive = path === "/scheduling";
 
   return (
     <nav className="side" aria-label="Primary">
@@ -59,6 +61,10 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
             <span className="nav-count">{trackers.length}</span>
           </Link>
         )}
+        <Link to="/scheduling" className={`nav-item${schedulingActive ? " active" : ""}`}>
+          <span>Scheduling</span>
+          <span className="pill-new">NEW</span>
+        </Link>
         {COMING_SOON.map((name) => (
           <div key={name} className="nav-item disabled" aria-disabled="true">
             <span>{name}</span>

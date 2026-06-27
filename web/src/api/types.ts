@@ -151,6 +151,7 @@ export interface ChecklistItem {
 
 export interface ReportSummary {
   id: number;
+  number: number; // per-project ordinal (#1 = oldest in this project); id stays the identity
   title: string; // the body headline, for the timeline entry
   generated_at: string;
   lane: string;
@@ -201,12 +202,15 @@ export interface ChecklistSnapshot {
 }
 
 export interface ReportNav {
-  prev_id: number | null;
-  next_id: number | null;
+  prev_id: number | null; // older neighbour — drives the link
+  prev_number: number | null; // older neighbour's per-project ordinal — drives the label
+  next_id: number | null; // newer neighbour — drives the link
+  next_number: number | null; // newer neighbour's per-project ordinal — drives the label
 }
 
 export interface ReportDetail {
   id: number;
+  number: number; // per-project ordinal (#1 = oldest in this project); id stays the identity
   project: string;
   title: string;
   sections: Section[];
@@ -221,6 +225,42 @@ export interface ReportDetail {
   checklist_snapshot: ChecklistSnapshot;
   comments: Comment[];
   nav: ReportNav;
+}
+
+// --- GET /api/scheduling ----------------------------------------------------
+
+/** Where a scheduled deadline comes from — a project (◇) or a tracker (⊟). */
+export interface ScheduleSource {
+  name: string;
+  kind: ProjectKind;
+}
+
+/** One open, dated deadline on the schedule. `state` is an open-deadline state
+ *  (overdue | due_soon | upcoming); the SPA colours the time column by it. */
+export interface ScheduleItem {
+  state: Status;
+  label: string;
+  due_date: string;
+  slipping: boolean;
+  source: ScheduleSource;
+}
+
+/** The three time buckets, each sorted by due_date ascending (server-side). */
+export interface ScheduleBuckets {
+  overdue: ScheduleItem[];
+  this_week: ScheduleItem[];
+  later: ScheduleItem[];
+}
+
+export interface ScheduleSummary {
+  overdue: number;
+  due_this_week: number;
+  slipping: number;
+}
+
+export interface SchedulingData {
+  summary: ScheduleSummary;
+  buckets: ScheduleBuckets;
 }
 
 // --- POST /api/login, POST /api/logout --------------------------------------

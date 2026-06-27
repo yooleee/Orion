@@ -62,4 +62,7 @@ EXPOSE 8787
 # docs/deployment.md) — never expose plain HTTP to the internet.
 # --web-dir serves the React SPA single-host (built in stage 1). Remove it to fall back to
 # the legacy server-rendered HTML.
-ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist"]
+# --showcase enables the public, no-login Showcase; --showcase-project allowlists a project
+# (default-deny) with its curated public blurb. Edit/extend this list to curate the guest
+# surface; drop both flags to take it offline (GET /api/showcase then 404s).
+ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist", "--showcase", "--showcase-project", "orion:A local-first knowledge base that observes your real project activity and reframes it into readable progress."]

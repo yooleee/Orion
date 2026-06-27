@@ -73,8 +73,11 @@ shell and to know whether to redirect to login.
 - `scope.unrestricted` is `true` for an admin or an open (ungated) relay, with `projects: null`. For a
   scoped viewer it is `false` with `projects` a sorted list of granted project names.
 - On an open loopback relay: `gated:false, authenticated:false, identity:null, scope.unrestricted:true`.
-- `showcase_enabled` is reserved (always `false` in 4a; the guest surface is 4d).
-- Source: `_auth_required`, `_authenticate`, `_allowed_projects`, `server.display_tz`.
+- `showcase_enabled` reflects `server.showcase_enabled` (the relay's `--showcase` flag): `true`
+  when the public Showcase surface is on, else `false`. The SPA shows the "Public showcase"
+  sidebar link only when this is `true`. See `GET /api/showcase` below.
+- Source: `_auth_required`, `_authenticate`, `_allowed_projects`, `server.display_tz`,
+  `server.showcase_enabled`.
 
 ### `GET /api/portfolio`
 
@@ -259,6 +262,42 @@ grouped into three time buckets, plus a summary. Scope-filtered identically to `
 - Source: `latest_report_per_project(today)` (enumeration + `kind`, includes checklist-only trackers) +
   `get_checklist` + `observed_history` per project → `api.serialize_scheduling`. Pure read-only
   re-aggregation — no new derivation, no producer/wire/store change.
+
+### `GET /api/showcase`
+
+The **public, no-login** curated surface — a small set of projects an operator has chosen to share
+without a sign-in. Like `GET /api/me`, it is **exempt from the `401` gate** (a guest has no
+session). It is **opt-in and default-deny**: disabled unless the relay was started with
+`--showcase`, and it serves **only** the projects named with `--showcase-project` (the allowlist),
+in allowlist order.
+
+```json
+{
+  "projects": [
+    { "name": "orion", "description": "A local-first tracker that observes & reframes.",
+      "status": "active", "progress": { "done": 6, "total": 15, "pct": 40 }, "report_count": 12 },
+    { "name": "barebones-ai-village", "description": "A structural detection layer — shipped.",
+      "status": "shipped", "progress": { "done": 4, "total": 4, "pct": 100 }, "report_count": 1 }
+  ]
+}
+```
+
+- **`404 {"error":"not found"}` when disabled** (`server.showcase_enabled` is false) — existence-
+  hiding, identical to a genuinely missing route, so the surface is invisible when off.
+- **Summary facts ONLY.** Each card carries exactly `name`, `description`, `status`, `progress`,
+  `report_count` — and nothing else. No checklist items, reports, comments, or deadlines reach the
+  anonymous viewer. The privacy boundary is the **shape** of the card (`api._showcase_card`), pinned
+  by test; cards are **not** links (no public drill-down).
+- **`description`** is the curated per-project blurb from `--showcase-project NAME:"blurb"`, falling
+  back to the observed report `headline` when no blurb was set (then `""` if the project has no
+  report body). **`status`** is derived from completion: `"shipped"` when `progress.pct == 100`,
+  else `"active"`.
+- **Curation is independent of viewer scope** (the guest is anonymous): the only access control is
+  the allowlist. No `scope` block.
+- Source: `latest_report_per_project(today)` filtered to the allowlist (in allowlist order) →
+  `api.serialize_showcase`. Pure read-only re-aggregation of existing store data plus the config
+  allowlist/blurbs — no producer/wire/store change. Config: relay `--showcase` +
+  `--showcase-project` flags (the relay does not read `orion.toml`).
 
 ### `POST /api/login`
 

@@ -163,7 +163,12 @@ def _progress(done: int, total: int) -> dict:
 
 
 def serialize_me(
-    *, gated: bool, principal: dict | None, allowed: set | None, display_tz: ZoneInfo
+    *,
+    gated: bool,
+    principal: dict | None,
+    allowed: set | None,
+    display_tz: ZoneInfo,
+    showcase_enabled: bool = False,
 ) -> dict:
     """Serialize the current viewer's identity, scope, and server context (/api/me).
 
@@ -173,6 +178,9 @@ def serialize_me(
         allowed: The viewer's read scope — None for unrestricted (admin / open relay), else
             the set of granted project names (server._allowed_projects).
         display_tz: The relay's display timezone.
+        showcase_enabled: Whether this relay exposes a public, no-login Showcase surface
+            (server.showcase_enabled). The SPA shows the "Public showcase" sidebar link
+            only when this is true.
 
     Returns:
         The /api/me shape: gated / authenticated / identity / scope / display_tz /
@@ -198,7 +206,7 @@ def serialize_me(
             "projects": None if allowed is None else sorted(allowed),
         },
         "display_tz": display_tz.key,
-        "showcase_enabled": False,  # reserved; the guest surface is a later slice (4d)
+        "showcase_enabled": showcase_enabled,
     }
 
 
@@ -310,6 +318,65 @@ def serialize_portfolio(entries: list[dict], allowed: set | None, today: date) -
         "projects": projects,
         "trackers": trackers,
     }
+
+
+def _showcase_card(row: dict) -> dict:
+    """Serialize one curated project into a public Showcase card (summary facts only).
+
+    Args:
+        row: A latest_report_per_project row for an allowlisted project, with an extra
+            "blurb" key holding the curated public description ("" when none was set).
+
+    Returns:
+        A {"name", "description", "status", "progress", "report_count"} card — and
+        DELIBERATELY nothing else. No checklist, reports, comments, or deadlines.
+
+    Why:
+        The Showcase is a public, no-login surface, so the privacy boundary is enforced by
+        the SHAPE here: this dict is the entire wire contract, so there is no path by which
+        an item label, a comment, or a deadline can leak to an anonymous viewer (a guard
+        pinned by test). `description` prefers the curated blurb and falls back to the same
+        observed headline the portfolio uses, so an allowlisted project always reads
+        sensibly even before a blurb is written. `status` is derived from completion (a
+        fully-done project reads "shipped", otherwise "active") rather than authored, in
+        keeping with observe-and-reframe.
+    """
+    progress = _progress(row["checklist_done"] or 0, row["checklist_total"] or 0)
+    # A curated blurb wins; else the latest report's headline; else empty. headline() needs
+    # a non-empty body, so guard the checklist-only case (no report → latest_body is None).
+    description = row.get("blurb") or (
+        headline(row["latest_body"]) if row.get("latest_body") else ""
+    )
+    return {
+        "name": row["project"],
+        "description": description,
+        "status": "shipped" if progress["pct"] == 100 else "active",
+        "progress": progress,
+        "report_count": row["report_count"],
+    }
+
+
+def serialize_showcase(entries: list[dict]) -> dict:
+    """Serialize the curated public Showcase dataset (/api/showcase).
+
+    Args:
+        entries: The allowlisted projects, in allowlist (display) order. Each is a
+            latest_report_per_project row plus a "blurb" key (the curated description, or
+            "" to fall back to the headline). The server applies the allowlist before
+            calling — this serializer trusts the caller's curation, exactly as
+            serialize_portfolio trusts the caller's scope filter.
+
+    Returns:
+        {"projects": [...]} — one summary card per curated project, allowlist-ordered.
+
+    Why:
+        Pulled out as its own serializer (not folded into the portfolio) because the public
+        surface is a STRICT SUBSET of the fields a logged-in viewer sees — a separate
+        function makes that narrowing explicit and testable rather than relying on a caller
+        to strip fields. No `scope` block: the guest has no session, and the allowlist is
+        the only access control here.
+    """
+    return {"projects": [_showcase_card(row) for row in entries]}
 
 
 def serialize_scheduling(projects: list[dict], today: date) -> dict:

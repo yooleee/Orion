@@ -112,6 +112,15 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
       {/* Bottom block: theme switcher + account card (pushed down by the spacer). */}
       <div className="side-spacer" />
 
+      {/* The public Showcase link only appears when the relay actually exposes it
+          (--showcase). Without it the link would lead to a 404 surface. */}
+      {me.showcase_enabled && (
+        <Link to="/showcase" className="showcase-link">
+          <span aria-hidden="true">↗</span>
+          <span>Public showcase</span>
+        </Link>
+      )}
+
       <ThemeSwitcher />
 
       {me.identity && (

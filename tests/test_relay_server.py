@@ -36,6 +36,7 @@ from relay.render import MAX_COMMENT_BODY_CHARS, PAGE_CSS_HASH, PAGE_JS_HASH
 from relay.server import (
     _SESSION_COOKIE_NAME,
     AuthConfig,
+    ShowcaseConfig,
     _b64url_encode,
     _is_loopback,
     _sign,
@@ -78,6 +79,7 @@ def _running_relay(
     auth=None,
     public_origin=False,
     web_dir=None,
+    showcase=None,
 ):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
@@ -106,7 +108,8 @@ def _running_relay(
     if auth is None:
         auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER)
     server = create_server(
-        "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth, web_dir=web_dir
+        "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth,
+        web_dir=web_dir, showcase=showcase,
     )
     _, port = server.server_address
     base_url = f"http://127.0.0.1:{port}"
@@ -2976,6 +2979,58 @@ def test_api_scheduling_is_scoped_for_a_viewer(tmp_path):
         _, out = _get_json(base_url, "/api/scheduling", cookie=_login(base_url, "mum-key"))
         labels = [r["label"] for b in out["buckets"].values() for r in b]
         assert labels == ["Mine"]  # the out-of-scope project's deadline never appears
+
+
+# --- GET /api/showcase: the public, no-login curated surface --------------------------
+
+
+def test_api_showcase_404_when_disabled(tmp_path):
+    """With no --showcase config the endpoint 404s — and does so UNAUTHENTICATED.
+
+    Why this matters: the public surface must be off by default (existence-hiding), and the
+    404 has to come back to an anonymous caller — confirming the route is reached before the
+    login gate, not after it (a 401 here would leak that the surface exists but is gated).
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        _push_checklist(base_url, "demo", [{"text": "x", "done": False}])
+        status, body = _get_json(base_url, "/api/showcase")  # no cookie
+        assert status == 404
+        assert body == {"error": "not found"}
+
+
+def test_api_showcase_public_serves_only_the_allowlist(tmp_path):
+    """Enabled showcase serves the curated allowlist to an ANONYMOUS caller, and nothing else.
+
+    Why this matters: this is the privacy contract end-to-end. A gated relay (view_token set)
+    still answers /api/showcase with no session, but the body carries ONLY allowlisted
+    projects — a non-listed project must never appear — and only the summary card fields.
+    """
+    showcase = ShowcaseConfig(enabled=True, projects=(("demo", "A curated demo blurb."),))
+    with _running_relay(tmp_path, view_token=_VIEW, showcase=showcase) as (base_url, _db):
+        # Two projects exist in the store; only "demo" is on the allowlist.
+        _push_checklist(base_url, "demo", [{"text": "Ship it", "done": True}])
+        _push_checklist(base_url, "secret", [{"text": "Hidden", "done": False}])
+
+        status, out = _get_json(base_url, "/api/showcase")  # no cookie — public
+        assert status == 200
+        names = [c["name"] for c in out["projects"]]
+        assert names == ["demo"]  # "secret" is not allowlisted → absent
+        card = out["projects"][0]
+        assert card["description"] == "A curated demo blurb."  # the curated blurb wins
+        assert card["status"] == "shipped"  # 1/1 done
+        assert set(card) == {"name", "description", "status", "progress", "report_count"}
+
+
+def test_api_me_showcase_enabled_tracks_config(tmp_path):
+    """/api/me reports showcase_enabled matching the server config (drives the sidebar link)."""
+    off = ShowcaseConfig(enabled=False)
+    with _running_relay(tmp_path, showcase=off) as (base_url, _db):
+        _, me = _get_json(base_url, "/api/me")
+        assert me["showcase_enabled"] is False
+    on = ShowcaseConfig(enabled=True, projects=(("demo", ""),))
+    with _running_relay(tmp_path, showcase=on) as (base_url, _db):
+        _, me = _get_json(base_url, "/api/me")
+        assert me["showcase_enabled"] is True
 
 
 # --- POST /api/reports/<id>/comments: the SPA's cookie-authed JSON comment write -------

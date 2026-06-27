@@ -86,6 +86,120 @@ def test_me_viewer_scope_is_the_sorted_granted_projects():
     }
 
 
+def test_me_showcase_enabled_flag_passes_through():
+    """showcase_enabled rides the /api/me shape so the SPA can show the public link.
+
+    Why this matters: the "Public showcase" sidebar link is shown only when the relay
+    actually exposes the surface. A default of False keeps existing callers (and the open
+    loopback case above) unchanged; passing True must surface True.
+    """
+    me = api.serialize_me(
+        gated=True,
+        principal={"user_id": 1, "role": "admin", "name": "Yusuf"},
+        allowed=None,
+        display_tz=_LA,
+        showcase_enabled=True,
+    )
+    assert me["showcase_enabled"] is True
+
+
+# --- serialize_showcase: the public, no-login curated cards -------------------
+
+
+def _showcase_row(project, *, done, total, report_count=3, latest_body="", blurb=""):
+    """Build a curated-Showcase entry: a latest_report_per_project row + a blurb.
+
+    Why: the showcase serializer reads only a handful of row fields (the counts, the
+    report count, the body for the headline fallback) plus the curated blurb the server
+    attaches from the allowlist — so the fixture carries exactly those.
+    """
+    return {
+        "project": project,
+        "checklist_done": done,
+        "checklist_total": total,
+        "report_count": report_count,
+        "latest_body": latest_body,
+        "blurb": blurb,
+    }
+
+
+def test_showcase_card_status_is_active_until_complete_then_shipped():
+    """A card reads "active" until every item is done, then "shipped".
+
+    Why this matters: the status pill is DERIVED from completion (observe-and-reframe),
+    not authored — so the pill can never disagree with the progress bar beside it.
+    """
+    out = api.serialize_showcase(
+        [
+            _showcase_row("orion", done=6, total=15),  # 40% -> active
+            _showcase_row("barebones-ai-village", done=4, total=4),  # 100% -> shipped
+        ]
+    )
+    cards = {c["name"]: c for c in out["projects"]}
+    assert cards["orion"]["status"] == "active"
+    assert cards["orion"]["progress"] == {"done": 6, "total": 15, "pct": 40}
+    assert cards["barebones-ai-village"]["status"] == "shipped"
+    assert cards["barebones-ai-village"]["progress"]["pct"] == 100
+
+
+def test_showcase_preserves_allowlist_order_and_report_count():
+    """Cards come back in the order the server passed them, carrying the report count."""
+    out = api.serialize_showcase(
+        [
+            _showcase_row("b", done=1, total=2, report_count=7),
+            _showcase_row("a", done=0, total=1, report_count=1),
+        ]
+    )
+    assert [c["name"] for c in out["projects"]] == ["b", "a"]  # not re-sorted
+    assert out["projects"][0]["report_count"] == 7
+
+
+def test_showcase_description_prefers_blurb_then_headline():
+    """A curated blurb wins; without one, the latest report's headline stands in.
+
+    Why this matters: the operator's editorial copy is the intended public description,
+    but an allowlisted project with no blurb yet must still read sensibly rather than
+    blank — so the observed headline is the graceful fallback.
+    """
+    out = api.serialize_showcase(
+        [
+            _showcase_row(
+                "curated", done=1, total=2, blurb="A local-first tracker.",
+                latest_body="Headline that should be ignored\nbody",
+            ),
+            _showcase_row(
+                "fallback", done=1, total=2, blurb="",
+                latest_body="Observed headline\nmore body",
+            ),
+            _showcase_row("bare", done=1, total=2, blurb="", latest_body=""),
+        ]
+    )
+    cards = {c["name"]: c for c in out["projects"]}
+    assert cards["curated"]["description"] == "A local-first tracker."
+    assert cards["fallback"]["description"] == "Observed headline"
+    assert cards["bare"]["description"] == ""  # no blurb, no body -> empty, not an error
+
+
+def test_showcase_card_exposes_only_summary_fields():
+    """A card carries ONLY summary facts — no checklist, reports, comments, or deadlines.
+
+    Why this matters: the Showcase is public and no-login, so the privacy boundary is the
+    SHAPE of this dict. Pinning the exact key set means a future field added to the
+    portfolio/project serializers can't silently leak to anonymous viewers — this test
+    fails the moment the public card grows a key.
+    """
+    out = api.serialize_showcase([_showcase_row("orion", done=6, total=15)])
+    card = out["projects"][0]
+    assert set(card) == {"name", "description", "status", "progress", "report_count"}
+    for leaked in ("checklist", "comments", "reports", "next_due", "at_risk", "body"):
+        assert leaked not in card
+
+
+def test_showcase_empty_input_is_empty_projects():
+    """No allowlisted projects -> an empty list, not an error (disabled is handled upstream)."""
+    assert api.serialize_showcase([]) == {"projects": []}
+
+
 # --- serialize_portfolio: the projects-vs-trackers split ----------------------
 
 

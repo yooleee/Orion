@@ -1137,6 +1137,79 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
     assert seen and seen[0][-2] is True
 
 
+def test_parse_showcase_projects_splits_name_and_optional_blurb():
+    """NAME[:blurb] flags parse to ordered (name, blurb) pairs; first colon only.
+
+    Why this matters: the curated allowlist + its public copy come from these flags, so the
+    parse rules are a contract — order is preserved (it is the display order), a missing
+    blurb is "" (the serializer then falls back to the headline), a blurb may itself contain
+    colons, and a blank name is dropped rather than producing a nameless card.
+    """
+    pairs = cli._parse_showcase_projects(
+        [
+            "orion:A tracker: observed, not authored",  # blurb keeps its inner colon
+            "barebones-ai-village",  # no blurb -> ""
+            "  ",  # blank -> dropped
+            " spaced : trimmed ",  # both sides stripped
+        ]
+    )
+    assert pairs == (
+        ("orion", "A tracker: observed, not authored"),
+        ("barebones-ai-village", ""),
+        ("spaced", "trimmed"),
+    )
+    assert cli._parse_showcase_projects(None) == ()  # flag never passed
+
+
+def test_relay_serve_showcase_flags_build_a_showcase_config(tmp_path, monkeypatch):
+    """`--showcase` + repeated `--showcase-project` reach serve() as a ShowcaseConfig.
+
+    Why this matters: the public surface is opt-in and curated entirely from the CLI (the
+    relay does not read orion.toml), so the flags must thread through to serve()'s showcase=
+    kwarg as the enabled flag plus the ordered allowlist — a flag that parsed but got
+    dropped would leave the Showcase silently empty or off.
+    """
+    from relay.server import ShowcaseConfig
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    seen = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
+
+    code = cli.main(
+        [
+            "relay-serve",
+            "--host", "127.0.0.1",
+            "--showcase",
+            "--showcase-project", "orion:A local-first tracker.",
+            "--showcase-project", "barebones-ai-village",
+            "--config", str(tmp_path / "orion.toml"),
+        ]
+    )
+    assert code == 0
+    showcase = seen[0]["showcase"]
+    assert isinstance(showcase, ShowcaseConfig)
+    assert showcase.enabled is True
+    assert showcase.projects == (
+        ("orion", "A local-first tracker."),
+        ("barebones-ai-village", ""),
+    )
+
+
+def test_relay_serve_showcase_defaults_off(tmp_path, monkeypatch):
+    """Without the flags, serve() gets a disabled ShowcaseConfig (the no-op default)."""
+    from relay.server import ShowcaseConfig
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    seen = []
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
+
+    code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
+    assert code == 0
+    assert seen[0]["showcase"] == ShowcaseConfig(enabled=False, projects=())
+
+
 def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
     """A fail-closed guard ValueError from serve() becomes a clean exit 1.
 

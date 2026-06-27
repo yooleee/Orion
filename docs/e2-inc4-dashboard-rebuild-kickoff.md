@@ -12,37 +12,33 @@ Role in project: Read this at the START of the next session, THEN plan the
 
 # Kickoff: E2 Inc 4 — the sectioned dashboard rebuild (richer-client SPA)
 
-## Status — 4a core SHIPPED (2026-06-26, PR #61, in review)
+## Status — 4a nearly done; **live in production**; Showcase + mobile + render.py-retire remain (2026-06-27)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. 4a's core (PR #61), the **Tracker page**, **Scheduling**,
-> the **first production deployment** (`project-orion.fly.dev`), and **comment writes** are all done. The
-> remaining 4a band is the **Showcase guest view** (`desktop-08`) + the **mobile pass**
-> (`mobile-all-screens`), then **retire `render.py` at parity**. Start each with a plan-mode pass.
+> `design/README.md` + `design/screenshots/`. **Finish the 4a band**, then start 4b/4c as length allows.
+> The 4a remainder, in order: (5) **Showcase guest view** (`desktop-08`, full-bleed, no-login) + the
+> **mobile pass** (`mobile-all-screens`); (6) **retire `render.py` at parity** (also removes the legacy
+> form comment route). Then **4b** Disciplines & **4c** Connections (each its own PR). Start each slice
+> with a plan-mode pass per the repo discipline; eyes-on every screen vs `design/screenshots/` across all
+> three themes; ship + redeploy (see **Deployment** below).
 >
-> **Comment writes — SHIPPED** (branch `e2-inc4-4a-comment-writes`). `POST /api/reports/:id/comments`
-> (cookie-authed JSON; reuses the form route's CSRF/auth/scope/identity guards) + the interactive composer.
-> Verified eyes-on: gated login → authed post → store persistence → identity attribution → XSS-inert
-> render (a `<script>` body shows as literal text, no console alert). Backend 770 + Vitest 28 green.
->
-> **Tracker page — SHIPPED** (branch `e2-inc4-4a-tracker-page`, PR #62, on PR #61). gap-8 (KI-22) closed
-> via **option 2**: the producer ships a first-class semantic `status` field end-to-end (additive, legacy
-> text embed kept), the relay folds `in_progress` into `state` + passes raw `status` through, and
-> `Tracker.tsx` (+ `TrackerRow`/`TrackerGroup`) renders circular indicators, legend, grouped roll-ups.
->
-> **Scheduling — SHIPPED** (branch `e2-inc4-4a-scheduling`, on PR #62). Pure read-only cross-project
-> derivation: `GET /api/scheduling` (`api.serialize_scheduling`) buckets every open dated deadline into
-> OVERDUE / THIS WEEK / LATER with a per-row source tag (◇ project / ⊟ tracker) + a summary chip row;
-> `Scheduling.tsx` + `ScheduleRow`. Verified eyes-on vs `desktop-05-scheduling-sepia.png` across all three
-> themes with live data (applications tracker + an orion project). Backend 764 + Vitest 23 green.
+> **Already SHIPPED + merged to `main` + deployed:** 4a core (JSON API + SPA shell + Projects home /
+> Project / Report + single-host serving), the **Tracker page** (gap-8/KI-22 closed via a first-class
+> producer `status` field), **Scheduling** (`GET /api/scheduling` cross-project deadline buckets),
+> per-project **report numbering**, the **first production deployment** (`project-orion.fly.dev`), and
+> **comment writes** (`POST /api/reports/:id/comments`, cookie-authed, security-reviewed). Backend 770 +
+> Vitest 28 green at handoff. Per-slice detail is in the band list + dated notes below.
 
-The JSON API seam (`relay/api.py` + [`docs/dashboard-api-contract.md`](dashboard-api-contract.md)), the
-explicit `kind` project/tracker flag, the React/Vite SPA (`web/`: three-theme tokens, shell, routing,
-login, **Projects home + Project page + Report detail**), and **single-host serving** (`relay-serve
---web-dir` + SPA CSP + path-traversal guard + index.html fallback; multi-stage Dockerfile) are built,
-verified end-to-end across all three themes (including the production single-host path), and in review as
-**PR #61**. Backend + Vitest green. `render.py` still serves the legacy HTML as the parity fallback (kept
-working). The comment composer is rendered but **inert** (writes deferred).
+### Deployment (LIVE — read before shipping a slice)
+
+The dashboard is live at **`https://project-orion.fly.dev`** (Fly app `project-orion`, single-host SPA via
+the multi-stage `Dockerfile` + `fly.toml`). To ship a slice: merge to `main`, then **`fly deploy -a
+project-orion`** from a clean `main` checkout (builds the SPA + relay image; the persistent `/data` volume
+— reports, comments, users — is preserved across deploys). The producer's `orion.toml` `[relay] url` points
+at the new host; push producer data with `PYTHONPATH=src` until the installed `orion` is updated. The relay
+is gated (per-user login + the bootstrap view key); local eyes-on of authed surfaces needs a gated serve —
+see the [[relay-serve-local-eyes-on-recipe]] memory. The old `orion-relay-horizon-c` app was migrated off
+and **destroyed**.
 
 ### Remaining 4a band (build next — smallest reviewable unit, eyes-on each vs `design/screenshots/`)
 
@@ -56,9 +52,9 @@ working). The comment composer is rendered but **inert** (writes deferred).
    tracker's open dated deadlines bucketed into OVERDUE / THIS WEEK / LATER with source tags + a summary.
    `GET /api/scheduling` (`api.serialize_scheduling`, open+dated only, reuses `_deadline_state` /
    `slipping_item_keys` — no new derivation) + `Scheduling.tsx` + `ScheduleRow`.
-3. **First production deployment** — **in flight.** SPA cutover to a NEW Fly app `project-orion.fly.dev`
-   (Fly has no in-place rename); retire the old `orion-relay-horizon-c`. Production cutover accepted (the
-   inert composer is the only regression, closed by the next slice). See the approved plan's Unit D.
+3. **First production deployment** — **SHIPPED.** SPA cutover to a NEW Fly app `project-orion.fly.dev`
+   (Fly has no in-place rename); the old `orion-relay-horizon-c`'s DB (reports/comments/users) + all
+   secrets were migrated over and the old app destroyed. See the **Deployment** note above for redeploys.
 4. **Comment writes** — **SHIPPED.** `POST /api/reports/:id/comments` (cookie-authed JSON, reusing the
    form route's CSRF/auth/scope/identity guards) + the interactive composer; closes the cutover's one gap.
    Verified eyes-on incl. XSS-inert render.

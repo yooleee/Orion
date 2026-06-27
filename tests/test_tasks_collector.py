@@ -181,11 +181,12 @@ def test_snapshot_captures_open_and_done_in_file_order(tmp_path):
     )
     items = snapshot(path)
 
+    # group is the "# TODO" heading above the items (grouping covered fully below).
     assert items == (
-        ChecklistItem(text="Build collector contract", done=True),
-        ChecklistItem(text="Slack delivery", done=False),
-        ChecklistItem(text="Add intake command", done=True),  # uppercase [X] is done
-        ChecklistItem(text="Wire the dashboard", done=False),  # `*` bullet recognized
+        ChecklistItem(text="Build collector contract", done=True, group="TODO"),
+        ChecklistItem(text="Slack delivery", done=False, group="TODO"),
+        ChecklistItem(text="Add intake command", done=True, group="TODO"),  # uppercase [X] is done
+        ChecklistItem(text="Wire the dashboard", done=False, group="TODO"),  # `*` bullet recognized
     )
 
 
@@ -204,6 +205,32 @@ def test_snapshot_dedupes_by_text_first_wins(tmp_path):
     assert items == (ChecklistItem(text="Duplicate", done=False),)
 
 
+def test_snapshot_groups_items_by_nearest_heading(tmp_path):
+    """Each item's group is the nearest preceding Markdown heading; pre-heading items stay None.
+
+    Why this matters: this is what turns a flat checkbox roadmap into dashboard MILESTONES —
+    the relay derives per-group progress (`derive.milestones`) from this field. An item above
+    any heading is genuinely ungrouped (None), and a later heading re-scopes the items under it,
+    so the project page's FORWARD LOOK reflects the file's section structure.
+    """
+    path = _write_tasks(
+        tmp_path,
+        "- [x] Untitled intro task\n"  # before any heading -> group None
+        "## Horizon A\n"
+        "- [x] A one\n"
+        "- [ ] A two\n"
+        "### Horizon B\n"  # any ATX level (#..######) is a heading
+        "- [ ] B one\n",
+    )
+    items = snapshot(path)
+    assert items == (
+        ChecklistItem(text="Untitled intro task", done=True, group=None),
+        ChecklistItem(text="A one", done=True, group="Horizon A"),
+        ChecklistItem(text="A two", done=False, group="Horizon A"),
+        ChecklistItem(text="B one", done=False, group="Horizon B"),
+    )
+
+
 def test_snapshot_ignores_non_checklist_lines(tmp_path):
     """Prose, headings, and plain bullets are not checklist items.
 
@@ -214,7 +241,10 @@ def test_snapshot_ignores_non_checklist_lines(tmp_path):
         tmp_path,
         "# Heading\nSome prose.\n- A plain bullet\n- [ ] Real item\n",
     )
-    assert snapshot(path) == (ChecklistItem(text="Real item", done=False),)
+    # The heading is not an item — but it does set the item's group.
+    assert snapshot(path) == (
+        ChecklistItem(text="Real item", done=False, group="Heading"),
+    )
 
 
 def test_snapshot_missing_file_returns_empty_not_error(tmp_path):

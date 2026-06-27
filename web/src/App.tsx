@@ -20,6 +20,7 @@ import { Project } from "./routes/Project";
 import { Report } from "./routes/Report";
 import { Tracker } from "./routes/Tracker";
 import { Scheduling } from "./routes/Scheduling";
+import { Showcase } from "./routes/Showcase";
 import { NotFound, Todos } from "./routes/placeholders";
 
 export function App() {
@@ -50,6 +51,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login me={me} onAuthChange={loadMe} />} />
+      {/* Public, no-login — full-bleed, OUTSIDE the Shell (its own top bar, no sidebar). */}
+      <Route path="/showcase" element={<Showcase />} />
       <Route element={<Shell me={me} onAuthChange={loadMe} />}>
         <Route index element={<Home />} />
         <Route path="project/:name" element={<Project />} />

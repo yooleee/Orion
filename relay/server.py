@@ -595,7 +595,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # use the SAME cookie session + scope the dashboard routes do — but answer with JSON
         # (and a 401 instead of a 303 redirect, so the SPA's fetch routes itself to /login).
         if (
-            path in ("/api/me", "/api/portfolio", "/api/scheduling")
+            path in ("/api/me", "/api/portfolio", "/api/scheduling", "/api/showcase")
             or path.startswith("/api/projects/")
             or path.startswith("/api/reports/")
         ):
@@ -1901,8 +1901,31 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         principal=principal,
                         allowed=allowed,
                         display_tz=self.server.display_tz,
+                        showcase_enabled=self.server.showcase_enabled,
                     ),
                 )
+                return
+
+            # /api/showcase is the public, no-login surface: like /api/me it is exempt from
+            # the 401 gate (a guest has no session). It 404s when the Showcase is disabled
+            # (existence-hiding), and otherwise serves ONLY the curated allowlist, in
+            # allowlist order, independent of any viewer scope.
+            if path == "/api/showcase":
+                if not self.server.showcase_enabled:
+                    self._send_json(404, {"error": "not found"})
+                    return
+                rows_by_name = {
+                    r["project"]: r
+                    for r in latest_report_per_project(conn, today=today)
+                }
+                # Walk the allowlist (not the store) so the order is the operator's and a
+                # listed-but-absent project is simply skipped rather than erroring.
+                entries = [
+                    {**rows_by_name[name], "blurb": blurb}
+                    for name, blurb in self.server.showcase_projects
+                    if name in rows_by_name
+                ]
+                self._send_json(200, api.serialize_showcase(entries))
                 return
 
             # Every OTHER read requires a session on a gated relay: answer 401 JSON (not a
@@ -2340,6 +2363,33 @@ class AuthConfig:
     allow_legacy_admin: bool = False
 
 
+@dataclass(frozen=True)
+class ShowcaseConfig:
+    """The relay's public, no-login Showcase configuration (E2 Inc 4, slice 4a).
+
+    Args:
+        enabled: Master opt-in switch. Off by default — the public surface exists only
+            when an operator explicitly turns it on (default-deny). While off,
+            GET /api/showcase 404s and the SPA hides the "Public showcase" link.
+        projects: The curated allowlist as ordered (name, blurb) pairs. ONLY these
+            projects appear publicly, in this order; `blurb` is the curated one-line
+            description ("" → fall back to the observed headline). Insertion order is the
+            display order.
+
+    Why:
+        A public, no-login surface is a genuine privacy boundary (Orion's first rule:
+        never leak), so curation is an EXPLICIT allowlist, not "publish everything when
+        on." Bundling the two knobs into one frozen object keeps the already-long
+        RelayServer / create_server / serve signatures readable — the same pattern
+        AuthConfig uses. These are project NAMES + operator-authored blurbs, not secrets,
+        so they ride on CLI flags (the relay never reads orion.toml), unlike the auth
+        secrets which come from .env.
+    """
+
+    enabled: bool = False
+    projects: tuple[tuple[str, str], ...] = ()
+
+
 class RelayServer(ThreadingHTTPServer):
     """A threaded HTTP server carrying the relay's db path and auth token.
 
@@ -2377,6 +2427,7 @@ class RelayServer(ThreadingHTTPServer):
         display_tz: ZoneInfo = _DISPLAY_TZ,
         auth: "AuthConfig | None" = None,
         web_dir: Path | None = None,
+        showcase: "ShowcaseConfig | None" = None,
     ):
         # Set config before binding so it is available to any request handled after
         # serve_forever() starts.
@@ -2384,6 +2435,11 @@ class RelayServer(ThreadingHTTPServer):
         self.token = token
         self.view_token = view_token
         self.display_tz = display_tz
+        # E2 Inc 4: the public, no-login Showcase. None = disabled (no public surface).
+        # Spread onto the server so each handler reads the knobs via self.server.<name>.
+        showcase = showcase or ShowcaseConfig()
+        self.showcase_enabled = showcase.enabled
+        self.showcase_projects = showcase.projects
         # E2 Inc 4: when set, the built SPA (web/dist) is served from here single-host —
         # static assets + an index.html fallback for client-side routes — and GET routing
         # serves the SPA instead of the legacy server-rendered HTML. None = legacy HTML.
@@ -2437,6 +2493,7 @@ def create_server(
     display_tz: ZoneInfo = _DISPLAY_TZ,
     auth: "AuthConfig | None" = None,
     web_dir: Path | None = None,
+    showcase: "ShowcaseConfig | None" = None,
 ) -> RelayServer:
     """Build and bind a RelayServer (does not start serving).
 
@@ -2489,7 +2546,7 @@ def create_server(
             "secret (relay-serve --view-token-env) before binding beyond loopback."
         )
     return RelayServer(
-        (host, port), db_path, token, view_token, display_tz, auth, web_dir
+        (host, port), db_path, token, view_token, display_tz, auth, web_dir, showcase
     )
 
 
@@ -2503,6 +2560,7 @@ def serve(
     display_tz: ZoneInfo = _DISPLAY_TZ,
     auth: "AuthConfig | None" = None,
     web_dir: Path | None = None,
+    showcase: "ShowcaseConfig | None" = None,
 ) -> None:
     """Run the relay server until interrupted (the blocking entry point).
 
@@ -2528,7 +2586,8 @@ def serve(
         rather than a traceback.
     """
     server = create_server(
-        host, port, db_path, token, view_token, require_view_auth, display_tz, auth, web_dir
+        host, port, db_path, token, view_token, require_view_auth, display_tz, auth,
+        web_dir, showcase,
     )
     bound_host, bound_port = server.server_address
     # Surface read-auth state at startup — the operator's confirmation that a

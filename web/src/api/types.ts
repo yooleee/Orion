@@ -59,7 +59,7 @@ export interface Me {
   identity: Identity | null;
   scope: Scope;
   display_tz: string;
-  showcase_enabled: boolean; // reserved; always false in 4a
+  showcase_enabled: boolean; // true when the relay exposes the public Showcase (GET /api/showcase)
 }
 
 // --- GET /api/portfolio -----------------------------------------------------
@@ -261,6 +261,26 @@ export interface ScheduleSummary {
 export interface SchedulingData {
   summary: ScheduleSummary;
   buckets: ScheduleBuckets;
+}
+
+// --- GET /api/showcase ------------------------------------------------------
+
+/** A curated card's derived status pill: "shipped" at 100% done, else "active". */
+export type ShowcaseStatus = "shipped" | "active";
+
+/** One curated project on the public, no-login Showcase. SUMMARY FACTS ONLY — by design
+ *  there is no checklist, report, comment, or deadline here (the public privacy boundary).
+ *  `description` is the operator's curated blurb, or the observed headline, or "". */
+export interface ShowcaseCard {
+  name: string;
+  description: string;
+  status: ShowcaseStatus;
+  progress: Progress;
+  report_count: number;
+}
+
+export interface ShowcaseData {
+  projects: ShowcaseCard[];
 }
 
 // --- POST /api/login, POST /api/logout --------------------------------------

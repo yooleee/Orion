@@ -1287,3 +1287,210 @@ h3 {
   background: var(--panel2);
   color: var(--tmid);
 }
+
+/* --- SHOWCASE (full-bleed, public no-login surface) ------------------------- */
+/* design/README §10 + desktop-08. Lives outside the shell: its own top bar, no
+   sidebar. All colours are tokens, so it re-themes for free across Dark/Sepia/Light. */
+
+.showcase-screen {
+  min-height: 100vh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Top bar — brand + SHOWCASE pill (left); compact theme switcher + dashboard link (right). */
+.showcase-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--border);
+}
+.showcase-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.showcase-wordmark {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 600;
+}
+.showcase-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.showcase-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+/* Icon-only theme switcher: no flex:1 stretch, just three tight glyph buttons. */
+.theme-switch-compact .seg {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  font-size: 13px;
+}
+.showcase-dash-link {
+  padding: 8px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--tmid);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Centered content column. */
+.showcase-body {
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px 24px 64px;
+}
+
+/* Hero — centered editorial display type. */
+.showcase-hero {
+  text-align: center;
+  padding: 44px 0 8px;
+}
+.showcase-hero-title {
+  font-size: 46px;
+  letter-spacing: -0.02em;
+  margin: 14px 0 16px;
+  color: var(--thi);
+}
+.showcase-hero-sub {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--tlow);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Section header: serif title + a rule filling the remaining width. */
+.showcase-section {
+  margin-top: 44px;
+}
+.showcase-section-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.showcase-section-head h2 {
+  font-size: 20px;
+  font-weight: 600;
+}
+.showcase-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.showcase-note {
+  color: var(--tlow);
+  font-size: 14px;
+  padding: 12px 0;
+}
+
+/* Selected-projects grid: two larger cards. */
+.showcase-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+.showcase-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 22px 24px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.showcase-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.showcase-card-name {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.showcase-status {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.showcase-status-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.showcase-status-shipped {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+.showcase-card-desc {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--tlow);
+  margin: 0 0 16px;
+}
+.showcase-card-meta {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tfaint);
+  margin-bottom: 8px;
+}
+
+/* How-I-work: three numbered principle cards. */
+.showcase-howiwork {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.showcase-how-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 20px;
+}
+.showcase-how-num {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.showcase-how-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--thi);
+  margin: 10px 0 8px;
+}
+.showcase-how-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--tlow);
+  margin: 0;
+}
+
+.showcase-footer {
+  text-align: center;
+  font-size: 12px;
+  color: var(--tfaint);
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}

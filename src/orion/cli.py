@@ -690,6 +690,29 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--showcase",
+        action="store_true",
+        help=(
+            "Enable the public, no-login Showcase surface (default: off). When on, "
+            "GET /api/showcase serves ONLY the projects named with --showcase-project; "
+            "while off it 404s and the dashboard hides the Public showcase link."
+        ),
+    )
+    relay_parser.add_argument(
+        "--showcase-project",
+        action="append",
+        default=None,
+        dest="showcase_projects",
+        metavar='NAME[:"blurb"]',
+        help=(
+            "Add a project to the public Showcase allowlist (repeatable; order is the "
+            'display order). Optionally append a curated one-line blurb after a colon, '
+            'e.g. --showcase-project \'orion:A local-first tracker that observes & '
+            "reframes'. Without a blurb the project's latest report headline is shown. "
+            "Only effective with --showcase."
+        ),
+    )
+    relay_parser.add_argument(
         "--config",
         default=default_config,
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
@@ -831,6 +854,8 @@ def main(argv: list[str] | None = None) -> int:
             session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
             web_dir=Path(args.web_dir) if args.web_dir else None,
+            showcase_enabled=args.showcase,
+            showcase_projects=args.showcase_projects,
         )
     if args.command == "relay-user":
         if args.relay_user_command == "add":
@@ -2930,6 +2955,37 @@ def _load_relay_serve():
         ) from exc
 
 
+def _parse_showcase_projects(
+    raw: list[str] | None,
+) -> tuple[tuple[str, str], ...]:
+    """Parse repeated --showcase-project NAME[:blurb] flags into (name, blurb) pairs.
+
+    Args:
+        raw: The accumulated --showcase-project values (argparse append, or None when the
+            flag was never passed).
+
+    Returns:
+        Ordered (name, blurb) pairs preserving CLI order — the Showcase display order.
+        A value with no colon yields an empty blurb (the serializer then falls back to
+        the observed headline). Surrounding whitespace is stripped from both parts; an
+        entry whose name is empty after stripping is skipped.
+
+    Why:
+        The allowlist + its curated copy come from the CLI (the relay never reads
+        orion.toml), so one place turns the flat "name:blurb" strings into the structured
+        pairs ShowcaseConfig holds. Splitting on the FIRST colon only lets a blurb itself
+        contain colons (e.g. "orion: a tracker: observed, not authored").
+    """
+    pairs: list[tuple[str, str]] = []
+    for value in raw or []:
+        name, sep, blurb = value.partition(":")
+        name = name.strip()
+        if not name:
+            continue
+        pairs.append((name, blurb.strip() if sep else ""))
+    return tuple(pairs)
+
+
 def cmd_relay_serve(
     host: str,
     port: int,
@@ -2942,6 +2998,8 @@ def cmd_relay_serve(
     session_days: int = 30,
     allow_legacy_admin: bool = False,
     web_dir: Path | None = None,
+    showcase_enabled: bool = False,
+    showcase_projects: list[str] | None = None,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
 
@@ -3020,9 +3078,9 @@ def cmd_relay_serve(
             )
 
         serve = _load_relay_serve()
-        # AuthConfig + the loopback test live in the relay package, importable now that
-        # _load_relay_serve has put the repo root on sys.path if it was needed.
-        from relay.server import AuthConfig, _is_loopback
+        # AuthConfig + ShowcaseConfig + the loopback test live in the relay package,
+        # importable now that _load_relay_serve has put the repo root on sys.path.
+        from relay.server import AuthConfig, ShowcaseConfig, _is_loopback
 
         # Sessions/provisioning need their secrets whenever the dashboard is access-gated
         # (a view secret is set) or provisioning is enabled (an admin token is set). Fail
@@ -3049,6 +3107,14 @@ def cmd_relay_serve(
             public_origin=public_origin,
             allow_legacy_admin=allow_legacy_admin,
         )
+
+        # The public Showcase allowlist + curated blurbs come from the CLI (project names
+        # are not secrets, and the relay does not read orion.toml). Disabled by default —
+        # a no-op ShowcaseConfig() — so the public surface only exists when asked for.
+        showcase = ShowcaseConfig(
+            enabled=showcase_enabled,
+            projects=_parse_showcase_projects(showcase_projects),
+        )
     except (SecretsError, ConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -3059,7 +3125,7 @@ def cmd_relay_serve(
         # view secret — surfaced here as a clean, actionable error, not a traceback.
         serve(
             host, port, db_path, token, view_token, require_view_auth, display_tz,
-            auth=auth, web_dir=web_dir,
+            auth=auth, web_dir=web_dir, showcase=showcase,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

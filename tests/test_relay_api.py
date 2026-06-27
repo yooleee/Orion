@@ -22,7 +22,7 @@ _TODAY = date(2026, 6, 26)
 _LA = ZoneInfo("America/Los_Angeles")
 
 
-def _item(text, *, done=False, due_date=None, key=None, group=None):
+def _item(text, *, done=False, due_date=None, key=None, group=None, status=None):
     """Build a checklist wire dict, attaching optional fields only when given.
 
     Why: mirrors the producer's optional-field shape (an absent field is a missing key,
@@ -35,6 +35,8 @@ def _item(text, *, done=False, due_date=None, key=None, group=None):
         item["key"] = key
     if group is not None:
         item["group"] = group
+    if status is not None:
+        item["status"] = status
     return item
 
 
@@ -269,6 +271,46 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
     assert out["comments"] == [
         {"id": 1, "author": "Alex", "role": None, "body": "nice", "created_at": "2026-06-25T00:00:00+00:00"}
     ]
+
+
+def test_project_detail_emits_in_progress_state_and_passes_status_through():
+    """A tracker item's structured status drives in_progress state + ships raw on the row (gap 8).
+
+    Why this matters: this is the closure of gap 8. An open, undated item the producer marked
+    in_progress used to collapse to not_started; it must now report state "in_progress". An
+    open item with a near deadline keeps its deadline urgency (overdue/due_soon LEADS the
+    single state), while the raw `status` still rides the row so the tracker's circular arc is
+    independent of that derived state. A done item reports "done" and carries its submitted
+    status. An item with no status keeps the old behaviour and a null `status`.
+    """
+    checklist = [
+        _item("Started, undated", status="in_progress"),  # the gap-8 case
+        _item("Started but overdue", due_date="2026-06-20", status="in_progress"),
+        _item("Submitted app", done=True, status="submitted"),
+        _item("Plain open item"),  # no status → not_started, status null
+    ]
+    out = api.serialize_project(
+        name="apps",
+        kind="tracker",
+        reports=[],
+        checklist=checklist,
+        observations=[],
+        comments=[],
+        today=_TODAY,
+    )
+    by_text = {r["text"]: r for r in out["checklist"]}
+    # The gap-8 case: open + undated + in_progress now reports in_progress (was not_started).
+    assert by_text["Started, undated"]["state"] == "in_progress"
+    assert by_text["Started, undated"]["status"] == "in_progress"
+    # Deadline urgency leads the single derived state, but raw status still rides the row.
+    assert by_text["Started but overdue"]["state"] == "overdue"
+    assert by_text["Started but overdue"]["status"] == "in_progress"
+    # Done items report done and carry their submitted status for the label nuance.
+    assert by_text["Submitted app"]["state"] == "done"
+    assert by_text["Submitted app"]["status"] == "submitted"
+    # No status ⇒ old behaviour and a null status (back-compat with status-less producers).
+    assert by_text["Plain open item"]["state"] == "not_started"
+    assert by_text["Plain open item"]["status"] is None
 
 
 def test_project_detail_handles_no_checklist():

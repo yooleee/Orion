@@ -26,6 +26,11 @@ export type Status =
 
 export type ProjectKind = "project" | "tracker";
 
+/** The tracker's raw, first-class observed status (E2 Inc 4, gap 8). Distinct from the
+ *  presentation `Status` enum: these are the producer's canonical item statuses. "submitted"
+ *  and "closed" are both done; "in_progress" is the open state `state` alone could not carry. */
+export type ItemStatus = "not_started" | "in_progress" | "submitted" | "closed";
+
 export type Role = "admin" | "viewer";
 
 /** done/total with a precomputed percentage (null when total is 0). */
@@ -134,7 +139,13 @@ export interface ChecklistItem {
   due_date: string | null;
   key: string | null;
   group: string | null;
-  state: Status; // 4a emits done | overdue | due_soon | not_started (gap 8: no embedded status yet)
+  // Derived per-row state: done | overdue | due_soon | in_progress | not_started. Deadline
+  // urgency leads; in_progress fills the open-and-undated gap (E2 Inc 4 closed gap 8).
+  state: Status;
+  // The raw observed status (null for status-less items, e.g. table to-do rows). Carried
+  // alongside `state` so the tracker's circular indicator can show the in-progress arc and
+  // the submitted/closed label nuance independently of the single derived state.
+  status: ItemStatus | null;
   slipping: boolean;
 }
 

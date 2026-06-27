@@ -290,17 +290,22 @@ Deferred).
   — the originating collector set is not stored, so the API ships `[]` and the SPA omits the "BUILT FROM"
   card; (5) **project description** — none stored, so the header sub-line is omitted; (7) **comment author
   role** — `report_comments.author` is free text with no identity, so `role` is `null` (overlaps KI-17);
-  (8) **embedded item status** (`in_progress`/`submitted`, the tracker's circular indicators) — the relay
-  stores `text` (status embedded in the string) + `done`, not a parsed status, so per-item `state` is
-  deadline/done-derived only (`done|overdue|due_soon|not_started`), and the richer status vocabulary waits
-  for the tracker page. Separately, the report **title** is the body headline (the report has no distinct
-  title field) — a documented choice, not a gap.
+  Separately, the report **title** is the body headline (the report has no distinct
+  title field) — a documented choice, not a gap. **(8) embedded item status is now CLOSED** — see below.
+  Gaps 3, 4, 5, 7 remain.
 - **Why it matters:** Each is a producer/wire extension (richer `participants`, a `collectors` list, a
-  `description`/status field on the blob), deliberately out of the read-only 4a backend seam. They are
+  `description` on the blob), deliberately out of the read-only 4a backend seam. They are
   flagged so the SPA's omissions read as intentional, and so the closing change is a known additive step.
 - **Severity:** low
-- **Status:** By-design for 4a (graceful degradation). Closed incrementally when the producer wire is next
+- **Status:** Partly closed. Gap 8 (item status) closed in the Tracker slice (see below); gaps 3/4/5/7
+  remain by-design for 4a (graceful degradation), closed incrementally when the producer wire is next
   extended; tracked against the contract doc's "Data gaps" list.
+- **Update (Tracker slice, E2 Inc 4):** gap 8 closed. The producer now ships a first-class semantic
+  `status` field (`not_started|in_progress|submitted|closed`) additively (the text embed stays for legacy
+  `render.py`/reports), the relay folds `in_progress` into `state` and passes raw `status` through, and the
+  tracker page renders the circular in-progress arc + submitted/closed label from it. Chosen over a
+  relay-side text parse so status is a clean observed property end-to-end rather than reverse-engineered
+  across the process boundary — the foundation later supervisor-side features build on.
 
 ## KI-23 — Legacy server-rendered dashboard not yet retired (parity pending)
 

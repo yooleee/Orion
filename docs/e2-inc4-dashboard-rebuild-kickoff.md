@@ -15,11 +15,16 @@ Role in project: Read this at the START of the next session, THEN plan the
 ## Status — 4a core SHIPPED (2026-06-26, PR #61, in review)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. 4a's core is built and in review (PR #61, branch
-> `e2-inc4-4a-spa-dashboard`); next is the **remaining 4a band**, starting with a plan-mode pass for the
-> **Tracker page**. Settle one open decision in that pass: how the tracker's circular *in-progress*
-> indicator gets its status (KI-22 gap-8). Then build `web/src/routes/Tracker.tsx` against
-> `/api/projects/:name`, checked against `design/screenshots/desktop-04-tracker-sepia.png`.
+> `design/README.md` + `design/screenshots/`. 4a's core (PR #61) and the **Tracker page** are both built;
+> next is **Scheduling** (`desktop-05`) — a new cross-project deadline aggregation + `Scheduling.tsx`.
+> Start with a plan-mode pass per the repo discipline.
+>
+> **Tracker page — SHIPPED** (branch `e2-inc4-4a-tracker-page`, built on PR #61). gap-8 (KI-22) was
+> closed via **option 2**: the producer ships a first-class semantic `status` field end-to-end (additive,
+> legacy text embed kept), the relay folds `in_progress` into `state` + passes raw `status` through, and
+> `web/src/routes/Tracker.tsx` (+ `TrackerRow`/`TrackerGroup`) renders the circular indicators, legend, and
+> grouped roll-ups. Verified eyes-on vs `desktop-04-tracker-sepia.png` across all three themes with live
+> relay data (the real `applications` tracker). Backend 759 + Vitest 19 green.
 
 The JSON API seam (`relay/api.py` + [`docs/dashboard-api-contract.md`](dashboard-api-contract.md)), the
 explicit `kind` project/tracker flag, the React/Vite SPA (`web/`: three-theme tokens, shell, routing,
@@ -31,12 +36,12 @@ working). The comment composer is rendered but **inert** (writes deferred).
 
 ### Remaining 4a band (build next — smallest reviewable unit, eyes-on each vs `design/screenshots/`)
 
-1. **Tracker page** (`desktop-04-tracker-sepia`) — the full "current focus" general-checklist page:
-   **circular** status indicators (vs projects' square checkboxes), the legend strip, grouped checklists
-   with group roll-ups. Data is **ready** — `/api/projects/:name` already returns the tracker's `kind` +
-   grouped `checklist` + `milestones`; `Tracker.tsx` is currently a placeholder. **Open decision (gap-8):**
-   the relay does not parse embedded `in_progress`/`submitted` status, so the circular in-progress arc
-   needs either a producer-wire status field or a client-side parse — settle in the plan pass.
+1. **Tracker page** (`desktop-04-tracker-sepia`) — **SHIPPED.** The full "current focus" general-checklist
+   page: **circular** status indicators (vs projects' square checkboxes), the legend strip, grouped
+   checklists with group roll-ups. gap-8 was closed via **option 2** (first-class producer `status` field,
+   not a relay/client text parse — see the contract's Data-gaps §8 and KI-22). `Tracker.tsx` +
+   `TrackerRow`/`TrackerGroup` render against `/api/projects/:name`; verified vs the screenshot across all
+   three themes.
 2. **Scheduling** (`desktop-05`) — a SMALL new cross-project derivation: aggregate every project's + the
    tracker's open deadlines into time buckets (OVERDUE / THIS WEEK / LATER) with source tags. New
    `/api/scheduling` endpoint (derive over all scoped projects' checklists) + `Scheduling.tsx`.

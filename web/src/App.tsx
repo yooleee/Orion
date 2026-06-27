@@ -18,7 +18,8 @@ import { Home } from "./routes/Home";
 import { Login } from "./routes/Login";
 import { Project } from "./routes/Project";
 import { Report } from "./routes/Report";
-import { NotFound, Todos, Tracker } from "./routes/placeholders";
+import { Tracker } from "./routes/Tracker";
+import { NotFound, Todos } from "./routes/placeholders";
 
 export function App() {
   // null = still loading the initial /api/me; undefined would conflate with "anonymous".

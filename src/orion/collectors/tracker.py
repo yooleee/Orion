@@ -229,11 +229,19 @@ def _application_items(text: str) -> list[ChecklistItem]:
         if status is not None:
             text_ = f"{title}{_STATUS_SEP}{status}"
             done = status in _DONE_STATUSES
+            # The structured, first-class status for the wire (E2 Inc 4, closing gap-8):
+            # the semantic form of the canonical display status ("In progress" ->
+            # "in_progress"). The four statuses are single-word/two-word, so lowercasing
+            # and replacing the space yields a stable enum value without a new constant.
+            # `text_` still embeds the status word (unchanged) so the legacy render.py /
+            # reports are untouched; this field is the additive, parse-free path.
+            semantic_status = status.lower().replace(" ", "_")
         else:
             # Unknown/absent status: keep the application (never drop it) as open, with
             # just its title so we never echo unrecognized free text onto the dashboard.
             text_ = title
             done = False
+            semantic_status = None
         # The bare title is the STABLE forward-store identity (key): `text_` embeds the
         # status, so it changes when the application advances (Not started -> Submitted),
         # but the title does not. Carrying key=title lets the relay track the SAME item's
@@ -245,7 +253,12 @@ def _application_items(text: str) -> list[ChecklistItem]:
         # to keep it clean; revisit only if the tracker is reused for a non-apps doc.
         items.append(
             ChecklistItem(
-                text=text_, done=done, due_date=deadline, key=title, group="Applications"
+                text=text_,
+                done=done,
+                due_date=deadline,
+                key=title,
+                group="Applications",
+                status=semantic_status,
             )
         )
     return items

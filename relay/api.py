@@ -121,18 +121,26 @@ def _item_state(item: dict, today: date) -> str:
 
     Returns:
         "done" when finished; else "overdue" / "due_soon" from classify_item; else
-        "not_started" (open, no near deadline). 4a does not parse the tracker's embedded
-        status, so "in_progress"/"submitted" are not emitted here (see contract gap 8).
+        "in_progress" when the producer marked it so (the tracker's structured status,
+        E2 Inc 4 closing gap 8); else "not_started" (open, undated, untouched).
 
     Why:
-        The project page's LIVE CHECKLIST colours each row by state. Built on classify_item
-        so a row's treatment can never disagree with the at-risk count. "not_started" is the
-        honest 4a default for an open, undated item until the richer status vocabulary lands.
+        The project page's LIVE CHECKLIST and the tracker page colour each row by state.
+        Built on classify_item so a row's treatment can never disagree with the at-risk
+        count. Deadline urgency (overdue/due_soon) leads the single state because it is the
+        more actionable signal; "in_progress" fills the open-and-undated gap that used to
+        collapse to "not_started". The raw `status` is ALSO shipped on the row (see
+        serialize_project) so the tracker's circular indicator can show the in-progress arc
+        independently of this single derived state. Absent status ⇒ the old behaviour.
     """
     if item.get("done"):
         return "done"
     state = classify_item(item, today)
-    return state if state is not None else "not_started"
+    if state is not None:
+        return state
+    if item.get("status") == "in_progress":
+        return "in_progress"
+    return "not_started"
 
 
 def _progress(done: int, total: int) -> dict:
@@ -360,6 +368,11 @@ def serialize_project(
             "key": item.get("key"),
             "group": item.get("group"),
             "state": _item_state(item, today),
+            # The raw observed status (E2 Inc 4, gap 8): None for items without one. Shipped
+            # alongside the derived `state` so the tracker's circular indicator renders the
+            # in_progress/submitted treatment directly, and so future consumers get status as
+            # a first-class fact rather than re-deriving it from `state`.
+            "status": item.get("status"),
             "slipping": _item_key(item) in slipping,
         }
         for item in items

@@ -737,17 +737,19 @@ def test_relay_push_carries_redacted_live_checklist(tmp_path, env_and_mocks):
 
 
 def _capture_checklist_pushes(mp):
-    """Monkeypatch cli.push_checklist to record (url, project, checklist, token) calls.
+    """Monkeypatch cli.push_checklist to record (url, project, checklist, token, kind) calls.
 
     Why: the command/watch loop call push_checklist as their only outbound effect; an
-    in-memory recorder lets each test assert on the exact payload without any network.
+    in-memory recorder lets each test assert on the exact payload without any network. `kind`
+    (E2 Inc 4) is keyword-only on push_checklist and rides every call, so the recorder
+    captures it too — letting a test assert the project/tracker flag propagates to the wire.
     """
     pushes = []
     mp.setattr(
         cli,
         "push_checklist",
-        lambda url, project, checklist, token: pushes.append(
-            (url, project, checklist, token)
+        lambda url, project, checklist, token, *, kind="project": pushes.append(
+            (url, project, checklist, token, kind)
         ),
     )
     return pushes
@@ -808,10 +810,11 @@ def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_moc
     assert code == 0
     assert len(pushes) == 1
 
-    url, project, checklist, token = pushes[0]
+    url, project, checklist, token, kind = pushes[0]
     assert url == "https://relay.test/ingest"  # the client derives /checklist from it
     assert project == "demo"
     assert token == "relay-secret"
+    assert kind == "project"  # default kind rides the push
     assert checklist[0] == {"text": "Wire the relay", "done": True}
     assert checklist[1] == {"text": "Render the dashboard", "done": False}
     # The secret-bearing item is present (open) but scrubbed — the privacy net holds on
@@ -871,7 +874,7 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
     assert code == 0
     assert len(pushes) == 1
 
-    _url, project, checklist, _token = pushes[0]
+    _url, project, checklist, _token, _kind = pushes[0]
     assert project == "apps"
     # The application item carries its status in the text and is done (Submitted); it also
     # emits the bare title as the stable forward-store `key` (Unit 3) and the "Applications"
@@ -932,7 +935,7 @@ def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_an
     code = cli.main(["checklist-push", "apps", "--config", str(toml)])
     assert code == 0
 
-    _url, _project, checklist, _token = pushes[0]
+    _url, _project, checklist, _token, _kind = pushes[0]
     assert checklist[0] == {
         "text": "Claude Corps Fellow (job) - In progress",
         "done": False,

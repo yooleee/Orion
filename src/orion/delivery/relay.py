@@ -102,6 +102,7 @@ def push_checklist(
     checklist: list,
     token: str,
     *,
+    kind: str = "project",
     timeout: float = 10.0,
 ) -> None:
     """POST a project's current checklist to a relay's /checklist endpoint.
@@ -114,6 +115,10 @@ def push_checklist(
             dicts — ALREADY redacted by the caller (the privacy net runs before this).
         token: The Bearer token authenticating the push (the SAME ingest credential),
             sent as `Authorization: Bearer <token>`.
+        kind: The project's kind ("project" | "tracker"), from config. E2 Inc 4: rides
+            the checklist push so the relay can split the home into projects vs. trackers.
+            The checklist push is the natural carrier — a tracker is checklist-only, so it
+            always pushes here, while report-only projects default to "project" relay-side.
         timeout: Seconds to wait for the request before failing.
 
     Returns:
@@ -131,7 +136,9 @@ def push_checklist(
         report it and carry on.
     """
     endpoint = urllib.parse.urljoin(relay_url, "/checklist")
-    data = json.dumps({"project": project, "checklist": checklist}).encode("utf-8")
+    data = json.dumps(
+        {"project": project, "checklist": checklist, "kind": kind}
+    ).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=data,

@@ -28,6 +28,7 @@ from relay.store import (
     comments_for_project,
     get,
     get_checklist,
+    get_project_kind,
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
@@ -42,6 +43,7 @@ from relay.store import (
     record_admin_audit,
     record_observations,
     revoke_user,
+    set_project_kind,
     update_last_login,
     upsert_checklist,
 )
@@ -938,3 +940,51 @@ def test_latest_report_per_project_slipping_is_none_without_today(tmp_path):
     row = {r["project"]: r for r in latest_report_per_project(conn)}["demo"]
 
     assert row["checklist_slipping"] is None
+
+
+# --- E2 Inc 4: per-project kind (relay_project_meta) --------------------------------
+# set_project_kind upserts, get_project_kind defaults to "project", and the portfolio
+# query carries the kind so the home can split projects from trackers.
+
+
+def test_get_project_kind_defaults_to_project(tmp_path):
+    """A project with no meta row reads as "project" — the safe default.
+
+    Why this matters: a report-only project (or one pushed by a producer predating the
+    flag) never records a kind, so the default must be "project" rather than an error.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert get_project_kind(conn, "demo") == "project"
+
+
+def test_set_project_kind_roundtrips_and_upserts(tmp_path):
+    """set_project_kind stores the kind and a later call overwrites it (one row).
+
+    Why this matters: kind is CURRENT STATE that rides every push; a re-push must replace,
+    not accumulate, so the latest config value always wins.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_project_kind(conn, "apps", "tracker")
+    assert get_project_kind(conn, "apps") == "tracker"
+    # A later push flips it back — the upsert overwrites the same row.
+    set_project_kind(conn, "apps", "project")
+    assert get_project_kind(conn, "apps") == "project"
+
+
+def test_latest_report_per_project_carries_kind(tmp_path):
+    """The portfolio rows expose kind: "tracker" when set, "project" by default.
+
+    Why this matters: the home splits projects from trackers off this field. A
+    checklist-only project marked "tracker" must carry that kind; an unmarked project
+    with a report must default to "project".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # A report-only project (unmarked → defaults to "project").
+    ingest(conn, _blob(project="orion"), "2026-06-26T00:00:00+00:00")
+    # A checklist-only project explicitly marked a tracker.
+    upsert_checklist(conn, "apps", _items(("Apply", False)), "2026-06-26T00:00:00+00:00")
+    set_project_kind(conn, "apps", "tracker")
+
+    rows = {r["project"]: r for r in latest_report_per_project(conn, today=date(2026, 6, 26))}
+    assert rows["orion"]["kind"] == "project"
+    assert rows["apps"]["kind"] == "tracker"

@@ -17,6 +17,7 @@
 # =============================================================================
 
 import json
+import json
 import threading
 import time
 import urllib.error
@@ -76,6 +77,7 @@ def _running_relay(
     require_view_auth=False,
     auth=None,
     public_origin=False,
+    web_dir=None,
 ):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
@@ -104,7 +106,7 @@ def _running_relay(
     if auth is None:
         auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER)
     server = create_server(
-        "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth
+        "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth, web_dir=web_dir
     )
     _, port = server.server_address
     base_url = f"http://127.0.0.1:{port}"
@@ -2609,3 +2611,313 @@ def test_mint_key_is_high_entropy_and_unique():
     keys = {mint_key() for _ in range(50)}
     assert len(keys) == 50  # no collisions
     assert all(len(k) >= 40 for k in keys)  # token_urlsafe(32) is ~43 chars
+
+
+# =============================================================================
+# E2 Inc 4: the SPA's read-only JSON API (/api/me|portfolio|projects|reports) +
+# the JSON auth siblings (POST /api/login, POST /api/logout). These cover the HTTP
+# wiring — the cookie gate, scope, kind split, and CSRF — over the pure serializers
+# already pinned in test_relay_api.py.
+# =============================================================================
+
+
+def _get_json(base_url, path, *, cookie=None):
+    """GET an /api route and return (status, parsed-json-or-None)."""
+    status, text = _get(base_url, path, cookie=cookie)
+    try:
+        return status, json.loads(text)
+    except ValueError:
+        return status, None
+
+
+def _post_api_json(base_url, path, payload, *, cookie=None, origin="__match__"):
+    """POST JSON to an /api route; return (status, parsed-json-or-text, headers).
+
+    origin "__match__" sends a same-origin Origin (so the CSRF check passes); None omits
+    it (to exercise the guard); any other string is sent verbatim (a foreign origin).
+    """
+    data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if origin == "__match__":
+        headers["Origin"] = base_url
+    elif origin is not None:
+        headers["Origin"] = origin
+    if cookie is not None:
+        headers["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
+    req = urllib.request.Request(base_url + path, data=data, headers=headers, method="POST")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=5) as resp:
+            body = resp.read().decode("utf-8")
+            try:
+                return resp.status, json.loads(body), resp.headers
+            except ValueError:
+                return resp.status, body, resp.headers
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        try:
+            return exc.code, json.loads(body), exc.headers
+        except ValueError:
+            return exc.code, body, exc.headers
+
+
+def _push_checklist(base_url, project, items, *, kind="project"):
+    """Push a checklist (with a kind) through the real /checklist endpoint."""
+    body = json.dumps({"project": project, "checklist": items, "kind": kind}).encode("utf-8")
+    return _post(base_url, body, path="/checklist")
+
+
+def test_api_me_open_relay(tmp_path):
+    """On an ungated relay /api/me reports not-gated, anonymous, unrestricted.
+
+    Why this matters: the SPA must not force a login on an open loopback relay.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, me = _get_json(base_url, "/api/me")
+        assert status == 200
+        assert me["gated"] is False and me["authenticated"] is False
+        assert me["scope"] == {"unrestricted": True, "projects": None}
+
+
+def test_api_routes_require_session_when_gated(tmp_path):
+    """A gated relay answers data /api/* with 401 JSON (not a 303) when unauthenticated.
+
+    Why this matters: the SPA's fetch needs a 401 to route itself to /login — a 303 to the
+    HTML login page would be useless to a JSON client.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        for path in ("/api/portfolio", "/api/projects/orion", "/api/reports/1"):
+            status, body = _get_json(base_url, path)
+            assert status == 401, path
+            assert body == {"error": "login required"}
+
+
+def test_api_me_is_reachable_unauthenticated_on_a_gated_relay(tmp_path):
+    """/api/me always returns 200 — even gated + unauthenticated — so the SPA learns to log in.
+
+    Why this matters: /api/me is the boot probe. If it 401'd like the data routes, the SPA
+    could not distinguish "needs login" from "relay down" — it must answer with the state.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        status, me = _get_json(base_url, "/api/me")
+        assert status == 200
+        assert me["gated"] is True and me["authenticated"] is False
+        assert me["identity"] is None
+
+
+def test_api_me_reflects_admin_and_viewer_scope(tmp_path):
+    """With a session, /api/me carries identity and the right scope per role."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["orion"])
+
+        _, admin_me = _get_json(base_url, "/api/me", cookie=_login(base_url, "admin-key"))
+        assert admin_me["identity"] == {"name": "Yusuf", "role": "admin"}
+        assert admin_me["scope"]["unrestricted"] is True
+
+        _, viewer_me = _get_json(base_url, "/api/me", cookie=_login(base_url, "mum-key"))
+        assert viewer_me["identity"] == {"name": "Mum", "role": "viewer"}
+        assert viewer_me["scope"] == {"unrestricted": False, "projects": ["orion"]}
+
+
+def test_api_portfolio_splits_projects_and_trackers(tmp_path):
+    """/api/portfolio puts a report-project under projects and a kind=tracker under trackers."""
+    with _running_relay(tmp_path) as (base_url, _db):
+        # A real project: push a report blob (the real blob's project is "demo").
+        _post(base_url, _real_blob_json().encode("utf-8"))
+        # A tracker: push a checklist marked kind=tracker.
+        _push_checklist(
+            base_url, "applications",
+            [{"text": "Apply somewhere", "done": False, "due_date": "2026-12-01"}],
+            kind="tracker",
+        )
+        status, out = _get_json(base_url, "/api/portfolio")
+        assert status == 200
+        assert "applications" in [t["name"] for t in out["trackers"]]
+        # The blob's project lands under projects, never under trackers.
+        assert "demo" in [p["name"] for p in out["projects"]]
+        assert "applications" not in [p["name"] for p in out["projects"]]
+        tracker = next(t for t in out["trackers"] if t["name"] == "applications")
+        assert tracker["kind"] == "tracker"
+        assert "segments" in tracker and "at_risk_items" in tracker
+
+
+def test_api_portfolio_is_scoped_for_a_viewer(tmp_path):
+    """A scoped viewer only sees granted projects in /api/portfolio."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _post(base_url, _real_blob_json().encode("utf-8"))  # project "demo"
+        _push_checklist(base_url, "applications", [{"text": "x", "done": False}], kind="tracker")
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["demo"])
+
+        _, out = _get_json(base_url, "/api/portfolio", cookie=_login(base_url, "mum-key"))
+        names = [p["name"] for p in out["projects"]] + [t["name"] for t in out["trackers"]]
+        assert names == ["demo"]  # the tracker is out of scope
+        assert out["scope"] == {"unrestricted": False, "projects": ["demo"]}
+
+
+def test_api_project_detail_and_missing_404(tmp_path):
+    """/api/projects/<name> returns detail for a real project, 404 for an unknown one."""
+    with _running_relay(tmp_path) as (base_url, _db):
+        _post(base_url, _real_blob_json().encode("utf-8"))
+        status, detail = _get_json(base_url, "/api/projects/demo")
+        assert status == 200 and detail["name"] == "demo"
+        assert "stats" in detail and "checklist" in detail and "reports" in detail
+
+        missing, body = _get_json(base_url, "/api/projects/ghost")
+        assert missing == 404 and body == {"error": "not found"}
+
+
+def test_api_report_detail_carries_nav_and_404s_unknown(tmp_path):
+    """/api/reports/<id> returns the report with nav; an unknown id is 404."""
+    with _running_relay(tmp_path) as (base_url, _db):
+        created = json.loads(_post(base_url, _real_blob_json().encode("utf-8"))[1])
+        report_id = created["id"]
+        status, detail = _get_json(base_url, f"/api/reports/{report_id}")
+        assert status == 200 and detail["id"] == report_id
+        assert detail["nav"] == {"prev_id": None, "next_id": None}  # the only report
+
+        missing, body = _get_json(base_url, "/api/reports/999999")
+        assert missing == 404 and body == {"error": "not found"}
+
+
+def test_api_login_sets_cookie_and_rejects_bad_key(tmp_path):
+    """POST /api/login returns {ok,user}+Set-Cookie on a good key, 401 {ok:false} on a bad one."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _provision_user(db, "Yusuf", "admin-key", role="admin")
+
+        status, body, headers = _post_api_json(base_url, "/api/login", {"key": "admin-key"})
+        assert status == 200
+        assert body == {"ok": True, "user": {"name": "Yusuf", "role": "admin"}}
+        assert _SESSION_COOKIE_NAME in (headers.get("Set-Cookie") or "")
+
+        bad, bad_body, _ = _post_api_json(base_url, "/api/login", {"key": "wrong"})
+        assert bad == 401 and bad_body == {"ok": False}
+
+
+def test_api_login_minted_cookie_authenticates_me(tmp_path):
+    """The cookie from /api/login authenticates a subsequent /api/me as that user."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        _, _body, headers = _post_api_json(base_url, "/api/login", {"key": "admin-key"})
+        jar = SimpleCookie()
+        jar.load(headers["Set-Cookie"])
+        cookie = jar[_SESSION_COOKIE_NAME].value
+
+        _, me = _get_json(base_url, "/api/me", cookie=cookie)
+        assert me["authenticated"] is True
+        assert me["identity"] == {"name": "Yusuf", "role": "admin"}
+
+
+def test_api_login_rejects_foreign_origin(tmp_path):
+    """A cross-origin POST /api/login is refused 403 (the CSRF guard)."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        status, _body, _h = _post_api_json(
+            base_url, "/api/login", {"key": "admin-key"}, origin="https://evil.example"
+        )
+        assert status == 403
+
+
+def test_api_logout_clears_cookie(tmp_path):
+    """POST /api/logout returns {ok:true} and a cookie-clearing Set-Cookie."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        status, body, headers = _post_api_json(base_url, "/api/logout", {})
+        assert status == 200 and body == {"ok": True}
+        assert _SESSION_COOKIE_NAME in (headers.get("Set-Cookie") or "")
+
+
+# =============================================================================
+# E2 Inc 4 (4a.5): serving the built SPA single-host via --web-dir. The relay serves
+# static assets + an index.html fallback for client-side routes, with the SPA CSP and a
+# path-traversal guard; the legacy server-rendered HTML is bypassed when web_dir is set.
+# =============================================================================
+
+
+def _build_web_dir(tmp_path):
+    """Create a fake built-SPA dir (index.html + a hashed asset) for serving tests."""
+    web = tmp_path / "dist"
+    (web / "assets").mkdir(parents=True)
+    (web / "index.html").write_text(
+        "<!doctype html><title>Orion</title><div id=root></div>", encoding="utf-8"
+    )
+    (web / "assets" / "index-abc123.js").write_text("console.log('spa')", encoding="utf-8")
+    return web
+
+
+def test_spa_index_served_for_client_routes(tmp_path):
+    """With --web-dir, "/" and unknown GET paths return index.html with the SPA CSP.
+
+    Why this matters: the SPA owns client-side routes (/, /project/x, /report/1); the
+    server must return index.html for them so the React router renders, and tag it with the
+    strict-script SPA CSP (not the legacy hash-based policy).
+    """
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        for path in ("/", "/project/orion", "/report/5", "/login"):
+            req = urllib.request.Request(base_url + path, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                assert resp.status == 200, path
+                assert b"id=root" in resp.read()
+                csp = resp.headers["Content-Security-Policy"]
+                assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+
+
+def test_spa_static_asset_served_with_immutable_cache(tmp_path):
+    """A hashed asset under /assets/ is served with its content-type + an immutable cache."""
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        req = urllib.request.Request(base_url + "/assets/index-abc123.js", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            assert "javascript" in resp.headers["Content-Type"]
+            assert "immutable" in resp.headers["Cache-Control"]
+            assert resp.read() == b"console.log('spa')"
+
+
+def test_spa_path_traversal_is_blocked(tmp_path):
+    """A "../"-escape outside web_dir is NOT served as a file (falls back to the SPA index).
+
+    Why this matters: the static handler must never read a file outside the asset root. A
+    traversal attempt resolves outside web_dir, fails the containment check, and is treated
+    as a client-route miss → index.html (200), never the escaped file's bytes.
+    """
+    web = _build_web_dir(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        # urllib normalizes "../" in the client, so hit the handler with a raw encoded path.
+        req = urllib.request.Request(base_url + "/assets/..%2f..%2fsecret.txt", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = resp.read()
+            assert b"TOP SECRET" not in body  # the escaped file was NOT served
+            assert b"id=root" in body  # served the SPA index instead
+
+
+def test_api_still_json_when_web_dir_set(tmp_path):
+    """/api/* keeps returning JSON (not the SPA index) when serving the SPA.
+
+    Why this matters: the SPA-fallback must not swallow the API. /api/me is matched before
+    the static handler, so it still answers JSON.
+    """
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        status, me = _get_json(base_url, "/api/me")
+        assert status == 200 and me["gated"] is False
+
+
+def test_web_dir_bypasses_legacy_html(tmp_path):
+    """With --web-dir, "/" serves the SPA index, NOT the legacy server-rendered portfolio."""
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        _, body = _get(base_url, "/")
+        assert "id=root" in body
+        # The legacy portfolio's eyebrow text must be absent (legacy HTML is bypassed).
+        assert "PORTFOLIO OVERVIEW" not in body
+
+
+def test_legacy_html_still_served_without_web_dir(tmp_path):
+    """Without --web-dir, "/" still serves the legacy server-rendered dashboard (parity)."""
+    with _running_relay(tmp_path) as (base_url, _db):
+        _, body = _get(base_url, "/")
+        # The legacy portfolio renders its own HTML (not the SPA root div).
+        assert "id=root" not in body

@@ -12,6 +12,51 @@ Role in project: Read this at the START of the next session, THEN plan the
 
 # Kickoff: E2 Inc 4 — the sectioned dashboard rebuild (richer-client SPA)
 
+## Status — 4a core SHIPPED (2026-06-26, PR #61, in review)
+
+> **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
+> `design/README.md` + `design/screenshots/`. 4a's core is built and in review (PR #61, branch
+> `e2-inc4-4a-spa-dashboard`); next is the **remaining 4a band**, starting with a plan-mode pass for the
+> **Tracker page**. Settle one open decision in that pass: how the tracker's circular *in-progress*
+> indicator gets its status (KI-22 gap-8). Then build `web/src/routes/Tracker.tsx` against
+> `/api/projects/:name`, checked against `design/screenshots/desktop-04-tracker-sepia.png`.
+
+The JSON API seam (`relay/api.py` + [`docs/dashboard-api-contract.md`](dashboard-api-contract.md)), the
+explicit `kind` project/tracker flag, the React/Vite SPA (`web/`: three-theme tokens, shell, routing,
+login, **Projects home + Project page + Report detail**), and **single-host serving** (`relay-serve
+--web-dir` + SPA CSP + path-traversal guard + index.html fallback; multi-stage Dockerfile) are built,
+verified end-to-end across all three themes (including the production single-host path), and in review as
+**PR #61**. Backend + Vitest green. `render.py` still serves the legacy HTML as the parity fallback (kept
+working). The comment composer is rendered but **inert** (writes deferred).
+
+### Remaining 4a band (build next — smallest reviewable unit, eyes-on each vs `design/screenshots/`)
+
+1. **Tracker page** (`desktop-04-tracker-sepia`) — the full "current focus" general-checklist page:
+   **circular** status indicators (vs projects' square checkboxes), the legend strip, grouped checklists
+   with group roll-ups. Data is **ready** — `/api/projects/:name` already returns the tracker's `kind` +
+   grouped `checklist` + `milestones`; `Tracker.tsx` is currently a placeholder. **Open decision (gap-8):**
+   the relay does not parse embedded `in_progress`/`submitted` status, so the circular in-progress arc
+   needs either a producer-wire status field or a client-side parse — settle in the plan pass.
+2. **Scheduling** (`desktop-05`) — a SMALL new cross-project derivation: aggregate every project's + the
+   tracker's open deadlines into time buckets (OVERDUE / THIS WEEK / LATER) with source tags. New
+   `/api/scheduling` endpoint (derive over all scoped projects' checklists) + `Scheduling.tsx`.
+3. **Comment writes** — wire the inert composer to a write path (a JSON `POST /api/comments` or the
+   existing form route) with its own CSRF/auth review. Its own focused slice (KI-23).
+4. **Showcase guest view** (`desktop-08`, full-bleed) + **mobile pass** (`mobile-all-screens`) — the
+   curated no-login surface, and the responsive adaptation (sidebar → bottom tab bar; rails → stacked).
+5. **Retire `render.py` at parity** (KI-23) — once every legacy URL has an SPA equivalent and comment
+   writes are wired, remove the server-rendered views (keep store / derive / api / auth).
+
+### Then 4b / 4c (each its own PR)
+
+- **4b — Disciplines & directions** (`desktop-06`): a new doc-centric collector reading CLAUDE.md / design /
+  decision docs → store → a principles section (observe-not-originate: reads the user's own docs).
+- **4c — Cross-project Connections** (`desktop-07`): a new cross-project relationship derivation (shared
+  items/topics, feeds) → the SVG graph section. E4's developer-view flavor.
+
+The original 4a entry-point material below is retained for context; the API contract it called for now
+lives in [`docs/dashboard-api-contract.md`](dashboard-api-contract.md).
+
 ## Where we are
 
 Rung 1 of the forward-looking layer (E2 Inc 3, Units 0–5) is **complete and deployed** (PR #60,

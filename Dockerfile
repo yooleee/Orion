@@ -10,6 +10,20 @@
 #                  docs/deployment.md for the full runbook and the per-host notes.
 # Build (from the repo root):  docker build -t orion-relay .
 # =============================================================================
+
+# --- Stage 1: build the SPA (E2 Inc 4) ---------------------------------------
+# The dashboard is a React/Vite app under web/. We build it in a Node stage and copy
+# only the static output (web/dist) into the final Python image — so Node is NOT in the
+# runtime image, just the built assets the relay serves single-host (--web-dir).
+FROM node:20-slim AS web-build
+WORKDIR /web
+# Copy manifests first so the dependency layer caches unless they change.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# --- Stage 2: the relay runtime ----------------------------------------------
 FROM python:3.12-slim
 
 # Run as a non-root user — this is a network-facing service, so we drop privileges.
@@ -28,6 +42,10 @@ RUN pip install --no-cache-dir .
 COPY relay/ ./relay/
 ENV PYTHONPATH=/app
 
+# The built SPA from stage 1 — served single-host by the relay (--web-dir below). Only the
+# static output is copied; no Node toolchain reaches the runtime image.
+COPY --from=web-build /web/dist ./web/dist
+
 # The sqlite store must persist across restarts/redeploys — keep it on a mounted
 # volume, not the container's ephemeral layer. Owned by the non-root user.
 RUN mkdir -p /data && chown orion:orion /data
@@ -42,4 +60,6 @@ EXPOSE 8787
 #   ORION_RELAY_VIEW_TOKEN  — the dashboard read password (HTTP Basic)
 # TLS is terminated by your platform/proxy in front of this container (see
 # docs/deployment.md) — never expose plain HTTP to the internet.
-ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3"]
+# --web-dir serves the React SPA single-host (built in stage 1). Remove it to fall back to
+# the legacy server-rendered HTML.
+ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist"]

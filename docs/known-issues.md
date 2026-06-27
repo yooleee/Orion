@@ -280,6 +280,42 @@ Deferred).
 - **Status:** By-design (documented limitation; revisit if a rename/duplicate-title case bites in real
   use — group+title keying is the available seam if so).
 
+## KI-22 — SPA renders some design fields the relay does not yet carry (E2 Inc 4 4a)
+
+- **Detail:** The E2 Inc 4 dashboard SPA (`web/`) consumes the relay's read-only JSON API
+  (`docs/dashboard-api-contract.md`). A few fields the design shows are not stored on the relay today,
+  so the API ships a graceful fallback and the SPA degrades rather than inventing data: (3) **recipient
+  roles** in a report's "SENT TO" — `participants` is a list of plain name strings, so `role` is `null`
+  and the SPA shows names only; (4) **report/project `source_tags`** ("git history · checklist · session")
+  — the originating collector set is not stored, so the API ships `[]` and the SPA omits the "BUILT FROM"
+  card; (5) **project description** — none stored, so the header sub-line is omitted; (7) **comment author
+  role** — `report_comments.author` is free text with no identity, so `role` is `null` (overlaps KI-17);
+  (8) **embedded item status** (`in_progress`/`submitted`, the tracker's circular indicators) — the relay
+  stores `text` (status embedded in the string) + `done`, not a parsed status, so per-item `state` is
+  deadline/done-derived only (`done|overdue|due_soon|not_started`), and the richer status vocabulary waits
+  for the tracker page. Separately, the report **title** is the body headline (the report has no distinct
+  title field) — a documented choice, not a gap.
+- **Why it matters:** Each is a producer/wire extension (richer `participants`, a `collectors` list, a
+  `description`/status field on the blob), deliberately out of the read-only 4a backend seam. They are
+  flagged so the SPA's omissions read as intentional, and so the closing change is a known additive step.
+- **Severity:** low
+- **Status:** By-design for 4a (graceful degradation). Closed incrementally when the producer wire is next
+  extended; tracked against the contract doc's "Data gaps" list.
+
+## KI-23 — Legacy server-rendered dashboard not yet retired (parity pending)
+
+- **Detail:** E2 Inc 4 4a serves the React SPA single-host via `relay-serve --web-dir`; when that flag is
+  set the relay serves the built SPA and **bypasses** the legacy server-rendered HTML (`relay/render.py`
+  views), but both code paths still ship. The SPA also leaves two surfaces unbuilt within 4a's band: the
+  full **Tracker page**, **Scheduling**, the Showcase guest view, and the mobile pass; and comment
+  **writes** are not wired (the composer renders inert — read-only slice). `render.py` retires "at parity"
+  only once the SPA covers every URL the old dashboard served and the comment write path is reconnected.
+- **Why it matters:** Until parity, the relay carries two front-ends. Keeping `render.py` working (its
+  tests stay green) is deliberate — it is the fallback while the SPA fills in — but it is dead weight to
+  remove once parity lands, and the inert composer is a visible "not done yet".
+- **Severity:** low
+- **Status:** Intended interim state. Retire `render.py` + wire comment writes in a later 4a/parity slice.
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

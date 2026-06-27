@@ -64,6 +64,13 @@ COLLECTOR_FILE_KEYS = {
 # and the CLI's checklist-push path agree on what counts as a checklist source.
 CHECKLIST_COLLECTORS = ("tasks", "tracker")
 
+# E2 Inc 4: the dashboard home splits real software "project"s from general "tracker"s
+# (checklists that are not a project, e.g. an applications to-do list). This is an EXPLICIT,
+# observed fact from the user's own config — not inferred — so it is a named flag with a
+# safe default of "project". An open enum (like share_level) so future kinds are additive.
+PROJECT_KINDS = ("project", "tracker")
+DEFAULT_PROJECT_KIND = "project"
+
 DEFAULT_STATE_DB = "orion.sqlite3"
 
 # The display time zone for human-facing timestamps in delivered messages (KI-20).
@@ -154,6 +161,8 @@ class ProjectConfig:
             one CHECKLIST_COLLECTORS collector — `tasks` (reads tasks_file) or
             `tracker` (reads tracker_file) — to be enabled (validated at load), since
             that is what resolves the file the checklist is read from.
+        kind: One of PROJECT_KINDS ("project" | "tracker"). Splits the dashboard home
+            into real software projects vs. general trackers. Defaults to "project".
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
@@ -175,6 +184,7 @@ class ProjectConfig:
     tracker_file: Path | None = None
     auto_send: bool = False
     checklist: bool = False
+    kind: str = DEFAULT_PROJECT_KIND
 
 
 @dataclass(frozen=True)
@@ -870,6 +880,24 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
             f"collector, so enable one of those (which is what sets its file)."
         )
 
+    # kind defaults to "project" (the common case) and must be a known value — mirroring
+    # share_level's validation. A typo (e.g. kind = "tracke") is a config error caught here
+    # with a fixable message rather than silently becoming an unrecognized kind downstream.
+    kind = body.get("kind", DEFAULT_PROJECT_KIND)
+    if kind not in PROJECT_KINDS:
+        raise ConfigError(
+            f"{where} has invalid kind={kind!r}. Expected one of {PROJECT_KINDS}."
+        )
+    # A tracker IS a checklist, and `kind` reaches the relay only on the checklist push
+    # (the carrier a tracker always uses). So kind = "tracker" without `checklist` would
+    # never be delivered — the project would silently never appear as a tracker. Reject
+    # that contradiction here, at load, rather than leaving it a confusing no-op.
+    if kind == "tracker" and not checklist:
+        raise ConfigError(
+            f"{where} sets kind = \"tracker\" but does not enable `checklist`. A tracker "
+            f"is surfaced from its live checklist, so set `checklist = true` too."
+        )
+
     # Recipients are parsed AFTER collectors are validated so each recipient's
     # `signals` filter can default to (and be validated against) the project's
     # actual collector set — see _parse_recipients.
@@ -903,6 +931,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         tracker_file=tracker_file,
         auto_send=auto_send,
         checklist=checklist,
+        kind=kind,
     )
 
 

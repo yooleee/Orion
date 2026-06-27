@@ -1,0 +1,224 @@
+// =============================================================================
+// web/src/api/types.ts
+// -----------------------------------------------------------------------------
+// Responsible for: The TypeScript shapes of the relay's read-only JSON API,
+//                  mirroring docs/dashboard-api-contract.md one-to-one. This is
+//                  the contract in code: the api client (client.ts) returns these
+//                  types and every screen consumes them.
+// Role in project: The SPA half of the SPA<->relay seam fixed in slice 4a.0. When
+//                  the contract changes, change it here and in the doc together.
+// Assumptions: timestamps are ISO 8601 UTC strings; deadlines are ISO YYYY-MM-DD
+//              strings. The SPA formats relative time client-side from `display_tz`.
+//              Status is a semantic enum; glyph/label/colour live in theme/status.ts.
+// =============================================================================
+
+/** Semantic item/milestone state. Presentation (glyph, label, colour) is owned by the frontend. */
+export type Status =
+  | "not_started"
+  | "in_progress"
+  | "done"
+  | "due_soon"
+  | "overdue"
+  | "upcoming" // open & dated, but beyond the due-soon horizon (neutral, no glyph)
+  | "at_risk" // union overdue-or-due-soon, used for roll-up counts
+  | "slipping"
+  | "on_track"; // roll-up state for a milestone or project row, not a per-item state
+
+export type ProjectKind = "project" | "tracker";
+
+export type Role = "admin" | "viewer";
+
+/** done/total with a precomputed percentage (null when total is 0). */
+export interface Progress {
+  done: number;
+  total: number;
+  pct: number | null;
+}
+
+// --- GET /api/me ------------------------------------------------------------
+
+export interface Identity {
+  name: string;
+  role: Role;
+}
+
+/** unrestricted => admin or open relay (projects null); else a scoped viewer's granted names. */
+export interface Scope {
+  unrestricted: boolean;
+  projects: string[] | null;
+}
+
+export interface Me {
+  gated: boolean;
+  authenticated: boolean;
+  identity: Identity | null;
+  scope: Scope;
+  display_tz: string;
+  showcase_enabled: boolean; // reserved; always false in 4a
+}
+
+// --- GET /api/portfolio -----------------------------------------------------
+
+/** The nearest open deadline and its state, or null when nothing open is dated. */
+export interface NextDue {
+  due_date: string;
+  state: Status;
+}
+
+export interface ProjectSummary {
+  name: string;
+  kind: "project";
+  headline: string;
+  progress: Progress;
+  at_risk: number;
+  slipping: number;
+  next_due: NextDue | null;
+  updated_at: string;
+  report_id: number | null;
+}
+
+/** Segmented progress-bar breakdown for the tracker card (the four tile the total). */
+export interface Segments {
+  overdue: number;
+  due_soon: number;
+  remaining: number; // open and not at risk
+  done: number;
+}
+
+/** One at-risk item surfaced as a forward-signal chip on the tracker card. */
+export interface AtRiskItem {
+  state: Status; // overdue | due_soon
+  label: string;
+  due_date: string;
+}
+
+export interface TrackerSummary {
+  name: string;
+  kind: "tracker";
+  item_count: number;
+  progress: Progress;
+  segments: Segments;
+  at_risk: number;
+  slipping: number;
+  next_due: NextDue | null;
+  at_risk_items: AtRiskItem[];
+  updated_at: string;
+}
+
+export interface Portfolio {
+  scope: Scope;
+  projects: ProjectSummary[];
+  trackers: TrackerSummary[];
+}
+
+// --- GET /api/projects/:name ------------------------------------------------
+
+export interface ProjectStats {
+  progress: Progress;
+  next_due: NextDue | null;
+  reports_count: number;
+}
+
+export interface Milestone {
+  group: string;
+  done: number;
+  total: number;
+  at_risk: number;
+  nearest_due: string | null;
+  slipping: boolean;
+}
+
+export interface ChecklistItem {
+  text: string;
+  done: boolean;
+  due_date: string | null;
+  key: string | null;
+  group: string | null;
+  state: Status; // 4a emits done | overdue | due_soon | not_started (gap 8: no embedded status yet)
+  slipping: boolean;
+}
+
+export interface ReportSummary {
+  id: number;
+  title: string; // the body headline, for the timeline entry
+  generated_at: string;
+  lane: string;
+  share_level: string;
+  section_count: number;
+  source_tags: string[]; // [] in 4a (gap 4)
+}
+
+export interface Comment {
+  id: number;
+  author: string;
+  role: Role | null; // null in 4a (gap 7)
+  body: string;
+  created_at: string;
+}
+
+export interface ProjectDetail {
+  name: string;
+  kind: ProjectKind;
+  description: string | null; // null in 4a (gap 5)
+  stats: ProjectStats;
+  milestones: Milestone[];
+  checklist: ChecklistItem[];
+  reports: ReportSummary[];
+  comments: Comment[];
+}
+
+// --- GET /api/reports/:id ---------------------------------------------------
+
+export type Section = [title: string, body: string];
+
+export interface Participant {
+  name: string;
+  role: Role | null; // null in 4a (gap 3)
+}
+
+export interface SnapshotRow {
+  text: string;
+  done: boolean;
+  state: Status;
+  due_date: string | null;
+}
+
+export interface ChecklistSnapshot {
+  done: number;
+  total: number;
+  rows: SnapshotRow[];
+}
+
+export interface ReportNav {
+  prev_id: number | null;
+  next_id: number | null;
+}
+
+export interface ReportDetail {
+  id: number;
+  project: string;
+  title: string;
+  sections: Section[];
+  body: string;
+  lane: string;
+  share_level: string;
+  generated_at: string;
+  ingested_at: string;
+  orion_version: string;
+  participants: Participant[];
+  source_tags: string[]; // [] in 4a (gap 4)
+  checklist_snapshot: ChecklistSnapshot;
+  comments: Comment[];
+  nav: ReportNav;
+}
+
+// --- POST /api/login, POST /api/logout --------------------------------------
+
+export interface LoginResult {
+  ok: boolean;
+  user?: Identity;
+}
+
+export interface LogoutResult {
+  ok: boolean;
+}

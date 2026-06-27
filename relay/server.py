@@ -489,6 +489,30 @@ def _parse_comment_path(path: str) -> int | None:
     return int(middle) if middle.isdigit() else None
 
 
+def _parse_api_comment_path(path: str) -> int | None:
+    """Extract the report id from "/api/reports/<id>/comments", or None.
+
+    Args:
+        path: The request path, already stripped of any query string.
+
+    Returns:
+        The integer report id when `path` is exactly "/api/reports/<digits>/comments";
+        otherwise None (the route did not match).
+
+    Why:
+        The SPA's JSON comment write is RESTfully scoped to a report. do_POST routes by
+        path, so it needs a yes/no-with-id matcher, mirroring _parse_comment_path's
+        all-digit guard: a non-numeric id simply fails to match and falls through to the
+        404 — no exception, no store touch. The GET /api/reports/<id> read uses the same
+        id segment, so write and read agree on the identity.
+    """
+    prefix, suffix = "/api/reports/", "/comments"
+    if not (path.startswith(prefix) and path.endswith(suffix)):
+        return None
+    middle = path[len(prefix):-len(suffix)]
+    return int(middle) if middle.isdigit() else None
+
+
 def _simple_html(heading: str, detail: str) -> str:
     """Build a minimal self-contained HTML page for a browser-facing error.
 
@@ -751,6 +775,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_api_logout()
             return
 
+        # E2 Inc 4: the SPA's cookie-authed JSON comment write (sibling of the form route
+        # below). Checked before the form route; distinct path from the Bearer /api/comments.
+        api_comment_report_id = _parse_api_comment_path(path)
+        if api_comment_report_id is not None:
+            self._handle_api_report_comment(api_comment_report_id)
+            return
+
         comment_report_id = _parse_comment_path(path)
         if comment_report_id is not None:
             self._handle_comment(comment_report_id)
@@ -994,6 +1025,108 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # 303 + Location → the browser re-GETs the report (POST-redirect-GET), so a
         # refresh of the resulting page does not resubmit the comment.
         self._send_redirect(303, f"/report/{report_id}")
+
+    def _handle_api_report_comment(self, report_id: int) -> None:
+        """Store one comment from the SPA on a report (POST /api/reports/<id>/comments).
+
+        Args:
+            report_id: The report the comment attaches to (parsed from the path).
+
+        Why:
+            The cookie-session, JSON sibling of the browser form route (_handle_comment):
+            the SAME auth + CSRF + scope + identity rules, but JSON-in / JSON-out for the
+            React SPA, which posts via fetch and appends the returned comment rather than
+            following a 303. The machine path POST /api/comments stays Bearer-authed and
+            separate (a browser never auto-sends a Bearer token, so it needs no CSRF check;
+            this cookie path does). Every guard reuses the vetted helpers so the two
+            browser-comment routes cannot drift on security.
+
+            Inbound-security checklist, enforced IN ORDER (mirrors _handle_comment):
+              1. Auth — a valid session cookie when the dashboard is gated; 401 otherwise.
+              2. CSRF — the cookie is auto-sent by the browser, so a forged cross-site POST
+                 is the threat; require a matching Origin/Referer (_origin_error), else 403.
+              3. Validate — JSON {body, author?}; a non-empty body within the caps; else 400.
+              4. Report exists AND is in scope — else 404, identical to a missing report
+                 (existence-hiding), so a viewer cannot probe or write outside their grants.
+              5. Store — attribute to the authenticated identity (NEVER the client-supplied
+                 author, so a logged-in user cannot post as someone else); open loopback has
+                 no session, so the typed name stands. Return 201 with the created comment in
+                 the read-path shape (api._comment) so the SPA appends it without a refetch.
+        """
+        conn = open_relay_store(self.server.db_path)
+        try:
+            # 1) Auth: a valid session whenever the dashboard is access-gated (same as reads).
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            if gated and principal is None:
+                self._send_json(401, {"error": "login required"})
+                return
+
+            # 2) CSRF: require a same-origin POST (the cookie is the forgeable credential).
+            if self._origin_error() is not None:
+                self._send_json(403, {"error": "origin check failed"})
+                return
+
+            # 3) Read + JSON-parse + validate the body (1 MB cap inside _read_raw_body).
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+            if not isinstance(payload, dict):
+                self._send_json(400, {"error": "payload must be a JSON object"})
+                return
+            body = payload.get("body")
+            client_author = payload.get("author", "")
+            if not isinstance(body, str):
+                self._send_json(400, {"error": "field 'body' must be a string"})
+                return
+            if not isinstance(client_author, str):
+                self._send_json(400, {"error": "field 'author' must be a string"})
+                return
+            # Strip both so a whitespace-only body counts as empty — same as the form route.
+            body = body.strip()
+            client_author = client_author.strip()
+            if not body:
+                self._send_json(400, {"error": "a comment body is required"})
+                return
+            if len(body) > MAX_COMMENT_BODY_CHARS or len(client_author) > MAX_AUTHOR_CHARS:
+                self._send_json(400, {"error": "comment or author is too long"})
+                return
+
+            # 4) Report exists AND is in this principal's scope, else 404 (existence-hiding,
+            # identical to a nonexistent report) — the same rule do_GET applies to reads.
+            allowed = self._allowed_projects(conn, principal)
+            report = get(conn, report_id)
+            if report is None or (
+                allowed is not None and report["project"] not in allowed
+            ):
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 5) Attribute to the authenticated identity (logged in) or the typed name (open
+            # loopback). The principal name is trusted (from the DB), so not re-length-capped.
+            author = principal["name"] if principal is not None else client_author
+            created_at = _utc_now_iso()
+            new_id = add_comment(conn, report_id, author, body, created_at)
+        finally:
+            conn.close()
+        # Return the created comment in the SAME shape the read path emits (api._comment):
+        # role is null in 4a (contract gap 7). The SPA appends this to the thread directly.
+        self._send_json(
+            201,
+            {
+                "id": new_id,
+                "author": author,
+                "role": None,
+                "body": body,
+                "created_at": created_at,
+            },
+        )
 
     def _handle_api_comments(self) -> None:
         """Return a project's comments as JSON for the local pull-back (GET /api/comments).

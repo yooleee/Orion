@@ -8,8 +8,10 @@
 //                  404 renders a clean not-found (existence-hiding carries through).
 // =============================================================================
 
+import { useEffect, useState } from "react";
 import { useOutletContext, useParams } from "react-router-dom";
 import type { ShellContext } from "../components/Shell";
+import type { Comment } from "../api/types";
 import { ApiError, getProject } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import { deadlineLabel } from "../lib/time";
@@ -26,6 +28,10 @@ export function Project() {
   const { me } = useOutletContext<ShellContext>();
   const { data, error, loading } = useApiData(() => getProject(name), [name]);
   const tz = me.display_tz;
+  // Comments posted this session, appended to the fetched thread; reset on project change.
+  const [posted, setPosted] = useState<Comment[]>([]);
+  useEffect(() => setPosted([]), [name]);
+  const canComment = me.authenticated || !me.gated;
 
   if (loading) return <div className="center-note">Loading…</div>;
   if (error) {
@@ -103,8 +109,14 @@ export function Project() {
 
           <section>
             <div className="eyebrow block-label">Comments</div>
-            <CommentList comments={data.comments} />
-            <CommentComposer authorName={me.identity?.name ?? null} />
+            <CommentList comments={[...data.comments, ...posted]} />
+            {/* A project's comments attach to its latest report (newest-first → [0]). */}
+            <CommentComposer
+              reportId={data.reports[0]?.id ?? null}
+              authorName={me.identity?.name ?? null}
+              canComment={canComment}
+              onPosted={(c) => setPosted((prev) => [...prev, c])}
+            />
           </section>
         </div>
       </div>

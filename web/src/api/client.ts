@@ -14,6 +14,7 @@
 // =============================================================================
 
 import type {
+  Comment,
   LoginResult,
   LogoutResult,
   Me,
@@ -79,4 +80,14 @@ export const logout = () =>
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
+  });
+
+// Post a comment on a report (the only user-authored write). Same-origin cookie + JSON,
+// like login/logout; the server attributes it to the session identity. Returns the created
+// comment (the read-path shape) so the caller can append it without a refetch.
+export const postComment = (reportId: number, body: string) =>
+  apiFetch<Comment>(`/api/reports/${encodeURIComponent(String(reportId))}/comments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body }),
   });

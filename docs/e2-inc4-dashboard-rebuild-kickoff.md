@@ -15,10 +15,15 @@ Role in project: Read this at the START of the next session, THEN plan the
 ## Status — 4a core SHIPPED (2026-06-26, PR #61, in review)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. 4a's core (PR #61), the **Tracker page**, and **Scheduling**
-> are all built. The **first production deployment** (SPA cutover to a new Fly app `project-orion.fly.dev`)
-> is the in-flight step; after a healthy deploy the next slice is **comment writes** (KI-23), which closes
-> the one feature the cutover temporarily drops. Start each with a plan-mode pass per the repo discipline.
+> `design/README.md` + `design/screenshots/`. 4a's core (PR #61), the **Tracker page**, **Scheduling**,
+> the **first production deployment** (`project-orion.fly.dev`), and **comment writes** are all done. The
+> remaining 4a band is the **Showcase guest view** (`desktop-08`) + the **mobile pass**
+> (`mobile-all-screens`), then **retire `render.py` at parity**. Start each with a plan-mode pass.
+>
+> **Comment writes — SHIPPED** (branch `e2-inc4-4a-comment-writes`). `POST /api/reports/:id/comments`
+> (cookie-authed JSON; reuses the form route's CSRF/auth/scope/identity guards) + the interactive composer.
+> Verified eyes-on: gated login → authed post → store persistence → identity attribution → XSS-inert
+> render (a `<script>` body shows as literal text, no console alert). Backend 770 + Vitest 28 green.
 >
 > **Tracker page — SHIPPED** (branch `e2-inc4-4a-tracker-page`, PR #62, on PR #61). gap-8 (KI-22) closed
 > via **option 2**: the producer ships a first-class semantic `status` field end-to-end (additive, legacy
@@ -54,8 +59,9 @@ working). The comment composer is rendered but **inert** (writes deferred).
 3. **First production deployment** — **in flight.** SPA cutover to a NEW Fly app `project-orion.fly.dev`
    (Fly has no in-place rename); retire the old `orion-relay-horizon-c`. Production cutover accepted (the
    inert composer is the only regression, closed by the next slice). See the approved plan's Unit D.
-4. **Comment writes** — wire the inert composer to a write path (a JSON `POST /api/comments` or the
-   existing form route) with its own CSRF/auth review. Its own focused slice (KI-23); closes the cutover gap.
+4. **Comment writes** — **SHIPPED.** `POST /api/reports/:id/comments` (cookie-authed JSON, reusing the
+   form route's CSRF/auth/scope/identity guards) + the interactive composer; closes the cutover's one gap.
+   Verified eyes-on incl. XSS-inert render.
 5. **Showcase guest view** (`desktop-08`, full-bleed) + **mobile pass** (`mobile-all-screens`) — the
    curated no-login surface, and the responsive adaptation (sidebar → bottom tab bar; rails → stacked).
 6. **Retire `render.py` at parity** (KI-23) — once every legacy URL has an SPA equivalent and comment

@@ -311,15 +311,16 @@ Deferred).
 
 - **Detail:** E2 Inc 4 4a serves the React SPA single-host via `relay-serve --web-dir`; when that flag is
   set the relay serves the built SPA and **bypasses** the legacy server-rendered HTML (`relay/render.py`
-  views), but both code paths still ship. The SPA also leaves two surfaces unbuilt within 4a's band: the
-  full **Tracker page**, **Scheduling**, the Showcase guest view, and the mobile pass; and comment
-  **writes** are not wired (the composer renders inert — read-only slice). `render.py` retires "at parity"
-  only once the SPA covers every URL the old dashboard served and the comment write path is reconnected.
+  views), but both code paths still ship. The Tracker page, Scheduling, and **comment writes** are now
+  shipped; the surfaces still unbuilt within 4a's band are the **Showcase guest view** and the **mobile
+  pass**. `render.py` retires "at parity" only once the SPA covers every URL the old dashboard served.
 - **Why it matters:** Until parity, the relay carries two front-ends. Keeping `render.py` working (its
   tests stay green) is deliberate — it is the fallback while the SPA fills in — but it is dead weight to
-  remove once parity lands, and the inert composer is a visible "not done yet".
+  remove once parity lands.
 - **Severity:** low
-- **Status:** Intended interim state. Retire `render.py` + wire comment writes in a later 4a/parity slice.
+- **Status:** Intended interim state, narrowing. **Comment writes wired** (`POST /api/reports/:id/comments`
+  — cookie-authed JSON, reusing the form route's CSRF/auth/scope; the inert composer is now live). Remaining
+  for parity: Showcase + mobile, then retire `render.py` (and the legacy form comment route with it).
 
 ## Resolved
 

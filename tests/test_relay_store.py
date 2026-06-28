@@ -30,6 +30,7 @@ from relay.store import (
     get_checklist,
     get_disciplines,
     get_project_kind,
+    get_skills,
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
@@ -45,9 +46,11 @@ from relay.store import (
     record_observations,
     revoke_user,
     set_project_kind,
+    skills_projects,
     update_last_login,
     upsert_checklist,
     upsert_disciplines,
+    upsert_skills,
 )
 
 
@@ -1044,3 +1047,52 @@ def test_upsert_empty_disciplines_clears_to_empty_list(tmp_path):
     upsert_disciplines(conn, "demo", [_card("X")], "2026-06-27T10:00:00+00:00")
     upsert_disciplines(conn, "demo", [], "2026-06-27T11:00:00+00:00")
     assert get_disciplines(conn, "demo") == []
+
+
+# --- relay_project_skills: observed-skills current state (E2 Inc 4 4c, the comb) ---
+
+
+def _skill_row(name, *, category="Backend", evidence="ev", weight=2, signals=("git",)):
+    """Build one stored skill dict (the shape the push carries)."""
+    return {
+        "name": name,
+        "category": category,
+        "evidence": evidence,
+        "weight": weight,
+        "signals": list(signals),
+    }
+
+
+def test_get_skills_none_until_pushed(tmp_path):
+    """get_skills returns None for a project that never pushed any.
+
+    Why this matters: None (no row) must be distinct from [] (pushed, none) so the
+    enumeration/merge can tell a never-pushed project from a cleared one, like disciplines.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert get_skills(conn, "demo") is None
+
+
+def test_upsert_skills_round_trips_and_lists_projects(tmp_path):
+    """An upserted skill set reads back identically and the project lists in skills_projects.
+
+    Why this matters: the comb renders these verbatim, so the JSON must round-trip
+    faithfully, and skills_projects must enumerate exactly the projects that pushed.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    rows = [_skill_row("Python backends", weight=3, signals=("git", "docs"))]
+    upsert_skills(conn, "demo", rows, "2026-06-27T10:00:00+00:00")
+    assert get_skills(conn, "demo") == rows
+    assert skills_projects(conn) == ["demo"]
+
+
+def test_upsert_skills_replaces_prior_set(tmp_path):
+    """A second push REPLACES the project's skills (current state, not append).
+
+    Why this matters: skills are current state like the checklist — re-observing changed
+    evidence must overwrite the prior skills, not accumulate them.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_skills(conn, "demo", [_skill_row("Old")], "2026-06-27T10:00:00+00:00")
+    upsert_skills(conn, "demo", [_skill_row("New")], "2026-06-27T11:00:00+00:00")
+    assert get_skills(conn, "demo") == [_skill_row("New")]

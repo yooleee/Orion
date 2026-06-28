@@ -102,11 +102,12 @@ P, decision-gated launch work._
   (producer/sourcing, CP1 — SHIPPED):** the global two-pass `skills-sync` + the atomic `POST /skills-batch`
   write + depth re-tune — a vertical slice spanning `extract.py` → `collectors/skills.py` → `cli.py` →
   `relay/{store,server,api}.py`, built as one coordinated unit (the producer and the batch store/endpoint are
-  intertwined). **Track B (SPA comb visual, CP2 — PENDING):** `web/src/routes/Skills.tsx` +
-  `lib/skillsComb.ts` + CSS, depends ONLY on the (unchanged) wire shape, so it is independent of Track A and
-  could fan out — but is **sequenced after** A so its tooth-length scale calibrates on the real re-tuned depth
-  distribution, not placeholder data. The one genuine coupling (scope-safety of a global extraction) was
-  resolved **structurally** in A: pass 2 is per-project and blind, so nothing leaks regardless of the visual.
+  intertwined). **Track B (SPA comb visual, CP2 — SHIPPED):** `web/src/routes/Skills.tsx` +
+  `lib/skillsComb.ts` + `base.css`, depended ONLY on the (unchanged) wire shape, so it stayed independent of
+  Track A — sequenced after A so its tooth-length scale calibrated on the real re-tuned depth distribution,
+  not placeholder data (it did: eyes-on-verified on real seeded data, 3 themes). The one genuine coupling
+  (scope-safety of a global extraction) was resolved **structurally** in A: pass 2 is per-project and blind,
+  so nothing leaks regardless of the visual. **4c rework COMPLETE** (the A→B-on-a-stable-wire split held).
 
 ## Three tiers of parallelizability
 

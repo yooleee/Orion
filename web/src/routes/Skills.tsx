@@ -2,9 +2,11 @@
 // web/src/routes/Skills.tsx
 // -----------------------------------------------------------------------------
 // Responsible for: The Skills section — a "partial living resume" built as a Comb
-//                  (E2 Inc 4 slice 4c). Per category, a row of "teeth" whose height
-//                  encodes each skill's derived depth, with evidence cards below that
-//                  anchor every skill to the projects that demonstrate it.
+//                  (E2 Inc 4 slice 4c; 4c-rework CP2 = the true comb-shaped-skills form).
+//                  A horizontal spine (breadth) with "teeth" hanging DOWN from it, each
+//                  tooth's LENGTH encoding the skill's derived depth, grouped into labelled
+//                  category segments, with evidence cards below that anchor every skill to
+//                  the projects that demonstrate it.
 // Role in project: The developer-view "what I work on, shown from real work" lens. Reads
 //                  /api/skills (the server merges each project's observed skills across the
 //                  portfolio and derives depth). REPLACES the design's desktop-07 connections
@@ -30,9 +32,9 @@ const SIGNAL_LABELS: Record<string, string> = {
   docs: "docs",
 };
 
-/** One comb "tooth": a vertical bar whose height encodes the skill's derived depth, with
- *  the skill name beneath the spine. The name is always shown (legible without colour or
- *  height alone), and the title attribute carries the same text for a hover affordance. */
+/** One comb "tooth": a bar hanging DOWN from the spine whose LENGTH encodes the skill's
+ *  derived depth, with the skill name beneath. The name is always shown (legible without
+ *  colour or length alone), and the title attribute carries the same text on hover. */
 function CombTooth({ skill }: { skill: Skill }) {
   return (
     <div className="comb-col" title={`${skill.name} — depth ${skill.depth}/4`}>
@@ -67,18 +69,19 @@ function SkillCard({ skill }: { skill: Skill }) {
   );
 }
 
-/** One cluster of the comb: a category's teeth on a shared spine, with the category name
- *  captioned beneath. Clusters sit side by side so the whole row reads as one segmented
- *  comb (the Capability Comb shape) rather than isolated bars. */
+/** One segment of the comb: a category's teeth hanging from a shared spine, with the
+ *  category name captioned ABOVE the spine. Segments sit side by side and align at the top
+ *  so their spines form one line — the whole row reads as a single segmented comb (the
+ *  comb-shaped-skills form) rather than isolated charts. */
 function CombCluster({ category, skills }: { category: string; skills: Skill[] }) {
   return (
     <div className="comb-cluster">
+      <div className="comb-cluster-label">{category}</div>
       <div className="comb" role="img" aria-label={`${category} skills by depth`}>
         {skills.map((s) => (
           <CombTooth key={s.name} skill={s} />
         ))}
       </div>
-      <div className="comb-cluster-label">{category}</div>
     </div>
   );
 }
@@ -119,8 +122,9 @@ export function Skills() {
         <h1 className="page-title">Skills &amp; craft</h1>
         <p className="page-sub">
           The kinds of work and skills your projects demonstrate, read from real activity
-          (languages, commits, and your own docs) and never authored here. Taller teeth are
-          skills your work shows more of, across more projects.
+          (languages, commits, and your own docs) and never authored here. The spine is your
+          breadth across areas. Longer teeth hanging from it are skills your work shows more
+          of, across more projects.
         </p>
       </div>
 
@@ -136,7 +140,8 @@ export function Skills() {
         </div>
       ) : (
         <>
-          {/* The comb: one horizontal band of category clusters, teeth varying by depth. */}
+          {/* The comb: a horizontal spine of category segments with teeth hanging down,
+              tooth length varying by depth (the comb-shaped-skills form). */}
           <div className="comb-band">
             {groups.map((group) => (
               <CombCluster key={group.category} category={group.category} skills={group.skills} />

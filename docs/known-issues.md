@@ -361,16 +361,20 @@ Deferred).
   outside reader (or a recruiter) would find legible — duplicates and component-entries dilute it, and the
   visual undersells the comb metaphor.
 - **Severity:** low (cosmetic + content quality, not correctness or security)
-- **Status:** **Partly resolved (rework CP1 shipped).** Parts (a) and (b) are addressed: `orion skills-sync`
-  now runs a **global two-pass** extraction (pass 1 builds one deduplicated, resume-grade canonical
-  vocabulary across all projects on Sonnet; pass 2 attributes it per project, blind to the others) and writes
-  every slice through an **atomic batch** endpoint (`POST /skills-batch`, prune + empty-clobber guard). The
+- **Status:** **RESOLVED (rework CP1 + CP2 shipped).** Parts (a) and (b): `orion skills-sync` runs a
+  **global two-pass** extraction (pass 1 builds one deduplicated, resume-grade canonical vocabulary across
+  all projects on Sonnet; pass 2 attributes it per project, blind to the others) and writes every slice
+  through an **atomic batch** endpoint (`POST /skills-batch`, prune + empty-clobber guard). The
   global-vs-scope tension is resolved structurally — pass 2 never sees another project, so existence-hiding
-  holds without trusting the prompt. Depth boundaries were re-tuned for the now-accurate breadth. Part (c)
-  **(comb visual fidelity) remains open — it is CP2** (redesign `Skills.tsx` to the real comb-shaped-skills
-  form: a spine with descending teeth, length = depth). Resume oracle:
-  `~/Developer/Applications/Documents/ygolding_resume_2026.md` (the kickoff's `~/Applications/...` path was
-  stale). Relates to [[KI-25]] and the kickoff doc above; see also KI-27 (dead `tasks` signal).
+  holds without trusting the prompt. An "achieved, not demoed" anti-overclaim rule keeps the output honest
+  (a demo of how something might work is not a competency). Depth boundaries re-tuned for the now-accurate
+  breadth. Part (c): `Skills.tsx` + `skillsComb.ts` + `base.css` redesigned to the true comb-shaped-skills
+  form — a horizontal **spine** (breadth) with **teeth hanging down**, length = depth ("broken comb"), in
+  category-labelled segments, evidence cards kept; eyes-on-verified on real data across all 3 themes.
+  Calibration-validated against the resume oracle `~/Developer/Applications/Documents/ygolding_resume_2026.md`
+  (the kickoff's `~/Applications/...` path was stale). Residual: run-to-run name flicker (a more advanced
+  persistent-identity "living skills" store is the proper long-term fix) and KI-27 (dead `tasks` signal).
+  Relates to [[KI-25]] and the kickoff doc above.
 
 ## KI-27 — Skills `tasks` signal is declared but never sourced (E2 Inc 4 4c)
 

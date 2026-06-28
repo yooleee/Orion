@@ -66,6 +66,7 @@ from .store import (
     projects_for_user,
     record_admin_audit,
     record_observations,
+    replace_all_skills,
     revoke_user,
     set_project_kind,
     skills_projects,
@@ -447,26 +448,82 @@ def _validate_skills_request(payload: object) -> str | None:
     if not isinstance(project, str) or not project.strip():
         return "field 'project' must be a non-empty string"
     skills = payload.get("skills")
+    return _validate_skill_cards(skills, "skills")
+
+
+def _validate_skill_cards(skills: object, label: str) -> str | None:
+    """Check a list of skill cards against the card contract.
+
+    Args:
+        skills: The candidate value (untrusted) — must be a list of card objects.
+        label: How to refer to the list in error messages (e.g. "skills" or
+            "projects['orion']") so a batch can point at the offending project.
+
+    Returns:
+        None when `skills` is a valid list of cards; otherwise a short 400 reason.
+
+    Why:
+        Both the single per-project push and the batch push validate the SAME card shape,
+        so the per-card rules live in one place (DRY). An empty list is valid (it
+        legitimately clears a project's set). Validated here at the trust boundary rather
+        than trusting the producer; the serializer still clamps defensively.
+    """
     if not isinstance(skills, list):
-        return "field 'skills' must be a list"
+        return f"field '{label}' must be a list"
     for i, card in enumerate(skills):
         if not isinstance(card, dict):
-            return f"skills[{i}] must be an object"
+            return f"{label}[{i}] must be an object"
         for field in ("name", "category"):
             if not isinstance(card.get(field), str) or not card[field].strip():
-                return f"skills[{i}].{field} must be a non-empty string"
+                return f"{label}[{i}].{field} must be a non-empty string"
         if not isinstance(card.get("evidence"), str):
-            return f"skills[{i}].evidence must be a string"
+            return f"{label}[{i}].evidence must be a string"
         # bool is a subclass of int, so reject it explicitly — `weight = true` is not a weight.
         weight = card.get("weight")
         if not isinstance(weight, int) or isinstance(weight, bool):
-            return f"skills[{i}].weight must be an integer"
+            return f"{label}[{i}].weight must be an integer"
         signals = card.get("signals")
         if not isinstance(signals, list):
-            return f"skills[{i}].signals must be a list"
+            return f"{label}[{i}].signals must be a list"
         for s in signals:
             if s not in _VALID_SKILL_SIGNALS:
-                return f"skills[{i}].signals entries must be one of {_VALID_SKILL_SIGNALS}"
+                return f"{label}[{i}].signals entries must be one of {_VALID_SKILL_SIGNALS}"
+    return None
+
+
+def _validate_skills_batch_request(payload: object) -> str | None:
+    """Check a parsed payload against the skills-batch contract (POST /skills-batch).
+
+    Args:
+        payload: The JSON-parsed request body (any type — untrusted input).
+
+    Returns:
+        None when the payload is a valid `{projects, allow_empty?}` batch; otherwise a
+        short 400 reason.
+
+    Why:
+        The global skills-sync writes EVERY project's slice in one atomic request. `projects`
+        maps each project name to its full card list (an object, so a project cannot appear
+        twice). `allow_empty` is an optional boolean acknowledging an intentional
+        whole-portfolio clear (the handler refuses to wipe a populated comb to empty without
+        it). Validating the shape here keeps the trust boundary at the relay.
+    """
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    projects = payload.get("projects")
+    if not isinstance(projects, dict):
+        return "field 'projects' must be an object mapping project name to skills"
+    if not projects:
+        return "field 'projects' must name at least one project"
+    for name, skills in projects.items():
+        if not isinstance(name, str) or not name.strip():
+            return "every project key must be a non-empty string"
+        error = _validate_skill_cards(skills, f"projects[{name!r}]")
+        if error is not None:
+            return error
+    allow_empty = payload.get("allow_empty")
+    if allow_empty is not None and not isinstance(allow_empty, bool):
+        return "field 'allow_empty' must be a boolean"
     return None
 
 
@@ -699,6 +756,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/skills":
             self._handle_skills_push()
+            return
+
+        if path == "/skills-batch":
+            self._handle_skills_batch()
             return
 
         if path == "/api/comments":
@@ -965,6 +1026,75 @@ class _RelayHandler(BaseHTTPRequestHandler):
         )
         # 200 (not 201): an upsert of existing per-project state, not a created resource.
         self._send_json(200, {"updated": payload["project"], "skills": count})
+
+    def _handle_skills_batch(self) -> None:
+        """Authenticate, validate, and atomically replace ALL projects' skills (POST /skills-batch).
+
+        Why:
+            The global skills-sync front door (the two-pass rework). It writes every
+            project's slice in ONE transaction so the canonical naming flips atomically and
+            a reader never sees a mix of old-named and new-named rows. It prunes projects
+            absent from the batch (reconciling renamed/disabled ones). A backstop refuses to
+            wipe a currently-populated comb to entirely empty unless the request sets
+            `allow_empty` — that pattern is the signature of a degraded producer run, while
+            the producer's own abort-on-failure is the primary guard against partial writes.
+        """
+        # 1) Authenticate first (same Bearer token as /ingest and /skills).
+        auth_error = self._auth_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Read and JSON-parse the body.
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+
+        # 3) Validate the {projects, allow_empty?} shape BEFORE storing.
+        error = _validate_skills_batch_request(payload)
+        if error is not None:
+            self._send_json(400, {"error": error})
+            return
+
+        projects = payload["projects"]
+        allow_empty = bool(payload.get("allow_empty", False))
+        incoming_total = sum(len(cards) for cards in projects.values())
+
+        conn = open_relay_store(self.server.db_path)
+        try:
+            # 4) Empty-clobber backstop: refuse to reduce a populated comb to nothing
+            #    unless the caller explicitly acknowledges it. One project going empty is
+            #    plausible; the WHOLE portfolio going empty is the shape of a degraded run.
+            if incoming_total == 0 and not allow_empty and skills_projects(conn):
+                self._send_json(
+                    409,
+                    {
+                        "error": "refusing to clear all skills (the batch is entirely "
+                        "empty but the relay holds skills); set allow_empty=true to confirm"
+                    },
+                )
+                return
+            # 5) Atomically replace + prune.
+            replace_all_skills(conn, projects, _utc_now_iso(), prune=True)
+        finally:
+            conn.close()
+
+        print(
+            f"[relay] replaced skills for {len(projects)} project(s) "
+            f"({incoming_total} skill(s) total)",
+            file=sys.stderr,
+        )
+        self._send_json(
+            200, {"updated": len(projects), "skills": incoming_total}
+        )
 
     def _handle_api_report_comment(self, report_id: int) -> None:
         """Store one comment from the SPA on a report (POST /api/reports/<id>/comments).

@@ -2,8 +2,9 @@
 // web/src/lib/skillsComb.ts
 // -----------------------------------------------------------------------------
 // Responsible for: The PURE layout math for the skills comb (E2 Inc 4 slice 4c) —
-//                  mapping a skill's derived depth to a tooth height, and grouping the
-//                  flat skills list into ordered category buckets.
+//                  mapping a skill's derived depth to a tooth LENGTH (how far the tooth
+//                  hangs down from the spine), and grouping the flat skills list into
+//                  ordered category buckets.
 // Role in project: Kept OUT of Skills.tsx so the comb's geometry is unit-testable without
 //                  rendering. The component stays declarative; this owns the arithmetic.
 // Why a helper (not inline): the depth->height map and the grouping are the two bits with
@@ -12,23 +13,25 @@
 
 import type { Skill } from "../api/types";
 
-// Tooth height (px) per derived depth (1-4). A comb's teeth vary in height to show depth;
-// these are the four steps. Tuned by eyes-on (no committed screenshot for this section),
-// so they live in one named place rather than scattered inline — easy to adjust.
+// Tooth length (px) per derived depth (1-4) — how far the tooth hangs DOWN from the spine.
+// A comb's teeth vary in length to show depth; these are the four steps. Tuned by eyes-on
+// (no committed screenshot for this section), so they live in one named place rather than
+// scattered inline — easy to adjust.
 export const COMB_HEIGHTS: Record<number, number> = { 1: 34, 2: 64, 3: 96, 4: 128 };
 
 /**
- * Map a skill's derived depth to its tooth height in pixels.
+ * Map a skill's derived depth to its tooth length in pixels (how far it descends).
  *
  * Args:
  *   depth: the server-derived ordinal depth (expected 1-4).
  *
- * Returns: the tooth height in px, clamped to the [1, 4] range so an out-of-range depth
+ * Returns: the tooth length in px, clamped to the [1, 4] range so an out-of-range depth
  *   (a future wider scale, or bad data) still draws a sane tooth rather than nothing.
  *
- * Why: the wire ships a semantic depth (1-4), and presentation (how tall that is) lives
- *   client-side — the same server-decides-meaning / client-decides-looks split the rest of
- *   the dashboard uses (e.g. status glyphs). Clamping keeps the comb robust to scale changes.
+ * Why: the wire ships a semantic depth (1-4), and presentation (how long the tooth is)
+ *   lives client-side — the same server-decides-meaning / client-decides-looks split the
+ *   rest of the dashboard uses (e.g. status glyphs). Clamping keeps the comb robust to
+ *   scale changes. The name is kept (it is the bar's CSS height) so callers/tests are stable.
  */
 export function toothHeight(depth: number): number {
   const clamped = Math.max(1, Math.min(4, Math.round(depth)));

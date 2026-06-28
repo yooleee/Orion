@@ -361,11 +361,34 @@ Deferred).
   outside reader (or a recruiter) would find legible — duplicates and component-entries dilute it, and the
   visual undersells the comb metaphor.
 - **Severity:** low (cosmetic + content quality, not correctness or security)
-- **Status:** Open by-design for the initial 4c build. The rework is the **next step** for the tab: move to
-  a GLOBAL portfolio analysis (one deduplicated skill set, resume-calibrated against
-  `~/Applications/Documents/ygolding_resume_2026.md`) and a true-to-method comb visual — while keeping the
-  observe-not-originate invariant and resolving the global-vs-scope-filtering tension. Tracked here so the
-  approximation reads as intentional. Relates to [[KI-25]] and the kickoff doc above.
+- **Status:** **RESOLVED (rework CP1 + CP2 shipped).** Parts (a) and (b): `orion skills-sync` runs a
+  **global two-pass** extraction (pass 1 builds one deduplicated, resume-grade canonical vocabulary across
+  all projects on Sonnet; pass 2 attributes it per project, blind to the others) and writes every slice
+  through an **atomic batch** endpoint (`POST /skills-batch`, prune + empty-clobber guard). The
+  global-vs-scope tension is resolved structurally — pass 2 never sees another project, so existence-hiding
+  holds without trusting the prompt. An "achieved, not demoed" anti-overclaim rule keeps the output honest
+  (a demo of how something might work is not a competency). Depth boundaries re-tuned for the now-accurate
+  breadth. Part (c): `Skills.tsx` + `skillsComb.ts` + `base.css` redesigned to the true comb-shaped-skills
+  form — a horizontal **spine** (breadth) with **teeth hanging down**, length = depth ("broken comb"), in
+  category-labelled segments, evidence cards kept; eyes-on-verified on real data across all 3 themes.
+  Calibration-validated against the resume oracle `~/Developer/Applications/Documents/ygolding_resume_2026.md`
+  (the kickoff's `~/Applications/...` path was stale). Residual: run-to-run name flicker (a more advanced
+  persistent-identity "living skills" store is the proper long-term fix) and KI-27 (dead `tasks` signal).
+  Relates to [[KI-25]] and the kickoff doc above.
+
+## KI-27 — Skills `tasks` signal is declared but never sourced (E2 Inc 4 4c)
+
+- **Detail:** `SKILL_SIGNALS` (producer) and `_VALID_SKILL_SIGNALS` (relay) both include `"tasks"`, and a
+  skill card may legitimately carry it, but the evidence bundle the model sees is built only from git
+  languages, commit subjects, and doc excerpts — it has **no task/checklist evidence**. So a skill can never
+  truthfully cite `tasks`; the kind is inert vocabulary.
+- **Why it matters:** observe-not-originate means a signal should reflect real evidence. A declared-but-unfed
+  signal is a small honesty gap (a model could attach `tasks` with nothing behind it) and a loose end the
+  rework noticed but deliberately scoped out.
+- **Severity:** low (the SPA simply shows whatever signals survive; no correctness or security impact).
+- **Status:** Open. Two clean fixes, both deferred to keep the rework surgical: **feed** the project's
+  checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
+  vocabulary until it is sourced. Flagged here rather than silently left.
 
 ## Resolved
 

@@ -58,6 +58,7 @@ from relay.store import (
     list_projects,
     observed_history,
     open_relay_store,
+    skills_projects,
 )
 
 _TOKEN = "test-ingest-token"
@@ -2697,6 +2698,78 @@ def test_skills_push_malformed_is_400_and_stores_nothing(tmp_path):
         assert get_skills(conn, "demo") is None
 
 
+def _push_skills_batch(base_url, slices, *, allow_empty=False, token=_TOKEN):
+    """Push a {projects, allow_empty} batch through the real /skills-batch endpoint."""
+    body = json.dumps({"projects": slices, "allow_empty": allow_empty}).encode("utf-8")
+    return _post(base_url, body, token=token, path="/skills-batch")
+
+
+def test_skills_batch_replaces_all_and_prunes(tmp_path):
+    """POST /skills-batch writes every project's slice atomically and prunes absent ones.
+
+    Why this matters: the global skills-sync front door. One request sets every project's
+    skills together (so the canonical re-naming is atomic), and a project that drops out of
+    the batch is pruned rather than left with stale-named cards that would break the merge.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        # Seed a project the batch will not mention, so prune must remove it.
+        _push_skills(base_url, "gone", [_skill("Stale skill")])
+
+        status, body = _push_skills_batch(
+            base_url,
+            {
+                "alpha": [_skill("Python backends", weight=2)],
+                "beta": [_skill("React", category="Frontend")],
+            },
+        )
+        assert status == 200
+        assert json.loads(body) == {"updated": 2, "skills": 2}
+
+        conn = open_relay_store(db)
+        assert get_skills(conn, "alpha") == [_skill("Python backends", weight=2)]
+        assert get_skills(conn, "gone") is None  # pruned
+        assert skills_projects(conn) == ["alpha", "beta"]
+
+
+def test_skills_batch_refuses_to_clear_a_populated_comb(tmp_path):
+    """An all-empty batch over a populated store is refused 409 unless allow_empty.
+
+    Why this matters: the empty-clobber backstop. A whole-portfolio wipe is the signature
+    of a degraded producer run, so the relay refuses it by default and leaves the stored
+    skills intact; an explicit allow_empty acknowledges an intentional clear.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _push_skills(base_url, "alpha", [_skill("Python backends")])
+
+        # All slices empty, no allow_empty -> refused, store untouched.
+        status, resp = _push_skills_batch(base_url, {"alpha": []})
+        assert status == 409
+        assert "allow_empty" in json.loads(resp)["error"]
+        conn = open_relay_store(db)
+        assert get_skills(conn, "alpha") == [_skill("Python backends")]
+
+        # Same batch WITH allow_empty -> accepted, alpha cleared.
+        status, _body = _push_skills_batch(base_url, {"alpha": []}, allow_empty=True)
+        assert status == 200
+        conn = open_relay_store(db)
+        assert get_skills(conn, "alpha") == []
+
+
+def test_skills_batch_requires_auth(tmp_path):
+    """POST /skills-batch with no Bearer token is rejected 401 and stores nothing.
+
+    Why this matters: the batch is a privileged ingest surface like /skills, so it must
+    authenticate before any write.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        status, _resp = _push_skills_batch(
+            base_url, {"alpha": [_skill("X")]}, token=None
+        )
+        assert status == 401
+        conn = open_relay_store(db)
+        assert get_skills(conn, "alpha") is None
+
+
 def test_api_skills_merges_across_projects(tmp_path):
     """GET /api/skills merges the same skill across two projects into one deeper card.
 
@@ -2711,7 +2784,7 @@ def test_api_skills_merges_across_projects(tmp_path):
         assert len(out["skills"]) == 1
         merged = out["skills"][0]
         assert merged["projects"] == ["orion", "sar_hackathon"]
-        assert merged["depth"] == 4  # breadth bonus lifts it to the top, above a single-project skill
+        assert merged["depth"] == 3  # re-tuned scale: total 4 + breadth 1 = score 5 -> depth 3
 
 
 def test_api_skills_is_scoped_for_a_viewer(tmp_path):

@@ -344,10 +344,13 @@ the change is recorded in the kickoff and `known-issues.md`.)
   by `(category rank, then descending depth, then name)` — tallest teeth first within each group. The SPA
   groups the flat list by `categories` to render one comb cluster per category.
 - **`depth`** (1–4) is DERIVED here, the one place that sees the whole portfolio:
-  `score = summed per-project weight + (breadth − 1)`, bucketed so a single-project skill spreads its
-  weight straight onto the comb (incidental→1, notable→2, central→3) and a skill shown across projects
-  reaches 4. Tuned so the comb actually varies on real data (most skills are single-project). The bucket
-  boundaries are named constants in `api.py`, pinned by test and tunable.
+  `score = summed per-project weight + (breadth − 1)`, bucketed (boundaries `2 / 4 / 6`). **Re-tuned for the
+  global rework:** with `skills-sync` the same competency now carries ONE canonical name across projects, so
+  the merge actually collapses duplicates and `breadth` becomes accurate — scores shift up, so the old
+  `1 / 2 / 3` boundaries pinned most teeth at depth 4. The wider scale spreads the post-dedup distribution
+  back across 1–4: a single-project skill reaches at most depth 2 (the taller teeth are reserved for skills
+  that recur **across** projects). The boundaries are named constants in `api.py`, pinned by test;
+  **provisional** until the real-data eyes-on calibration confirms the spread.
 - **`categories`** are the distinct categories, ordered by total depth (strongest group first), tie-broken
   by name — the comb's section order.
 - **`projects`** are the in-scope projects that evidence the skill (the honest "observed · <projects>"
@@ -359,19 +362,38 @@ the change is recorded in the kickoff and `known-issues.md`.)
 - Source: `skills_projects` (enumerate projects that pushed skills — NOT `latest_report_per_project`, so a
   skills-only project is not missed) + `get_skills` per in-scope project → `api.serialize_skills`.
 
-#### `POST /skills` (producer push — machine, not the SPA)
+#### `POST /skills-batch` (producer push — machine, not the SPA) — the global front door
 
-A producer-side machine push (Bearer ingest token, like `POST /disciplines`) that sets a project's observed
-skills as **current state** (full-state upsert, no report). Body `{"project": "<name>", "skills": [{name,
-category, evidence, weight, signals}, …]}`; each card's `name`/`category` must be non-empty strings,
-`evidence` a string, `weight` an integer, and `signals` a list drawn from `git | tasks | docs`. Returns
-`200 {"updated": "<name>", "skills": <count>}`. An empty list clears the project's prior set. The producer
-gathers the project's own observed evidence (git languages from tracked files + recent commit subjects, plus
-any `discipline_docs` for topical focus) and reframes it into skills **grounded only in that evidence** via
-an **opt-in, cache-gated** Haiku step (`orion skills-push`, gated by a per-project `skills = true` flag);
-the evidence is redacted before the model and the output redacted again before the push. An extraction
-failure aborts **without** pushing (so a transient error never clobbers stored skills with an empty set).
-Stored in `relay_project_skills` (one row per project, replaced on each push).
+A producer-side machine push (Bearer ingest token) that atomically replaces **every** synced project's
+skills in **one transaction**. Body `{"projects": {"<name>": [{name, category, evidence, weight, signals},
+…], …}, "allow_empty": false}`; each card is validated exactly as in `POST /skills`. Returns `200 {"updated":
+<project count>, "skills": <total card count>}`.
+
+This is the carrier for the **global two-pass `orion skills-sync`** (the skills-comb rework). The producer
+gathers every `skills = true` project's observed evidence locally and runs two LLM passes on **Sonnet**:
+**pass 1** sees all projects at once and produces ONE deduplicated, resume-grade **canonical vocabulary**
+(fixing the cross-project near-duplicate and component-vs-competency problems); **pass 2** runs per project,
+**blind to the others**, attributing the vocabulary to that project's evidence with a weight, an evidence
+sentence grounded only in that bundle, and signals. Pass 2's blindness keeps existence-hiding **structural**
+— a project's evidence text cannot reference (and so cannot leak) a project it never sees. Evidence is
+redacted before each model call and the output redacted again before the push.
+
+Why a batch (not N single pushes): the whole point is consistent cross-project naming, so all slices must
+flip **atomically** — a partial write would leave stale-named and new-named rows side by side and transiently
+reintroduce the duplicate bug. The relay **prunes** projects absent from the batch (reconciling a renamed or
+`skills`-disabled project) and **refuses to clear a populated comb to entirely empty** unless `allow_empty`
+is set (a `409`) — that whole-portfolio wipe is the signature of a degraded run, while the producer's own
+abort-on-failure (any pass error or a truncated response) is the primary guard against a partial write.
+Stored in `relay_project_skills` (one row per project) via `store.replace_all_skills`.
+
+#### `POST /skills` (producer push — machine, not the SPA) — **DEPRECATED**
+
+The original **per-project** push, superseded by `POST /skills-batch`. It set one project's skills as current
+state via a single-pass Haiku reframe (`orion skills-push`). It still works (and remains the storage
+primitive `skills-batch` builds on), but it cannot deduplicate skills **across** projects, which is why
+independent per-project extraction produced near-duplicate names the merge could not collapse (KI-26). Body
+`{"project": "<name>", "skills": […]}`, returns `200 {"updated": "<name>", "skills": <count>}`, empty list
+clears the set. Prefer `skills-sync` / `POST /skills-batch` for any new use.
 
 ### `GET /api/showcase`
 

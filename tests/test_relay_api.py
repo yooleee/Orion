@@ -779,9 +779,12 @@ def _skill(name, *, category="Backend", evidence="ev", weight=2, signals=("git",
 def test_skills_single_project_shape_and_depth():
     """One project's skill is emitted with its projects anchor and a derived depth.
 
-    Why this matters: the baseline — a single-project skill spreads its weight straight
-    onto the comb: incidental (weight 1) is depth 1, central (weight 3) is depth 3, so the
-    teeth actually vary. The merged card names which project evidences it.
+    Why this matters: the baseline under the RE-TUNED depth scale (boundaries 2/4/6 for
+    the global-dedup distribution) — a single-project skill spreads its weight onto the
+    lower teeth: incidental (weight 1, score 1) is depth 1, central (weight 3, score 3) is
+    depth 2. The taller teeth (3-4) are reserved for skills that recur ACROSS projects, so
+    a single project alone cannot reach the top. The merged card names which project
+    evidences it.
     """
     out = api.serialize_skills(
         [
@@ -796,8 +799,8 @@ def test_skills_single_project_shape_and_depth():
         allowed=None,
     )
     by_name = {s["name"]: s for s in out["skills"]}
-    assert by_name["Incidental thing"]["depth"] == 1
-    assert by_name["Central thing"]["depth"] == 3
+    assert by_name["Incidental thing"]["depth"] == 1  # score 1 <= T1 (2)
+    assert by_name["Central thing"]["depth"] == 2  # score 3 <= T2 (4)
     assert by_name["Central thing"]["projects"] == ["orion"]
 
 
@@ -806,8 +809,9 @@ def test_skills_merge_across_projects_raises_depth_via_breadth():
 
     Why this matters: this is the whole point of the cross-project comb — a competency
     shown across the portfolio out-ranks an equally-weighted one confined to one project.
-    Two projects at weight 2 (total 4, +1 breadth = 5) reach the top depth 4, above a lone
-    weight-2 skill (depth 2). The projects anchor unions both, sorted.
+    Under the re-tuned scale (boundaries 2/4/6), two projects at weight 2 (total 4, +1
+    breadth = score 5) reach depth 3, above a lone weight-2 skill (score 2 = depth 1). The
+    projects anchor unions both, sorted.
     """
     out = api.serialize_skills(
         [
@@ -819,7 +823,7 @@ def test_skills_merge_across_projects_raises_depth_via_breadth():
     assert len(out["skills"]) == 1  # casefold-merged despite the capitalization difference
     merged = out["skills"][0]
     assert merged["projects"] == ["orion", "sar_hackathon"]
-    assert merged["depth"] == 4
+    assert merged["depth"] == 3  # score 5 <= T3 (6)
 
 
 def test_skills_merge_picks_canonical_text_and_unions_signals():

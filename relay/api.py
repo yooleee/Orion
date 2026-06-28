@@ -449,19 +449,29 @@ def serialize_disciplines(projects: list[dict], allowed: set | None) -> dict:
 # unknown kind a card carries is simply dropped from the merged output.
 _SKILL_SIGNAL_ORDER = ("git", "tasks", "docs")
 
-# Depth-bucket boundaries for the comb's tooth height (E2 Inc 4 slice 4c). A merged
-# skill's score is `summed per-project weight + (breadth - 1)`, so BREADTH (how many
-# projects independently surface the skill) and per-project CENTRALITY both raise the
-# tooth — the honest "observed-derived depth" the slice settled on. Boundaries are
-# named constants (not magic numbers) so they are tunable in one place and pinned by
-# test. With per-project weight clamped to 1..3 the common case — a single-project skill —
-# spreads its weight straight onto the comb: incidental (1) is depth 1, notable (2) depth 2,
-# central (3) depth 3; a skill demonstrated across projects reaches depth 4. (Tuned so the
-# comb actually varies on real data, where most skills are single-project: collapsing
-# weight 2 and 3 to one depth left the teeth nearly uniform.)
-_DEPTH_T1 = 1  # score <= 1  -> depth 1
-_DEPTH_T2 = 2  # score <= 2  -> depth 2
-_DEPTH_T3 = 3  # score <= 3  -> depth 3  (else depth 4)
+# Depth-bucket boundaries for the comb's tooth height (E2 Inc 4 slice 4c; RE-TUNED for
+# the global two-pass rework). A merged skill's score is `summed per-project weight +
+# (breadth - 1)`, so BREADTH (how many projects surface the skill) and per-project
+# CENTRALITY both raise the tooth. Boundaries are named constants (not magic numbers) so
+# they are tunable in one place and pinned by test.
+#
+# Why re-tuned: the OLD boundaries (1/2/3) assumed "most skills are single-project,"
+# because per-project independent extraction failed to merge cross-project duplicates and
+# under-counted breadth. The global rework makes breadth ACCURATE — the same competency
+# across N projects now merges into one skill with breadth N — so scores shift UP and the
+# old scale pinned most teeth at depth 4 (a flat comb). The wider boundaries below spread
+# the post-dedup distribution back across 1..4: a single-project incidental skill (weight 1)
+# stays depth 1, a single-project central one (weight 3) lands depth 2, a skill genuinely
+# shared across a couple of projects reaches depth 3, and a broadly cross-cutting one
+# (high summed weight AND breadth) tops out at depth 4.
+#
+# PROVISIONAL: these are calibrated against the EXPECTED post-dedup shape, not yet against
+# a real `skills-sync` run. The CP1 eyes-on calibration (run sync on the real portfolio,
+# inspect the depth spread) is what finalizes them; adjust here if the real comb still
+# clusters. CP2's visual reads whatever scale this lands on.
+_DEPTH_T1 = 2  # score <= 2  -> depth 1
+_DEPTH_T2 = 4  # score <= 4  -> depth 2
+_DEPTH_T3 = 6  # score <= 6  -> depth 3  (else depth 4)
 
 
 def _skill_depth(total_weight: int, breadth: int) -> int:

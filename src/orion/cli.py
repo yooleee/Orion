@@ -42,6 +42,7 @@ from orion.collectors.notes import collect as collect_notes
 from orion.collectors.tasks import ChecklistItem, TasksError
 from orion.collectors.tasks import collect as collect_tasks
 from orion.collectors.tasks import snapshot as snapshot_tasks
+from orion.collectors.disciplines import snapshot as snapshot_disciplines
 from orion.collectors.tracker import TrackerError
 from orion.collectors.tracker import collect as collect_tracker
 from orion.collectors.tracker import snapshot as snapshot_tracker
@@ -65,9 +66,15 @@ from orion.delivery.relay import (
     pull_comments,
     push as relay_push,
     push_checklist,
+    push_disciplines,
     revoke_user as relay_revoke_user,
 )
 from orion.delivery.slack import send as slack_send
+from orion.extract import (
+    AnthropicDisciplineExtractor,
+    Discipline,
+    DisciplineExtractor,
+)
 from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
 from orion.redact import redact
@@ -80,11 +87,13 @@ from orion.report import (
 from orion.scaffold import parse_recipient_spec, render_project_stanza, slugify_project_name
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
+    get_cache,
     get_comment_watermark,
     get_last_report_time,
     get_marker,
     open_state,
     record_report,
+    set_cache,
     set_comment_watermark,
     set_marker,
 )
@@ -261,6 +270,20 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=3.0,
         help="Seconds between polls in --watch mode (default: 3.0).",
+    )
+
+    disciplines_parser = subparsers.add_parser(
+        "disciplines-push",
+        help="Extract a project's disciplines from its docs and push them to the relay (no report).",
+    )
+    disciplines_parser.add_argument(
+        "project",
+        help="Project name as defined in orion.toml (must enable the 'disciplines' collector).",
+    )
+    disciplines_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
     intake_parser = subparsers.add_parser(
@@ -786,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_checklist_push(
             args.project, Path(args.config), args.watch, args.interval
         )
+    if args.command == "disciplines-push":
+        return cmd_disciplines_push(args.project, Path(args.config))
     if args.command == "install-hook":
         return cmd_install_hook(
             args.project, Path(args.config), args.hook, args.print_only, args.force
@@ -1516,6 +1541,136 @@ def cmd_checklist_push(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     print(f"Pushed checklist for {project.name!r} ({len(payload)} item(s)).")
+    return 0
+
+
+def _redacted_disciplines(
+    project: ProjectConfig,
+    extractor: DisciplineExtractor,
+    conn: sqlite3.Connection,
+) -> tuple[list[Discipline], int]:
+    """Snapshot a project's disciplines and redact each card's text (the privacy net).
+
+    Args:
+        project: The project to read (its discipline_docs are the source).
+        extractor: The configured DisciplineExtractor (called only on changed docs).
+        conn: An open state connection, used for the extraction cache.
+
+    Returns:
+        A (items, hits) pair: the redacted Discipline list (a card whose title is
+        ENTIRELY a secret — empty after redaction — is dropped to avoid a blank card),
+        and the count of secrets scrubbed across the cards.
+
+    Why:
+        Mirrors _redacted_checklist: the dedicated disciplines push must apply the
+        SAME redaction net to the observed text before it leaves the machine. The doc
+        text was already redacted BEFORE the model (in the collector); this is the
+        second pass on the model's OUTPUT (defense in depth, exactly as the summarizer
+        body is redacted again after the LLM). Factoring it here keeps that guarantee
+        in one place. The cache_get/cache_set closures bind the collector's storage to
+        this project's "disciplines" namespace in the state store.
+    """
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    raw = snapshot_disciplines(
+        project.discipline_docs,
+        project.repo_path,
+        extractor,
+        cache_get=lambda key: get_cache(conn, project.name, "disciplines", key),
+        cache_set=lambda key, content_hash, value: set_cache(
+            conn, project.name, "disciplines", key, content_hash, value, now
+        ),
+    )
+
+    items: list[Discipline] = []
+    hits = 0
+    for d in raw:
+        scrub_title = redact(d.title)
+        scrub_why = redact(d.why)
+        hits += scrub_title.hit_count + scrub_why.hit_count
+        safe_title = scrub_title.text.strip()
+        if not safe_title:
+            # The whole title was a secret — drop the card rather than show a blank one.
+            continue
+        # `source` is a repo-relative path the collector stamped (not raw user prose),
+        # so it rides through but is run through redact as a net; its hits are NOT
+        # re-counted (it is not author free-text).
+        safe_source = redact(d.source).text
+        items.append(
+            Discipline(
+                title=safe_title,
+                why=scrub_why.text.strip(),
+                scope=d.scope,
+                source=safe_source,
+            )
+        )
+    return items, hits
+
+
+def _disciplines_payload(
+    project: ProjectConfig,
+    extractor: DisciplineExtractor,
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """The project's redacted disciplines as the wire payload (list of dicts).
+
+    Why:
+        Mirrors _checklist_payload: derive the exact {title, why, scope, source} shape
+        push_disciplines sends, in one place, over _redacted_disciplines.
+    """
+    items, _hits = _redacted_disciplines(project, extractor, conn)
+    return [d.as_dict() for d in items]
+
+
+def cmd_disciplines_push(project_name: str, config_path: Path) -> int:
+    """Extract a project's disciplines from its docs and push them to the relay.
+
+    Args:
+        project_name: The project whose disciplines to push.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a setup or delivery error.
+
+    Why:
+        The dedicated disciplines push (E2 Inc 4 slice 4b): it sets ONLY the project's
+        observed principles on the dashboard — no report — exactly as checklist-push
+        sets the live checklist. It reads the project's own docs UNMODIFIED, reframes
+        their stated principles via the configured (opt-in) LLM extractor (cache-gated,
+        so the model runs only on a changed doc), redacts, and pushes. It requires the
+        'disciplines' collector enabled (with discipline_docs) and an enabled [relay].
+    """
+    try:
+        config = load_config(config_path)
+        load_secrets(config_path)
+        project = get_project(config, project_name)
+        relay_cfg = config.relay
+        if not relay_cfg.enabled:
+            raise ConfigError(
+                f"disciplines-push needs an enabled [relay] in {config_path} — it "
+                f"pushes the disciplines to the dashboard relay."
+            )
+        if "disciplines" not in project.collectors:
+            raise ConfigError(
+                f"Project {project.name!r} does not enable the 'disciplines' collector. "
+                f"Add 'disciplines' to its collectors (with a `discipline_docs` list) to "
+                f"push its observed principles."
+            )
+        token = get_required(relay_cfg.token_env_var)
+        # Building the extractor reads ANTHROPIC_API_KEY (anthropic provider) and
+        # rejects the local provider — both surface here as a clear setup error.
+        extractor = _build_extractor(config.summarizer, get_required)
+    except (ConfigError, SecretsError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    conn = open_state(config.state_db)
+    try:
+        payload = _disciplines_payload(project, extractor, conn)
+        push_disciplines(relay_cfg.url, project.name, payload, token)
+    except DeliveryError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Pushed disciplines for {project.name!r} ({len(payload)} card(s)).")
     return 0
 
 
@@ -3547,6 +3702,43 @@ def _build_summarizer(cfg: SummarizerConfig, secret_getter) -> Summarizer:
         # named an api_key_env. config validation guarantees base_url and model.
         api_key = secret_getter(cfg.api_key_env) if cfg.api_key_env else None
         return LocalSummarizer(cfg.base_url, cfg.model, api_key=api_key)
+    raise ConfigError(f"Unknown summarizer provider {cfg.provider!r}.")
+
+
+def _build_extractor(cfg: SummarizerConfig, secret_getter) -> DisciplineExtractor:
+    """Construct the configured disciplines extractor backend (E2 Inc 4 slice 4b).
+
+    Args:
+        cfg: The global SummarizerConfig — the extractor reuses the SAME provider and
+            model as the summarizer (one configured backend), so there is no separate
+            config surface to maintain.
+        secret_getter: A callable mapping an env-var NAME to its value (the module's
+            get_required). Injected so secret READING stays in the CLI, mirroring
+            _build_summarizer.
+
+    Returns:
+        A DisciplineExtractor for the configured provider.
+
+    Why:
+        Mirrors _build_summarizer's call-time dispatch. Disciplines extraction needs
+        reliable structured (JSON) output, which local models do not consistently
+        produce, so the local backend is deferred: we build the Anthropic extractor
+        now and raise a clear, actionable error for `provider == "local"` rather than
+        silently shipping a flaky path. The seam (the Protocol) is in place, so adding
+        a local extractor later is additive.
+    """
+    if cfg.provider == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=secret_getter("ANTHROPIC_API_KEY"))
+        return AnthropicDisciplineExtractor(client, cfg.model)
+    if cfg.provider == "local":
+        raise ConfigError(
+            "The 'disciplines' collector needs the Anthropic summarizer provider — "
+            "structured extraction is not supported on the local provider yet. Set "
+            "[summarizer] provider = \"anthropic\", or drop 'disciplines' from this "
+            "project's collectors."
+        )
     raise ConfigError(f"Unknown summarizer provider {cfg.provider!r}.")
 
 

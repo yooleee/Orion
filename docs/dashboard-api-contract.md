@@ -263,6 +263,58 @@ grouped into three time buckets, plus a summary. Scope-filtered identically to `
   `get_checklist` + `observed_history` per project → `api.serialize_scheduling`. Pure read-only
   re-aggregation — no new derivation, no producer/wire/store change.
 
+### `GET /api/disciplines`
+
+The **Disciplines & directions** section (E2 Inc 4 slice 4b): the working principles Orion **observed**
+in the user's own docs, split into a **Global** group (conventions across all projects) and per-project
+groups. Scope-filtered like `/api/portfolio`. Each card is `{title, why, source}` — a bold title, a
+"why" paragraph, and the repo-relative doc the `observed · <source>` footer cites.
+
+```json
+{
+  "scope": { "unrestricted": false, "projects": ["orion"] },
+  "global": [
+    { "title": "Untrusted text is inert",
+      "why": "Commit messages and task names are always rendered as plain text — a hard security rule.",
+      "source": "design/README.md" }
+  ],
+  "projects": [
+    { "name": "orion",
+      "principles": [
+        { "title": "Observe & reframe, never originate",
+          "why": "Plans and tasks are written in their own places; Orion reads and reframes them.",
+          "source": "CLAUDE.md" }
+      ] }
+  ]
+}
+```
+
+- **`global`** are the `scope == "global"` cards across all in-scope projects, **deduped by normalized
+  title** (a global convention may be stated in several projects' docs), the source picked
+  deterministically (the lexicographically-first `(project, source)`), sorted by title.
+- **`projects`** are `scope == "project"` cards grouped under their project, projects sorted by name and
+  cards by title. A project with no project-scope cards is **omitted** (no empty group).
+- **`scope`** is the same `{unrestricted, projects}` block `/api/portfolio` ships. **Scope-filtered FIRST:**
+  a global principle declared only in an out-of-scope project never reaches a scoped viewer (its presence
+  and source path would leak that project's existence) — existence-hiding, like the other routes.
+- **Honest extraction.** `source` is **caller-stamped** by the producer collector (the repo-relative doc),
+  never model-chosen, so `observed · <source>` is literally true. The `scope` enum is consumed by the
+  grouping and dropped from the wire card.
+- Source: `disciplines_projects` (enumerate projects that have pushed disciplines — NOT
+  `latest_report_per_project`, so a disciplines-only project is not missed) + `get_disciplines` per
+  in-scope project → `api.serialize_disciplines`.
+
+#### `POST /disciplines` (producer push — machine, not the SPA)
+
+A producer-side machine push (Bearer ingest token, like `POST /checklist` and `/ingest`) that sets a
+project's observed disciplines as **current state** (full-state upsert, no report). Body
+`{"project": "<name>", "disciplines": [{title, why, scope, source}, …]}`; each card's `title`/`why`/`source`
+must be strings (non-empty title) and `scope` one of `global | project`. Returns `200 {"updated": "<name>",
+"disciplines": <count>}`. An empty list clears the project's prior set. The producer reads the project's
+own docs **unmodified** and reframes their stated principles via an **opt-in, cache-gated** LLM step
+(`orion disciplines-push`); the docs are redacted before the model and the output redacted again before
+the push. Stored in `relay_project_disciplines` (one row per project, replaced on each push).
+
 ### `GET /api/showcase`
 
 The **public, no-login** curated surface — a small set of projects an operator has chosen to share

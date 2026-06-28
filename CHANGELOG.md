@@ -20,6 +20,24 @@ The dashboard rebuilt as a React/Vite single-page app served single-host by the 
 JSON API), faithful to the `design/` handoff. Shipped slice by slice (each its own PR); per-slice
 detail and the band map live in [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](docs/e2-inc4-dashboard-rebuild-kickoff.md).
 
+### Added
+
+- **Disciplines & directions section (4b).** A new **Disciplines** section reflects the working
+  principles Orion observes in a project's own docs, split into a **Global** group (cross-cutting
+  conventions) and per-project groups, each card a title, a "why", and an `observed · <source>` footer.
+  Observe-not-originate end to end: a new doc-centric collector reads the configured `discipline_docs`
+  **unchanged** and reframes only the principles their author stated into cards via an **opt-in,
+  cache-gated** Haiku step (the docs are never marked up; the model never invents). The seam mirrors the
+  live-checklist push: `orion disciplines-push` extracts (`src/orion/extract.py` +
+  `collectors/disciplines.py`, redact-before-LLM, a content-hash cache in the producer state store so the
+  model runs only on a changed doc) → `POST /disciplines` → `relay_project_disciplines` upsert →
+  `GET /api/disciplines` (`api.serialize_disciplines`: the Global/project split + dedupe with a
+  deterministic source pick, **scope-filtered first** so a global stated only in an out-of-scope project
+  never leaks) → `web/src/routes/Disciplines.tsx`. The **collector stamps `source`** (the repo-relative
+  doc), never the model, so the footer's claim is literally true; untrusted text renders inert (no
+  `dangerouslySetInnerHTML`). `discipline_docs` is an explicit, opt-in per-project config list. Verified
+  eyes-on vs `desktop-06` across all three themes against the live `orion` docs. Backend 714 + web 36 green.
+
 ### Removed
 
 - **Legacy server-rendered HTML retired at parity (closes [KI-23](docs/known-issues.md)).** With the

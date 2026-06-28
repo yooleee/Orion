@@ -12,14 +12,25 @@ Role in project: Read this at the START of the next session, THEN plan the
 
 # Kickoff: E2 Inc 4 — the sectioned dashboard rebuild (richer-client SPA)
 
-## Status — **4a band COMPLETE** (render.py retired); next is **4b Disciplines** (2026-06-27)
+## Status — **4b Disciplines SHIPPED**; next is **4c Connections** (2026-06-27)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. The **4a band is done** — `render.py` retired at parity
-> (item 6 below, closes KI-23). Next is **4b — Disciplines & directions** (`desktop-06`), then **4c —
-> Cross-project Connections** (`desktop-07`), each its own PR. Start each slice with a plan-mode pass per
-> the repo discipline; eyes-on every screen vs `design/screenshots/` across all three themes; ship +
-> redeploy (see **Deployment** below).
+> `design/README.md` + `design/screenshots/`. The **4a band and 4b are done**. Next is **4c —
+> Cross-project Connections** (`desktop-07`), its own PR. Start the slice with a plan-mode pass per the
+> repo discipline; eyes-on every screen vs `design/screenshots/` across all three themes; ship + redeploy
+> (see **Deployment** below).
+>
+> **4b — Disciplines & directions (just shipped):** a new doc-centric collector reads a project's own
+> instruction/decision docs UNCHANGED and reframes the principles their author stated into cards via an
+> **opt-in, cache-gated Haiku step** (observe-not-originate; the docs are read as-is, never marked up).
+> Pipeline mirrors the checklist seam end to end: `orion disciplines-push` (`src/orion/extract.py` +
+> `collectors/disciplines.py`) → `POST /disciplines` → `relay_project_disciplines` upsert →
+> `GET /api/disciplines` (`api.serialize_disciplines`, Global/project split + scope-filter-first) →
+> `web/src/routes/Disciplines.tsx`. The **collector stamps `source`** (repo-relative doc), never the
+> model, so `observed · <doc>` is honest. `discipline_docs` points at `CLAUDE.md` (the instruction doc —
+> the design `design/` spec is deliberately excluded as it is a visual spec, not a source of
+> disciplines). Eyes-on verified vs `desktop-06` across all three themes (17 real cards from the live
+> `orion` CLAUDE.md). Backend 714 + web 36 green.
 >
 > **render.py retirement (just shipped):** deleted `relay/render.py` + the legacy form routes
 > (`GET/POST /login`, `POST /report/:id/comment`); the SPA is the only front-end (relay is API-only
@@ -83,10 +94,14 @@ and **destroyed**.
    the auth/cookie/CSP machinery, `GET /logout`, and store/derive. Without `--web-dir` the relay is now
    **API-only (headless)**. Backend 676 + web 33 green; KI-23 closed. **4a band complete.**
 
-### Then 4b / 4c (each its own PR)
+### 4b / 4c (each its own PR)
 
-- **4b — Disciplines & directions** (`desktop-06`): a new doc-centric collector reading CLAUDE.md / design /
-  decision docs → store → a principles section (observe-not-originate: reads the user's own docs).
+- **4b — Disciplines & directions** (`desktop-06`) — **SHIPPED.** A new doc-centric collector reads a
+  project's own instruction docs UNCHANGED and reframes their stated principles into cards via an opt-in,
+  cache-gated Haiku step (observe-not-originate). End-to-end seam: `disciplines-push` → `POST /disciplines`
+  → `relay_project_disciplines` → `GET /api/disciplines` (Global/project split, scope-filter-first) →
+  `Disciplines.tsx`. The collector stamps the repo-relative `source` so `observed · <doc>` is honest. See
+  the Status block at the top for detail.
 - **4c — Cross-project Connections** (`desktop-07`): a new cross-project relationship derivation (shared
   items/topics, feeds) → the SVG graph section. E4's developer-view flavor.
 

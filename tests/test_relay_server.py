@@ -53,6 +53,7 @@ from relay.store import (
     comments_for,
     get,
     get_checklist,
+    get_disciplines,
     list_projects,
     observed_history,
     open_relay_store,
@@ -2539,3 +2540,103 @@ def test_api_report_comment_rejects_empty_and_oversized_body(tmp_path):
         assert s_big == 400
         conn = open_relay_store(db)
         assert comments_for(conn, report_id) == []
+
+
+# --- POST /disciplines + GET /api/disciplines (E2 Inc 4 slice 4b) ----------------
+# /disciplines upserts a project's observed principles WITHOUT a report (like
+# /checklist); /api/disciplines serves them split into Global + per-project groups.
+
+
+def _disc(title, why="why", scope="project", source="CLAUDE.md"):
+    """Build one discipline card dict (the push/serialize shape)."""
+    return {"title": title, "why": why, "scope": scope, "source": source}
+
+
+def _push_disciplines(base_url, project, cards, *, token=_TOKEN):
+    """Push a {project, disciplines} body through the real /disciplines endpoint."""
+    body = json.dumps({"project": project, "disciplines": cards}).encode("utf-8")
+    return _post(base_url, body, token=token, path="/disciplines")
+
+
+def test_disciplines_push_upserts_without_a_report(tmp_path):
+    """A valid POST /disciplines stores the cards and returns 200, creating no report.
+
+    Why this matters: the dedicated push sets the dashboard's Disciplines section with no
+    report row — the same near-real-time model as /checklist.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        status, body = _push_disciplines(base_url, "demo", [_disc("Local-first", scope="global")])
+        assert status == 200
+        assert json.loads(body) == {"updated": "demo", "disciplines": 1}
+
+        conn = open_relay_store(db)
+        assert get_disciplines(conn, "demo") == [_disc("Local-first", scope="global")]
+        assert list_projects(conn) == []  # no report row was created
+
+
+def test_disciplines_push_wrong_token_is_401(tmp_path):
+    """A bad Bearer token is rejected 401 and stores nothing.
+
+    Why this matters: /disciplines is a machine push on the ingest credential — a wrong
+    token must not write.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        status, _ = _push_disciplines(base_url, "demo", [_disc("X")], token="wrong")
+        assert status == 401
+        conn = open_relay_store(db)
+        assert get_disciplines(conn, "demo") is None
+
+
+def test_disciplines_push_malformed_is_400_and_stores_nothing(tmp_path):
+    """A card with a non-string title is rejected 400 and nothing is stored.
+
+    Why this matters: /disciplines is an untrusted surface, so a malformed card must fail
+    validation before any write — the section can never hold a shape the SPA can't render.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        bad = [{"title": 123, "why": "w", "scope": "global", "source": "CLAUDE.md"}]
+        body = json.dumps({"project": "demo", "disciplines": bad}).encode("utf-8")
+        status, resp = _post(base_url, body, path="/disciplines")
+        assert status == 400
+        assert "disciplines" in json.loads(resp)["error"]
+        conn = open_relay_store(db)
+        assert get_disciplines(conn, "demo") is None
+
+
+def test_api_disciplines_returns_global_and_project_groups(tmp_path):
+    """GET /api/disciplines serves the stored cards split into Global + per-project.
+
+    Why this matters: this is the end-to-end read the SPA renders — a pushed global card
+    lands in `global`, a project card under its project group.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        _push_disciplines(
+            base_url,
+            "orion",
+            [_disc("Local-first", scope="global"), _disc("Observe", scope="project")],
+        )
+        status, out = _get_json(base_url, "/api/disciplines")
+        assert status == 200
+        assert [c["title"] for c in out["global"]] == ["Local-first"]
+        assert out["projects"] == [
+            {"name": "orion", "principles": [{"title": "Observe", "why": "why", "source": "CLAUDE.md"}]}
+        ]
+
+
+def test_api_disciplines_is_scoped_for_a_viewer(tmp_path):
+    """A scoped viewer never sees an out-of-scope project's disciplines — even a global one.
+
+    Why this matters: scope-filter-FIRST is the leak guard. A global principle declared
+    only in a project the viewer can't see must not surface, since even its presence (and
+    source path) would leak that project's existence.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _push_disciplines(base_url, "granted", [_disc("Mine", scope="project")])
+        _push_disciplines(base_url, "secret", [_disc("Hidden global", scope="global")])
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["granted"])
+
+        status, out = _get_json(base_url, "/api/disciplines", cookie=_login(base_url, "mum-key"))
+        assert status == 200
+        # The out-of-scope project's global never appears, and only 'granted' is a group.
+        assert out["global"] == []
+        assert [g["name"] for g in out["projects"]] == ["granted"]

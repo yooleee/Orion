@@ -126,10 +126,13 @@ share_level = "high_level"
 # auto_send = false
 
 # Which signals are collected — each independently toggleable here. Supported:
-#   "git"       — raw git activity (summarized by Claude on the raw lane)
-#   "tasks"     — newly-completed items from a Markdown checklist (structured, no LLM)
-#   "notes"     — a hand-written update file (structured, no LLM)
-#   "incubator" — new ideas + status changes from an idea-pipeline table (structured, no LLM)
+#   "git"         — raw git activity (summarized by Claude on the raw lane)
+#   "tasks"       — newly-completed items from a Markdown checklist (structured, no LLM)
+#   "notes"       — a hand-written update file (structured, no LLM)
+#   "incubator"   — new ideas + status changes from an idea-pipeline table (structured, no LLM)
+#   "disciplines" — working principles read from your own instruction/decision docs, for the
+#                   dashboard's Disciplines section (observe-not-originate). OPT-IN: this is the one
+#                   collector that uses the LLM on already-written content, and only by your choosing.
 # A run reports every enabled signal as a titled section in one message.
 collectors = ["git"]
 
@@ -140,6 +143,14 @@ collectors = ["git"]
 # tasks_file = "TODO.md"        # a Markdown checklist; "- [x]" lines are reported when newly checked
 # notes_file = "NOTES.md"       # a hand-written "current update"; re-sent whenever its content changes
 # incubator_file = "index.md"   # an idea-pipeline Markdown table; new ideas + status moves are reported
+
+# The "disciplines" collector reads a LIST of your own docs UNCHANGED and reframes the principles
+# their author stated into dashboard cards (a cache-gated Haiku step; the docs are never marked up,
+# the model never invents). Each card's source is the repo-relative doc it was observed in. Point it
+# at your instruction/decision docs (the canonical "how the work is built and why"), not a visual
+# spec. Push with `orion disciplines-push <project>`. Uncomment alongside enabling "disciplines":
+#   collectors = ["git", "disciplines"]
+# discipline_docs = ["CLAUDE.md", "docs/decisions.md"]
 
 # Named recipients of this project's reports. Listed explicitly (not an implicit
 # "me") so a shared multi-supervisor service can be added later without a rewrite.

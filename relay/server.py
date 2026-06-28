@@ -43,18 +43,6 @@ from zoneinfo import ZoneInfo
 
 from . import api
 from .derive import today_in_tz
-from .render import (
-    _DISPLAY_TZ,
-    MAX_AUTHOR_CHARS,
-    MAX_COMMENT_BODY_CHARS,
-    PAGE_CSS_HASH,
-    PAGE_JS_HASH,
-    render_login,
-    render_not_found,
-    render_portfolio,
-    render_project,
-    render_report,
-)
 from .store import (
     add_comment,
     add_user,
@@ -81,16 +69,24 @@ from .store import (
     upsert_checklist,
 )
 
+# The default IANA zone the dashboard renders timestamps in (the SPA reads it from
+# GET /api/me and formats relative time client-side). Defaulted so an omitted
+# --timezone keeps the historical Pacific output. Formerly lived in render.py; it
+# moved here when render.py retired (E2 Inc 4, KI-23), this being its only consumer.
+_DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
+
 # Reject a Content-Length larger than this outright. A report blob is a few KB; 1 MB
 # is far above any real payload but well below "read gigabytes into memory". Cheap
 # defensive hygiene on an inbound surface — we do not trust a client-sent length.
 _MAX_BLOB_BYTES = 1_000_000
 
-# Per-field caps for a supervisor comment (C2) are defined in render.py (the
-# dependency-free module) and imported above, so the form's maxlength hint and this
-# server-side enforcement share ONE definition. The 1 MB raw-body cap above remains
-# the outer memory guard; MAX_COMMENT_BODY_CHARS / MAX_AUTHOR_CHARS are the semantic
-# limits on the DECODED form fields.
+# Per-field caps for a supervisor comment (C2): the semantic limits on the DECODED
+# comment body / author, enforced by the JSON comment write handlers. The 1 MB raw-body
+# cap above remains the outer memory guard. These formerly lived in render.py (where the
+# form's maxlength hint also used them); they moved here when render.py retired (E2 Inc 4,
+# KI-23). NOTE: the native-bot package keeps its OWN independent copies in orion.bot.core.
+MAX_COMMENT_BODY_CHARS = 4_000
+MAX_AUTHOR_CHARS = 200
 
 # The blob fields the relay consumes, each required to be a string. NOTE: the legacy
 # `source_marker` field (removed from the producer in KI-8; older blobs may still carry
@@ -134,31 +130,6 @@ _PROVISIONABLE_ROLES = ("admin", "viewer")
 _ADMIN_ACTOR = "admin-token"
 
 # --- Security response headers (hardening, defense-in-depth) --------------------
-# The Content-Security-Policy sent on every HTML response. It is HASH-BASED: the two
-# inline blocks the dashboard renders (_PAGE_CSS, _PAGE_JS) are allowlisted by their
-# SHA-256, computed in render.py from the SAME constants the markup uses (so the policy
-# and the page can never drift). That avoids 'unsafe-inline' while letting the page's
-# own style/script run; everything else is locked down:
-#   default-src 'self'      — same-origin only is the baseline for anything unlisted
-#   style-src / script-src  — 'self' plus the one exact inline hash each
-#   img-src 'self'          — the dashboard loads no external images
-#   base-uri 'none'         — block a <base> tag that could rewrite relative URLs
-#   form-action 'self'      — the login/comment forms may only POST back to us
-#   frame-ancestors 'none'  — the dashboard may not be framed (clickjacking)
-#   object-src 'none'       — no plugins/embeds
-# The inline-hash allowances are simply inert on the _simple_html error pages (which
-# carry no inline blocks), so this ONE policy safely covers every HTML response.
-_CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; "
-    f"style-src 'self' '{PAGE_CSS_HASH}'; "
-    f"script-src 'self' '{PAGE_JS_HASH}'; "
-    "img-src 'self'; "
-    "base-uri 'none'; "
-    "form-action 'self'; "
-    "frame-ancestors 'none'; "
-    "object-src 'none'"
-)
-
 # E2 Inc 4: the CSP for the React SPA (the --web-dir static responses). Vite emits EXTERNAL
 # hashed JS/CSS (no inline <script>/<style>), so script-src stays STRICT 'self' — that is the
 # XSS guarantee, the same one the old hash-based policy gave. style-src adds 'unsafe-inline'
@@ -466,29 +437,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _parse_comment_path(path: str) -> int | None:
-    """Extract the report id from a "/report/<id>/comment" path, or None.
-
-    Args:
-        path: The request path, already stripped of any query string.
-
-    Returns:
-        The integer report id when `path` is exactly "/report/<digits>/comment";
-        otherwise None (the route did not match).
-
-    Why:
-        do_POST routes by path, so it needs a single yes/no-with-id matcher for the
-        comment route. We accept only an all-digit id segment (mirroring do_GET's
-        id_str.isdigit() guard), so a non-numeric or malformed id simply fails to
-        match and falls through to the 404 — no exception, no store touch.
-    """
-    prefix, suffix = "/report/", "/comment"
-    if not (path.startswith(prefix) and path.endswith(suffix)):
-        return None
-    middle = path[len(prefix):-len(suffix)]
-    return int(middle) if middle.isdigit() else None
-
-
 def _parse_api_comment_path(path: str) -> int | None:
     """Extract the report id from "/api/reports/<id>/comments", or None.
 
@@ -501,39 +449,16 @@ def _parse_api_comment_path(path: str) -> int | None:
 
     Why:
         The SPA's JSON comment write is RESTfully scoped to a report. do_POST routes by
-        path, so it needs a yes/no-with-id matcher, mirroring _parse_comment_path's
-        all-digit guard: a non-numeric id simply fails to match and falls through to the
-        404 — no exception, no store touch. The GET /api/reports/<id> read uses the same
-        id segment, so write and read agree on the identity.
+        path, so it needs a yes/no-with-id matcher with an all-digit guard: a non-numeric
+        id simply fails to match and falls through to the 404 — no exception, no store
+        touch. The GET /api/reports/<id> read uses the same id segment, so write and read
+        agree on the identity.
     """
     prefix, suffix = "/api/reports/", "/comments"
     if not (path.startswith(prefix) and path.endswith(suffix)):
         return None
     middle = path[len(prefix):-len(suffix)]
     return int(middle) if middle.isdigit() else None
-
-
-def _simple_html(heading: str, detail: str) -> str:
-    """Build a minimal self-contained HTML page for a browser-facing error.
-
-    Args:
-        heading: The <h1> / <title> text. MUST be a static, trusted literal.
-        detail: A one-line explanation. Same static-only contract.
-
-    Returns:
-        A tiny complete HTML document string.
-
-    Why:
-        The comment POST is driven by a browser form, so its rejections (400/401/403)
-        read better as HTML than the JSON /ingest returns. These pages carry NO
-        dynamic input — every caller passes a fixed message — so they need no escaping.
-        Keeping them here leaves render.py (the dashboard view layer) untouched.
-    """
-    return (
-        "<!doctype html><html lang='en'><meta charset='utf-8'>"
-        f"<title>Orion — {heading}</title>"
-        f"<h1>{heading}</h1><p>{detail}</p></html>"
-    )
 
 
 class _RelayHandler(BaseHTTPRequestHandler):
@@ -552,29 +477,28 @@ class _RelayHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        """Route a GET to one of the read-only dashboard views.
+        """Route a GET request.
 
-        Routes: "/" (project index), "/project/<name>" (a project's history),
-        "/report/<id>" (one report). An unknown report id or any other path is a
-        404; an unknown PROJECT renders a friendly empty-state (200), since "no
-        reports" and "never existed" look the same to a viewer.
+        Three GET surfaces remain after the server-rendered views retired (KI-23):
+          1. The machine-JSON API ("/api/comments", "/api/users") — Bearer/admin-token
+             authed, routed FIRST so a browser never reaches it and the CLI never trips
+             the session gate.
+          2. The SPA's read-only JSON API ("/api/me", "/api/portfolio",
+             "/api/projects/<name>", "/api/reports/<id>", "/api/scheduling",
+             "/api/showcase") — cookie-session authed (a 401 routes the SPA to /login),
+             except /api/me + /api/showcase which answer publicly.
+          3. The built SPA itself, when --web-dir is set: a real asset if the path maps to
+             one, else index.html for client-side routing; "/logout" clears the cookie.
+        Without --web-dir the relay is API-only (headless): only "/logout" and the JSON
+        routes answer; any other path is a JSON 404.
 
-        Read auth (multi-party): when the dashboard is access-gated — a view secret is
-        set OR any user has been provisioned — every route requires a valid SESSION
-        COOKIE; an absent/invalid/expired/revoked one redirects to /login (a persistent
-        login, not the old per-session Basic dialog). On a bare loopback dev relay with
-        neither, reads stay open. The fail-closed guard in create_server() still
-        guarantees a view secret whenever the bind is non-loopback, so a world-reachable
-        dashboard is never unauthenticated. Ingest stays Bearer-authed independently.
-
-        /login and /logout are reachable WITHOUT a session (you must reach /login to
-        authenticate). The "/api/..." namespace is Bearer-authed (a machine surface),
-        routed FIRST — a browser never reaches it, the CLI never trips the session gate.
-
-        AuthZ scoping layers on top of the gate: an admin (and the open/ungated relay)
-        sees everything; a viewer is restricted to projects_for_user, and any project or
-        report outside that scope returns 404 (existence-hiding, decision A), resolved
-        from current DB state on every route so a regrant/revoke applies immediately.
+        Read auth (multi-party): the SPA-API routes share the dashboard's gate — when
+        access-gated (a view secret is set OR any user is provisioned) a valid SESSION
+        COOKIE is required; on a bare loopback dev relay with neither, reads stay open. The
+        fail-closed guard in create_server() guarantees a view secret on any non-loopback
+        bind. AuthZ scoping layers on top: an admin (and the open relay) sees everything; a
+        viewer is restricted to projects_for_user, and out-of-scope projects/reports return
+        404 (existence-hiding, decision A), re-resolved from DB state on every request.
         """
         # Strip any query string; routing is by path only (the /api/ handler re-reads
         # the query itself, since it — unlike the dashboard — takes parameters).
@@ -602,13 +526,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_spa_api(path)
             return
 
-        # E2 Inc 4: when serving the SPA single-host, GET routing diverges from the legacy
-        # server-rendered dashboard — the SPA owns every page (/, /project/*, /report/*,
-        # /login) via client-side routing. So serve a real asset if the path maps to one,
-        # else fall back to index.html. The data is still gated (the /api routes 401); the
-        # index shell itself is public (the SPA then calls /api/me and routes to /login).
-        # /logout stays a real action (clear the cookie, then the SPA loads). The legacy
-        # HTML branch below is retained until parity and only runs when web_dir is unset.
+        # E2 Inc 4 (KI-23): the React SPA is the dashboard's only front-end. When started
+        # with --web-dir the relay serves the built SPA single-host — the SPA owns every
+        # page (/, /project/*, /report/*, /login) via client-side routing. So serve a real
+        # asset if the path maps to one, else fall back to index.html. The data is still
+        # gated (the /api routes 401); the index shell itself is public (the SPA then calls
+        # /api/me and routes to /login). /logout stays a real action (clear the cookie,
+        # then the SPA reloads). The legacy server-rendered HTML views retired here.
         if self.server.web_dir is not None:
             if path == "/logout":
                 self._handle_logout()
@@ -618,128 +542,33 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._serve_spa_index()
             return
 
-        # The login surface is reachable WITHOUT a session — you must get here to log in.
-        if path == "/login":
-            self._send_html(200, render_login())
-            return
+        # No --web-dir: this relay is API-ONLY (headless). There is no HTML front-end to
+        # serve, so /logout (a harmless cookie clear) is the only browser GET honoured;
+        # every other path is a JSON 404. A real browser dashboard requires --web-dir.
         if path == "/logout":
             self._handle_logout()
             return
-
-        # A fresh connection per request keeps each sqlite handle on its own thread.
-        conn = open_relay_store(self.server.db_path)
-        try:
-            # Authentication gate (cookie session). Required whenever the dashboard is
-            # access-gated; an absent/invalid/expired/revoked session redirects to
-            # /login instead of the old Basic 401, so a logged-in browser STAYS logged
-            # in across restarts (the point of the session).
-            gated = self._auth_required(conn)
-            principal = self._authenticate(conn) if gated else None
-            if gated and principal is None:
-                self._send_redirect(303, "/login")
-                return
-
-            # AuthZ scoping: which projects this principal may see. None = unrestricted
-            # (admin / legacy admin / open relay); a set = a viewer's allowed projects.
-            # Out-of-scope resources return 404 (NOT 403) so a viewer cannot even learn
-            # that a project/report they aren't granted EXISTS — decision A (the audience
-            # may include guests). The 404 is byte-identical to a genuinely-missing one.
-            allowed = self._allowed_projects(conn, principal)
-
-            if path == "/":
-                # The portfolio home: each project plus its latest report (id + body),
-                # so the cards can show a one-line headline and link straight in. Scope
-                # filtering is unchanged — the same per-project `in allowed` predicate the
-                # index used, applied before render, so a viewer sees only granted cards.
-                # "today" in the relay's display zone, so the at-risk badge counts
-                # against the same day every viewer sees (E2 Inc 3).
-                today = today_in_tz(self.server.display_tz)
-                projects = latest_report_per_project(conn, today=today)
-                if allowed is not None:
-                    projects = [p for p in projects if p["project"] in allowed]
-                self._send_html(
-                    200, render_portfolio(projects, self.server.display_tz)
-                )
-                return
-
-            if path.startswith("/project/"):
-                # Decode the percent-encoded name back to the stored project string.
-                name = urllib.parse.unquote(path[len("/project/"):])
-                # A viewer outside this project's scope is told it does not exist.
-                if allowed is not None and name not in allowed:
-                    self._send_html(404, render_not_found(f"No project {name!r}."))
-                    return
-                self._send_html(
-                    200,
-                    render_project(
-                        name,
-                        history(conn, name),
-                        self.server.display_tz,
-                        checklist=get_checklist(conn, name),
-                        # The observation history drives the per-item "slipping" marker
-                        # (E2 Inc 3 Unit 4); the project page is the surface that shows it.
-                        observations=observed_history(conn, name),
-                    ),
-                )
-                return
-
-            if path.startswith("/report/"):
-                id_str = path[len("/report/"):]
-                # Only a numeric id can match a row; anything else is a 404 without
-                # touching the store.
-                report = get(conn, int(id_str)) if id_str.isdigit() else None
-                # Resolve the report's project FIRST, then scope-check it: an out-of-scope
-                # report is reported as missing with the SAME message as a nonexistent
-                # one, so existence stays hidden from a viewer who lacks the grant.
-                if report is None or (
-                    allowed is not None and report["project"] not in allowed
-                ):
-                    self._send_html(404, render_not_found(f"No report {id_str!r}."))
-                    return
-                # report is not None implies id_str was numeric, so int() is safe.
-                comments = comments_for(conn, int(id_str))
-                # The project's LIVE checklist (E2 Inc 2) — current state, shown as
-                # context on the report page. None when the project has no checklist.
-                checklist = get_checklist(conn, report["project"])
-                # Pass the authenticated identity (when logged in) so the comment form
-                # shows "commenting as <name>" and drops the free-text name field — the
-                # comment will be attributed to this identity, not a typed value.
-                author_name = principal["name"] if principal is not None else None
-                self._send_html(
-                    200,
-                    render_report(
-                        report,
-                        comments,
-                        self.server.display_tz,
-                        author_name=author_name,
-                        checklist=checklist,
-                    ),
-                )
-                return
-
-            self._send_html(404, render_not_found(f"Unknown path {path!r}."))
-        finally:
-            conn.close()
+        self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
         """Route a POST to one of the relay's write surfaces.
 
         Routes: "/ingest" (the Bearer-authed report push), "/api/comments" (a
-        Bearer-authed MACHINE comment write — the native bot's path, C2-bots), and
-        "/report/<id>/comment" (a view-authed BROWSER comment, C2). Anything else is a
-        404. Routing is by path only, so any query string is stripped first — mirroring
-        do_GET.
+        Bearer-authed MACHINE comment write — the native bot's path, C2-bots),
+        "/api/reports/<id>/comments" (the SPA's cookie-authed BROWSER comment write),
+        and the JSON auth siblings "/api/login" / "/api/logout". Anything else is a 404.
+        Routing is by path only, so any query string is stripped first — mirroring do_GET.
 
         Why a router: do_POST used to be the single ingest handler. C2 added a second,
-        very differently-authed write path (HTTP Basic + a CSRF check, not Bearer), and
-        the bots slice adds a third — a machine sibling of GET /api/comments that takes
-        Bearer (like /ingest), not Basic. Each path gets its own handler, keeping this
-        method a short, readable table of routes rather than one branching blob.
+        differently-authed write path (a CSRF check + cookie session), and the bots slice
+        added a third — a machine sibling of GET /api/comments that takes Bearer (like
+        /ingest). Each path gets its own handler, keeping this method a short, readable
+        table of routes rather than one branching blob.
 
         Note "/api/comments" is shared between do_GET (the pull-back read) and do_POST
         (the bot's write): the HTTP method already disambiguates them, so the same
-        Bearer-gated machine path serves both directions — symmetric with how the
-        browser uses /report/<id> (GET) and /report/<id>/comment (POST).
+        Bearer-gated machine path serves both directions. (The legacy form routes
+        POST /login and POST /report/<id>/comment retired with render.py — KI-23.)
         """
         path = urllib.parse.urlparse(self.path).path
 
@@ -763,11 +592,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_revoke_user()
             return
 
-        if path == "/login":
-            self._handle_login()
-            return
-
-        # E2 Inc 4: the SPA's JSON auth siblings of the form /login + GET /logout.
+        # E2 Inc 4: the SPA's JSON auth siblings (the cookie-session login / logout).
         if path == "/api/login":
             self._handle_api_login()
             return
@@ -775,16 +600,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_api_logout()
             return
 
-        # E2 Inc 4: the SPA's cookie-authed JSON comment write (sibling of the form route
-        # below). Checked before the form route; distinct path from the Bearer /api/comments.
+        # E2 Inc 4: the SPA's cookie-authed JSON comment write — the only user-authored
+        # write path. Distinct from the Bearer-authed machine /api/comments above.
         api_comment_report_id = _parse_api_comment_path(path)
         if api_comment_report_id is not None:
             self._handle_api_report_comment(api_comment_report_id)
-            return
-
-        comment_report_id = _parse_comment_path(path)
-        if comment_report_id is not None:
-            self._handle_comment(comment_report_id)
             return
 
         self._send_json(404, {"error": "not found"})
@@ -922,110 +742,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # 200 (not 201): an upsert of existing per-project state, not a created resource.
         self._send_json(200, {"updated": payload["project"], "items": count})
 
-    def _handle_comment(self, report_id: int) -> None:
-        """Store one supervisor comment on a report (POST /report/<id>/comment, C2).
-
-        Args:
-            report_id: The report the comment attaches to (parsed from the path).
-
-        The inbound-security checklist, enforced IN ORDER:
-          1. Auth — a valid SESSION COOKIE, exactly as the GET dashboard now requires:
-             gated whenever a view secret is set or users exist (401 otherwise); open
-             on a bare loopback dev relay — consistent with reads.
-          2. CSRF — a session cookie is auto-sent by the browser, so a forged cross-site
-             POST is the threat. Require an Origin matching our canonical public origin
-             (or, absent one configured, the request Host); reject a mismatch with 403.
-             SameSite=Lax on the cookie is a second layer (it suppresses the cookie on
-             most cross-site POSTs), but the Origin check stays the guarantee.
-          3. Validate — parse the urlencoded form; require a non-empty body within the
-             length caps (and a capped author); reject with 400.
-          4. Report exists — 404 if the id has no report (a stale or forged link).
-          5. Store, then 303 redirect back to the report (POST-redirect-GET, so a
-             browser refresh does not resubmit the comment).
-
-        Why:
-            This is Orion's first write-from-a-browser surface, so it is gated more
-            tightly than the feature itself. The comment text is deliberately NOT
-            redaction-scanned: redaction is an OUTBOUND control for the developer's own
-            secrets, whereas an inbound supervisor comment shown only on the
-            access-gated dashboard is a different threat. The relevant control here is
-            XSS-escaping on render (pinned in render.py), not redaction.
-        """
-        # One fresh connection per request (own thread), used for both the auth check
-        # and the report lookup/insert below.
-        conn = open_relay_store(self.server.db_path)
-        try:
-            # 1) Auth: a valid session is required whenever the dashboard is access-gated
-            # (the same rule as do_GET). The credential is the session cookie, not Basic.
-            # Capture the principal so step 5 can scope the write to the report's project.
-            gated = self._auth_required(conn)
-            principal = self._authenticate(conn) if gated else None
-            if gated and principal is None:
-                self._send_html(401, _simple_html("unauthorized", "Log in to comment."))
-                return
-
-            # 2) CSRF: require a same-origin POST (canonical Origin check).
-            if self._origin_error() is not None:
-                self._send_html(
-                    403, _simple_html("forbidden", "Request blocked by an origin (CSRF) check.")
-                )
-                return
-
-            # 3) Read and parse the urlencoded form body.
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_html(
-                    400, _simple_html("bad request", "Missing, oversized, or unreadable body.")
-                )
-                return
-            try:
-                fields = urllib.parse.parse_qs(raw.decode("utf-8"))
-            except UnicodeDecodeError:
-                self._send_html(400, _simple_html("bad request", "Body is not valid UTF-8."))
-                return
-
-            # parse_qs maps each key to a LIST of values; take the first (or "" if
-            # absent), then strip — a name/body of only whitespace counts as empty.
-            form_author = fields.get("author", [""])[0].strip()
-            body = fields.get("body", [""])[0].strip()
-
-            # 4) Validate: a non-empty body within caps, and a capped author. We validate
-            # the FORM-submitted name even when logged in (defense), though it is then
-            # ignored in favor of the authenticated identity below.
-            if not body:
-                self._send_html(400, _simple_html("bad request", "A comment body is required."))
-                return
-            if len(body) > MAX_COMMENT_BODY_CHARS or len(form_author) > MAX_AUTHOR_CHARS:
-                self._send_html(400, _simple_html("bad request", "Comment or name is too long."))
-                return
-
-            # When the commenter is LOGGED IN, attribute the comment to their authenticated
-            # identity (re-read from the session principal), NOT the self-asserted form
-            # field — so a logged-in user cannot post under someone else's name. In open /
-            # loopback mode there is no session, so the typed name stands. The principal
-            # name comes from the DB (provisioned, or the legacy-admin sentinel), so it is
-            # trusted and not re-length-checked here. (The bot's POST /api/comments path is
-            # unchanged — a machine surface with its own free-text author.)
-            author = principal["name"] if principal is not None else form_author
-
-            # 5) Confirm the report exists AND is in this principal's scope, then store. An
-            # out-of-scope report is reported as missing (identical to a nonexistent one),
-            # so a viewer can neither write to nor confirm the existence of a report they
-            # were not granted — the same existence-hiding rule do_GET applies to reads.
-            allowed = self._allowed_projects(conn, principal)
-            report = get(conn, report_id)
-            if report is None or (
-                allowed is not None and report["project"] not in allowed
-            ):
-                self._send_html(404, render_not_found(f"No report {report_id!r}."))
-                return
-            add_comment(conn, report_id, author, body, _utc_now_iso())
-        finally:
-            conn.close()
-        # 303 + Location → the browser re-GETs the report (POST-redirect-GET), so a
-        # refresh of the resulting page does not resubmit the comment.
-        self._send_redirect(303, f"/report/{report_id}")
-
     def _handle_api_report_comment(self, report_id: int) -> None:
         """Store one comment from the SPA on a report (POST /api/reports/<id>/comments).
 
@@ -1033,15 +749,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
             report_id: The report the comment attaches to (parsed from the path).
 
         Why:
-            The cookie-session, JSON sibling of the browser form route (_handle_comment):
-            the SAME auth + CSRF + scope + identity rules, but JSON-in / JSON-out for the
-            React SPA, which posts via fetch and appends the returned comment rather than
-            following a 303. The machine path POST /api/comments stays Bearer-authed and
-            separate (a browser never auto-sends a Bearer token, so it needs no CSRF check;
-            this cookie path does). Every guard reuses the vetted helpers so the two
-            browser-comment routes cannot drift on security.
+            The only user-authored write surface: the SPA posts a comment via fetch and
+            appends the returned comment to the thread. JSON-in / JSON-out, cookie-session
+            authed with a CSRF (Origin) check, scope-filtered, and attributed to the
+            authenticated identity. The machine path POST /api/comments stays Bearer-authed
+            and separate (a browser never auto-sends a Bearer token, so it needs no CSRF
+            check; this cookie path does). Every guard reuses the vetted auth/scope/origin
+            helpers. (This absorbed the retired browser form route's role — KI-23.)
 
-            Inbound-security checklist, enforced IN ORDER (mirrors _handle_comment):
+            Inbound-security checklist, enforced IN ORDER:
               1. Auth — a valid session cookie when the dashboard is gated; 401 otherwise.
               2. CSRF — the cookie is auto-sent by the browser, so a forged cross-site POST
                  is the threat; require a matching Origin/Referer (_origin_error), else 403.
@@ -1088,7 +804,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             if not isinstance(client_author, str):
                 self._send_json(400, {"error": "field 'author' must be a string"})
                 return
-            # Strip both so a whitespace-only body counts as empty — same as the form route.
+            # Strip both so a whitespace-only body counts as empty.
             body = body.strip()
             client_author = client_author.strip()
             if not body:
@@ -1200,10 +916,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         This is the native-bot write path: a Slack/Discord bot, on a supervisor's reply,
         POSTs JSON {project, body, author?, report_id?} here and the relay appends it to
-        the project's report_comments — the EXACT same store the browser comment form
-        (`_handle_comment`) and the dashboard render from. So a chat reply and a dashboard
-        comment are indistinguishable downstream, and `orion comments` keeps working
-        unchanged.
+        the project's report_comments — the EXACT same store the SPA comment write
+        (`_handle_api_report_comment`) and the dashboard read from. So a chat reply and a
+        dashboard comment are indistinguishable downstream, and `orion comments` keeps
+        working unchanged.
 
         Body fields:
           - project   (required): the project to attach the comment to.
@@ -1219,9 +935,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
           1. Auth — Bearer, the SAME token /ingest and GET /api/comments use (whoever can
              push a project's reports can comment on them). 401 + WWW-Authenticate: Bearer.
              Checked BEFORE the body is read. NO CSRF/Origin check is needed (unlike the
-             browser `_handle_comment`): a Bearer token is never auto-attached by a browser,
-             so there is no cross-site-forgery vector — the same reasoning GET /api/comments
-             uses to skip it.
+             browser `_handle_api_report_comment`): a Bearer token is never auto-attached by
+             a browser, so there is no cross-site-forgery vector — the same reasoning GET
+             /api/comments uses to skip it.
           2. Read + parse — the 1 MB raw-body cap (`_read_raw_body`), then JSON; a missing/
              oversized body or non-object/invalid JSON is a 400.
           3. Validate — `project`/`body` required non-empty strings; `author` optional str;
@@ -1234,10 +950,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             Comments are deliberately NOT redaction-scanned — same rationale as
-            `_handle_comment` and `_handle_api_comments`: redaction is an OUTBOUND control
-            for the developer's own secrets, whereas an inbound supervisor comment shown
-            only on the access-gated dashboard is a different threat (the control there is
-            XSS-escaping on render, in render.py). This handler stays Bearer-gated all the same.
+            `_handle_api_report_comment` and `_handle_api_comments`: redaction is an OUTBOUND
+            control for the developer's own secrets, whereas an inbound supervisor comment
+            shown only on the access-gated dashboard is a different threat (the control there
+            is the SPA's inert React text rendering, never dangerouslySetInnerHTML). This
+            handler stays Bearer-gated all the same.
         """
         # 1) Authenticate FIRST, exactly like /ingest — validate nothing until authorized.
         auth_error = self._auth_error()
@@ -1705,44 +1422,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return None
         return set(projects_for_user(conn, principal["user_id"]))
 
-    def _handle_login(self) -> None:
-        """Verify a posted access key and set the session cookie (POST /login).
-
-        Why:
-            The login key is the credential: we recompute its verifier (HMAC with the
-            pepper) and look it up; a matching ACTIVE user gets a fresh signed session
-            cookie (sub = user id, sv = their session_version) and a redirect to the
-            dashboard. The legacy view key, while still permitted, logs in as the
-            bootstrap admin (sub = 0). A miss re-renders /login with a GENERIC error (we
-            never reveal which part failed, so the form leaks nothing about which keys
-            exist). All key compares are constant-time and the key is never logged.
-        """
-        # An unconfigured (no session key) relay has nothing to log into — treat /login
-        # as a no-op redirect rather than erroring.
-        if self.server.session_key is None:
-            self._send_redirect(303, "/")
-            return
-        conn = open_relay_store(self.server.db_path)
-        try:
-            raw = self._read_raw_body()
-            key = ""
-            if raw is not None:
-                try:
-                    key = urllib.parse.parse_qs(raw.decode("utf-8")).get("key", [""])[0]
-                except UnicodeDecodeError:
-                    key = ""
-
-            resolved = self._resolve_login(conn, key)
-            if resolved is None:
-                self._send_html(401, render_login("Invalid or expired access key."))
-                return
-            sub, sv, _identity = resolved
-            self._send_redirect(
-                303, "/", extra_headers={"Set-Cookie": self._mint_cookie(sub, sv)}
-            )
-        finally:
-            conn.close()
-
     def _resolve_login(self, conn, key: str) -> tuple | None:
         """Verify an access key and resolve it to (sub, sv, identity), or None on a miss.
 
@@ -1757,12 +1436,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             real-user success.
 
         Why:
-            BOTH the form login (/login → 303) and the JSON login (/api/login → JSON) need
-            the exact same verify-and-mint logic; factoring it here is the one place that can
-            never drift between them. All key compares stay constant-time (key_verifier /
-            compare_digest) and the key is never logged. A generic None on any miss keeps the
-            callers from leaking which part failed. Returns identity too, so the JSON caller
-            can echo {name, role} without a second lookup.
+            The JSON login (POST /api/login) needs verify-and-mint logic; factoring it here
+            keeps it testable and ready to share (the form login that used to share it
+            retired with render.py — KI-23). All key compares stay constant-time
+            (key_verifier / compare_digest) and the key is never logged. A generic None on
+            any miss keeps the caller from leaking which part failed. Returns identity too,
+            so the JSON caller can echo {name, role} without a second lookup.
         """
         if not key or self.server.session_key is None:
             return None
@@ -1795,9 +1474,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
             configured session lifetime.
 
         Why:
-            The form and JSON logins both mint the identical cookie; sharing one builder
-            keeps the signing, lifetime, and cookie flags (HttpOnly/SameSite/Secure) in one
-            place so the two paths cannot diverge on a security-relevant attribute.
+            The JSON login mints the session cookie through this one builder, which keeps the
+            signing, lifetime, and cookie flags (HttpOnly/SameSite/Secure) in a single place
+            (a security-relevant invariant). Factored out while the form login also used it;
+            that route has since retired with render.py (KI-23).
         """
         now = int(time.time())
         value = make_session_value(
@@ -1811,9 +1491,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
         Why:
             The SPA's login: it POSTs {"key": ...} and needs to tell success from failure
             without parsing a redirect, plus get {name, role} back to populate the account
-            card. It reuses _resolve_login + _mint_cookie (so it cannot drift from the form
-            route) and applies the same same-origin CSRF check as the comment POST — the SPA
-            fetch is same-origin (single host in prod, Vite proxy in dev), so it passes.
+            card. It reuses the factored-out _resolve_login + _mint_cookie helpers and
+            applies the same same-origin CSRF check as the comment POST — the SPA fetch is
+            same-origin (single host in prod, Vite proxy in dev), so it passes.
         """
         # CSRF: this sets a cookie, so guard it like the other state-changing POSTs.
         origin_error = self._origin_error()
@@ -2099,26 +1779,21 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length)
 
-    def _security_headers(self, *, html: bool) -> dict:
-        """Return the standard security response headers for this response.
-
-        Args:
-            html: True for an HTML response, which additionally gets the CSP and the
-                legacy X-Frame-Options (both only meaningful for a document a browser
-                renders/frames); False for JSON and bodyless redirects.
+    def _security_headers(self) -> dict:
+        """Return the standard security response headers common to every response.
 
         Returns:
             A header-name -> value dict for the response writer to merge in.
 
         Why:
-            Defense-in-depth on an internet-facing surface, defined ONCE so all three
-            response writers send a consistent set (DRY). X-Content-Type-Options and
-            Referrer-Policy ride EVERY response. HSTS is gated on secure_cookie — the
-            same hosted-HTTPS signal the cookie's Secure attribute uses — so a plain
-            HTTP loopback dev relay never claims HTTPS-only (which would wedge it in a
-            browser). The CSP (from _CONTENT_SECURITY_POLICY) and the legacy
-            X-Frame-Options clickjacking cover go on HTML only, where a browser renders
-            or frames the response — they are meaningless on a JSON API reply.
+            Defense-in-depth on an internet-facing surface, defined ONCE so all response
+            writers send a consistent set (DRY). X-Content-Type-Options and Referrer-Policy
+            ride EVERY response. HSTS is gated on secure_cookie — the same hosted-HTTPS
+            signal the cookie's Secure attribute uses — so a plain HTTP loopback dev relay
+            never claims HTTPS-only (which would wedge it in a browser). The SPA's CSP +
+            X-Frame-Options are NOT here: only the SPA index.html (an HTML document a
+            browser renders/frames) needs them, and _send_file attaches them itself — they
+            are meaningless on a JSON API reply or a bodyless redirect.
 
             Referrer-Policy is "same-origin", NOT "no-referrer": "no-referrer" is what
             broke the comment loop. Per the Fetch standard, a non-GET request under a
@@ -2140,11 +1815,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # 2 years, includeSubDomains — the standard durable HSTS lifetime.
         if self.server.secure_cookie:
             headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-        if html:
-            headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
-            # Legacy clickjacking cover for older browsers, alongside the CSP's
-            # frame-ancestors 'none' (which supersedes it in modern ones).
-            headers["X-Frame-Options"] = "DENY"
         return headers
 
     def _send_json(
@@ -2171,37 +1841,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         # Security headers first, then any caller-supplied extras (which take
         # precedence on a name clash, though none currently collide).
-        merged = {**self._security_headers(html=False), **(extra_headers or {})}
-        for name, value in merged.items():
-            self.send_header(name, value)
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_html(
-        self, code: int, html_str: str, *, extra_headers: dict | None = None
-    ) -> None:
-        """Write an HTML response with the given status code.
-
-        Args:
-            code: HTTP status code.
-            html_str: The HTML body.
-            extra_headers: Optional extra response headers (e.g. WWW-Authenticate on a
-                401). Defaulted so the common case stays a two-arg call.
-
-        Why:
-            The dashboard responses are all UTF-8 HTML; this keeps the
-            status/header/body sequence and the charset in one place (DRY), so each
-            view function just returns a string and never deals with the socket.
-            extra_headers keeps the one case that needs an extra header (the dashboard
-            401's WWW-Authenticate) from forking this method — same shape as _send_json.
-        """
-        body = html_str.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        # HTML responses additionally carry the CSP and X-Frame-Options (html=True).
-        # Security headers first, then caller extras (precedence on a clash).
-        merged = {**self._security_headers(html=True), **(extra_headers or {})}
+        merged = {**self._security_headers(), **(extra_headers or {})}
         for name, value in merged.items():
             self.send_header(name, value)
         self.end_headers()
@@ -2213,27 +1853,24 @@ class _RelayHandler(BaseHTTPRequestHandler):
         """Write a bodyless redirect response to `location`.
 
         Args:
-            code: The 3xx status code (303 for POST-redirect-GET).
+            code: The 3xx status code (303).
             location: The path to redirect to (a site-relative path is fine).
-            extra_headers: Optional extra response headers — used to attach a
-                Set-Cookie on the login/logout redirects (set the session cookie while
-                redirecting to the dashboard, or clear it while redirecting to /login).
+            extra_headers: Optional extra response headers — used to attach the
+                cookie-clearing Set-Cookie on the GET /logout redirect.
 
         Why:
-            After a successful comment POST we 303 back to the report page so the
-            browser re-fetches it with a GET — the POST-redirect-GET pattern, which
-            stops a page refresh from resubmitting the comment. Login/logout reuse the
-            same redirect but also need to (un)set the session cookie, hence
-            extra_headers — same shape as _send_html/_send_json. A redirect needs no
-            body, so we send an explicit zero Content-Length plus the Location header.
+            GET /logout clears the session cookie and 303-redirects to /login; this is its
+            sole remaining caller now that the form login + comment POST routes retired with
+            render.py (the SPA's JSON auth/comment paths use _send_json). It also keeps the
+            redirect header sequence in one place — same shape as _send_json. A redirect
+            needs no body, so we send an explicit zero Content-Length plus the Location.
         """
         self.send_response(code)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
-        # A redirect carries no rendered body, so it gets the common headers only
-        # (html=False — no CSP/X-Frame-Options). Caller extras (e.g. the login/logout
-        # Set-Cookie) take precedence on a clash.
-        merged = {**self._security_headers(html=False), **(extra_headers or {})}
+        # A redirect carries no rendered body, so it gets the common headers only.
+        # Caller extras (e.g. the login/logout Set-Cookie) take precedence on a clash.
+        merged = {**self._security_headers(), **(extra_headers or {})}
         for name, value in merged.items():
             self.send_header(name, value)
         self.end_headers()
@@ -2255,14 +1892,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             One writer for both asset and index responses keeps the header sequence in one
-            place. The SPA gets its OWN CSP (script-src strict 'self'), distinct from the
-            legacy hash-based policy that still covers the server-rendered HTML.
+            place. The SPA index gets its OWN CSP (script-src strict 'self') + the
+            clickjacking X-Frame-Options here — the only HTML the relay serves now that the
+            server-rendered views have retired (KI-23).
         """
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
-        headers = self._security_headers(html=False)
+        headers = self._security_headers()
         if spa_html:
             headers["Content-Security-Policy"] = _SPA_CONTENT_SECURITY_POLICY
             headers["X-Frame-Options"] = "DENY"
@@ -2401,9 +2039,9 @@ class RelayServer(ThreadingHTTPServer):
         view_token: Optional shared secret for dashboard (GET) read auth via HTTP
             Basic. None (the default) leaves reads open — valid only for a loopback
             bind, which create_server() enforces with a fail-closed guard.
-        display_tz: The IANA zone the dashboard renders timestamps in. Defaults to
-            render.py's Pacific constant, so an operator who passes no --timezone gets
-            the historical California output unchanged.
+        display_tz: The IANA zone the dashboard renders timestamps in. Defaults to the
+            module's _DISPLAY_TZ Pacific constant, so an operator who passes no --timezone
+            gets the historical California output unchanged.
 
     Why:
         Subclassing ThreadingHTTPServer to hold db_path/token is the clean way to
@@ -2441,8 +2079,9 @@ class RelayServer(ThreadingHTTPServer):
         self.showcase_enabled = showcase.enabled
         self.showcase_projects = showcase.projects
         # E2 Inc 4: when set, the built SPA (web/dist) is served from here single-host —
-        # static assets + an index.html fallback for client-side routes — and GET routing
-        # serves the SPA instead of the legacy server-rendered HTML. None = legacy HTML.
+        # static assets + an index.html fallback for client-side routes. None = API-only
+        # (headless): the JSON API works but there is no HTML front-end (the legacy
+        # server-rendered views retired at parity, KI-23).
         self.web_dir = web_dir.resolve() if web_dir is not None else None
         # Spread the auth bundle onto the server so each handler reads the individual
         # knobs via self.server.<name> (the existing per-request access pattern).
@@ -2593,7 +2232,7 @@ def serve(
     # Surface read-auth state at startup — the operator's confirmation that a
     # world-reachable bind is gated (the fail-closed guard guarantees it is).
     auth_state = "login required" if view_token else "open (loopback only)"
-    frontend = f"SPA from {web_dir}" if web_dir is not None else "server-rendered HTML"
+    frontend = f"SPA from {web_dir}" if web_dir is not None else "API only (no SPA dir)"
     print(
         f"[relay] listening on http://{bound_host}:{bound_port}  "
         f"(db: {db_path}; dashboard: {auth_state}; frontend: {frontend})",

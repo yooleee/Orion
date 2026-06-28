@@ -32,10 +32,10 @@ import pytest
 from orion.collectors.tasks import ChecklistItem
 from orion.config import ProjectConfig, Recipient
 from orion.report import build_report, serialize_blob
-from relay.render import MAX_COMMENT_BODY_CHARS, PAGE_CSS_HASH, PAGE_JS_HASH
 from relay.server import (
     _SESSION_COOKIE_NAME,
     AuthConfig,
+    MAX_COMMENT_BODY_CHARS,
     ShowcaseConfig,
     _b64url_encode,
     _is_loopback,
@@ -225,25 +225,25 @@ def _provision_user(db, name, key, *, role="viewer", projects=()):
 
 
 def _post_login(base_url, key):
-    """POST /login with an access key; return (status, headers, text), no redirect follow.
+    """POST /api/login with an access key; return (status, headers, text), no redirect follow.
 
     Args:
         base_url: the server's base URL.
         key: the raw access key to present.
 
     Why:
-        The low-level login driver every login test shares. Success replies 303 +
-        Set-Cookie, a bad key replies 401 with the re-rendered login page; a no-redirect
-        opener keeps both (and their headers/body) readable rather than auto-following the
-        303 into the dashboard. Returning the raw headers lets a test inspect the
-        Set-Cookie attributes (HttpOnly / SameSite / Secure); returning the body lets it
-        assert the 401 re-renders the form and leaks no secret.
+        The low-level login driver every login test shares. After the server-rendered HTML
+        retired (KI-23), login is the JSON route POST /api/login: success replies 200 +
+        Set-Cookie, a bad key replies 401 with {"ok": false} and no Set-Cookie. The JSON
+        body carries the same-origin Origin header so the CSRF check passes. Returning the
+        raw headers lets a test inspect the Set-Cookie attributes (HttpOnly / SameSite /
+        Secure); returning the body lets it assert the rejection leaks no secret.
     """
-    data = urllib.parse.urlencode({"key": key}).encode("utf-8")
+    data = json.dumps({"key": key}).encode("utf-8")
     req = urllib.request.Request(
-        base_url + "/login",
+        base_url + "/api/login",
         data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type": "application/json", "Origin": base_url},
         method="POST",
     )
     opener = urllib.request.build_opener(_NoRedirect)
@@ -264,12 +264,13 @@ def _login(base_url, key):
 
     Returns:
         The orion_session cookie value on success, or None on a rejected key (the server
-        re-renders the login page with a 401 and sets no cookie).
+        replies 401 with no Set-Cookie).
 
     Why:
         The convenience wrapper most tests use: it drives the real login flow via
-        _post_login and extracts just the cookie value, so a follow-up _get / _post_comment
-        can present it. Tests that need the raw Set-Cookie attributes call _post_login.
+        _post_login and extracts just the cookie value, so a follow-up _get / _get_json /
+        _post_api_json can present it. Tests that need the raw Set-Cookie attributes call
+        _post_login.
     """
     _, headers, _ = _post_login(base_url, key)
     set_cookie = headers.get("Set-Cookie")
@@ -653,199 +654,6 @@ def test_unknown_path_is_404(tmp_path):
         assert status == 404
 
 
-# --- CP7: the read-only dashboard GET routes, end to end ----------------------
-#
-# These drive the SAME running server through HTTP after ingesting a real blob, so
-# they prove the store -> render wiring (not just the pure render functions, which
-# test_relay_render.py covers). Ingest is authenticated; the dashboard GETs are not
-# (loopback-bound access model — see do_GET).
-
-
-def test_dashboard_index_then_project_then_report(tmp_path):
-    """After a real push, the index → project → report routes all render it.
-
-    Why this matters: this is the dashboard's whole navigation path end to end. We
-    ingest one real blob, then walk /, /project/demo, and /report/<id>, confirming
-    each 200s and shows the expected content drawn from the store.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        status, body = _post(base_url, _real_blob_json().encode("utf-8"))
-        assert status == 201
-        report_id = json.loads(body)["id"]
-
-        # Index lists the project and links to its page.
-        code, index_html = _get(base_url, "/")
-        assert code == 200
-        assert "demo" in index_html
-        assert 'href="/project/demo"' in index_html
-
-        # Project page lists the report and links to it.
-        code, project_html = _get(base_url, "/project/demo")
-        assert code == 200
-        assert f'href="/report/{report_id}"' in project_html
-
-        # Report page shows the section content.
-        code, report_html = _get(base_url, f"/report/{report_id}")
-        assert code == 200
-        assert "Code activity" in report_html
-        assert "Shipped the seam." in report_html
-
-
-def test_project_page_shows_the_live_checklist(tmp_path):
-    """A checklist pushed via /checklist appears on the project page (the watch surface).
-
-    Why this matters: this pins the CP2 end-to-end path — a near-real-time checklist
-    push lands in the store and the project page renders it, even though no report-page
-    visit is needed. We push a checklist (no report), GET /project/demo, and assert the
-    block and an item render.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        status, _ = _post(base_url, _checklist_body(), path="/checklist")
-        assert status == 200
-
-        code, project_html = _get(base_url, "/project/demo")
-        assert code == 200
-        assert "Current checklist" in project_html
-        assert "Wire it" in project_html  # an item from _checklist_body's default
-
-
-def test_home_shows_checklist_only_project_card(tmp_path):
-    """A checklist-only project (no report) appears on the home with a clickable card.
-
-    Why this matters: this is the end-to-end payoff of the slice. Before, the home only
-    listed projects that had reports, so a dashboard-only project (a pushed checklist, no
-    git, never report-ed — the applications tracker) was reachable solely by typing the
-    direct /project/<name> URL. We push ONLY a checklist for 'applications', GET the home,
-    and assert its card and /project/ link now render alongside no crash.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        status, _ = _post(
-            base_url, _checklist_body(project="applications"), path="/checklist"
-        )
-        assert status == 200
-
-        code, home_html = _get(base_url, "/")
-        assert code == 200
-        assert 'href="/project/applications"' in home_html
-        assert "0 report(s)" in home_html  # checklist-only → zero reports
-
-
-def test_dashboard_unknown_report_id_is_404(tmp_path):
-    """A GET for a report id that does not exist returns 404.
-
-    Why this matters: a stale or hand-typed /report/<id> link must be a clean 404
-    page, the behavior the store's get()->None contract feeds.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        code, html = _get(base_url, "/report/999")
-        assert code == 404
-        assert "Not found" in html
-
-
-def test_dashboard_unknown_get_path_is_404(tmp_path):
-    """A GET to an unrouted path returns 404.
-
-    Why this matters: anything outside the three known views is not found — a
-    probing or typo'd GET gets a clean 404 rather than a server error.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        code, _ = _get(base_url, "/nope")
-        assert code == 404
-
-
-# --- C3: dashboard read auth (cookie session) + the fail-closed bind guard -------
-#
-# Read auth is enforced whenever the dashboard is access-gated — a view secret is set
-# OR any user has been provisioned. The credential is now a signed SESSION COOKIE
-# (minted by POST /login), not the old HTTP-Basic dialog: an absent/invalid session
-# redirects to /login (303) instead of a 401. With neither a view secret nor users (the
-# loopback default) GETs stay open. The fail-closed guard still guarantees a view secret
-# whenever the bind is non-loopback, so a world-reachable dashboard is never
-# unauthenticated. Ingest (the write surface) is unaffected — it stays Bearer-authed.
-
-
-def test_dashboard_open_when_no_view_secret(tmp_path):
-    """With no view secret and no users, dashboard GETs serve without a session (200).
-
-    Why this matters: this pins the backward-compatible default — local, loopback
-    use stays zero-friction (no login) exactly as before C3. The guard (below) is what
-    keeps this default safe by forbidding it on a non-loopback bind.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        code, _ = _get(base_url, "/")
-        assert code == 200
-
-
-def test_dashboard_requires_login_when_view_secret_set(tmp_path):
-    """With a view secret set, a GET sent with no session is redirected to /login (303).
-
-    Why this matters: this is the read gate that makes leaving loopback safe — once the
-    dashboard is access-gated, an unauthenticated visitor is sent to log in rather than
-    shown the content. A persistent login (cookie) replaces the old re-prompting dialog.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        code, _ = _get(base_url, "/")
-        assert code == 303
-
-
-def test_dashboard_no_session_redirects_to_login_and_login_page_hides_secret(tmp_path):
-    """The gate redirects to /login, and the login page never leaks the view secret.
-
-    Why this matters: the redirect Location is how an unauthenticated browser is told
-    WHERE to authenticate (the cookie-session analog of the old WWW-Authenticate: Basic
-    header). And, like the ingest path, no auth surface — here the login page — may ever
-    contain the expected secret.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        # Build the request directly so the redirect's Location header is readable.
-        req = urllib.request.Request(base_url + "/", method="GET")
-        opener = urllib.request.build_opener(_NoRedirect)
-        try:
-            opener.open(req, timeout=5)
-            raise AssertionError("expected a 303 redirect")
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 303
-            assert exc.headers.get("Location") == "/login"
-        # The login page itself must not echo the view secret.
-        _, login_html = _get(base_url, "/login")
-        assert _VIEW not in login_html
-
-
-def test_dashboard_bad_key_is_401_and_rerenders_login(tmp_path):
-    """POST /login with the wrong key is refused 401, re-renders login, never echoes it.
-
-    Why this matters: a present-but-wrong credential must be refused — the key is the
-    gate. The server re-renders the login page (so the browser stays on the form) with a
-    generic error and sets no cookie, and the response leaks neither the bad key nor the
-    expected view secret.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        # _login returns None on a rejected key (no Set-Cookie issued).
-        assert _login(base_url, "not-the-key") is None
-        # Inspect the 401 + re-rendered login body directly.
-        code, headers, body = _post_login(base_url, "not-the-key")
-        assert code == 401
-        assert headers.get("Set-Cookie") is None  # no session minted
-        assert "sign in" in body.lower()  # the login form was re-rendered
-        assert "not-the-key" not in body and _VIEW not in body
-
-
-def test_dashboard_login_then_view_is_200(tmp_path):
-    """After logging in, the session cookie renders the dashboard (200).
-
-    Why this matters: the positive path — a visitor who logs in (here via the legacy
-    bootstrap admin, since no users exist yet) gets a session cookie that carries them
-    through to the content, proving login -> cookie -> authenticated GET works end to end.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        assert _post(base_url, _real_blob_json().encode("utf-8"))[0] == 201
-        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users provisioned)
-        assert cookie is not None
-        code, html = _get(base_url, "/", cookie=cookie)
-        assert code == 200
-        assert "demo" in html
-
-
 # --- C3: session lifecycle — login, cookie hygiene, expiry, revocation, logout ---
 #
 # The running-server counterparts to the pure-crypto cookie tests at the bottom of the
@@ -864,7 +672,7 @@ def test_login_success_sets_a_valid_cookie(tmp_path):
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         code, headers, _ = _post_login(base_url, _VIEW)  # legacy bootstrap admin
-        assert code == 303
+        assert code == 200  # POST /api/login replies 200 + Set-Cookie (was a 303 form post)
         set_cookie = headers.get("Set-Cookie")
         assert set_cookie is not None
         low = set_cookie.lower()
@@ -882,34 +690,34 @@ def test_provisioned_viewer_can_login_and_view(tmp_path):
 
     Why this matters: this is the real per-user flow — provisioning a user is itself enough
     to gate the dashboard (the access model is "controlled once anyone exists"), an
-    unauthenticated visitor is sent to /login, and the user's own key logs them in to the
-    content. Proves identity end to end: store -> login -> authenticated GET.
+    unauthenticated request is refused (401 on a data API route), and the user's own key logs
+    them in to the content. Proves identity end to end: store -> login -> authenticated GET.
     """
     with _running_relay(tmp_path) as (base_url, db):  # no view secret
         _ingest_one(base_url)
         _provision_user(db, "erin", "erin-key", projects=["demo"])
         # Provisioning a user gates the dashboard even with no view secret set.
-        assert _get(base_url, "/")[0] == 303  # no session -> login
+        assert _get_json(base_url, "/api/portfolio")[0] == 401  # no session -> login required
         cookie = _login(base_url, "erin-key")
         assert cookie is not None
-        assert _get(base_url, "/", cookie=cookie)[0] == 200  # logged in -> served
+        assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 200  # logged in -> served
 
 
-def test_tampered_cookie_redirects_to_login(tmp_path):
-    """A session cookie with a flipped byte is refused — the request is sent to /login.
+def test_tampered_cookie_is_rejected(tmp_path):
+    """A session cookie with a flipped byte is refused — a gated data API route returns 401.
 
     Why this matters: the HMAC signature is what makes the stateless cookie unforgeable; a
     mutated cookie must never authenticate, and the live gate must turn that into a clean
-    redirect, not an error or (worse) an authenticated request.
+    401 (login required), not an error or (worse) an authenticated request.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
         cookie = _login(base_url, _VIEW)
         tampered = cookie[:-1] + ("A" if cookie[-1] != "A" else "B")
-        assert _get(base_url, "/", cookie=tampered)[0] == 303
+        assert _get_json(base_url, "/api/portfolio", cookie=tampered)[0] == 401
 
 
-def test_expired_cookie_redirects_to_login(tmp_path):
-    """A session whose `exp` has passed is refused server-side, redirecting to /login.
+def test_expired_cookie_is_rejected(tmp_path):
+    """A session whose `exp` has passed is refused server-side (a gated data route 401s).
 
     Why this matters: expiry is enforced from the signed payload, not just the browser's
     Max-Age, so a client that keeps a cookie past its lifetime still cannot use it. We mint
@@ -920,10 +728,10 @@ def test_expired_cookie_redirects_to_login(tmp_path):
         expired = make_session_value(
             _SKEY, user_id=0, session_version=0, issued_at=now - 100, expires_at=now - 10
         )
-        assert _get(base_url, "/", cookie=expired)[0] == 303
+        assert _get_json(base_url, "/api/portfolio", cookie=expired)[0] == 401
 
 
-def test_revoked_session_redirects_to_login(tmp_path):
+def test_revoked_session_is_rejected(tmp_path):
     """Bumping a user's session_version force-logs-out their live cookie on the next request.
 
     Why this matters: this is STATELESS revocation — the cookie carries the session_version
@@ -934,13 +742,13 @@ def test_revoked_session_redirects_to_login(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         uid = _provision_user(db, "bob", "bob-key", projects=["demo"])
         cookie = _login(base_url, "bob-key")
-        assert _get(base_url, "/", cookie=cookie)[0] == 200  # works before revocation
+        assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 200  # works before revocation
         conn = open_relay_store(db)
         try:
             bump_session_version(conn, uid)
         finally:
             conn.close()
-        assert _get(base_url, "/", cookie=cookie)[0] == 303  # sv mismatch -> logged out
+        assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 401  # sv mismatch -> logged out
 
 
 def test_logout_clears_cookie(tmp_path):
@@ -1016,12 +824,11 @@ def test_secure_cookie_only_when_hosted(tmp_path):
         assert "secure" not in headers.get("Set-Cookie", "").lower()
 
 
-# --- Hardening: Content-Security-Policy + standard security response headers ----
+# --- Hardening: HSTS rides every response in a hosted posture -------------------
 #
-# The dashboard is internet-facing and renders user-influenced text (comments, project
-# names), so every HTML response carries a hash-based CSP plus the standard hardening
-# headers. These drive a live relay and read the response headers directly (the _get
-# helper drops them), the same manual-request pattern the redirect test uses.
+# The relay is internet-facing, so the hardening headers (here HSTS) must track the
+# deployment posture. This drives a live relay and reads the response headers directly
+# (the _get helper drops them), the same manual-request pattern the auth tests use.
 
 
 def _get_headers(base_url, path, *, cookie=None):
@@ -1036,7 +843,7 @@ def _get_headers(base_url, path, *, cookie=None):
         The header-presence tests need the response HEADERS, which _get discards (it
         returns only code + text). This mirrors _post_login's manual-request pattern:
         build the request directly and return response.headers, with a no-redirect
-        opener so the gate's 303 -> /login surfaces here instead of being auto-followed.
+        opener so any 3xx surfaces here instead of being auto-followed.
     """
     headers = {}
     if cookie is not None:
@@ -1050,35 +857,6 @@ def _get_headers(base_url, path, *, cookie=None):
         return exc.code, exc.headers, exc.read().decode("utf-8")
 
 
-def test_dashboard_html_carries_csp_and_security_headers(tmp_path):
-    """A dashboard HTML GET sends the CSP (with BOTH inline hashes) and the standard headers.
-
-    Why this matters: the dashboard is internet-facing and renders attacker-influenceable
-    text, so a Content-Security-Policy and the standard hardening headers are the
-    defense-in-depth the surface warrants. The CSP must name BOTH inline-block hashes —
-    omit either and the policy would block the page's own CSS/JS — and lock down framing;
-    nosniff, Referrer-Policy, and the legacy X-Frame-Options must ride the HTML response.
-    """
-    # An open loopback relay (no view secret, no users) serves the index directly, so
-    # this is a plain HTML 200 — no login needed to inspect the response headers.
-    with _running_relay(tmp_path) as (base_url, _db):
-        status, headers, _ = _get_headers(base_url, "/")
-        assert status == 200
-        csp = headers.get("Content-Security-Policy")
-        assert csp is not None
-        # The policy allowlists exactly the two inline blocks the page renders.
-        assert f"'{PAGE_CSS_HASH}'" in csp
-        assert f"'{PAGE_JS_HASH}'" in csp
-        assert "default-src 'self'" in csp
-        assert "frame-ancestors 'none'" in csp
-        assert headers.get("X-Content-Type-Options") == "nosniff"
-        # "same-origin", NOT "no-referrer": "no-referrer" makes a browser send a comment
-        # POST with Origin: null (and no Referer), which the CSRF check then 403s. The
-        # policy must keep a same-origin Origin/Referer for the comment loop to work.
-        assert headers.get("Referrer-Policy") == "same-origin"
-        assert headers.get("X-Frame-Options") == "DENY"
-
-
 def test_hsts_only_when_hosted(tmp_path):
     """Strict-Transport-Security is sent in a hosted HTTPS posture, absent on a loopback dev relay.
 
@@ -1087,14 +865,15 @@ def test_hsts_only_when_hosted(tmp_path):
     connect over http). So it must track the hosted signal (secure_cookie), exactly like
     the cookie's Secure attribute, not be hardcoded. Mirrors test_secure_cookie_only_when_hosted.
     """
-    # Hosted posture (behind TLS): HSTS is sent.
+    # Hosted posture (behind TLS): HSTS is sent. /api/me is always reachable and the HSTS
+    # header rides every response, so it is the probe now that the HTML routes have retired.
     hosted = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, secure_cookie=True)
     with _running_relay(tmp_path, auth=hosted) as (base_url, _db):
-        _, headers, _ = _get_headers(base_url, "/")
+        _, headers, _ = _get_headers(base_url, "/api/me")
         assert "max-age=63072000" in headers.get("Strict-Transport-Security", "")
     # Plain loopback dev (the default): no HSTS, so plain http to the relay still works.
     with _running_relay(tmp_path) as (base_url, _db):
-        _, headers, _ = _get_headers(base_url, "/")
+        _, headers, _ = _get_headers(base_url, "/api/me")
         assert headers.get("Strict-Transport-Security") is None
 
 
@@ -1120,167 +899,6 @@ def _ingest_project(base_url, project):
     status, body = _post(base_url, json.dumps(blob).encode("utf-8"))
     assert status == 201
     return json.loads(body)["id"]
-
-
-def test_viewer_index_shows_only_scoped_projects(tmp_path):
-    """A viewer's index lists only the projects they are granted, not the others.
-
-    Why this matters: the index is the first authZ surface — a viewer scoped to "alpha"
-    must not even see that "beta" exists in the project list, so the filter runs on the
-    rendered set, not just the detail routes.
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        _ingest_project(base_url, "alpha")
-        _ingest_project(base_url, "beta")
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        code, html = _get(base_url, "/", cookie=cookie)
-        assert code == 200
-        assert "alpha" in html
-        assert "beta" not in html  # out-of-scope project is invisible on the index
-
-
-def test_admin_index_shows_all_projects(tmp_path):
-    """An admin (here the legacy bootstrap admin) sees every project on the index.
-
-    Why this matters: the scope filter must apply ONLY to viewers; an admin's all-access
-    is decided by role, never narrowed by the per-project table. This is the unrestricted
-    side of the same _allowed_projects(None) decision.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        _ingest_project(base_url, "alpha")
-        _ingest_project(base_url, "beta")
-        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin -> sees all
-        code, html = _get(base_url, "/", cookie=cookie)
-        assert code == 200
-        assert "alpha" in html and "beta" in html
-
-
-def test_portfolio_home_shows_each_projects_latest_headline(tmp_path):
-    """The home page shows each project's latest-report first line as a headline (end to end).
-
-    Why this matters: this is the whole point of the portfolio home — at a glance, a viewer
-    sees not just project names but a one-line "what's happening" per project. It exercises
-    the full new path end to end: ingest -> latest_report_per_project -> render_portfolio ->
-    the rendered home. We use the real blob (body "Shipped the relay seam."), so a passing
-    assert proves the latest body actually reaches the card.
-    """
-    with _running_relay(tmp_path) as (base_url, _db):
-        _ingest_project(base_url, "alpha")
-        code, html = _get(base_url, "/")  # open loopback relay serves the home directly
-        assert code == 200
-        assert "alpha" in html  # the project card
-        assert "Shipped the relay seam." in html  # its latest report's first line
-
-
-def test_viewer_in_scope_project_is_200_out_of_scope_is_404(tmp_path):
-    """A viewer reaches a granted project (200) but an ungranted one is 404 (hidden).
-
-    Why this matters: this is the per-project read gate. An out-of-scope project — whether
-    it exists or not — must be indistinguishable from a nonexistent one, so a viewer cannot
-    probe project names.
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        _ingest_project(base_url, "alpha")
-        _ingest_project(base_url, "beta")
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        assert _get(base_url, "/project/alpha", cookie=cookie)[0] == 200
-        assert _get(base_url, "/project/beta", cookie=cookie)[0] == 404  # exists, hidden
-        assert _get(base_url, "/project/nope", cookie=cookie)[0] == 404  # nonexistent
-
-
-def test_viewer_in_scope_report_is_200_out_of_scope_is_404(tmp_path):
-    """A viewer reads a report in a granted project (200) but not one outside it (404).
-
-    Why this matters: the report route resolves the report's project FIRST, then scope-
-    checks it, so a viewer cannot open a report belonging to a project they lack — even
-    with a direct /report/<id> link.
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        alpha_report = _ingest_project(base_url, "alpha")
-        beta_report = _ingest_project(base_url, "beta")
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        assert _get(base_url, f"/report/{alpha_report}", cookie=cookie)[0] == 200
-        assert _get(base_url, f"/report/{beta_report}", cookie=cookie)[0] == 404
-
-
-def test_viewer_out_of_scope_report_404_is_identical_to_missing(tmp_path):
-    """An out-of-scope report's 404 is identical to a genuinely-missing one at the SAME id.
-
-    Why this matters: existence-hiding (decision A) holds only if, for the SAME requested
-    id, a viewer cannot tell "exists but not mine" from "does not exist". The 404 message
-    echoes the requested id (which the viewer already typed, so that leaks nothing), so the
-    right test fixes the id and varies only existence: we request the same id N across two
-    relays — one where report N exists in an unscoped project, one where N is missing — and
-    require an identical status AND body.
-    """
-    # Relay 1: report N exists, but in a project the viewer is NOT scoped to.
-    with _running_relay(tmp_path / "exists") as (base_url, db):
-        report_id = _ingest_project(base_url, "beta")
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        code_oos, body_oos = _get(base_url, f"/report/{report_id}", cookie=cookie)
-    # Relay 2: the SAME id is genuinely missing (nothing ingested there).
-    with _running_relay(tmp_path / "missing") as (base_url, db):
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        code_missing, body_missing = _get(base_url, f"/report/{report_id}", cookie=cookie)
-    assert code_oos == code_missing == 404
-    assert body_oos == body_missing  # indistinguishable -> existence hidden
-
-
-def test_viewer_with_no_grants_sees_nothing(tmp_path):
-    """A viewer with zero project grants sees an empty index and 404s every project.
-
-    Why this matters: default-deny is the invariant — access is granted, never assumed. A
-    freshly provisioned viewer with no scope rows must see nothing until an admin grants a
-    project, not the whole dashboard.
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        _ingest_project(base_url, "alpha")
-        _provision_user(db, "viewer-empty", "e-key", projects=[])  # no grants
-        cookie = _login(base_url, "e-key")
-        code, html = _get(base_url, "/", cookie=cookie)
-        assert code == 200
-        assert "alpha" not in html
-        assert _get(base_url, "/project/alpha", cookie=cookie)[0] == 404
-
-
-def test_viewer_cannot_comment_out_of_scope(tmp_path):
-    """A viewer's comment on an out-of-scope report is 404 (hidden) and stores nothing.
-
-    Why this matters: authZ runs on EVERY route, not just reads (hardening #6). A viewer
-    must not be able to write to — or even confirm the existence of — a report in a project
-    they were not granted, so the comment POST applies the same existence-hiding 404.
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        beta_report = _ingest_project(base_url, "beta")
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        status, _, _ = _post_comment(base_url, beta_report, body="sneaky", cookie=cookie)
-        assert status == 404
-
-        conn = open_relay_store(db)
-        assert comments_for(conn, beta_report) == []  # nothing written
-
-
-def test_viewer_can_comment_in_scope(tmp_path):
-    """A viewer's comment on a granted project's report is accepted (303) and stored.
-
-    Why this matters: the scope gate must not over-block — a viewer with a grant is exactly
-    the supervisor the sharing flow is for, so commenting within scope must still work.
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        alpha_report = _ingest_project(base_url, "alpha")
-        _provision_user(db, "viewer-a", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-        status, _, _ = _post_comment(base_url, alpha_report, body="looks good", cookie=cookie)
-        assert status == 303
-
-        conn = open_relay_store(db)
-        assert [c["body"] for c in comments_for(conn, alpha_report)] == ["looks good"]
 
 
 def test_ingest_unaffected_by_view_secret(tmp_path):
@@ -1352,31 +970,32 @@ def test_require_view_auth_with_secret_on_loopback_enforces_login(tmp_path):
 
     Why this matters: this is the proxy topology done right — the guard passes (a secret
     is set), and the loopback dashboard still demands a session, so the proxy cannot
-    expose an unauthenticated view. Proves both the guard and the enforcement.
+    expose an unauthenticated view. Proves both the guard and the enforcement (a data API
+    route 401s without a session, 200s with one).
     """
     with _running_relay(tmp_path, view_token=_VIEW, require_view_auth=True) as (base_url, _db):
-        assert _get(base_url, "/")[0] == 303  # no session -> redirected to login
+        assert _get_json(base_url, "/api/portfolio")[0] == 401  # no session -> login required
         cookie = _login(base_url, _VIEW)  # legacy bootstrap admin
-        assert _get(base_url, "/", cookie=cookie)[0] == 200  # session -> served
+        assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 200  # session -> served
 
 
-# --- C2: dashboard comments (POST /report/<id>/comment) -------------------------
+# --- CSRF for the SPA comment write (POST /api/reports/<id>/comments) ------------
 #
-# The comment route is Orion's first write-from-a-browser surface, so these tests are
-# the security checklist made executable: auth (view secret), CSRF (Origin check),
-# validation (non-empty body + length caps), report-existence, and the 303
-# POST-redirect-GET on success. The route speaks HTTP form data (not JSON like
-# /ingest) and is gated by the SAME view secret as the read dashboard.
+# The browser comment route retired with render.py (KI-23); the SPA now writes comments
+# via the cookie-authed JSON route POST /api/reports/<id>/comments (success 201). Its
+# happy path, auth, scope, and validation are covered by the test_api_report_comment_*
+# tests below; these remaining cases pin the CSRF (Origin/Referer) edge behavior — the
+# Origin-absent / opaque-"null" / public_origin paths — that those tests do not exercise.
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """An opener handler that does NOT follow redirects.
 
     Why:
-        A successful comment POST replies 303 (POST-redirect-GET). urllib follows 3xx
-        automatically, which would swallow the 303 and return the redirected GET's 200.
-        Returning None from redirect_request stops the follow, so the 303 + Location
-        surface to the test (as an HTTPError we unwrap) instead of being hidden.
+        Some routes (e.g. GET /logout) reply with a 303. urllib follows 3xx automatically,
+        which would swallow the 303 and return the redirected GET's 200. Returning None
+        from redirect_request stops the follow, so the 303 + Location surface to the test
+        (as an HTTPError we unwrap) instead of being hidden.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -1396,131 +1015,6 @@ def _ingest_one(base_url):
     return json.loads(body)["id"]
 
 
-def _post_comment(
-    base_url,
-    report_id,
-    *,
-    author="Alex",
-    body="Nice work.",
-    cookie=None,
-    origin="__match__",
-    referer=None,
-):
-    """POST a comment form and return (status, headers, text), without following 303.
-
-    Args:
-        base_url: the server base URL.
-        report_id: the report id to comment on (goes in the path).
-        author, body: the urlencoded form fields. Pass body="" to exercise the
-            empty-body rejection (parse_qs drops blank values, so the server sees none).
-        cookie: optional session-cookie value (from _login) sent as the dashboard
-            credential; None omits the Cookie header (the no-session case).
-        origin: the Origin header. "__match__" (default) sends an Origin equal to the
-            server's own base URL, so its host matches the request Host (a same-origin
-            request). None omits the header; any other string is sent verbatim to
-            exercise a cross-origin rejection.
-        referer: the Referer header. None omits it (the default). "__match__" sends a
-            Referer under the server's own base URL; any other string is sent verbatim.
-            Used to exercise the Origin-absent / Referer-fallback CSRF path.
-
-    Why:
-        Centralizes the form-POST plumbing (urlencoding, the session cookie, Origin, and
-        the no-redirect opener) so each test states only the field it is exercising. A
-        303 or any 4xx surfaces as an HTTPError, unwrapped here into a uniform
-        (code, headers, text) tuple.
-    """
-    data = urllib.parse.urlencode({"author": author, "body": body}).encode("utf-8")
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    if cookie is not None:
-        headers["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
-    if origin == "__match__":
-        # Same-origin: derive Origin from base_url so its netloc equals the Host header
-        # urllib sets from the URL.
-        headers["Origin"] = base_url
-    elif origin is not None:
-        headers["Origin"] = origin
-    if referer == "__match__":
-        # A same-origin Referer: a real page URL under our own origin (with a path).
-        headers["Referer"] = base_url + f"/report/{report_id}"
-    elif referer is not None:
-        headers["Referer"] = referer
-    req = urllib.request.Request(
-        base_url + f"/report/{report_id}/comment",
-        data=data,
-        headers=headers,
-        method="POST",
-    )
-    opener = urllib.request.build_opener(_NoRedirect)
-    try:
-        with opener.open(req, timeout=5) as response:
-            return response.status, response.headers, response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.headers, exc.read().decode("utf-8")
-
-
-def test_comment_is_stored_and_redirects(tmp_path):
-    """A valid, authed, same-origin comment is stored and answered with a 303.
-
-    Why this matters: this is the happy path end to end — a logged-in session, a matching
-    Origin, and a non-empty body produce a stored comment and a 303 redirect back to the
-    report (POST-redirect-GET, so a refresh won't resubmit). We assert both the redirect
-    target and that the comment actually landed in the store.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
-        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users yet)
-
-        # The typed author "Alex" is deliberately ignored in favor of the session identity.
-        status, headers, _ = _post_comment(
-            base_url, report_id, author="Alex", body="Ship it.", cookie=cookie
-        )
-        assert status == 303
-        assert headers.get("Location") == f"/report/{report_id}"
-
-        conn = open_relay_store(db)
-        stored = comments_for(conn, report_id)
-        assert len(stored) == 1
-        assert stored[0]["author"] == "legacy-admin"  # authenticated identity, not "Alex"
-        assert stored[0]["body"] == "Ship it."
-
-
-def test_comment_without_a_session_is_401(tmp_path):
-    """With the dashboard gated, a comment POST sent with no session is 401, not stored.
-
-    Why this matters: the comment write path reuses the dashboard gate — once access is
-    controlled, you must be logged in to comment, exactly as to read. Auth is checked
-    first, so nothing is stored.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id)  # no cookie
-        assert status == 401
-
-        conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
-
-
-def test_comment_cross_origin_is_403_and_stores_nothing(tmp_path):
-    """A logged-in comment from a foreign Origin is rejected 403 (CSRF guard), not stored.
-
-    Why this matters: the session cookie is auto-sent by the browser, so a malicious page
-    could forge an authenticated comment POST. The Origin check is the defense: a request
-    whose Origin host differs from Host is refused even WITH a valid session, and leaves
-    no trace in the store. We send a real session cookie so the Origin check (not auth) is
-    what's under test.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
-        cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(
-            base_url, report_id, cookie=cookie, origin="https://evil.example"
-        )
-        assert status == 403
-
-        conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
-
-
 def test_comment_missing_origin_and_referer_is_403(tmp_path):
     """A logged-in comment POST with NEITHER Origin nor Referer is rejected 403.
 
@@ -1529,36 +1023,39 @@ def test_comment_missing_origin_and_referer_is_403(tmp_path):
     than be treated as same-origin by default. A valid session isolates the origin
     check as the thing under test.
     """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        report_id = _ingest_one(base_url)
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(
-            base_url, report_id, cookie=cookie, origin=None, referer=None
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "x"},
+            cookie=cookie, origin=None,
         )
         assert status == 403
+
+        conn = open_relay_store(db)
+        assert comments_for(conn, rid) == []
 
 
 def test_comment_missing_origin_with_matching_referer_is_allowed(tmp_path):
     """A same-origin comment that omits Origin but sends a matching Referer succeeds.
 
     Why this matters: this is the BUG FIX. Some browsers (notably Safari) omit the
-    Origin header on a same-origin form POST, so requiring Origin alone rejected a
-    legitimate logged-in admin's comment with a "CSRF" 403. The Referer fallback accepts
-    the request when the Referer's origin matches ours — a cross-site attacker cannot
-    forge that. We assert the comment is accepted (303) and actually stored.
+    Origin header on a same-origin POST, so requiring Origin alone rejected a legitimate
+    logged-in admin's comment with a "CSRF" 403. The Referer fallback accepts the request
+    when the Referer's origin matches ours — a cross-site attacker cannot forge that. We
+    assert the comment is accepted (201) and actually stored.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, headers, _ = _post_comment(
-            base_url, report_id, cookie=cookie, body="Looks great!",
-            origin=None, referer="__match__",
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "Looks great!"},
+            cookie=cookie, origin=None, referer="__match__",
         )
-        assert status == 303
-        assert headers.get("Location") == f"/report/{report_id}"
+        assert status == 201
 
         conn = open_relay_store(db)
-        stored = comments_for(conn, report_id)
+        stored = comments_for(conn, rid)
         assert len(stored) == 1
         assert stored[0]["body"] == "Looks great!"
 
@@ -1571,16 +1068,16 @@ def test_comment_missing_origin_with_foreign_referer_is_403(tmp_path):
     exists to stop, so it stays a 403 even with a valid session and nothing is stored.
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(
-            base_url, report_id, cookie=cookie,
-            origin=None, referer="https://evil.example/report/1",
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "x"},
+            cookie=cookie, origin=None, referer="https://evil.example/x",
         )
         assert status == 403
 
         conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
+        assert comments_for(conn, rid) == []
 
 
 # --- The no-referrer CSRF bug: the production exact-match path + opaque Origin -------
@@ -1588,10 +1085,9 @@ def test_comment_missing_origin_with_foreign_referer_is_403(tmp_path):
 # send a comment POST with `Origin: null` and NO Referer (Fetch standard). With a
 # configured public_origin, the exact-match check then 403'd EVERY browser comment, and
 # the Referer fallback could not help (the same policy stripped Referer). The fix is two
-# parts: the response policy is now "same-origin" (so a real Origin is sent — covered by
-# test_dashboard_html_has_csp_and_security_headers), and _origin_error treats a literal
-# "null" Origin as opaque and falls back to Referer. These tests set public_origin, the
-# production path the earlier origin tests never exercised.
+# parts: the response policy is now "same-origin" (so a real Origin is sent), and
+# _origin_error treats a literal "null" Origin as opaque and falls back to Referer. These
+# tests set public_origin, the production path the earlier origin tests never exercised.
 
 
 def test_comment_with_public_origin_canonical_origin_is_allowed(tmp_path):
@@ -1603,15 +1099,15 @@ def test_comment_with_public_origin_canonical_origin_is_allowed(tmp_path):
     Origin (what a browser now sends under the "same-origin" policy) is accepted.
     """
     with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
-        report_id = _ingest_one(base_url)
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, headers, _ = _post_comment(
-            base_url, report_id, cookie=cookie, body="Canonical.", origin="__match__"
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "Canonical."},
+            cookie=cookie, origin="__match__",
         )
-        assert status == 303
-        assert headers.get("Location") == f"/report/{report_id}"
+        assert status == 201
         conn = open_relay_store(db)
-        assert comments_for(conn, report_id)[0]["body"] == "Canonical."
+        assert comments_for(conn, rid)[0]["body"] == "Canonical."
 
 
 def test_comment_with_public_origin_foreign_origin_is_403(tmp_path):
@@ -1621,14 +1117,15 @@ def test_comment_with_public_origin_foreign_origin_is_403(tmp_path):
     session — the fix must not weaken the guard. Nothing is stored.
     """
     with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
-        report_id = _ingest_one(base_url)
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(
-            base_url, report_id, cookie=cookie, origin="https://evil.example"
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "x"},
+            cookie=cookie, origin="https://evil.example",
         )
         assert status == 403
         conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
+        assert comments_for(conn, rid) == []
 
 
 def test_comment_with_public_origin_opaque_null_origin_falls_back_to_referer(tmp_path):
@@ -1638,18 +1135,18 @@ def test_comment_with_public_origin_opaque_null_origin_falls_back_to_referer(tmp
     opaque origin serializes; treating it as a real candidate (as the old code did) made
     it fail the exact match and 403 a legitimate same-origin POST. We now treat "null" as
     no-usable-Origin and fall back to the Referer — which, under the "same-origin" policy,
-    a same-origin request still carries. Accepted (303) and stored.
+    a same-origin request still carries. Accepted (201) and stored.
     """
     with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
-        report_id = _ingest_one(base_url)
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, headers, _ = _post_comment(
-            base_url, report_id, cookie=cookie, body="Via referer.",
-            origin="null", referer="__match__",
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "Via referer."},
+            cookie=cookie, origin="null", referer="__match__",
         )
-        assert status == 303
+        assert status == 201
         conn = open_relay_store(db)
-        assert comments_for(conn, report_id)[0]["body"] == "Via referer."
+        assert comments_for(conn, rid)[0]["body"] == "Via referer."
 
 
 def test_comment_with_public_origin_null_origin_no_referer_is_403(tmp_path):
@@ -1660,61 +1157,15 @@ def test_comment_with_public_origin_null_origin_no_referer_is_403(tmp_path):
     the request is rejected 403 and nothing is stored.
     """
     with _running_relay(tmp_path, view_token=_VIEW, public_origin=True) as (base_url, db):
-        report_id = _ingest_one(base_url)
+        rid = _ingest_one(base_url)
         cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(
-            base_url, report_id, cookie=cookie, origin="null", referer=None
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "x"},
+            cookie=cookie, origin="null", referer=None,
         )
         assert status == 403
         conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
-
-
-def test_comment_on_missing_report_is_404(tmp_path):
-    """A logged-in, same-origin comment on a nonexistent report id returns 404.
-
-    Why this matters: a stale or forged /report/<id>/comment link must be a clean 404,
-    not a crash. Auth and the Origin check pass first (so this isolates the
-    report-existence guard), then the missing report is reported as not found.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(base_url, 999, cookie=cookie)
-        assert status == 404
-
-
-def test_comment_empty_body_is_400_and_stores_nothing(tmp_path):
-    """A logged-in comment with an empty body is rejected 400 and stored nothing.
-
-    Why this matters: a comment must carry text. An empty (or whitespace-only) body is
-    a validation failure, caught at the inbound boundary before the store is touched.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
-        cookie = _login(base_url, _VIEW)
-        status, _, _ = _post_comment(base_url, report_id, body="", cookie=cookie)
-        assert status == 400
-
-        conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
-
-
-def test_comment_oversized_body_is_400(tmp_path):
-    """A logged-in comment body over the length cap is rejected 400.
-
-    Why this matters: we never trust a client-sent size. A body beyond
-    MAX_COMMENT_BODY_CHARS is refused, mirroring the ingest endpoint's length
-    discipline, so no oversized text reaches the store.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        report_id = _ingest_one(base_url)
-        cookie = _login(base_url, _VIEW)
-        too_long = "x" * (MAX_COMMENT_BODY_CHARS + 1)
-        status, _, _ = _post_comment(base_url, report_id, body=too_long, cookie=cookie)
-        assert status == 400
-
-        conn = open_relay_store(db)
-        assert comments_for(conn, report_id) == []
+        assert comments_for(conn, rid) == []
 
 
 def test_comment_open_when_no_view_secret(tmp_path):
@@ -1725,57 +1176,14 @@ def test_comment_open_when_no_view_secret(tmp_path):
     (it is not an auth control), so the request must be same-origin.
     """
     with _running_relay(tmp_path) as (base_url, db):  # view_token=None, no users
-        report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id, body="local note")  # no cookie
-        assert status == 303
+        rid = _ingest_one(base_url)
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments", {"body": "local note"}
+        )  # no cookie, default same-origin
+        assert status == 201
 
         conn = open_relay_store(db)
-        assert [c["body"] for c in comments_for(conn, report_id)] == ["local note"]
-
-
-def test_comment_appears_on_the_report_page(tmp_path):
-    """After posting, the comment is shown on the report's GET page.
-
-    Why this matters: this is the store -> render wiring end to end — a posted comment
-    must actually surface (author and body) when the report page is fetched, proving
-    do_GET feeds comments_for into render_report.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
-        report_id = _ingest_one(base_url)
-        cookie = _login(base_url, _VIEW)
-        # The typed name is ignored; the comment is attributed to the session identity.
-        _post_comment(
-            base_url, report_id, author="Reviewer", body="Looks solid.", cookie=cookie
-        )
-
-        code, html = _get(base_url, f"/report/{report_id}", cookie=cookie)
-        assert code == 200
-        assert "legacy-admin" in html  # the authenticated byline, not the typed "Reviewer"
-        assert "Looks solid." in html
-
-
-def test_comment_uses_authenticated_identity_not_form_field(tmp_path):
-    """A logged-in viewer's comment is attributed to their account name, ignoring the form.
-
-    Why this matters: identity must not be spoofable. A provisioned viewer who submits a
-    comment with a different name in the form field is still recorded under their OWN
-    authenticated name — the form value is dropped. This is the accountability property the
-    multi-party identity unblocks (KI-17, comment half).
-    """
-    with _running_relay(tmp_path) as (base_url, db):
-        report_id = _ingest_project(base_url, "alpha")
-        _provision_user(db, "alice", "a-key", projects=["alpha"])
-        cookie = _login(base_url, "a-key")
-
-        # Try to post as "someone-else"; the server must override with "alice".
-        status, _, _ = _post_comment(
-            base_url, report_id, author="someone-else", body="my note", cookie=cookie
-        )
-        assert status == 303
-
-        conn = open_relay_store(db)
-        stored = comments_for(conn, report_id)
-        assert [(c["author"], c["body"]) for c in stored] == [("alice", "my note")]
+        assert [c["body"] for c in comments_for(conn, rid)] == ["local note"]
 
 
 def test_comment_in_open_mode_uses_the_typed_name(tmp_path):
@@ -1786,12 +1194,15 @@ def test_comment_in_open_mode_uses_the_typed_name(tmp_path):
     so the optional typed name stands — preserving the zero-friction local-dev behavior.
     """
     with _running_relay(tmp_path) as (base_url, db):  # no view token, no users -> open
-        report_id = _ingest_one(base_url)
-        status, _, _ = _post_comment(base_url, report_id, author="Casey", body="local note")
-        assert status == 303
+        rid = _ingest_one(base_url)
+        status, _, _ = _post_api_json(
+            base_url, f"/api/reports/{rid}/comments",
+            {"body": "local note", "author": "Casey"},
+        )  # no cookie
+        assert status == 201
 
         conn = open_relay_store(db)
-        assert comments_for(conn, report_id)[0]["author"] == "Casey"
+        assert comments_for(conn, rid)[0]["author"] == "Casey"
 
 
 # --- C2 pull-back: GET /api/comments (Bearer-authed machine JSON) ----------------
@@ -2397,9 +1808,10 @@ def test_create_admin_role_user_sees_all_projects(tmp_path):
         _ingest_project(base_url, "beta")
         _, payload = _admin_post(base_url, "/api/users", {"name": "root", "role": "admin"})
         cookie = _login(base_url, payload["key"])
-        code, html = _get(base_url, "/", cookie=cookie)
+        code, out = _get_json(base_url, "/api/portfolio", cookie=cookie)
         assert code == 200
-        assert "alpha" in html and "beta" in html
+        names = [p["name"] for p in out["projects"]]
+        assert "alpha" in names and "beta" in names  # admin sees every project
 
 
 def test_list_users_excludes_credential_material(tmp_path):
@@ -2444,12 +1856,12 @@ def test_revoke_user_forces_logout_and_blocks_relogin(tmp_path):
         )
         key = payload["key"]
         cookie = _login(base_url, key)
-        assert _get(base_url, "/", cookie=cookie)[0] == 200  # works before revoke
+        assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 200  # works before revoke
 
         status, r = _admin_post(base_url, "/api/users/revoke", {"name": "bob"})
         assert status == 200 and r["revoked"] is True
 
-        assert _get(base_url, "/", cookie=cookie)[0] == 303  # live cookie force-logged-out
+        assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 401  # force-logged-out
         assert _login(base_url, key) is None  # key no longer authenticates
 
 
@@ -2633,11 +2045,14 @@ def _get_json(base_url, path, *, cookie=None):
         return status, None
 
 
-def _post_api_json(base_url, path, payload, *, cookie=None, origin="__match__"):
+def _post_api_json(base_url, path, payload, *, cookie=None, origin="__match__", referer=None):
     """POST JSON to an /api route; return (status, parsed-json-or-text, headers).
 
     origin "__match__" sends a same-origin Origin (so the CSRF check passes); None omits
     it (to exercise the guard); any other string is sent verbatim (a foreign origin).
+    referer "__match__" sends a same-origin Referer (base_url + path); None omits it (the
+    default); any other string is sent verbatim. The referer arg lets the CSRF tests
+    exercise the Origin-absent / Referer-fallback path.
     """
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -2645,6 +2060,10 @@ def _post_api_json(base_url, path, payload, *, cookie=None, origin="__match__"):
         headers["Origin"] = base_url
     elif origin is not None:
         headers["Origin"] = origin
+    if referer == "__match__":
+        headers["Referer"] = base_url + path
+    elif referer is not None:
+        headers["Referer"] = referer
     if cookie is not None:
         headers["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
     req = urllib.request.Request(base_url + path, data=data, headers=headers, method="POST")
@@ -2912,22 +2331,18 @@ def test_api_still_json_when_web_dir_set(tmp_path):
         assert status == 200 and me["gated"] is False
 
 
-def test_web_dir_bypasses_legacy_html(tmp_path):
-    """With --web-dir, "/" serves the SPA index, NOT the legacy server-rendered portfolio."""
-    web = _build_web_dir(tmp_path)
-    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
-        _, body = _get(base_url, "/")
-        assert "id=root" in body
-        # The legacy portfolio's eyebrow text must be absent (legacy HTML is bypassed).
-        assert "PORTFOLIO OVERVIEW" not in body
+def test_no_web_dir_is_api_only(tmp_path):
+    """Without --web-dir the relay is API-only/headless: "/" 404s JSON; /api/me still 200s.
 
-
-def test_legacy_html_still_served_without_web_dir(tmp_path):
-    """Without --web-dir, "/" still serves the legacy server-rendered dashboard (parity)."""
+    Why this matters: the legacy server-rendered HTML retired (KI-23), so a relay started
+    without --web-dir has no browser front-end to serve. A browser GET to "/" gets a clean
+    JSON 404, while the JSON API (here /api/me, the boot probe) keeps answering.
+    """
     with _running_relay(tmp_path) as (base_url, _db):
-        _, body = _get(base_url, "/")
-        # The legacy portfolio renders its own HTML (not the SPA root div).
-        assert "id=root" not in body
+        status, body = _get_json(base_url, "/")
+        assert status == 404
+        assert body == {"error": "not found"}
+        assert _get_json(base_url, "/api/me")[0] == 200
 
 
 def test_api_scheduling_buckets_deadlines_across_sources(tmp_path):

@@ -12,19 +12,24 @@ Role in project: Read this at the START of the next session, THEN plan the
 
 # Kickoff: E2 Inc 4 — the sectioned dashboard rebuild (richer-client SPA)
 
-## Status — Showcase + mobile SHIPPED to main; **only render.py-retire remains in 4a** (2026-06-27)
+## Status — **4a band COMPLETE** (render.py retired); next is **4b Disciplines** (2026-06-27)
 
 > **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. The 4a band is **almost done**: only (6) **retire
-> `render.py` at parity** remains (also removes the legacy form comment route, closes KI-23). Then **4b**
-> Disciplines & **4c** Connections (each its own PR). Start each slice with a plan-mode pass per the repo
-> discipline; eyes-on every screen vs `design/screenshots/` across all three themes; ship + redeploy (see
-> **Deployment** below).
+> `design/README.md` + `design/screenshots/`. The **4a band is done** — `render.py` retired at parity
+> (item 6 below, closes KI-23). Next is **4b — Disciplines & directions** (`desktop-06`), then **4c —
+> Cross-project Connections** (`desktop-07`), each its own PR. Start each slice with a plan-mode pass per
+> the repo discipline; eyes-on every screen vs `design/screenshots/` across all three themes; ship +
+> redeploy (see **Deployment** below).
 >
-> **Pending deploy:** PR #65 (Showcase) + PR #66 (mobile) are merged to `main` but **not yet deployed** —
-> the next `fly deploy -a project-orion` ships the mobile fix. The public Showcase stays **off** in prod
-> until the live relay's launch command gains `--showcase` + `--showcase-project` flags (an explicit,
-> privacy-gated opt-in the operator chooses).
+> **render.py retirement (just shipped):** deleted `relay/render.py` + the legacy form routes
+> (`GET/POST /login`, `POST /report/:id/comment`); the SPA is the only front-end (relay is API-only
+> without `--web-dir`). The JSON API, cookie comment write, auth/CSP machinery, `GET /logout`, and
+> store/derive layers all stay. Backend 676 + web 33 green. Detail in CHANGELOG (E2 Inc 4 → Removed).
+>
+> **Deploy note:** confirm the previously-pending PR #65 (Showcase) + PR #66 (mobile) and this retirement
+> are all on the deployed image — run `fly deploy -a project-orion` from a clean `main` after merge. The
+> public Showcase stays **off** in prod unless the live relay's launch command carries `--showcase` +
+> `--showcase-project` flags (an explicit, privacy-gated opt-in the operator chooses).
 >
 > **Already SHIPPED + merged to `main` + deployed:** 4a core (JSON API + SPA shell + Projects home /
 > Project / Report + single-host serving), the **Tracker page** (gap-8/KI-22 closed via a first-class
@@ -71,9 +76,12 @@ and **destroyed**.
    `BottomTabBar` (+ a "More" sheet) and `MobileTopBar`, both toggled by CSS (no JS resize); `navState.ts`
    shares the active-section rule between the two navs; two-column grids collapse to one. Eyes-on verified
    vs `desktop-08` + `mobile-all-screens` across all three themes.
-6. **Retire `render.py` at parity** (KI-23) — once every legacy URL has an SPA equivalent and comment
-   writes are wired, remove the server-rendered views (keep store / derive / api / auth). **This is the
-   only remaining 4a item.**
+6. **Retire `render.py` at parity** (KI-23) — **SHIPPED.** With the SPA covering every legacy URL,
+   deleted `relay/render.py` and the legacy form routes (`GET/POST /login`, `POST /report/:id/comment`);
+   relocated the three still-used pieces (`_headline` → `api.py`; `MAX_COMMENT_BODY_CHARS` /
+   `MAX_AUTHOR_CHARS` / `_DISPLAY_TZ` → `server.py`). Kept the JSON API, the cookie comment write,
+   the auth/cookie/CSP machinery, `GET /logout`, and store/derive. Without `--web-dir` the relay is now
+   **API-only (headless)**. Backend 676 + web 33 green; KI-23 closed. **4a band complete.**
 
 ### Then 4b / 4c (each its own PR)
 

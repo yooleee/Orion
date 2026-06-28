@@ -14,6 +14,30 @@ This file looks **backward** (what was built). For the forward-looking design an
 see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## E2 Inc 4 — sectioned dashboard rebuild (SPA) — in progress
+
+The dashboard rebuilt as a React/Vite single-page app served single-host by the relay (a read-only
+JSON API), faithful to the `design/` handoff. Shipped slice by slice (each its own PR); per-slice
+detail and the band map live in [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](docs/e2-inc4-dashboard-rebuild-kickoff.md).
+
+### Removed
+
+- **Legacy server-rendered HTML retired at parity (closes [KI-23](docs/known-issues.md)).** With the
+  SPA covering every URL the old dashboard served (Projects home, Project, Report, Tracker, Scheduling,
+  Showcase, login), the relay no longer carries two front-ends. Deleted `relay/render.py` (all
+  `render_*` views, the `_PAGE_CSS`/`_PAGE_JS` blocks, their CSP hashes) and the **legacy form routes**
+  that depended on it: `GET/POST /login` (the HTML login form — replaced by `POST /api/login`) and
+  `POST /report/:id/comment` (the form comment write — replaced by the cookie-authed JSON
+  `POST /api/reports/:id/comments`). Relocated the three still-used pieces: `_headline` → `relay/api.py`
+  (so `api.py` no longer imports `render.py`), and `MAX_COMMENT_BODY_CHARS` / `MAX_AUTHOR_CHARS` /
+  `_DISPLAY_TZ` → `relay/server.py`. `_security_headers` dropped its now-dead HTML branch (the SPA's
+  own strict-`script-src` CSP rides on the index via `_send_file`). **Kept** unchanged: the JSON API,
+  the comment write path, the auth/cookie/CSRF machinery, `GET /logout`, the machine Bearer routes, and
+  the store/derive layers. With no `--web-dir` the relay is now **API-only (headless)** rather than
+  serving legacy HTML. Backend tests pruned/repointed to the JSON surface (the pure render tests
+  deleted; legacy route tests either dropped as redundant with the `test_api_*` coverage or repointed
+  to the JSON routes): backend suite 676 green, web 33 green.
+
 ## E2 Inc 3 — forward-looking planning layer, rung 1 (observe + remember) — in progress
 
 The forward-looking layer (E1): due-dates, at-risk, slippage, and derived milestones, built on an

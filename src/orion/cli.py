@@ -2811,9 +2811,9 @@ def _format_pacific(iso: str) -> str:
         choice) so timestamps read consistently regardless of the machine's local
         timezone. ZoneInfo is internally cached, so constructing it per call is cheap;
         doing it HERE rather than at module import keeps a missing tzdata from breaking
-        every other command — only the `comments` listing depends on it. This
-        deliberately does NOT import relay/render.py's formatter: orion/ shares no code
-        with relay/, the same independence the duplicated busy-timeout constant reflects.
+        every other command — only the `comments` listing depends on it. This is its own
+        small formatter rather than a shared one: orion/ shares no code with relay/, the
+        same independence the duplicated busy-timeout constant reflects.
     """
     # fromisoformat parses the stored "+00:00" offset; astimezone converts that absolute
     # instant to California wall-clock time (zoneinfo applies DST -> PDT/PST).

@@ -301,10 +301,11 @@ in allowlist order.
 
 ### `POST /api/login`
 
-Body `{"key": "<access key>"}`. Verifies the key and, on success, sets the same signed session cookie the
-form login sets (HttpOnly, SameSite=Lax, Secure when hosted) and returns the principal. Reuses the
-verify-and-mint logic factored out of `_handle_login` (a shared `_resolve_login`) so the form and JSON
-paths cannot drift. The existing `_origin_error()` CSRF check applies.
+Body `{"key": "<access key>"}`. Verifies the key and, on success, sets a signed session cookie
+(HttpOnly, SameSite=Lax, Secure when hosted) and returns the principal. The verify-and-mint logic is
+the shared `_resolve_login` / `_mint_cookie` (kept factored out). The existing `_origin_error()` CSRF
+check applies. This is the relay's only login surface — the legacy HTML form login retired with
+`render.py` (KI-23).
 
 ```json
 { "ok": true, "user": { "name": "Yusuf", "role": "admin" } }
@@ -314,8 +315,9 @@ On a bad or revoked key: `401 {"ok": false}` (no cookie set).
 
 ### `POST /api/logout`
 
-Clears the session cookie and returns `{"ok": true}`. The `_origin_error()` CSRF check applies. The
-existing `GET /logout` form route stays until parity.
+Clears the session cookie and returns `{"ok": true}`. The `_origin_error()` CSRF check applies.
+`GET /logout` also remains (a 303 redirect that clears the cookie) and is unaffected by the
+`render.py` retirement.
 
 ### `POST /api/reports/:id/comments`
 
@@ -330,7 +332,7 @@ the read path emits (so the SPA appends it without a refetch):
 { "id": 12, "author": "Yusuf", "role": null, "body": "Looks great.", "created_at": "2026-06-27T01:00:00+00:00" }
 ```
 
-- **Guards, in order** (mirroring the form route `_handle_comment`, reusing the same helpers):
+- **Guards, in order** (reusing the shared auth/scope/origin helpers):
   `401 {"error":"login required"}` when gated + no session → `403 {"error":"origin check failed"}` on an
   Origin/Referer mismatch (`_origin_error`) → `400` for a non-object body, a non-string/empty `body`, or
   `body`/`author` over `MAX_COMMENT_BODY_CHARS` (4000) / `MAX_AUTHOR_CHARS` (200) → `404 {"error":"not
@@ -342,7 +344,8 @@ the read path emits (so the SPA appends it without a refetch):
 - **XSS:** the body is stored verbatim and rendered as an inert React text node (never
   `dangerouslySetInnerHTML`), so a `<script>` body displays as literal text.
 - This is **distinct** from the machine `POST /api/comments` (Bearer-authed, for bots — no cookie, no
-  CSRF). The legacy form route `POST /report/:id/comment` stays until `render.py` retires.
+  CSRF). It is the **only** browser comment write — the legacy form route `POST /report/:id/comment`
+  retired with `render.py` (KI-23).
 - Source: `_authenticate` / `_allowed_projects` / `_origin_error` / `get` / `add_comment` (all reused).
 
 ## The `kind` flag (projects vs trackers)
@@ -373,7 +376,7 @@ backend scope). Each is shown above with its 4a value.
 8. **Embedded item status** (`in_progress` / `submitted`, the tracker's circular indicators) — **CLOSED**
    (Tracker slice, E2 Inc 4). The producer now ships a first-class `status` field (`not_started |
    in_progress | submitted | closed`, the semantic form of its canonical status) alongside the still-present
-   text embed (so legacy `render.py`/reports are untouched). The relay folds `in_progress` into `state` and
+   text embed (so existing stored reports are untouched). The relay folds `in_progress` into `state` and
    passes the raw `status` through; the SPA renders the circular in-progress arc and the submitted/closed
    label from it. We chose the producer-field path over a relay-side text parse so status is a clean
    observed property end-to-end (the foundation later supervisor-side features build on), not a string the

@@ -4,7 +4,7 @@
 # Responsible for: The PURE decision logic of the chat bot — given a normalized
 #                  inbound message and the channel→project map, decide whether to
 #                  forward it to the relay as a comment, and with what fields.
-# Role in project: This is to the bot what relay/render.py is to the relay server:
+# Role in project: This is to the bot what relay/api.py is to the relay server:
 #                  all the branching logic, none of the I/O. It has NO network, NO
 #                  asyncio, and NO slack-bolt import, so the whole threat-model and
 #                  routing logic is unit-testable with plain dicts. The async Bolt
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Per-field caps on a forwarded comment. These MIRROR relay/render.py's
+# Per-field caps on a forwarded comment. These MIRROR relay/server.py's
 # MAX_COMMENT_BODY_CHARS / MAX_AUTHOR_CHARS, but are duplicated here DELIBERATELY:
 # orion/ and relay/ share no code by design (see relay/store.py's header — it
 # duplicates _BUSY_TIMEOUT_SECONDS for the same reason), and the relay endpoint

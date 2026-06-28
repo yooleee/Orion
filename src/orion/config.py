@@ -169,6 +169,13 @@ class ProjectConfig:
             LIST — disciplines are observed across several of the user's own docs (e.g.
             CLAUDE.md, design/README.md). The docs are read UNMODIFIED (observe-not-
             originate); the optional LLM step reframes their stated principles.
+        skills: Whether to surface this project's observed SKILLS on the dashboard's
+            "skills comb" (E2 Inc 4 slice 4c). Defaults to False (opt-in). A boolean flag
+            (like `checklist`) rather than a collector, because skills are DERIVED from
+            signals the project already exposes (git languages + commit subjects, and any
+            `discipline_docs` for topical focus) — there is no new file to name. Pushed
+            with `orion skills-push`; the relay merges each project's skills across the
+            portfolio into the comb.
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
@@ -192,6 +199,7 @@ class ProjectConfig:
     checklist: bool = False
     kind: str = DEFAULT_PROJECT_KIND
     discipline_docs: tuple[Path, ...] = ()
+    skills: bool = False
 
 
 @dataclass(frozen=True)
@@ -930,6 +938,16 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
     # its own resolver rather than a COLLECTOR_FILE_KEYS entry.
     discipline_docs = _parse_discipline_docs(body, collectors_raw, config_path, where)
 
+    # skills defaults to False (opt-in). It is a boolean flag, not a collector, because
+    # skills are DERIVED from signals the project already exposes (git + discipline_docs)
+    # — there is no new file to require — so unlike `checklist` it has no companion check.
+    # isinstance(..., bool) rejects ints/strings so `skills = 1` is caught here.
+    skills = body.get("skills", False)
+    if not isinstance(skills, bool):
+        raise ConfigError(
+            f"{where} has invalid skills={skills!r}. Expected true or false."
+        )
+
     return ProjectConfig(
         name=name,
         repo_path=repo_path,
@@ -944,6 +962,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         checklist=checklist,
         kind=kind,
         discipline_docs=discipline_docs,
+        skills=skills,
     )
 
 

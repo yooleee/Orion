@@ -263,6 +263,32 @@ export interface SchedulingData {
   buckets: ScheduleBuckets;
 }
 
+// --- GET /api/disciplines ---------------------------------------------------
+
+/** One observed principle card. `source` is the repo-relative doc it was observed in
+ *  (the "observed · <source>" footer); it is caller-stamped by the producer, never
+ *  model-chosen, so the claim is honest. The server drops the scope enum from the wire
+ *  card — the Global vs project grouping already encodes it. */
+export interface Discipline {
+  title: string;
+  why: string;
+  source: string;
+}
+
+/** A project's group of project-specific principles, in the Disciplines section. */
+export interface DisciplineGroup {
+  name: string;
+  principles: Discipline[];
+}
+
+/** GET /api/disciplines: principles split into a Global group (across all projects) and
+ *  per-project groups. `scope` is the same viewer-scope block the portfolio ships. */
+export interface DisciplinesData {
+  scope: Scope;
+  global: Discipline[];
+  projects: DisciplineGroup[];
+}
+
 // --- GET /api/showcase ------------------------------------------------------
 
 /** A curated card's derived status pill: "shipped" at 100% done, else "active". */

@@ -113,6 +113,20 @@ CREATE TABLE IF NOT EXISTS relay_project_meta (
     kind    TEXT NOT NULL DEFAULT 'project'   -- "project" | "tracker"
 );
 
+-- E2 Inc 4 (4b): a project's OBSERVED DISCIPLINES — the working principles Orion read
+-- from the user's own docs (observe-not-originate; the user authored them, Orion only
+-- reflects them). Like relay_project_checklists this is CURRENT STATE: ONE row per
+-- project, REPLACED on each push (project is the PRIMARY KEY, ingest upserts), NOT
+-- append-only history. disciplines is a JSON array of {title, why, scope, source}
+-- objects, where scope is "global" | "project" and source is the repo-relative doc the
+-- principle was observed in (the dashboard's "observed · <source>" footer). A brand-new
+-- "IF NOT EXISTS" table, so the already-deployed relay gains it with NO column migration.
+CREATE TABLE IF NOT EXISTS relay_project_disciplines (
+    project     TEXT PRIMARY KEY,   -- one current discipline set per project
+    disciplines TEXT NOT NULL,      -- JSON array of {title, why, scope, source} objects
+    updated_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay last received it
+);
+
 -- C2: supervisor comments on a report. Append-only and flat (no threading, edit, or
 -- delete) — the v1 model. report_id points at relay_reports.id but is deliberately
 -- NOT a foreign key: sqlite enforces FKs only when explicitly enabled per-connection,
@@ -320,6 +334,86 @@ def get_checklist(conn: sqlite3.Connection, project: str) -> list | None:
         "SELECT items FROM relay_project_checklists WHERE project = ?", (project,)
     ).fetchone()
     return json.loads(row["items"]) if row is not None else None
+
+
+def upsert_disciplines(
+    conn: sqlite3.Connection, project: str, disciplines: list, updated_at: str
+) -> None:
+    """Replace a project's observed disciplines with the latest push.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the disciplines belong to.
+        disciplines: The current disciplines as a list of
+            {"title", "why", "scope", "source"} dicts (the validated shape the push
+            carries). May be empty — an enabled-but-empty push legitimately clears the
+            project's prior set.
+        updated_at: ISO 8601 UTC timestamp of when the relay received this push.
+
+    Why:
+        Disciplines are CURRENT STATE, not history, so each push REPLACES the project's
+        row rather than appending — identical to upsert_checklist. ON CONFLICT(project)
+        DO UPDATE makes it one idempotent statement: first push inserts, later pushes
+        overwrite. Stored verbatim (already redacted and validated upstream), JSON-encoded
+        for the TEXT column because sqlite has no list type.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_disciplines (project, disciplines, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project) DO UPDATE SET
+            disciplines = excluded.disciplines,
+            updated_at = excluded.updated_at
+        """,
+        (project, json.dumps(disciplines), updated_at),
+    )
+    conn.commit()
+
+
+def get_disciplines(conn: sqlite3.Connection, project: str) -> list | None:
+    """Return a project's observed disciplines, or None if it has none.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to fetch disciplines for.
+
+    Returns:
+        The disciplines as a list of {"title", "why", "scope", "source"} dicts (decoded
+        from JSON), or None when the project has no disciplines row. None (no row) is
+        deliberately distinct from [] (a row with an empty list) so a caller can tell
+        "never pushed disciplines" from "pushed, but none observed".
+
+    Why:
+        Backs the dashboard's Disciplines section. Decoding the JSON here (like
+        get_checklist) hands the serializer real dicts, not a raw string. Returning None
+        for a project that never pushed lets the serializer simply skip it.
+    """
+    row = conn.execute(
+        "SELECT disciplines FROM relay_project_disciplines WHERE project = ?",
+        (project,),
+    ).fetchone()
+    return json.loads(row["disciplines"]) if row is not None else None
+
+
+def disciplines_projects(conn: sqlite3.Connection) -> list[str]:
+    """Return the names of every project that has pushed disciplines, sorted.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        A sorted list of project names that have a disciplines row. Empty when none.
+
+    Why:
+        The Disciplines section enumerates exactly the projects that have disciplines —
+        NOT latest_report_per_project, which only knows projects with a report or a live
+        checklist and would miss a disciplines-only project. A dedicated enumeration keeps
+        the section correct and independent of the report/checklist surfaces.
+    """
+    rows = conn.execute(
+        "SELECT project FROM relay_project_disciplines ORDER BY project"
+    ).fetchall()
+    return [row["project"] for row in rows]
 
 
 def set_project_kind(conn: sqlite3.Connection, project: str, kind: str) -> None:

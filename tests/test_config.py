@@ -1546,3 +1546,107 @@ def test_tracker_without_checklist_raises(tmp_path):
     )
     with pytest.raises(ConfigError, match="checklist"):
         load_config(path)
+
+
+# --- disciplines collector: discipline_docs parsing (E2 Inc 4 slice 4b) ----------
+
+
+def test_discipline_docs_resolve_absolute(tmp_path):
+    """With the 'disciplines' collector on, discipline_docs resolve next to the config.
+
+    Why this matters: the collector reads these paths, so a relative entry must be made
+    absolute against the config dir (mirroring tasks_file), and an absolute entry kept.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [summarizer]
+        provider = "anthropic"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git", "disciplines"]
+        discipline_docs = ["CLAUDE.md", "/abs/design/README.md"]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.discipline_docs == (
+        (tmp_path / "CLAUDE.md").resolve(),
+        Path("/abs/design/README.md"),
+    )
+
+
+def test_disciplines_enabled_without_docs_raises(tmp_path):
+    """Enabling 'disciplines' with no discipline_docs is a config error, caught at load.
+
+    Why this matters: an enabled collector with nothing to read is a setup mistake; we
+    fail loudly here with a fixable message rather than producing an empty section.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["disciplines"]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="discipline_docs"):
+        load_config(path)
+
+
+def test_discipline_docs_ignored_when_collector_off(tmp_path):
+    """discipline_docs is () when the 'disciplines' collector is not enabled.
+
+    Why this matters: a stray discipline_docs key without the collector must not turn
+    the feature on — only the collector list does. The field defaults to empty.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["git"]
+        discipline_docs = ["CLAUDE.md"]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.discipline_docs == ()
+
+
+def test_discipline_docs_invalid_entry_raises(tmp_path):
+    """A non-string discipline_docs entry is rejected with a clear error.
+
+    Why this matters: a malformed entry would crash the collector later; catching it at
+    load keeps the failure locatable.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        collectors = ["disciplines"]
+        discipline_docs = ["ok.md", 42]
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="discipline_docs"):
+        load_config(path)

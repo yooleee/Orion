@@ -1655,3 +1655,68 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+/* =============================================================================
+   Disciplines & directions (slice 4b)
+   A Global group + per-project groups, each a section header (title + rule + a
+   right-aligned mono aside) over a 2-column grid of principle cards. Each card is
+   a bold title, a "why" paragraph, and a top-bordered "observed · <source>" footer.
+   Measurements from design/README "Disciplines & directions" + desktop-06.
+   ============================================================================= */
+
+.disc-section {
+  margin-top: 30px;
+}
+/* The right-aligned mono label in a section header ("across all projects" /
+   "project-specific"). Sits after the flex-filling rule, so it hugs the right edge. */
+.section-aside {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--tfaint);
+  white-space: nowrap;
+}
+
+.disc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.disc-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 18px 20px;
+}
+.disc-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--thi);
+  margin-bottom: 9px;
+}
+.disc-card-why {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--tlow);
+  margin: 0 0 16px;
+}
+/* Footer pinned to the card bottom (margin-top:auto) so cards of different text
+   lengths still align their "observed · <source>" line on a shared top border. */
+.disc-card-foot {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--tfaint);
+}
+
+@media (max-width: 768px) {
+  .disc-grid {
+    grid-template-columns: 1fr;
+  }
+}

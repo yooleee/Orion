@@ -15,6 +15,7 @@
 
 import type {
   Comment,
+  DisciplinesData,
   LoginResult,
   LogoutResult,
   Me,
@@ -66,6 +67,7 @@ export const getProject = (name: string) =>
 export const getReport = (id: number | string) =>
   apiFetch<ReportDetail>(`/api/reports/${encodeURIComponent(String(id))}`);
 export const getScheduling = () => apiFetch<SchedulingData>("/api/scheduling");
+export const getDisciplines = () => apiFetch<DisciplinesData>("/api/disciplines");
 // Public, no-login: 404s (ApiError.status === 404) when the relay's Showcase is disabled,
 // which the Showcase screen turns into a clean "not available" note.
 export const getShowcase = () => apiFetch<ShowcaseData>("/api/showcase");

@@ -307,6 +307,27 @@ Deferred).
   relay-side text parse so status is a clean observed property end-to-end rather than reverse-engineered
   across the process boundary — the foundation later supervisor-side features build on.
 
+## KI-24 — Disciplines extraction is LLM-judged (scope, selection, dedupe) (E2 Inc 4 4b)
+
+- **Detail:** The Disciplines collector (4b) reframes a doc's stated principles into cards via a Haiku
+  step, which leaves three properties model-dependent rather than deterministic: (a) **scope** — each card
+  is classified `global` vs `project` by the model, so the Global/project split is approximate (a
+  cross-cutting principle may land under a project, or vice versa); (b) **selection/count** — which
+  principles are extracted (and how many) depends on the doc and the prompt, so it is not stable across
+  model or prompt versions, and a dense doc can yield many cards (a visual spec yields styling trivia,
+  which is why `discipline_docs` should point at instruction docs, not `design/`); (c) **global dedupe is
+  identity-by-normalized-title** — near-duplicate titles ("inert" vs "inert.") do not merge (mirrors
+  KI-6's identity-by-text). The content-hash cache keys on doc text **plus** an `extract.CACHE_VERSION`,
+  so a prompt change busts the cache only when that constant is bumped.
+- **Why it matters:** observe-not-originate holds (the model reframes only stated principles, never
+  invents, and the collector stamps `source`), but the *organization* of the cards is a model judgment.
+  An outside reader sees a faithful-but-approximate grouping, not a guaranteed-canonical one.
+- **Severity:** low
+- **Status:** Open by-design for 4b (stage-appropriate). A later move to deterministic scope-by-source
+  (e.g. a global doc-set vs per-project docs) or a richer dedupe is additive — the wire/store/serializer
+  seam (`{title, why, scope, source}`) already supports it. Tracked here so the approximation reads as
+  intentional. Relates to [[KI-6]].
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

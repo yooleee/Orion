@@ -627,3 +627,136 @@ def test_scheduling_empty_when_nothing_open_and_dated():
     out = api.serialize_scheduling(projects, _TODAY)
     assert out["buckets"] == {"overdue": [], "this_week": [], "later": []}
     assert out["summary"] == {"overdue": 0, "due_this_week": 0, "slipping": 0}
+
+
+# --- serialize_disciplines: Global vs per-project split (E2 Inc 4 4b) ------------
+
+
+def _disc(title, why="why", scope="project", source="CLAUDE.md"):
+    """Build one stored discipline dict (the shape get_disciplines returns)."""
+    return {"title": title, "why": why, "scope": scope, "source": source}
+
+
+def test_disciplines_card_shape_drops_scope():
+    """Each emitted card is exactly {title, why, source} — scope is consumed by grouping.
+
+    Why this matters: the Global vs project section already encodes scope, so the wire
+    card carries only what the SPA renders (title, why, observed-source).
+    """
+    out = api.serialize_disciplines(
+        [{"name": "orion", "disciplines": [_disc("Sectioned", why="distinct sections", source="CLAUDE.md")]}],
+        allowed=None,
+    )
+    assert out["projects"][0]["principles"] == [
+        {"title": "Sectioned", "why": "distinct sections", "source": "CLAUDE.md"}
+    ]
+
+
+def test_disciplines_split_global_from_project():
+    """Global-scope cards go to `global`; project-scope cards group under their project.
+
+    Why this matters: the design shows a Global section then per-project sections — the
+    serializer must bucket by scope so the SPA renders two kinds of group correctly.
+    """
+    out = api.serialize_disciplines(
+        [
+            {
+                "name": "orion",
+                "disciplines": [
+                    _disc("Local-first", scope="global", source="CLAUDE.md"),
+                    _disc("Observe, not originate", scope="project", source="design/README.md"),
+                ],
+            }
+        ],
+        allowed=None,
+    )
+    assert [c["title"] for c in out["global"]] == ["Local-first"]
+    assert out["projects"] == [
+        {
+            "name": "orion",
+            "principles": [
+                {"title": "Observe, not originate", "why": "why", "source": "design/README.md"}
+            ],
+        }
+    ]
+
+
+def test_disciplines_dedupes_globals_with_deterministic_source():
+    """A global title stated in two projects dedupes to one card, source picked stably.
+
+    Why this matters: a global convention can appear in several projects' docs. We dedupe
+    by normalized title and pick the source from the lexicographically-first (project,
+    source) so the footer never flickers with ingest order. Here 'alpha' wins over 'zeta'.
+    """
+    out = api.serialize_disciplines(
+        [
+            {"name": "zeta", "disciplines": [_disc("Untrusted text is inert", scope="global", source="zeta/sec.md")]},
+            {"name": "alpha", "disciplines": [_disc("untrusted text is inert", scope="global", source="alpha/sec.md")]},
+        ],
+        allowed=None,
+    )
+    # One card despite the case-different titles; source comes from project 'alpha'.
+    assert len(out["global"]) == 1
+    assert out["global"][0]["source"] == "alpha/sec.md"
+
+
+def test_disciplines_sorts_globals_by_title_and_projects_by_name():
+    """Globals sort by title; project groups sort by name; cards within a group by title.
+
+    Why this matters: a stable 2-column grid needs deterministic ordering, so a re-render
+    (or a re-extraction in a different order) never reshuffles the cards.
+    """
+    out = api.serialize_disciplines(
+        [
+            {
+                "name": "beta",
+                "disciplines": [
+                    _disc("Zed principle", scope="project"),
+                    _disc("Able principle", scope="project"),
+                ],
+            },
+            {
+                "name": "alpha",
+                "disciplines": [
+                    _disc("Second global", scope="global"),
+                    _disc("First global", scope="global"),
+                    _disc("Alpha-only", scope="project"),  # so alpha forms a project group
+                ],
+            },
+        ],
+        allowed=None,
+    )
+    assert [c["title"] for c in out["global"]] == ["First global", "Second global"]
+    assert [g["name"] for g in out["projects"]] == ["alpha", "beta"]
+    beta = next(g for g in out["projects"] if g["name"] == "beta")
+    assert [c["title"] for c in beta["principles"]] == ["Able principle", "Zed principle"]
+
+
+def test_disciplines_omits_projects_with_no_project_scope_cards():
+    """A project with only global cards (or none) produces no per-project group.
+
+    Why this matters: an empty section would be visual noise. A project contributes a
+    group only when it has project-scope cards; its global cards still merge into Global.
+    """
+    out = api.serialize_disciplines(
+        [
+            {"name": "orion", "disciplines": [_disc("Only global", scope="global")]},
+            {"name": "other", "disciplines": None},  # never pushed
+        ],
+        allowed=None,
+    )
+    assert [c["title"] for c in out["global"]] == ["Only global"]
+    assert out["projects"] == []  # neither project has project-scope cards
+
+
+def test_disciplines_scope_block_reports_viewer_scope():
+    """The scope block reflects unrestricted vs a scoped viewer, like serialize_portfolio.
+
+    Why this matters: the SPA reads scope from the same response; an admin/open relay is
+    unrestricted, a scoped viewer lists its granted projects.
+    """
+    unrestricted = api.serialize_disciplines([], allowed=None)
+    assert unrestricted["scope"] == {"unrestricted": True, "projects": None}
+
+    scoped = api.serialize_disciplines([], allowed={"orion", "applications"})
+    assert scoped["scope"] == {"unrestricted": False, "projects": ["applications", "orion"]}

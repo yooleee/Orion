@@ -73,6 +73,23 @@ CREATE TABLE IF NOT EXISTS comment_watermark (
     updated_at           TEXT NOT NULL,     -- ISO 8601 UTC of the pull that set it
     PRIMARY KEY (project, relay_url)
 );
+
+-- E2 Inc 4 (4b): a per-(project, collector, key) cache so an EXPENSIVE collector step
+-- runs only when its input actually changed. The disciplines collector keys on the doc
+-- path, stores the doc's content hash + the extracted disciplines JSON, and reuses the
+-- value when the hash is unchanged (so the LLM extraction runs only on a real edit).
+-- Distinct from collector_markers (a delta marker advanced after a SEND): this is an
+-- optimization cache, advanced as soon as the work is done, with no send semantics. One
+-- row per (project, collector, key) — overwritten on change — so it stays bounded.
+CREATE TABLE IF NOT EXISTS collector_cache (
+    project      TEXT NOT NULL,
+    collector    TEXT NOT NULL,   -- the collector that owns the entry (e.g. "disciplines")
+    cache_key    TEXT NOT NULL,   -- the input identity (e.g. a doc's absolute path)
+    content_hash TEXT NOT NULL,   -- hash of the (redacted) input the value was derived from
+    value        TEXT NOT NULL,   -- the cached result (e.g. extracted disciplines JSON)
+    cached_at    TEXT NOT NULL,   -- ISO 8601 UTC of when the value was computed
+    PRIMARY KEY (project, collector, cache_key)
+);
 """
 
 
@@ -231,6 +248,81 @@ def set_comment_watermark(
             updated_at = excluded.updated_at
         """,
         (project, relay_url, last_seen_comment_id, updated_at),
+    )
+    conn.commit()
+
+
+def get_cache(
+    conn: sqlite3.Connection, project: str, collector: str, cache_key: str
+) -> tuple[str, str] | None:
+    """Return a cache entry's (content_hash, value), or None if there is no row.
+
+    Args:
+        conn: An open state connection.
+        project: The project the entry belongs to.
+        collector: The collector that owns the entry (e.g. "disciplines").
+        cache_key: The input identity (e.g. a doc's absolute path).
+
+    Returns:
+        A (content_hash, value) pair for a cached input, or None for a first-ever
+        (or evicted) key. The caller compares the stored content_hash to the
+        current input's hash: equal means the value is still valid and the expensive
+        step can be skipped.
+
+    Why:
+        Returning the hash alongside the value lets the caller decide validity in one
+        read — no second lookup. None is the universal "nothing cached for this
+        input" signal, identical in spirit to get_marker's None.
+    """
+    row = conn.execute(
+        "SELECT content_hash, value FROM collector_cache "
+        "WHERE project = ? AND collector = ? AND cache_key = ?",
+        (project, collector, cache_key),
+    ).fetchone()
+    return (row[0], row[1]) if row is not None else None
+
+
+def set_cache(
+    conn: sqlite3.Connection,
+    project: str,
+    collector: str,
+    cache_key: str,
+    content_hash: str,
+    value: str,
+    cached_at: str,
+) -> None:
+    """Store (or replace) a cache entry for one (project, collector, key).
+
+    Args:
+        conn: An open state connection.
+        project: The project the entry belongs to.
+        collector: The collector that owns the entry (e.g. "disciplines").
+        cache_key: The input identity (e.g. a doc's absolute path).
+        content_hash: Hash of the (redacted) input the value was derived from.
+        value: The cached result to store (e.g. extracted disciplines JSON).
+        cached_at: ISO 8601 UTC timestamp of when the value was computed.
+
+    Returns:
+        None. Side effect: upserts the collector_cache row and commits.
+
+    Why:
+        An UPSERT on (project, collector, cache_key) means a changed input overwrites
+        the same row — one row per key, so the cache stays bounded — mirroring
+        set_marker's one-row-per-signal shape. The caller writes ONLY after the
+        expensive step succeeds, so a failure leaves the prior entry (or no entry) in
+        place and the next run retries.
+    """
+    conn.execute(
+        """
+        INSERT INTO collector_cache
+            (project, collector, cache_key, content_hash, value, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project, collector, cache_key) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            value = excluded.value,
+            cached_at = excluded.cached_at
+        """,
+        (project, collector, cache_key, content_hash, value, cached_at),
     )
     conn.commit()
 

@@ -351,6 +351,98 @@ def serialize_portfolio(entries: list[dict], allowed: set | None, today: date) -
     }
 
 
+def _discipline_card(card: dict) -> dict:
+    """Reduce a stored discipline to the wire card the SPA renders.
+
+    Args:
+        card: One stored discipline ({title, why, scope, source}); `scope` was used to
+            bucket it (Global vs per-project) and is dropped from the card itself.
+
+    Returns:
+        {"title", "why", "source"} — the bold title, the "why" paragraph, and the
+        repo-relative doc the "observed · <source>" footer shows.
+
+    Why:
+        The grouping (Global section vs a project's section) already encodes the scope,
+        so the card itself need not carry it — one minimal shape for both groups keeps
+        the SPA's Discipline type single and the wire honest.
+    """
+    return {
+        "title": card.get("title", ""),
+        "why": card.get("why", ""),
+        "source": card.get("source", ""),
+    }
+
+
+def serialize_disciplines(projects: list[dict], allowed: set | None) -> dict:
+    """Serialize observed disciplines, split into Global and per-project (/api/disciplines).
+
+    Args:
+        projects: Scope-FILTERED entries, each {"name": str, "disciplines": list | None}
+            where the list is get_disciplines' result (stored {title, why, scope, source}
+            dicts) or None. The server applies scope BEFORE calling, so a global principle
+            declared only in an out-of-scope project never reaches a scoped viewer
+            (existence-hiding, consistent with the rest of the relay).
+        allowed: The viewer's read scope (None unrestricted, else granted names) — reported
+            back only; filtering already happened.
+
+    Returns:
+        {"scope", "global", "projects"}:
+          - global: deduped global-scope cards (across all in-scope projects), sorted by title.
+          - projects: [{name, principles}] for each project with project-scope cards, sorted
+            by name, each principles list sorted by title.
+
+    Why:
+        Mirrors serialize_portfolio's server-side split: the Global-vs-project grouping is
+        derived HERE, not in the collector (which only sees one project) nor the store (which
+        keeps a flat per-project list). A global principle may be stated in several projects'
+        docs, so we dedupe by normalized title and pick the source deterministically (the
+        lexicographically first (project, source)) — otherwise the footer would flicker with
+        ingest order. No `today`: disciplines are dateless.
+    """
+    # Collect + dedupe global cards by normalized title. For each title we keep the
+    # candidate with the smallest (project, source) so the chosen source is stable.
+    globals_by_title: dict[str, tuple[str, str, dict]] = {}
+    for entry in projects:
+        name = entry["name"]
+        for card in entry.get("disciplines") or []:
+            if card.get("scope") != "global":
+                continue
+            norm = card.get("title", "").strip().casefold()
+            if not norm:
+                continue
+            source = card.get("source", "")
+            chosen = globals_by_title.get(norm)
+            if chosen is None or (name, source) < (chosen[0], chosen[1]):
+                globals_by_title[norm] = (name, source, card)
+    global_cards = [
+        _discipline_card(c[2])
+        for c in sorted(globals_by_title.values(), key=lambda c: c[2].get("title", ""))
+    ]
+
+    # Per-project groups: each project's project-scope cards, projects sorted by name and
+    # cards sorted by title. Projects with no project-scope cards are omitted (no empty group).
+    project_groups = []
+    for entry in sorted(projects, key=lambda e: e["name"]):
+        cards = [
+            _discipline_card(card)
+            for card in (entry.get("disciplines") or [])
+            if card.get("scope") == "project"
+        ]
+        if cards:
+            cards.sort(key=lambda c: c["title"])
+            project_groups.append({"name": entry["name"], "principles": cards})
+
+    return {
+        "scope": {
+            "unrestricted": allowed is None,
+            "projects": None if allowed is None else sorted(allowed),
+        },
+        "global": global_cards,
+        "projects": project_groups,
+    }
+
+
 def _showcase_card(row: dict) -> dict:
     """Serialize one curated project into a public Showcase card (summary facts only).
 

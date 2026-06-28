@@ -8,11 +8,13 @@
 
 from orion.state import (
     _BUSY_TIMEOUT_SECONDS,
+    get_cache,
     get_comment_watermark,
     get_last_report_time,
     get_marker,
     open_state,
     record_report,
+    set_cache,
     set_comment_watermark,
     set_marker,
 )
@@ -218,3 +220,46 @@ def test_comment_watermark_is_scoped_per_project_and_relay(tmp_path):
     assert get_comment_watermark(conn, "demo", relay_a) == 10   # this project+relay
     assert get_comment_watermark(conn, "other", relay_a) == 20  # different project
     assert get_comment_watermark(conn, "demo", relay_b) == 30   # same project, other relay
+
+
+# --- collector_cache: the content-hash cache (E2 Inc 4 slice 4b) ------------------
+
+
+def test_cache_round_trips_hash_and_value(tmp_path):
+    """After set, get returns the stored (content_hash, value) for that key.
+
+    Why this matters: the disciplines collector compares the stored hash to the
+    current doc's hash to decide whether to skip the LLM. Both fields must survive.
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert get_cache(conn, "demo", "disciplines", "/abs/CLAUDE.md") is None
+    set_cache(
+        conn, "demo", "disciplines", "/abs/CLAUDE.md", "hash1", '[{"title":"X"}]',
+        "2026-06-27T10:00:00+00:00",
+    )
+    assert get_cache(conn, "demo", "disciplines", "/abs/CLAUDE.md") == ("hash1", '[{"title":"X"}]')
+
+
+def test_cache_upsert_overwrites_same_key(tmp_path):
+    """Re-setting one key replaces its row (bounded: one row per key), not appends.
+
+    Why this matters: an edited doc must overwrite its prior cache entry so the cache
+    stays bounded and never serves a stale value for the same input identity.
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    set_cache(conn, "demo", "disciplines", "k", "h1", "v1", "2026-06-27T10:00:00+00:00")
+    set_cache(conn, "demo", "disciplines", "k", "h2", "v2", "2026-06-27T11:00:00+00:00")
+    assert get_cache(conn, "demo", "disciplines", "k") == ("h2", "v2")
+
+
+def test_cache_is_keyed_by_project_collector_and_key(tmp_path):
+    """Entries are independent across project, collector, and key.
+
+    Why this matters: one project's (or collector's) cache must never shadow another's
+    — the composite primary key keeps them separate.
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    set_cache(conn, "demo", "disciplines", "k", "h", "demo-val", "2026-06-27T10:00:00+00:00")
+    set_cache(conn, "other", "disciplines", "k", "h", "other-val", "2026-06-27T10:00:00+00:00")
+    assert get_cache(conn, "demo", "disciplines", "k") == ("h", "demo-val")
+    assert get_cache(conn, "other", "disciplines", "k") == ("h", "other-val")

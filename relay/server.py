@@ -48,8 +48,10 @@ from .store import (
     add_user,
     comments_for,
     comments_for_project,
+    disciplines_projects,
     get,
     get_checklist,
+    get_disciplines,
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
@@ -67,6 +69,7 @@ from .store import (
     set_project_kind,
     update_last_login,
     upsert_checklist,
+    upsert_disciplines,
 )
 
 # The default IANA zone the dashboard renders timestamps in (the SPA reads it from
@@ -365,6 +368,50 @@ def _validate_checklist_request(payload: object) -> str | None:
     return None
 
 
+# The two scopes a discipline card may carry (mirrors _VALID_PROJECT_KINDS). The serializer
+# uses scope to split the Global group from per-project ones, so an out-of-set value is
+# rejected at the inbound boundary rather than silently mis-bucketed later.
+_VALID_DISCIPLINE_SCOPES = ("global", "project")
+
+
+def _validate_disciplines_request(payload: object) -> str | None:
+    """Check a parsed payload against the disciplines-push contract (POST /disciplines).
+
+    Args:
+        payload: The JSON-parsed request body (any type — untrusted input).
+
+    Returns:
+        None when the payload is a valid `{project, disciplines}` request; otherwise a
+        short human-readable 400 reason.
+
+    Why:
+        The disciplines push is an untrusted inbound surface like /ingest and /checklist,
+        so it validates shape BEFORE storing. `disciplines` is REQUIRED (the request exists
+        to set it) and each card must carry a non-empty string `title`, string `why` and
+        `source`, and a known `scope` — the exact shape serialize_disciplines reads. An
+        empty list is valid (it legitimately clears the project's prior set).
+    """
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    project = payload.get("project")
+    if not isinstance(project, str) or not project.strip():
+        return "field 'project' must be a non-empty string"
+    disciplines = payload.get("disciplines")
+    if not isinstance(disciplines, list):
+        return "field 'disciplines' must be a list"
+    for i, card in enumerate(disciplines):
+        if not isinstance(card, dict):
+            return f"disciplines[{i}] must be an object"
+        for field in ("title", "why", "source"):
+            if not isinstance(card.get(field), str):
+                return f"disciplines[{i}].{field} must be a string"
+        if not card["title"].strip():
+            return f"disciplines[{i}].title must be a non-empty string"
+        if card.get("scope") not in _VALID_DISCIPLINE_SCOPES:
+            return f"disciplines[{i}].scope must be one of {_VALID_DISCIPLINE_SCOPES}"
+    return None
+
+
 def _validate_blob(payload: object) -> str | None:
     """Check a parsed payload against the portable blob contract.
 
@@ -519,7 +566,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # use the SAME cookie session + scope the dashboard routes do — but answer with JSON
         # (and a 401 instead of a 303 redirect, so the SPA's fetch routes itself to /login).
         if (
-            path in ("/api/me", "/api/portfolio", "/api/scheduling", "/api/showcase")
+            path
+            in (
+                "/api/me",
+                "/api/portfolio",
+                "/api/scheduling",
+                "/api/disciplines",
+                "/api/showcase",
+            )
             or path.startswith("/api/projects/")
             or path.startswith("/api/reports/")
         ):
@@ -578,6 +632,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/checklist":
             self._handle_checklist_push()
+            return
+
+        if path == "/disciplines":
+            self._handle_disciplines_push()
             return
 
         if path == "/api/comments":
@@ -741,6 +799,60 @@ class _RelayHandler(BaseHTTPRequestHandler):
         )
         # 200 (not 201): an upsert of existing per-project state, not a created resource.
         self._send_json(200, {"updated": payload["project"], "items": count})
+
+    def _handle_disciplines_push(self) -> None:
+        """Authenticate, validate, and upsert a project's observed disciplines (POST /disciplines).
+
+        Why:
+            The dedicated disciplines-only push (E2 Inc 4 slice 4b): it sets a project's
+            observed principles on the dashboard WITHOUT creating a report, exactly as
+            /checklist sets the live checklist. It reuses the ingest Bearer token (the same
+            machine-to-machine push credential) and the SAME upsert shape (current state,
+            replaced per push). The guard sequence mirrors _handle_checklist_push; the
+            payload is the small `{project, disciplines}`.
+        """
+        # 1) Authenticate first (same Bearer token as /ingest).
+        auth_error = self._auth_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Read and JSON-parse the body.
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+
+        # 3) Validate the {project, disciplines} shape BEFORE storing.
+        error = _validate_disciplines_request(payload)
+        if error is not None:
+            self._send_json(400, {"error": error})
+            return
+
+        # 4) Upsert this project's disciplines, stamped with the relay's receive clock.
+        # One fresh connection per request keeps each sqlite handle on its own thread.
+        conn = open_relay_store(self.server.db_path)
+        try:
+            upsert_disciplines(
+                conn, payload["project"], payload["disciplines"], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        count = len(payload["disciplines"])
+        print(
+            f"[relay] updated disciplines for project {payload['project']!r} "
+            f"({count} card(s))",
+            file=sys.stderr,
+        )
+        # 200 (not 201): an upsert of existing per-project state, not a created resource.
+        self._send_json(200, {"updated": payload["project"], "disciplines": count})
 
     def _handle_api_report_comment(self, report_id: int) -> None:
         """Store one comment from the SPA on a report (POST /api/reports/<id>/comments).
@@ -1689,6 +1801,23 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     for r in rows
                 ]
                 self._send_json(200, api.serialize_scheduling(projects, today))
+                return
+
+            if path == "/api/disciplines":
+                # Observed-principles view: enumerate exactly the projects that have pushed
+                # disciplines (NOT latest_report_per_project, which would miss a
+                # disciplines-only project), SCOPE-FILTER FIRST, then fetch each in-scope
+                # project's stored set. Filtering before the merge is what stops a global
+                # principle declared only in an out-of-scope project from leaking to a scoped
+                # viewer (existence-hiding, like the other routes).
+                names = disciplines_projects(conn)
+                if allowed is not None:
+                    names = [n for n in names if n in allowed]
+                projects = [
+                    {"name": name, "disciplines": get_disciplines(conn, name)}
+                    for name in names
+                ]
+                self._send_json(200, api.serialize_disciplines(projects, allowed))
                 return
 
             # No SPA route matched (the do_GET prefix check is broader than the exact set).

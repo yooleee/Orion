@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Allowed values, kept as named constants so validation and error messages share
 # one source of truth (DRY) and adding a value later is a one-line change.
 SHARE_LEVELS = ("high_level", "detailed")  # "high_level" sends no code diff (safest).
-SUPPORTED_COLLECTORS = ("git", "tasks", "notes", "incubator", "tracker")  # E2 Inc 2.6: tracker added.
+SUPPORTED_COLLECTORS = ("git", "tasks", "notes", "incubator", "tracker", "disciplines")  # E2 Inc 4 4b: disciplines added.
 SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
 
 # Which chat platforms the native two-way bot can listen on (C2-bots). Slack
@@ -163,6 +163,12 @@ class ProjectConfig:
             that is what resolves the file the checklist is read from.
         kind: One of PROJECT_KINDS ("project" | "tracker"). Splits the dashboard home
             into real software projects vs. general trackers. Defaults to "project".
+        discipline_docs: The instruction/design/decision docs the "disciplines"
+            collector reads (absolute paths), or () when that collector is not enabled.
+            Resolved absolute at load time. Unlike the single-file collectors this is a
+            LIST — disciplines are observed across several of the user's own docs (e.g.
+            CLAUDE.md, design/README.md). The docs are read UNMODIFIED (observe-not-
+            originate); the optional LLM step reframes their stated principles.
 
     Why:
         A frozen dataclass gives a typed, immutable bundle to pass down the
@@ -185,6 +191,7 @@ class ProjectConfig:
     auto_send: bool = False
     checklist: bool = False
     kind: str = DEFAULT_PROJECT_KIND
+    discipline_docs: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -919,6 +926,10 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         body, "tracker", collectors_raw, config_path, where
     )
 
+    # The "disciplines" collector reads a LIST of docs (not a single file), so it gets
+    # its own resolver rather than a COLLECTOR_FILE_KEYS entry.
+    discipline_docs = _parse_discipline_docs(body, collectors_raw, config_path, where)
+
     return ProjectConfig(
         name=name,
         repo_path=repo_path,
@@ -932,6 +943,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         auto_send=auto_send,
         checklist=checklist,
         kind=kind,
+        discipline_docs=discipline_docs,
     )
 
 
@@ -983,6 +995,59 @@ def _parse_collector_file(
     if not path.is_absolute():
         path = (config_path.parent / path).resolve()
     return path
+
+
+def _parse_discipline_docs(
+    body: dict,
+    enabled: list,
+    config_path: Path,
+    where: str,
+) -> tuple[Path, ...]:
+    """Resolve the doc list for the "disciplines" collector, if it is enabled.
+
+    Args:
+        body: The raw [projects.<name>] table.
+        enabled: The project's list of enabled collector names.
+        config_path: Path to the config file, used to resolve relative paths and to
+            locate error messages.
+        where: A locating string for error messages.
+
+    Returns:
+        A tuple of absolute Paths when the "disciplines" collector is enabled, or ()
+        when it is not. Each entry is expanduser-resolved and made absolute against
+        the config file's directory (mirroring _parse_collector_file).
+
+    Why:
+        Disciplines are observed across SEVERAL docs, so this collector takes a list
+        (`discipline_docs`) rather than a single `*_file`, which is why it gets its
+        own resolver instead of a COLLECTOR_FILE_KEYS entry. We require a non-empty
+        list when the collector is on (an enabled collector with nothing to read is a
+        config mistake worth catching at load), but — like _parse_collector_file — we
+        do NOT check that each file exists: a doc may be created later, and a missing
+        doc is failed soft at run time (it simply contributes no disciplines).
+    """
+    if "disciplines" not in enabled:
+        return ()
+
+    raw = body.get("discipline_docs")
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(
+            f"{where} enables the 'disciplines' collector but is missing a non-empty "
+            f"`discipline_docs` list (the docs to read principles from)."
+        )
+
+    docs: list[Path] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError(
+                f"{where} has an invalid `discipline_docs` entry {entry!r}. "
+                f"Each entry must be a non-empty path string."
+            )
+        path = Path(entry).expanduser()
+        if not path.is_absolute():
+            path = (config_path.parent / path).resolve()
+        docs.append(path)
+    return tuple(docs)
 
 
 def _parse_recipients(

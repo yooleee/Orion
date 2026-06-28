@@ -10,9 +10,10 @@
 
 A local-first tool that turns a developer's project activity (git, a to-do/milestone list,
 manual notes, and Claude Code session summaries) into readable progress updates and delivers
-them to designated "supervisors" over Discord or Slack. The full design lives in
-`plans/orion-plan.md` — **read it before doing anything**. It is the source of truth for
-architecture, phasing, and the decisions already settled.
+them to designated "supervisors" over Discord or Slack. The full design lives in `plans/orion-plan.md` — the source of truth for architecture,
+phasing, and settled decisions. **For execution sessions** (where the user points you to a
+kickoff doc), start there; the kickoff cross-references the plan. **For planning or scoping
+sessions** without a kickoff doc, read `plans/orion-plan.md` first.
 
 ## How to work in this repo
 

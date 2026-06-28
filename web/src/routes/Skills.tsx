@@ -126,8 +126,13 @@ export function Skills() {
 
       {groups.length === 0 ? (
         <div className="center-note">
-          No skills observed yet — Orion derives these from a project&rsquo;s activity once
-          it has some, for any project with <code>skills = true</code>.
+          {/* Wrap in a block so the inline mono span does not become a separate flex item
+              of .center-note (which would collapse the surrounding spaces). */}
+          <p className="center-note-text">
+            No skills observed yet. Orion derives these from a project&rsquo;s activity once it
+            has some, for any project that opts in with{" "}
+            <span className="mono-inline">skills = true</span>.
+          </p>
         </div>
       ) : (
         <>

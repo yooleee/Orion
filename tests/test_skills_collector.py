@@ -18,8 +18,8 @@ import subprocess
 
 import pytest
 
-from orion.collectors.skills import snapshot
-from orion.extract import Skill, ExtractError
+from orion.collectors.skills import SkillProject, snapshot, sync
+from orion.extract import ExtractError, Skill, VocabSkill
 
 
 def _run(repo, *args):
@@ -206,3 +206,231 @@ def test_missing_doc_is_skipped_but_git_evidence_still_extracts(tmp_path):
 
     assert len(out) == 1
     assert len(ext.calls) == 1  # extraction still happened from git evidence alone
+
+
+# =============================================================================
+# sync() — the GLOBAL two-pass orchestrator (the skills comb rework). Pass 1 builds one
+# deduplicated vocabulary across ALL projects; pass 2 attributes it per project, BLIND to
+# the others. These pin the behaviors the rework depends on: consistent cross-project
+# naming (so the relay merge collapses duplicates), structural containment (pass 2 never
+# sees another project, so it cannot leak one), the two-level cache, and abort-on-failure.
+# =============================================================================
+
+
+class _FakeSyncExtractor:
+    """A two-pass SkillExtractor stand-in: records pass-1 and pass-2 calls.
+
+    Why:
+        Lets us assert the orchestration — how often each (expensive) pass runs (the cache
+        contract), and crucially WHAT bundle each pass-2 call received (to prove a project
+        is observed in isolation, the containment guarantee) — with no network call.
+
+    Args:
+        vocab_specs: (name, category) pairs the global pass returns.
+        attributions: {marker: [(name, evidence, weight, signals), ...]} — a project whose
+            bundle CONTAINS `marker` is attributed those skills (names must be in the vocab).
+        error: "vocab" or "attribute" to make that pass raise, else None.
+    """
+
+    def __init__(self, vocab_specs, attributions, error=None):
+        self.vocab_calls = []
+        self.attribute_calls = []
+        self._vocab_specs = vocab_specs
+        self._attributions = attributions
+        self.error = error
+
+    def extract_vocab(self, portfolio_text):
+        self.vocab_calls.append(portfolio_text)
+        if self.error == "vocab":
+            raise ExtractError("vocab pass down")
+        return tuple(VocabSkill(name=n, category=c) for (n, c) in self._vocab_specs)
+
+    def attribute(self, evidence_text, vocab):
+        self.attribute_calls.append((evidence_text, vocab))
+        if self.error == "attribute":
+            raise ExtractError("attribute pass down")
+        category = {v.name: v.category for v in vocab}
+        cards = []
+        for marker, specs in self._attributions.items():
+            if marker in evidence_text:
+                cards.extend(
+                    Skill(name=n, category=category.get(n, "Backend"), evidence=e, weight=w, signals=s)
+                    for (n, e, w, s) in specs
+                )
+        return tuple(cards)
+
+
+def _sync_cache():
+    """A dict-backed (store, get, set) cache for sync, keyed on (cache_id, key)."""
+    store: dict = {}
+    return (
+        store,
+        lambda cache_id, key: store.get((cache_id, key)),
+        lambda cache_id, key, content_hash, value: store.__setitem__(
+            (cache_id, key), (content_hash, value)
+        ),
+    )
+
+
+def _sync_project(tmp_path, name, filename, content, message):
+    """Create a one-commit repo and return the SkillProject pointing at it."""
+    repo = tmp_path / name
+    repo.mkdir()
+    _run(repo, "init", "-q")
+    _run(repo, "config", "user.email", "test@example.com")
+    _run(repo, "config", "user.name", "Test User")
+    _commit(repo, filename, content, message)
+    return SkillProject(name=name, repo_path=repo, doc_paths=())
+
+
+def test_sync_gives_every_project_the_same_canonical_name(tmp_path):
+    """A skill both projects evidence is attributed under ONE canonical vocab name.
+
+    Why this matters: the core fix — per-project independent extraction produced
+    near-duplicate names that the relay merge could not collapse. With one shared
+    vocabulary, both projects carry the identical canonical name, so the merge folds them
+    into a single comb tooth. Pass 1 runs once; pass 2 once per project.
+    """
+    a = _sync_project(tmp_path, "alpha", "app.py", "x=1\n", "alpha work")
+    b = _sync_project(tmp_path, "beta", "svc.py", "y=2\n", "beta work")
+    ext = _FakeSyncExtractor(
+        vocab_specs=[("Python backends", "Backend")],
+        attributions={
+            "alpha work": [("Python backends", "alpha evidence", 2, ("git",))],
+            "beta work": [("Python backends", "beta evidence", 3, ("git",))],
+        },
+    )
+    store, get, set_ = _sync_cache()
+
+    out = sync([a, b], ext, cache_get=get, cache_set=set_)
+
+    assert out["alpha"][0].name == out["beta"][0].name == "Python backends"
+    assert out["alpha"][0].category == "Backend"  # canonical category from the vocab
+    assert len(ext.vocab_calls) == 1  # one global pass over the whole portfolio
+    assert len(ext.attribute_calls) == 2  # one attribution per project
+
+
+def test_sync_pass2_is_blind_to_other_projects(tmp_path):
+    """Each pass-2 call receives ONLY its own project's bundle — never another's.
+
+    Why this matters: this is the existence-hiding guarantee restored STRUCTURALLY. Pass 2
+    cannot reference (and so cannot leak) a project it never sees, so a scoped viewer can
+    never have one project's evidence text name another. We prove the isolation directly:
+    every attribution bundle contains exactly one project's marker.
+    """
+    a = _sync_project(tmp_path, "alpha", "app.py", "x=1\n", "ALPHA_MARKER work")
+    b = _sync_project(tmp_path, "beta", "svc.py", "y=2\n", "BETA_MARKER work")
+    ext = _FakeSyncExtractor(
+        vocab_specs=[("Python backends", "Backend")],
+        attributions={"work": [("Python backends", "ev", 2, ("git",))]},
+    )
+    _store, get, set_ = _sync_cache()
+
+    sync([a, b], ext, cache_get=get, cache_set=set_)
+
+    for bundle, _vocab in ext.attribute_calls:
+        has_alpha = "ALPHA_MARKER" in bundle
+        has_beta = "BETA_MARKER" in bundle
+        assert has_alpha != has_beta  # exactly one project's marker, never both
+
+
+def test_sync_caches_both_passes_on_unchanged_evidence(tmp_path):
+    """A second sync on UNCHANGED evidence re-runs NEITHER pass (two-level cache).
+
+    Why this matters: the cost guarantee. The vocabulary is cached on the whole portfolio's
+    content and each attribution on its own bundle plus the vocabulary, so a repeated sync
+    with no changes spends nothing on the model.
+    """
+    a = _sync_project(tmp_path, "alpha", "app.py", "x=1\n", "alpha work")
+    b = _sync_project(tmp_path, "beta", "svc.py", "y=2\n", "beta work")
+    ext = _FakeSyncExtractor(
+        vocab_specs=[("Python backends", "Backend")],
+        attributions={"work": [("Python backends", "ev", 2, ("git",))]},
+    )
+    _store, get, set_ = _sync_cache()
+
+    sync([a, b], ext, cache_get=get, cache_set=set_)
+    sync([a, b], ext, cache_get=get, cache_set=set_)
+
+    assert len(ext.vocab_calls) == 1  # vocabulary reused
+    assert len(ext.attribute_calls) == 2  # each attribution reused
+
+
+def test_sync_changed_project_re_extracts_vocab_and_only_that_attribution(tmp_path):
+    """A new commit in ONE project re-runs pass 1 and only that project's pass 2.
+
+    Why this matters: a global vocabulary necessarily re-runs when any project changes (the
+    price of seeing everything at once), but the UNCHANGED project's attribution still hits
+    its cache — so the cost of a change stays proportional, not a full re-extraction.
+    """
+    a = _sync_project(tmp_path, "alpha", "app.py", "x=1\n", "alpha work")
+    b = _sync_project(tmp_path, "beta", "svc.py", "y=2\n", "beta work")
+    ext = _FakeSyncExtractor(
+        vocab_specs=[("Python backends", "Backend")],
+        attributions={"work": [("Python backends", "ev", 2, ("git",))]},
+    )
+    _store, get, set_ = _sync_cache()
+
+    sync([a, b], ext, cache_get=get, cache_set=set_)
+    _commit(a.repo_path, "more.py", "z=3\n", "alpha more work")  # only alpha changes
+    sync([a, b], ext, cache_get=get, cache_set=set_)
+
+    assert len(ext.vocab_calls) == 2  # portfolio content changed -> vocab re-run
+    assert len(ext.attribute_calls) == 3  # alpha re-attributed; beta was a cache hit
+
+
+def test_sync_empty_project_gets_empty_slice_and_no_attribute_call(tmp_path):
+    """A project with no evidence maps to an empty slice without a pass-2 call.
+
+    Why this matters: no evidence means nothing to observe — the project still appears in
+    the result (so the caller can prune/clear it) but never costs a model call, and does
+    not enter the portfolio vocabulary.
+    """
+    a = _sync_project(tmp_path, "alpha", "app.py", "x=1\n", "alpha work")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _run(empty, "init", "-q")  # initialized, no commits, no docs
+    b = SkillProject(name="empty", repo_path=empty, doc_paths=())
+    ext = _FakeSyncExtractor(
+        vocab_specs=[("Python backends", "Backend")],
+        attributions={"work": [("Python backends", "ev", 2, ("git",))]},
+    )
+    _store, get, set_ = _sync_cache()
+
+    out = sync([a, b], ext, cache_get=get, cache_set=set_)
+
+    assert out["empty"] == ()  # present in the result, but empty
+    assert len(ext.attribute_calls) == 1  # only the project with evidence was attributed
+
+
+def test_sync_vocab_failure_propagates_and_pushes_nothing(tmp_path):
+    """A pass-1 failure raises (so the CLI aborts the whole run without pushing).
+
+    Why this matters: a transient failure must never become an empty/partial push that
+    clobbers the relay's stored skills. Propagating lets the CLI leave them intact.
+    """
+    a = _sync_project(tmp_path, "alpha", "app.py", "x=1\n", "alpha work")
+    ext = _FakeSyncExtractor(vocab_specs=[("X", "Backend")], attributions={}, error="vocab")
+    _store, get, set_ = _sync_cache()
+
+    with pytest.raises(ExtractError):
+        sync([a], ext, cache_get=get, cache_set=set_)
+
+
+def test_sync_no_evidence_anywhere_returns_all_empty_without_model(tmp_path):
+    """When no project has evidence, every slice is empty and no pass runs.
+
+    Why this matters: the whole-portfolio version of the empty-repo guard — no spend when
+    there is nothing to observe.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _run(empty, "init", "-q")
+    p = SkillProject(name="empty", repo_path=empty, doc_paths=())
+    ext = _FakeSyncExtractor(vocab_specs=[("X", "Backend")], attributions={})
+    _store, get, set_ = _sync_cache()
+
+    out = sync([p], ext, cache_get=get, cache_set=set_)
+
+    assert out == {"empty": ()}
+    assert ext.vocab_calls == []  # no evidence -> no model call at all

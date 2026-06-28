@@ -28,20 +28,43 @@ import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from dataclasses import dataclass
+
 from orion.collectors import git
-from orion.extract import SKILLS_CACHE_VERSION, Skill, SkillExtractor, ExtractError
+from orion.extract import (
+    SKILLS_CACHE_VERSION,
+    ExtractError,
+    Skill,
+    SkillExtractor,
+    VocabSkill,
+)
 from orion.redact import redact
 
 # The cache_get/cache_set seam: the collector stays decoupled from the state store
 # (and trivially testable with a dict) while the CLI wires these to state.get_cache /
 # state.set_cache. cache_get returns (content_hash, extraction_json) or None. Mirrors
-# the disciplines collector.
+# the disciplines collector. (Used by the legacy single-project snapshot.)
 CacheGet = Callable[[str], "tuple[str, str] | None"]
 CacheSet = Callable[[str, str, str], None]
+
+# The GLOBAL sync's cache seam carries an extra cache_id (which project, or the portfolio
+# sentinel) because one sync caches BOTH the portfolio-wide vocabulary and each project's
+# attribution. The CLI wires these to state.get_cache/set_cache with the "skills"
+# namespace and cache_id as the per-row project key.
+SyncCacheGet = Callable[[str, str], "tuple[str, str] | None"]
+SyncCacheSet = Callable[[str, str, str, str], None]
 
 # One cache key per project — unlike disciplines (one key per doc), a project's skills
 # come from a SINGLE merged evidence bundle, so there is one extraction and one entry.
 _BUNDLE_KEY = "bundle"
+
+# The global sync's two cache slots. The vocabulary is stored under a synthetic
+# portfolio "project" (it is cross-project, not owned by any one project); each project's
+# attribution is stored under that project's own name, key "attribution" (distinct from
+# the legacy "bundle" key so the two paths never collide).
+_PORTFOLIO_CACHE_ID = "__portfolio__"
+_VOCAB_KEY = "vocab"
+_ATTRIBUTION_KEY = "attribution"
 
 # How many recent commit subjects to feed the model. Enough to characterize the kind of
 # work without ballooning cost or the redaction surface.
@@ -173,6 +196,36 @@ def _render_bundle(
     return "\n\n".join(sections).strip()
 
 
+def _safe_bundle(
+    repo_path: Path, doc_paths: Sequence[Path], commit_limit: int
+) -> str:
+    """Gather a project's evidence and return it as ONE redacted bundle string.
+
+    Args:
+        repo_path: The project's repo root (language + commit evidence).
+        doc_paths: Instruction/decision docs to read for topical focus (may be empty).
+        commit_limit: How many recent commit subjects to include.
+
+    Returns:
+        The redacted, rendered evidence bundle, or "" when the project has no evidence at
+        all (empty repo, no docs) — in which case there is nothing to extract.
+
+    Why:
+        Both the legacy per-project snapshot and the global sync need the SAME
+        gather + render + redact step, so it lives in one place (DRY). Redaction happens
+        HERE, before the text can reach the model, so every caller inherits the privacy
+        invariant without restating it.
+    """
+    languages = _language_counts(git.tracked_files(repo_path))
+    commits = git.recent_subjects(repo_path, commit_limit)
+    docs = _doc_excerpts(doc_paths)
+    bundle = _render_bundle(languages, commits, docs)
+    if not bundle:
+        return ""
+    # Redact BEFORE the text can reach the model (the privacy invariant).
+    return redact(bundle).text
+
+
 def snapshot(
     repo_path: Path,
     doc_paths: Sequence[Path],
@@ -215,20 +268,14 @@ def snapshot(
         the cached extraction when the hash is unchanged so the LLM runs only on a real
         change.
     """
-    languages = _language_counts(git.tracked_files(repo_path))
-    commits = git.recent_subjects(repo_path, commit_limit)
-    docs = _doc_excerpts(doc_paths)
-    bundle = _render_bundle(languages, commits, docs)
-
-    if not bundle:
+    safe = _safe_bundle(repo_path, doc_paths, commit_limit)
+    if not safe:
         # No evidence at all (empty repo, no docs) — nothing to extract. Return empty
         # without a model call; the caller decides whether an empty push is wanted.
         return ()
 
-    # Redact BEFORE the text reaches the model (the privacy invariant). Hash the
-    # redacted bundle (prefixed with the prompt's CACHE_VERSION) so the cache key
+    # Hash the redacted bundle (prefixed with the prompt's CACHE_VERSION) so the cache key
     # reflects exactly what we would send AND busts when the prompt changes.
-    safe = redact(bundle).text
     content_hash = hashlib.sha256(
         f"{SKILLS_CACHE_VERSION}\n{safe}".encode("utf-8")
     ).hexdigest()
@@ -236,17 +283,8 @@ def snapshot(
     cached = cache_get(_BUNDLE_KEY)
     if cached is not None and cached[0] == content_hash:
         # Unchanged evidence: reconstruct the Skills from the cached extraction — no
-        # model call. signals is stored as a list; rebuild it as a tuple.
-        return tuple(
-            Skill(
-                name=item["name"],
-                category=item["category"],
-                evidence=item["evidence"],
-                weight=item["weight"],
-                signals=tuple(item["signals"]),
-            )
-            for item in json.loads(cached[1])
-        )
+        # model call.
+        return _skills_from_json(cached[1])
 
     # Cache miss / changed evidence: run the model. A failure propagates (see Raises) so
     # the CLI does not clobber the stored skills; we cache ONLY on success.
@@ -257,3 +295,181 @@ def snapshot(
         json.dumps([s.as_dict() for s in extracted]),
     )
     return extracted
+
+
+def _skills_from_json(payload: str) -> tuple[Skill, ...]:
+    """Reconstruct cached Skills from their JSON form.
+
+    Args:
+        payload: The JSON array a cache slot stored ([{name, category, evidence, weight,
+            signals}, ...]).
+
+    Returns:
+        The Skills, with `signals` rebuilt as a tuple (JSON has no tuples).
+
+    Why:
+        Both the legacy snapshot cache hit and the sync attribution cache hit decode the
+        same stored shape, so the reconstruction lives in one place (DRY).
+    """
+    return tuple(
+        Skill(
+            name=item["name"],
+            category=item["category"],
+            evidence=item["evidence"],
+            weight=item["weight"],
+            signals=tuple(item["signals"]),
+        )
+        for item in json.loads(payload)
+    )
+
+
+@dataclass(frozen=True)
+class SkillProject:
+    """One project's inputs to the global sync (its identity + evidence sources).
+
+    Args:
+        name: The project name (the relay's per-project upsert key, and the label used to
+            separate projects in the pass-1 portfolio evidence).
+        repo_path: The project's repo root.
+        doc_paths: Its instruction/decision docs (the project's discipline_docs, reused).
+
+    Why:
+        sync() works over MANY projects, so a small input record reads better than three
+        parallel lists and keeps the collector decoupled from the CLI's ProjectConfig (it
+        needs only these three fields). Frozen so a caller cannot mutate it mid-run.
+    """
+
+    name: str
+    repo_path: Path
+    doc_paths: tuple[Path, ...]
+
+
+def _render_portfolio(bundles: dict[str, str]) -> str:
+    """Assemble per-project redacted bundles into ONE labeled portfolio document.
+
+    Args:
+        bundles: {project_name: redacted_bundle_text} for every project with evidence.
+
+    Returns:
+        The bundles concatenated, each under a "### Project: <name>" header, in sorted
+        name order (deterministic, so the pass-1 cache key and model input are stable).
+
+    Why:
+        Pass 1 reads every project at once to deduplicate globally, so it needs the
+        bundles in one document with clear per-project boundaries. The names appear only
+        in the INPUT — pass 1's output is names + categories with no project labels — so
+        labeling here does not leak a project downstream.
+    """
+    blocks = [f"### Project: {name}\n\n{bundles[name]}" for name in sorted(bundles)]
+    return "\n\n---\n\n".join(blocks)
+
+
+def sync(
+    projects: Sequence[SkillProject],
+    extractor: SkillExtractor,
+    *,
+    cache_get: SyncCacheGet,
+    cache_set: SyncCacheSet,
+    commit_limit: int = _COMMIT_LIMIT,
+) -> dict[str, tuple[Skill, ...]]:
+    """Observe ALL projects together and return each one's skills against ONE vocabulary.
+
+    Args:
+        projects: Every project to include (typically all `skills = true` projects).
+        extractor: The injected SkillExtractor (Anthropic via config, or a fake in tests).
+        cache_get: Looks up a (cache_id, key) slot's cached (content_hash, json) or None.
+        cache_set: Stores a (cache_id, key) slot's (content_hash, json).
+        commit_limit: How many recent commit subjects to include per project.
+
+    Returns:
+        {project_name: skills} for EVERY requested project (a project with no evidence, or
+        none of the vocabulary's skills, maps to an empty tuple — the caller decides how to
+        treat an empty slice). Naming is consistent across projects because every skill is
+        bound to the shared pass-1 vocabulary, so the relay's merge collapses duplicates.
+
+    Raises:
+        ExtractError if pass 1 or any pass-2 call fails or truncates. The failure
+        propagates so the CLI aborts the WHOLE run WITHOUT pushing — a half-built skill set
+        is never written, leaving the relay's prior skills intact (the same abort-on-failure
+        guarantee snapshot gives, extended to the portfolio).
+
+    Why:
+        This is the two-pass global rework. Pass 1 (extract_vocab) sees every project's
+        evidence at once and produces a deduplicated, resume-grade vocabulary — fixing the
+        per-project near-duplicate and component-vs-competency problems a per-project pass
+        cannot. Pass 2 (attribute) runs per project, BLIND to the others, so its evidence
+        text cannot reference (and so cannot leak) another project — restoring the
+        existence-hiding guarantee structurally. Two cache levels keep re-runs cheap: the
+        vocabulary is cached on the whole portfolio's content, each attribution on its own
+        bundle plus the vocabulary.
+    """
+    # 1) Build a redacted bundle per project. Projects with no evidence are simply absent
+    #    from `bundles` (they contribute nothing to the vocabulary), but still appear in
+    #    the result as empty so the caller sees the full requested set.
+    bundles: dict[str, str] = {}
+    bundle_hashes: dict[str, str] = {}
+    for project in projects:
+        safe = _safe_bundle(project.repo_path, project.doc_paths, commit_limit)
+        if not safe:
+            continue
+        bundles[project.name] = safe
+        bundle_hashes[project.name] = hashlib.sha256(
+            f"{SKILLS_CACHE_VERSION}\n{safe}".encode("utf-8")
+        ).hexdigest()
+
+    result: dict[str, tuple[Skill, ...]] = {project.name: () for project in projects}
+    if not bundles:
+        # No project has any evidence — nothing to extract; every slice is empty.
+        return result
+
+    # 2) Pass 1 (vocabulary), cached on the sorted tuple of all bundle hashes so any one
+    #    project's change re-runs it (the price of a global view) but an unchanged
+    #    portfolio reuses it. Sorted → order-independent, so adding a project at the end
+    #    does not spuriously bust the key.
+    portfolio_hash = hashlib.sha256(
+        ("\n".join([SKILLS_CACHE_VERSION, *sorted(bundle_hashes.values())])).encode("utf-8")
+    ).hexdigest()
+    cached_vocab = cache_get(_PORTFOLIO_CACHE_ID, _VOCAB_KEY)
+    if cached_vocab is not None and cached_vocab[0] == portfolio_hash:
+        vocab = tuple(
+            VocabSkill(name=v["name"], category=v["category"])
+            for v in json.loads(cached_vocab[1])
+        )
+    else:
+        vocab = extractor.extract_vocab(_render_portfolio(bundles))
+        cache_set(
+            _PORTFOLIO_CACHE_ID,
+            _VOCAB_KEY,
+            portfolio_hash,
+            json.dumps([{"name": v.name, "category": v.category} for v in vocab]),
+        )
+
+    if not vocab:
+        # The portfolio demonstrates no nameable skills — all slices stay empty.
+        return result
+
+    # The vocabulary's identity, folded into each attribution cache key so a vocabulary
+    # change re-runs pass 2 even when a project's own bundle is unchanged.
+    vocab_hash = hashlib.sha256(
+        json.dumps([[v.name, v.category] for v in vocab]).encode("utf-8")
+    ).hexdigest()
+
+    # 3) Pass 2 per project (blind to other projects), cached on (bundle hash, vocab hash).
+    for name, safe in bundles.items():
+        attribution_hash = hashlib.sha256(
+            f"{SKILLS_CACHE_VERSION}\n{bundle_hashes[name]}\n{vocab_hash}".encode("utf-8")
+        ).hexdigest()
+        cached_attr = cache_get(name, _ATTRIBUTION_KEY)
+        if cached_attr is not None and cached_attr[0] == attribution_hash:
+            result[name] = _skills_from_json(cached_attr[1])
+            continue
+        attributed = extractor.attribute(safe, vocab)
+        cache_set(
+            name,
+            _ATTRIBUTION_KEY,
+            attribution_hash,
+            json.dumps([s.as_dict() for s in attributed]),
+        )
+        result[name] = attributed
+
+    return result

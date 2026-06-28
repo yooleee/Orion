@@ -13,7 +13,7 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-27 (E2 **Inc 4 COMPLETE** — 4a band + 4b Disciplines + 4c **Skills comb** (reframed from Connections) all shipped). Prior: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
+_Last synced: 2026-06-28 (E2 **4c Skills-comb rework CP1 SHIPPED** — global two-pass `skills-sync` + atomic `/skills-batch` + depth re-tune; CP2 comb visual pending — see the 4c-rework coupling note below). Prior: 2026-06-27 (E2 **Inc 4 COMPLETE** — 4a band + 4b Disciplines + 4c **Skills comb** (reframed from Connections) all shipped). Prior: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
 the SPA ⟂ JSON-API seam realized, single-host serving shipped — see the (updated) coupling fact #3 and the
 Inc 4 map below, plus the kickoff
 [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](e2-inc4-dashboard-rebuild-kickoff.md). The forward-looking
@@ -97,6 +97,16 @@ P, decision-gated launch work._
   their section — gate the section on the band, not on each other. **E4-developer-view = Inc 4c** shipped as
   the Skills comb (a literal cross-project relationship graph was deferred — projects too independent);
   **E4-multi-party stays C3-gated.** **Inc 4 COMPLETE.**
+- **4c Skills-comb rework: Track A (sourcing) → then Track B (visual) ∥-ready on a stable wire shape.** The
+  rework splits cleanly along the **`GET /api/skills` wire shape**, which is held stable. **Track A
+  (producer/sourcing, CP1 — SHIPPED):** the global two-pass `skills-sync` + the atomic `POST /skills-batch`
+  write + depth re-tune — a vertical slice spanning `extract.py` → `collectors/skills.py` → `cli.py` →
+  `relay/{store,server,api}.py`, built as one coordinated unit (the producer and the batch store/endpoint are
+  intertwined). **Track B (SPA comb visual, CP2 — PENDING):** `web/src/routes/Skills.tsx` +
+  `lib/skillsComb.ts` + CSS, depends ONLY on the (unchanged) wire shape, so it is independent of Track A and
+  could fan out — but is **sequenced after** A so its tooth-length scale calibrates on the real re-tuned depth
+  distribution, not placeholder data. The one genuine coupling (scope-safety of a global extraction) was
+  resolved **structurally** in A: pass 2 is per-project and blind, so nothing leaks regardless of the visual.
 
 ## Three tiers of parallelizability
 

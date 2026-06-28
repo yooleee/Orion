@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -261,7 +262,26 @@ SKILL_WEIGHT_MAX = 3
 # Bump when the SKILLS extraction prompt/output contract changes, so the collector's
 # content-hash cache re-extracts unchanged bundles instead of serving stale cards.
 # Independent of disciplines' CACHE_VERSION: the two prompts evolve separately.
-SKILLS_CACHE_VERSION = "1"
+# "2": the global two-pass rework (vocab + per-project attribution) replaced the
+# single-pass per-project prompt, so every prior cache entry must re-extract.
+# "3": added the "achieved, not demoed" anti-overclaim rule to both passes (a demo of how
+# something might work is not a competency), so cached extractions from before it re-run.
+SKILLS_CACHE_VERSION = "3"
+
+# The global skills extraction is a HARDER task than the per-project summarizer reframe:
+# pass 1 deduplicates and resume-grades competencies across the WHOLE portfolio, and
+# pass 2 attributes them per project. So this step alone steps UP from the Haiku
+# summarizer default to Sonnet, per the project's "step to Sonnet only for that step,
+# and only when the lightest model visibly misses nuance" rule. The CLI builder passes
+# this to the extractor rather than reusing the summarizer's configured model.
+SKILLS_EXTRACTION_MODEL = "claude-sonnet-4-6"
+
+# The two-pass calls emit more than a single summary — a portfolio-wide vocabulary
+# (pass 1) and an attributed subset with evidence sentences (pass 2) — so they get a
+# larger budget than MAX_TOKENS. A response that HITS this ceiling is truncated; the
+# extractor treats truncation as a failure (raises ExtractError) rather than parsing a
+# half-built array, so a sync run aborts and never pushes a partial skill set.
+SKILLS_MAX_TOKENS = 4096
 
 
 @dataclass(frozen=True)
@@ -319,6 +339,29 @@ class Skill:
         }
 
 
+@dataclass(frozen=True)
+class VocabSkill:
+    """One entry in the portfolio-wide canonical skill vocabulary (pass 1 output).
+
+    Args:
+        name: The canonical competency phrase (e.g. "Bayesian inference", "Python
+            stdlib-first backends"). Pass 1 deduplicates across the whole portfolio, so
+            the same competency phrased differently in several projects collapses to one
+            of these — which is what fixes the per-project near-duplicate problem.
+        category: The grouping this skill belongs to (the comb's section).
+
+    Why:
+        Pass 1 sees EVERY project's evidence at once and emits ONLY names + categories —
+        no per-project free text — so it can canonicalize globally without carrying
+        anything that could identify a specific (possibly out-of-scope) project. Pass 2
+        then attributes these fixed names per project (blind to other projects). A frozen
+        record keeps the two-field shape explicit at every use site, like Skill.
+    """
+
+    name: str
+    category: str
+
+
 # The skills system prompt, shared by every backend (DRY). Like the disciplines prompt
 # its spine is OBSERVE-NOT-ORIGINATE, but it is tuned for the resume crux: the model
 # must ground every skill in the provided evidence and must NOT list aspirational or
@@ -356,6 +399,113 @@ _SKILLS_SYSTEM_PROMPT = (
 )
 
 
+# PASS 1 (global). Reads EVERY project's evidence bundle at once and produces ONE
+# deduplicated, portfolio-wide VOCABULARY of competencies. Two jobs the per-project
+# single-pass prompt could not do: (a) collapse the same competency phrased differently
+# across projects into one canonical name, and (b) frame entries as RESUME/JD-grade
+# transferable skills, not project deliverables. Its OUTPUT is names + categories ONLY —
+# no per-project free text — so it canonicalizes globally without emitting anything that
+# could identify a specific project (pass 2 handles per-project attribution).
+_SKILLS_VOCAB_SYSTEM_PROMPT = (
+    "You read the EVIDENCE BUNDLES for SEVERAL of a developer's projects — each bundle "
+    "lists a project's programming languages (from its tracked files), recent commit "
+    "subjects, and short excerpts of its instruction/decision docs. From all of them "
+    "together you produce ONE deduplicated VOCABULARY of the developer's SKILLS, to build "
+    "a 'partial living resume' grounded in real work rather than self-description.\n"
+    "You are OBSERVING. Every skill MUST be supported by the evidence across the "
+    "projects. Do NOT list aspirational skills, generic buzzwords, or anything the "
+    "evidence does not actually show.\n"
+    "Three rules that define this task:\n"
+    "1. DEDUPLICATE GLOBALLY. The same competency often appears under different wording "
+    "in different projects (e.g. 'Python backend development', 'Python backends and "
+    "integrations', 'Python stdlib-first backends'). Collapse these into ONE canonical "
+    "entry. The output must contain no near-duplicates.\n"
+    "2. SKILLS, NOT DELIVERABLES. A skill is a TRANSFERABLE COMPETENCY that a resume or a "
+    "job description would name — not a system or feature built for one project. For "
+    "example 'multi-drone tracking' is a deliverable; the underlying SKILLS are 'Bayesian "
+    "inference' and 'geospatial data processing'. Name the competencies behind the work, "
+    "not the work products.\n"
+    "3. CLAIM ONLY WHAT THE WORK ACHIEVED, never what it merely gestured at. Ground each "
+    "skill in a real, working capability the evidence shows — not in what a demo, "
+    "prototype, or proof-of-concept only ILLUSTRATES. If the evidence shows that something "
+    "was demonstrated, mocked, or simulated to show how it MIGHT work, rather than actually "
+    "built and working, do NOT name it as a competency. When in doubt, prefer the narrower "
+    "skill that is genuinely evidenced (e.g. the probability modeling behind a demo) over "
+    "the broader capability the demo suggests (e.g. 'simulation' or 'coordination' that was "
+    "only illustrated). A resume must not overstate.\n"
+    "Rules for each entry:\n"
+    "- `name`: a short, canonical competency phrase (about 2-5 words), e.g. 'Bayesian "
+    "inference', 'LLM evaluation', 'Python stdlib-first backends', 'React component "
+    "design'. Prefer concrete craft over vague labels like 'software engineering'.\n"
+    "- `category`: a short grouping. Prefer this small vocabulary when it fits: 'Backend', "
+    "'Frontend', 'ML / NLP', 'Systems & tooling', 'Foundations & theory', 'Product & "
+    "design'. Use another short category only if none fit.\n"
+    "- Never reproduce code, file contents, secrets, keys, or tokens. Do not name "
+    "individual projects in the output.\n"
+    "- Use clean prose: no em-dashes, no semicolons. Avoid generic LLM filler.\n"
+    "Return ONLY a JSON array of objects, each {\"name\": str, \"category\": str}. No "
+    "prose, no code fence, no preamble. An empty array is a valid answer."
+)
+
+
+# PASS 2 (per-project). Reads the canonical vocabulary plus ONE project's evidence bundle
+# and decides which vocabulary skills THAT project demonstrates, with a per-project
+# weight, an evidence sentence, and signals. It is deliberately BLIND to every other
+# project: it cannot reference, and so cannot leak, a project it never sees — which is
+# what restores the existence-hiding guarantee the per-project design had. It may select
+# ONLY from the given vocabulary (a controlled-vocabulary pass), so naming stays
+# consistent across projects and the relay's merge collapses duplicates correctly.
+_SKILLS_ATTRIBUTE_SYSTEM_PROMPT = (
+    "You are given a CANONICAL SKILL VOCABULARY (a fixed list of competency names and "
+    "their categories) and the EVIDENCE BUNDLE for ONE of a developer's projects — its "
+    "languages, recent commit subjects, and doc excerpts. Decide which of the "
+    "vocabulary's skills THIS project's evidence actually demonstrates.\n"
+    "You are OBSERVING. Include a skill ONLY if this project's own evidence shows it was "
+    "actually built and working — not merely demonstrated, mocked, or simulated to show how "
+    "it might work. A resume must not overstate.\n"
+    "Rules:\n"
+    "- SELECT ONLY FROM THE VOCABULARY. The `name` of each entry you return MUST match a "
+    "vocabulary name exactly. Never invent a skill that is not in the vocabulary, even if "
+    "the evidence suggests one.\n"
+    "- `weight`: an integer 1-3 for how CENTRAL the skill is to THIS project, judged from "
+    "the evidence: 1 incidental, 2 notable, 3 central. Not a self-rating of ability.\n"
+    "- `evidence`: ONE sentence, grounded ONLY in THIS project's bundle, naming what "
+    "demonstrates the skill (a language, a body of commits, a documented decision). Do "
+    "NOT mention any other project, and do not invent specifics not in this bundle.\n"
+    "- `signals`: an array naming which evidence supported it, each one of \"git\", "
+    "\"tasks\", \"docs\". Include only the kinds you actually used.\n"
+    "- Never reproduce code, file contents, secrets, keys, or tokens.\n"
+    "- Use clean prose: no em-dashes, no semicolons. Avoid generic LLM filler.\n"
+    "Return ONLY a JSON array of objects, each {\"name\": str, \"weight\": int, "
+    "\"evidence\": str, \"signals\": [str]}. No prose, no code fence, no preamble. An "
+    "empty array is valid (this project may demonstrate none of the vocabulary's skills)."
+)
+
+
+def _strip_fence(raw: str) -> str:
+    """Strip a leading/trailing ```...``` code fence some models add despite the prompt.
+
+    Args:
+        raw: The model's reply text.
+
+    Returns:
+        The inner text with any surrounding fence removed, stripped of whitespace. An
+        empty string when a fence opened but enclosed nothing.
+
+    Why:
+        All three skills parsers (single-pass, vocab, attribution) tolerate the same
+        fence, so the tolerance lives in one place (DRY) rather than being copied per
+        parser.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        if text.endswith("```"):
+            text = text[: -len("```")]
+        text = text.strip()
+    return text
+
+
 def _parse_skills(raw: str) -> tuple[Skill, ...]:
     """Parse a model response into validated Skills.
 
@@ -383,13 +533,7 @@ def _parse_skills(raw: str) -> tuple[Skill, ...]:
         name and a group, but a missing weight should degrade (clamp) rather than drop a
         real competency.
     """
-    text = raw.strip()
-    # Tolerate a ```json ... ``` fence some models add despite the instruction.
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1] if "\n" in text else ""
-        if text.endswith("```"):
-            text = text[: -len("```")]
-        text = text.strip()
+    text = _strip_fence(raw)
 
     try:
         items = json.loads(text)
@@ -438,6 +582,126 @@ def _parse_skills(raw: str) -> tuple[Skill, ...]:
     return tuple(skills)
 
 
+def _parse_vocab(raw: str) -> tuple[VocabSkill, ...]:
+    """Parse a pass-1 response into the deduplicated canonical vocabulary.
+
+    Args:
+        raw: The model's reply — expected to be a JSON array of {name, category} objects.
+
+    Returns:
+        The validated VocabSkills in the model's order, deduplicated by casefolded name
+        (first occurrence wins). Items missing a name or category are SKIPPED (fail-soft
+        per item).
+
+    Raises:
+        ExtractError when the whole response is not a JSON array (a contract break).
+
+    Why:
+        Pass 1 is the controlled vocabulary that pass 2 attributes against, so it must be
+        clean and duplicate-free. The casefold de-dup here is a safety net ON TOP of the
+        prompt's global-dedup instruction — if the model still emits two spellings of one
+        skill, only the first survives, so pass 2 cannot split a project across both.
+    """
+    text = _strip_fence(raw)
+    try:
+        items = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ExtractError(f"Vocab extractor returned non-JSON output: {exc}") from exc
+    if not isinstance(items, list):
+        raise ExtractError("Vocab extractor output was not a JSON array.")
+
+    vocab: list[VocabSkill] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        category = item.get("category")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(category, str) or not category.strip():
+            continue
+        norm = name.strip().casefold()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        vocab.append(VocabSkill(name=name.strip(), category=category.strip()))
+    return tuple(vocab)
+
+
+def _parse_attribution(raw: str, vocab: Sequence[VocabSkill]) -> tuple[Skill, ...]:
+    """Parse a pass-2 response into per-project Skills bound to the canonical vocabulary.
+
+    Args:
+        raw: The model's reply — expected to be a JSON array of
+            {name, weight, evidence, signals} objects.
+        vocab: The canonical vocabulary pass 2 was told to select from. It supplies each
+            skill's canonical name + category AND acts as the allow-list: a returned name
+            that is not in the vocabulary is DROPPED (the controlled-vocabulary guard).
+
+    Returns:
+        The validated Skills, with `name` and `category` taken from the matched vocabulary
+        entry so naming is identical across projects. Items naming a non-vocabulary skill,
+        or missing a name, are skipped; `weight` clamps to [SKILL_WEIGHT_MIN,
+        SKILL_WEIGHT_MAX] and `signals` filters to SKILL_SIGNALS, as in _parse_skills.
+
+    Raises:
+        ExtractError when the whole response is not a JSON array (a contract break).
+
+    Why:
+        Pass 2's job is attribution, not naming. Binding each returned card back to its
+        vocabulary entry by casefolded name is exactly what guarantees the same competency
+        carries the same name in every project, so the relay's casefold merge collapses
+        them instead of leaving the per-project near-duplicates this rework exists to fix.
+        Dropping out-of-vocab names stops pass 2 from quietly reintroducing a duplicate the
+        global pass already canonicalized.
+    """
+    text = _strip_fence(raw)
+    try:
+        items = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ExtractError(f"Attribution extractor returned non-JSON output: {exc}") from exc
+    if not isinstance(items, list):
+        raise ExtractError("Attribution extractor output was not a JSON array.")
+
+    # Match returned names back to the vocabulary by casefolded name (the same
+    # normalization the relay's merge uses), so the stored card carries the canonical
+    # spelling regardless of how the model cased it.
+    by_norm = {v.name.casefold(): v for v in vocab}
+    skills: list[Skill] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        canonical = by_norm.get(name.strip().casefold())
+        if canonical is None:
+            # Not in the controlled vocabulary — drop it; pass 2 must not invent skills.
+            continue
+        evidence = item.get("evidence")
+        evidence_text = evidence.strip() if isinstance(evidence, str) else ""
+
+        raw_weight = item.get("weight")
+        weight = raw_weight if isinstance(raw_weight, int) and not isinstance(raw_weight, bool) else SKILL_WEIGHT_MIN
+        weight = max(SKILL_WEIGHT_MIN, min(SKILL_WEIGHT_MAX, weight))
+
+        raw_signals = item.get("signals")
+        chosen = set(raw_signals) if isinstance(raw_signals, list) else set()
+        signals = tuple(s for s in SKILL_SIGNALS if s in chosen)
+
+        skills.append(
+            Skill(
+                name=canonical.name,
+                category=canonical.category,
+                evidence=evidence_text,
+                weight=weight,
+                signals=signals,
+            )
+        )
+    return tuple(skills)
+
+
 class SkillExtractor(Protocol):
     """The provider-agnostic skills-extraction seam (E2 Inc 4 slice 4c).
 
@@ -456,6 +720,43 @@ class SkillExtractor(Protocol):
         Returns:
             The observed Skills (possibly empty). Backends raise ExtractError on an API
             failure or an unparseable response.
+
+        Why:
+            The legacy SINGLE-PASS per-project path (the deprecated `skills-push`). The
+            global `skills-sync` path uses extract_vocab + attribute instead; this stays
+            for the existing command and its tests.
+        """
+        ...
+
+    def extract_vocab(self, portfolio_text: str) -> tuple[VocabSkill, ...]:
+        """Pass 1: produce the deduplicated portfolio-wide skill vocabulary.
+
+        Args:
+            portfolio_text: The ALREADY-REDACTED, project-labeled evidence for the WHOLE
+                portfolio (every in-scope project's bundle, assembled by the collector).
+
+        Returns:
+            The canonical VocabSkills (possibly empty). Backends raise ExtractError on an
+            API failure, a truncated response, or an unparseable reply.
+        """
+        ...
+
+    def attribute(
+        self, evidence_text: str, vocab: Sequence[VocabSkill]
+    ) -> tuple[Skill, ...]:
+        """Pass 2: attribute the canonical vocabulary to ONE project's evidence.
+
+        Args:
+            evidence_text: The ALREADY-REDACTED evidence bundle for ONE project — the only
+                project this call ever sees, which is what keeps its output from
+                referencing (and so leaking) any other project.
+            vocab: The canonical vocabulary from extract_vocab; the controlled set this
+                project's skills are selected from.
+
+        Returns:
+            The Skills this project evidences (possibly empty), each bound to a vocabulary
+            entry. Backends raise ExtractError on an API failure, truncation, or an
+            unparseable reply.
         """
         ...
 
@@ -467,21 +768,69 @@ class AnthropicSkillExtractor:
         client: An anthropic.Anthropic instance, injected by the caller — same as the
             summarizer / disciplines extractor, so secret handling stays in the CLI and
             tests can substitute a fake client.
-        model: The model id to request (Haiku via config — the lightest model adequate
-            for this evidence-grounded extraction).
+        model: The model id to request. The CLI passes SKILLS_EXTRACTION_MODEL (Sonnet)
+            for the global two-pass path, since portfolio-wide dedup + resume-grading is a
+            harder task than the per-project reframe; the legacy single-pass `extract`
+            shares the same client/model.
 
     Why:
         Reuses the exact Anthropic plumbing the disciplines extractor uses (plain,
         non-streaming Messages request; APIError -> ExtractError). Only the system
-        prompt and the JSON shape differ.
+        prompt and the JSON shape differ. The three calls share one _complete helper so
+        the API plumbing and the truncation guard live in a single place (DRY).
     """
 
     def __init__(self, client: anthropic.Anthropic, model: str) -> None:
         self._client = client
         self._model = model
 
+    def _complete(self, system: str, user_text: str, max_tokens: int) -> str:
+        """Run one Messages request and return its concatenated text, guarding truncation.
+
+        Args:
+            system: The system prompt for this call.
+            user_text: The (already-redacted) user message.
+            max_tokens: The output budget for this call.
+
+        Returns:
+            The concatenated text of the reply's text blocks.
+
+        Raises:
+            ExtractError on an APIError, OR when the model stopped because it hit
+            max_tokens (a TRUNCATED reply). Truncation is treated as a failure, not parsed
+            as a partial array, so a sync run aborts rather than pushing a half-built skill
+            set (a valid-but-partial JSON could otherwise silently drop a project's skills).
+
+        Why:
+            All three skills calls share this plumbing. The stop_reason check is the
+            structural guard behind the plan's "never write a partial result": we would
+            rather fail loudly and keep the relay's prior skills than store a truncated set.
+        """
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_text}],
+            )
+        except anthropic.APIError as exc:
+            raise ExtractError(f"Anthropic API call failed: {exc}") from exc
+
+        # A reply that stopped on the token ceiling is incomplete; refuse to parse it.
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise ExtractError(
+                "Skills extraction hit the token ceiling (response truncated); aborting "
+                "without pushing so the relay's prior skills are left intact."
+            )
+
+        return "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", None) == "text"
+        )
+
     def extract(self, evidence_text: str) -> tuple[Skill, ...]:
-        """Extract skills from one redacted evidence bundle via the Anthropic API.
+        """Extract skills from one redacted evidence bundle via the Anthropic API (legacy).
 
         Args:
             evidence_text: The ALREADY-REDACTED rendered evidence bundle.
@@ -490,26 +839,60 @@ class AnthropicSkillExtractor:
             The observed Skills (possibly empty).
 
         Why:
-            See the class docstring. We collect the response text blocks (as the
-            summarizer does) and hand them to _parse_skills. Any APIError becomes an
-            ExtractError so the collector can surface a clean setup/transport failure.
+            The legacy single-pass per-project path (deprecated `skills-push`). Kept
+            unchanged in behavior; the global path uses extract_vocab + attribute.
         """
-        try:
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=MAX_TOKENS,
-                system=_SKILLS_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": evidence_text}],
-            )
-        except anthropic.APIError as exc:
-            raise ExtractError(f"Anthropic API call failed: {exc}") from exc
-
-        reply = "".join(
-            block.text
-            for block in response.content
-            if getattr(block, "type", None) == "text"
-        )
+        reply = self._complete(_SKILLS_SYSTEM_PROMPT, evidence_text, MAX_TOKENS)
         return _parse_skills(reply)
+
+    def extract_vocab(self, portfolio_text: str) -> tuple[VocabSkill, ...]:
+        """Pass 1: deduplicate + resume-grade the whole portfolio into one vocabulary.
+
+        Args:
+            portfolio_text: The ALREADY-REDACTED, project-labeled portfolio evidence.
+
+        Returns:
+            The canonical VocabSkills (possibly empty).
+
+        Why:
+            One global call over all projects is what lets the model collapse the
+            cross-project near-duplicates a per-project pass cannot see. Its output is
+            names + categories only, so seeing every project leaks nothing downstream.
+        """
+        reply = self._complete(
+            _SKILLS_VOCAB_SYSTEM_PROMPT, portfolio_text, SKILLS_MAX_TOKENS
+        )
+        return _parse_vocab(reply)
+
+    def attribute(
+        self, evidence_text: str, vocab: Sequence[VocabSkill]
+    ) -> tuple[Skill, ...]:
+        """Pass 2: select which vocabulary skills ONE project's evidence demonstrates.
+
+        Args:
+            evidence_text: The ALREADY-REDACTED evidence bundle for ONE project.
+            vocab: The canonical vocabulary to select from.
+
+        Returns:
+            The Skills this project evidences (possibly empty), bound to vocabulary entries.
+
+        Why:
+            Per-project and blind to other projects, so its evidence sentences cannot name
+            (and so cannot leak) a project it never sees. The vocabulary is rendered into
+            the user message as a fixed allow-list; _parse_attribution drops anything off
+            it so pass 2 cannot reintroduce a duplicate.
+        """
+        vocab_lines = "\n".join(f"- {v.name} [{v.category}]" for v in vocab)
+        user_text = (
+            "## Canonical skill vocabulary (select only from these)\n"
+            f"{vocab_lines}\n\n"
+            "## This project's evidence\n"
+            f"{evidence_text}"
+        )
+        reply = self._complete(
+            _SKILLS_ATTRIBUTE_SYSTEM_PROMPT, user_text, SKILLS_MAX_TOKENS
+        )
+        return _parse_attribution(reply, vocab)
 
 
 class AnthropicDisciplineExtractor:

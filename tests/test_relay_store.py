@@ -44,6 +44,7 @@ from relay.store import (
     projects_for_user,
     record_admin_audit,
     record_observations,
+    replace_all_skills,
     revoke_user,
     set_project_kind,
     skills_projects,
@@ -1096,3 +1097,50 @@ def test_upsert_skills_replaces_prior_set(tmp_path):
     upsert_skills(conn, "demo", [_skill_row("Old")], "2026-06-27T10:00:00+00:00")
     upsert_skills(conn, "demo", [_skill_row("New")], "2026-06-27T11:00:00+00:00")
     assert get_skills(conn, "demo") == [_skill_row("New")]
+
+
+def test_replace_all_skills_writes_every_slice_and_prunes_absent(tmp_path):
+    """A batch replace writes each project's slice and PRUNES a project not in the batch.
+
+    Why this matters: the global sync's atomic write. Every synced project's row is set
+    together, and a project that dropped out of the batch (turned `skills` off, or was
+    removed) is deleted rather than left with stale-named cards that would break the merge.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # Seed a project that the batch will NOT mention, so prune must remove it.
+    upsert_skills(conn, "gone", [_skill_row("Stale")], "2026-06-27T09:00:00+00:00")
+
+    replace_all_skills(
+        conn,
+        {"alpha": [_skill_row("Python backends")], "beta": [_skill_row("React")]},
+        "2026-06-28T10:00:00+00:00",
+        prune=True,
+    )
+
+    assert get_skills(conn, "alpha") == [_skill_row("Python backends")]
+    assert get_skills(conn, "beta") == [_skill_row("React")]
+    assert get_skills(conn, "gone") is None  # pruned: absent from the batch
+    assert skills_projects(conn) == ["alpha", "beta"]
+
+
+def test_replace_all_skills_rolls_back_on_error(tmp_path):
+    """A failure mid-batch leaves the store on its PRE-batch state (atomicity).
+
+    Why this matters: the canonical re-naming must flip all-or-nothing. If the batch fails
+    partway, a reader must never see a mix of old-named and new-named rows (which would
+    transiently reintroduce the duplicate bug). We force a failure with a non-serializable
+    card and assert the prior state survived unchanged.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_skills(conn, "alpha", [_skill_row("Original")], "2026-06-27T09:00:00+00:00")
+
+    # A set is not JSON-serializable, so json.dumps raises while writing beta's slice —
+    # after alpha's row would have been touched, exercising the rollback.
+    bad = {"alpha": [_skill_row("Replaced")], "beta": {"not", "serializable"}}
+    with pytest.raises(TypeError):
+        replace_all_skills(conn, bad, "2026-06-28T10:00:00+00:00", prune=True)
+
+    # The pre-batch state is intact: alpha unchanged, beta never created, nothing pruned.
+    assert get_skills(conn, "alpha") == [_skill_row("Original")]
+    assert get_skills(conn, "beta") is None
+    assert skills_projects(conn) == ["alpha"]

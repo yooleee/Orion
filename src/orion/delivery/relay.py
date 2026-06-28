@@ -292,6 +292,75 @@ def push_skills(
         raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
 
 
+def push_skills_batch(
+    relay_url: str,
+    slices: dict,
+    token: str,
+    *,
+    allow_empty: bool = False,
+    timeout: float = 10.0,
+) -> None:
+    """POST every project's skills in ONE atomic batch to a relay's /skills-batch endpoint.
+
+    Args:
+        relay_url: The relay's configured URL (the [relay] table's `url`); the
+            /skills-batch endpoint is derived from it with urljoin.
+        slices: {project_name: skills_list} — the FULL desired state for every synced
+            project, each list the {name, category, evidence, weight, signals} card shape,
+            ALREADY redacted by the caller (the privacy net runs before this).
+        token: The Bearer token authenticating the push (the SAME ingest credential).
+        allow_empty: When True, set the request's `allow_empty` flag so the relay accepts a
+            batch that clears every project's skills (the relay otherwise refuses to wipe a
+            populated comb to empty). Default False — the safe case.
+        timeout: Seconds to wait for the request before failing.
+
+    Returns:
+        None. Raises DeliveryError on any non-2xx response (including the relay's 409
+        empty-clobber refusal, whose message tells the caller to pass allow_empty) or a
+        network failure.
+
+    Why:
+        The transport for the GLOBAL skills-sync (the two-pass rework). One request carries
+        every project's slice so the relay can replace them in a single transaction, which
+        is what makes the canonical re-naming atomic (no transient mix of old and new
+        names). Pure transport, like push_skills: the caller owns redaction; this only
+        encodes the {projects, allow_empty} body and POSTs it with the auth header.
+    """
+    endpoint = urllib.parse.urljoin(relay_url, "/skills-batch")
+    data = json.dumps({"projects": slices, "allow_empty": allow_empty}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": _USER_AGENT,
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            # The batch endpoint returns 200 (an atomic replace); accept any 2xx.
+            if not (200 <= status < 300):
+                raise DeliveryError(f"Relay skills-batch push returned HTTP {status}.")
+    except urllib.error.HTTPError as exc:
+        # Surface the relay's body message (e.g. the 409 empty-clobber refusal) so the
+        # caller learns it must pass allow_empty, not just the bare status.
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")
+        except Exception:
+            detail = ""
+        raise DeliveryError(
+            f"Relay skills-batch push returned HTTP {exc.code}: {exc.reason}"
+            + (f" ({detail})" if detail else "")
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+
 def pull_comments(
     relay_url: str,
     token: str,

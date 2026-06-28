@@ -361,11 +361,30 @@ Deferred).
   outside reader (or a recruiter) would find legible — duplicates and component-entries dilute it, and the
   visual undersells the comb metaphor.
 - **Severity:** low (cosmetic + content quality, not correctness or security)
-- **Status:** Open by-design for the initial 4c build. The rework is the **next step** for the tab: move to
-  a GLOBAL portfolio analysis (one deduplicated skill set, resume-calibrated against
-  `~/Applications/Documents/ygolding_resume_2026.md`) and a true-to-method comb visual — while keeping the
-  observe-not-originate invariant and resolving the global-vs-scope-filtering tension. Tracked here so the
-  approximation reads as intentional. Relates to [[KI-25]] and the kickoff doc above.
+- **Status:** **Partly resolved (rework CP1 shipped).** Parts (a) and (b) are addressed: `orion skills-sync`
+  now runs a **global two-pass** extraction (pass 1 builds one deduplicated, resume-grade canonical
+  vocabulary across all projects on Sonnet; pass 2 attributes it per project, blind to the others) and writes
+  every slice through an **atomic batch** endpoint (`POST /skills-batch`, prune + empty-clobber guard). The
+  global-vs-scope tension is resolved structurally — pass 2 never sees another project, so existence-hiding
+  holds without trusting the prompt. Depth boundaries were re-tuned for the now-accurate breadth. Part (c)
+  **(comb visual fidelity) remains open — it is CP2** (redesign `Skills.tsx` to the real comb-shaped-skills
+  form: a spine with descending teeth, length = depth). Resume oracle:
+  `~/Developer/Applications/Documents/ygolding_resume_2026.md` (the kickoff's `~/Applications/...` path was
+  stale). Relates to [[KI-25]] and the kickoff doc above; see also KI-27 (dead `tasks` signal).
+
+## KI-27 — Skills `tasks` signal is declared but never sourced (E2 Inc 4 4c)
+
+- **Detail:** `SKILL_SIGNALS` (producer) and `_VALID_SKILL_SIGNALS` (relay) both include `"tasks"`, and a
+  skill card may legitimately carry it, but the evidence bundle the model sees is built only from git
+  languages, commit subjects, and doc excerpts — it has **no task/checklist evidence**. So a skill can never
+  truthfully cite `tasks`; the kind is inert vocabulary.
+- **Why it matters:** observe-not-originate means a signal should reflect real evidence. A declared-but-unfed
+  signal is a small honesty gap (a model could attach `tasks` with nothing behind it) and a loose end the
+  rework noticed but deliberately scoped out.
+- **Severity:** low (the SPA simply shows whatever signals survive; no correctness or security impact).
+- **Status:** Open. Two clean fixes, both deferred to keep the rework surgical: **feed** the project's
+  checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
+  vocabulary until it is sourced. Flagged here rather than silently left.
 
 ## Resolved
 

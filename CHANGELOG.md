@@ -22,6 +22,26 @@ detail and the band map live in [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](do
 
 ### Added
 
+- **Skills comb section (4c) — a "partial living resume".** A new **Skills** section shows the kinds of
+  work and skills the user's projects *demonstrate*, rendered as a **Capability Comb**: per category, teeth
+  whose height encodes each skill's derived **depth**, with evidence cards below anchoring every skill to
+  the projects that demonstrate it (`observed · <projects> · <signals>`). It is observe-not-originate (a
+  resume that is *derived*, never authored): a per-project collector gathers observed evidence (git
+  languages from tracked files + recent commit subjects, plus any `discipline_docs` for topical focus) and
+  an **opt-in, cache-gated** Haiku step reframes it into skills **grounded only in that evidence** (no
+  aspirational entries). The seam mirrors 4b: `orion skills-push` (`src/orion/extract.py` +
+  `collectors/skills.py`, redact-before-LLM, content-hash cache; gated by a per-project `skills = true`
+  flag) → `POST /skills` → `relay_project_skills` upsert → `GET /api/skills`
+  (`api.serialize_skills`: **merges** each project's skills across the portfolio by normalized name, unions
+  the evidencing projects + signals, and **derives each tooth's depth** from evidence weight + cross-project
+  breadth — the one place that sees the whole portfolio; **scope-filtered first** so a skill evidenced only
+  by an out-of-scope project never leaks) → `web/src/routes/Skills.tsx` (a pure `skillsComb.ts` layout
+  helper maps depth→tooth height and groups by category). Untrusted text renders inert. Verified eyes-on on
+  **genuine extracted data** across all three themes. This **replaces the planned Cross-project Connections
+  graph** (`design/` §8 / `desktop-07`): the projects are mostly independent, so a literal relationship
+  graph was thin — reframed mid-build with the developer into the more honest, useful skills comb (recorded
+  in [KI-25](docs/known-issues.md) and the kickoff). Backend 744 + web 43 green.
+
 - **Disciplines & directions section (4b).** A new **Disciplines** section reflects the working
   principles Orion observes in a project's own docs, split into a **Global** group (cross-cutting
   conventions) and per-project groups, each card a title, a "why", and an `observed · <source>` footer.

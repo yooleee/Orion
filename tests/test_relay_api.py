@@ -779,8 +779,9 @@ def _skill(name, *, category="Backend", evidence="ev", weight=2, signals=("git",
 def test_skills_single_project_shape_and_depth():
     """One project's skill is emitted with its projects anchor and a derived depth.
 
-    Why this matters: the baseline — a lone incidental skill (weight 1) is depth 1, a
-    central one (weight 3) is depth 2, and the merged card names which project evidences it.
+    Why this matters: the baseline — a single-project skill spreads its weight straight
+    onto the comb: incidental (weight 1) is depth 1, central (weight 3) is depth 3, so the
+    teeth actually vary. The merged card names which project evidences it.
     """
     out = api.serialize_skills(
         [
@@ -796,7 +797,7 @@ def test_skills_single_project_shape_and_depth():
     )
     by_name = {s["name"]: s for s in out["skills"]}
     assert by_name["Incidental thing"]["depth"] == 1
-    assert by_name["Central thing"]["depth"] == 2
+    assert by_name["Central thing"]["depth"] == 3
     assert by_name["Central thing"]["projects"] == ["orion"]
 
 
@@ -805,8 +806,8 @@ def test_skills_merge_across_projects_raises_depth_via_breadth():
 
     Why this matters: this is the whole point of the cross-project comb — a competency
     shown across the portfolio out-ranks an equally-weighted one confined to one project.
-    Two projects at weight 2 (total 4, +1 breadth = 5) reach depth 3, above a lone weight-2
-    skill (depth 2). The projects anchor unions both, sorted.
+    Two projects at weight 2 (total 4, +1 breadth = 5) reach the top depth 4, above a lone
+    weight-2 skill (depth 2). The projects anchor unions both, sorted.
     """
     out = api.serialize_skills(
         [
@@ -818,7 +819,7 @@ def test_skills_merge_across_projects_raises_depth_via_breadth():
     assert len(out["skills"]) == 1  # casefold-merged despite the capitalization difference
     merged = out["skills"][0]
     assert merged["projects"] == ["orion", "sar_hackathon"]
-    assert merged["depth"] == 3
+    assert merged["depth"] == 4
 
 
 def test_skills_merge_picks_canonical_text_and_unions_signals():
@@ -852,7 +853,7 @@ def test_skills_categories_ordered_by_total_depth():
             {
                 "name": "orion",
                 "skills": [
-                    _skill("A", category="Backend", weight=3),   # depth 2
+                    _skill("A", category="Backend", weight=3),   # depth 3
                     _skill("B", category="ML / NLP", weight=1),  # depth 1
                 ],
             }

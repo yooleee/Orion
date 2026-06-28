@@ -315,6 +315,64 @@ own docs **unmodified** and reframes their stated principles via an **opt-in, ca
 (`orion disciplines-push`); the docs are redacted before the model and the output redacted again before
 the push. Stored in `relay_project_disciplines` (one row per project, replaced on each push).
 
+### `GET /api/skills`
+
+The **Skills comb** (E2 Inc 4 slice 4c): a "partial living resume" of the kinds of work and skills the
+user's projects **demonstrate**, DERIVED from observed activity (never authored). Each project's observed
+skills are **merged across the portfolio** into one comb, with each skill's `depth` (the comb tooth height)
+derived server-side from how central it is (evidence weight) and across how many projects (breadth).
+Scope-filtered like `/api/portfolio`. (This **replaces** the design's `desktop-07` Cross-project
+Connections graph — the projects are mostly independent, so a skills comb is the more honest, useful fit;
+the change is recorded in the kickoff and `known-issues.md`.)
+
+```json
+{
+  "scope": { "unrestricted": false, "projects": ["orion"] },
+  "categories": ["Backend", "ML / NLP", "Frontend"],
+  "skills": [
+    { "name": "Python stdlib-first backends", "category": "Backend", "depth": 4,
+      "projects": ["barebones-ai-village", "orion", "sar_hackathon"],
+      "evidence": "Built the relay's stdlib HTTP API and CLI.", "signals": ["git", "docs"] }
+  ]
+}
+```
+
+- **`skills`** is a FLAT list (so the server can order across categories in one pass), merged by
+  **normalized name** across all in-scope projects: the contributing `projects` and `signals` are unioned,
+  and the canonical `name`/`category`/`evidence` is the lexicographically-first `(project)` contributor (the
+  same stability rule `serialize_disciplines` uses, so the card does not flicker with push order). Ordered
+  by `(category rank, then descending depth, then name)` — tallest teeth first within each group. The SPA
+  groups the flat list by `categories` to render one comb cluster per category.
+- **`depth`** (1–4) is DERIVED here, the one place that sees the whole portfolio:
+  `score = summed per-project weight + (breadth − 1)`, bucketed so a single-project skill spreads its
+  weight straight onto the comb (incidental→1, notable→2, central→3) and a skill shown across projects
+  reaches 4. Tuned so the comb actually varies on real data (most skills are single-project). The bucket
+  boundaries are named constants in `api.py`, pinned by test and tunable.
+- **`categories`** are the distinct categories, ordered by total depth (strongest group first), tie-broken
+  by name — the comb's section order.
+- **`projects`** are the in-scope projects that evidence the skill (the honest "observed · <projects>"
+  anchor). **`signals`** name which evidence kinds (`git | tasks | docs`) supported it.
+- **Scope-filtered FIRST:** a skill evidenced only by an out-of-scope project never reaches a scoped
+  viewer, and a merged skill's `projects` anchor can only list in-scope projects (existence-hiding).
+- The card carries **no project/tracker glyph** for its anchors — `skills = true` is only ever set on real
+  software projects, so the distinction adds nothing today (KI-25; additive via `get_project_kind` later).
+- Source: `skills_projects` (enumerate projects that pushed skills — NOT `latest_report_per_project`, so a
+  skills-only project is not missed) + `get_skills` per in-scope project → `api.serialize_skills`.
+
+#### `POST /skills` (producer push — machine, not the SPA)
+
+A producer-side machine push (Bearer ingest token, like `POST /disciplines`) that sets a project's observed
+skills as **current state** (full-state upsert, no report). Body `{"project": "<name>", "skills": [{name,
+category, evidence, weight, signals}, …]}`; each card's `name`/`category` must be non-empty strings,
+`evidence` a string, `weight` an integer, and `signals` a list drawn from `git | tasks | docs`. Returns
+`200 {"updated": "<name>", "skills": <count>}`. An empty list clears the project's prior set. The producer
+gathers the project's own observed evidence (git languages from tracked files + recent commit subjects, plus
+any `discipline_docs` for topical focus) and reframes it into skills **grounded only in that evidence** via
+an **opt-in, cache-gated** Haiku step (`orion skills-push`, gated by a per-project `skills = true` flag);
+the evidence is redacted before the model and the output redacted again before the push. An extraction
+failure aborts **without** pushing (so a transient error never clobbers stored skills with an empty set).
+Stored in `relay_project_skills` (one row per project, replaced on each push).
+
 ### `GET /api/showcase`
 
 The **public, no-login** curated surface — a small set of projects an operator has chosen to share

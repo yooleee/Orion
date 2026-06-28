@@ -13,7 +13,7 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
+_Last synced: 2026-06-27 (E2 **Inc 4 COMPLETE** — 4a band + 4b Disciplines + 4c **Skills comb** (reframed from Connections) all shipped). Prior: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
 the SPA ⟂ JSON-API seam realized, single-host serving shipped — see the (updated) coupling fact #3 and the
 Inc 4 map below, plus the kickoff
 [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](e2-inc4-dashboard-rebuild-kickoff.md). The forward-looking
@@ -74,8 +74,11 @@ P, decision-gated launch work._
    split held in practice. The frontend was serial only at its start (shell + theming + routing before
    screens), then screen-parallel (Projects/Project/Report). Single-host won over two-host: the relay
    serves the built SPA (`--web-dir`), so there is no Cloudflare/Fly coordination edge. The two new backend
-   bands (Disciplines collector, Connections derivation) and the Scheduling aggregation remain mutually
-   file-disjoint; only their *sections* depend on the (now-built) shell.
+   bands (Disciplines collector, the **Skills comb** collector+merge — 4c, reframed from the planned
+   Connections derivation) and the Scheduling aggregation stayed mutually file-disjoint; only their
+   *sections* depended on the (now-built) shell. **Inc 4 is COMPLETE** — the seam analysis held across all
+   three new signals (each: a producer collector → push → store → a cross-project serializer → a section,
+   fanned out against the agreed JSON).
 
 ## Dependency graph (cannot parallelize across these edges)
 
@@ -90,9 +93,10 @@ P, decision-gated launch work._
 - **E2 Inc 4 (sectioned dashboard rebuild): API contract → then frontend ∥ backend.** The JSON API
   contract gates everything; once fixed, the SPA and the backend (JSON serializers + new derivations) run
   in parallel. Within it: **4a** data-ready sections need only re-serialization (low coupling); **4b**
-  Disciplines and **4c** Connections each need a new backend band before their section — gate the section
-  on the derivation, not on each other. **E4-developer-view = Inc 4c** is unblocked (data is already
-  project-keyed); **E4-multi-party stays C3-gated.**
+  Disciplines and **4c** the **Skills comb** (reframed from Connections) each need a new backend band before
+  their section — gate the section on the band, not on each other. **E4-developer-view = Inc 4c** shipped as
+  the Skills comb (a literal cross-project relationship graph was deferred — projects too independent);
+  **E4-multi-party stays C3-gated.** **Inc 4 COMPLETE.**
 
 ## Three tiers of parallelizability
 

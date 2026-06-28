@@ -2711,7 +2711,7 @@ def test_api_skills_merges_across_projects(tmp_path):
         assert len(out["skills"]) == 1
         merged = out["skills"][0]
         assert merged["projects"] == ["orion", "sar_hackathon"]
-        assert merged["depth"] == 3  # breadth bonus lifts it above a single-project skill
+        assert merged["depth"] == 4  # breadth bonus lifts it to the top, above a single-project skill
 
 
 def test_api_skills_is_scoped_for_a_viewer(tmp_path):

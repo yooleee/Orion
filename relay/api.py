@@ -454,11 +454,14 @@ _SKILL_SIGNAL_ORDER = ("git", "tasks", "docs")
 # projects independently surface the skill) and per-project CENTRALITY both raise the
 # tooth — the honest "observed-derived depth" the slice settled on. Boundaries are
 # named constants (not magic numbers) so they are tunable in one place and pinned by
-# test. With per-project weight clamped to 1..3: a lone incidental skill is depth 1, a
-# central one depth 2, a skill across two projects depth 3, across three+ depth 4.
-_DEPTH_T1 = 1  # score <= 1
-_DEPTH_T2 = 3  # score <= 3
-_DEPTH_T3 = 5  # score <= 5  (else depth 4)
+# test. With per-project weight clamped to 1..3 the common case — a single-project skill —
+# spreads its weight straight onto the comb: incidental (1) is depth 1, notable (2) depth 2,
+# central (3) depth 3; a skill demonstrated across projects reaches depth 4. (Tuned so the
+# comb actually varies on real data, where most skills are single-project: collapsing
+# weight 2 and 3 to one depth left the teeth nearly uniform.)
+_DEPTH_T1 = 1  # score <= 1  -> depth 1
+_DEPTH_T2 = 2  # score <= 2  -> depth 2
+_DEPTH_T3 = 3  # score <= 3  -> depth 3  (else depth 4)
 
 
 def _skill_depth(total_weight: int, breadth: int) -> int:

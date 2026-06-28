@@ -307,26 +307,17 @@ Deferred).
   relay-side text parse so status is a clean observed property end-to-end rather than reverse-engineered
   across the process boundary — the foundation later supervisor-side features build on.
 
-## KI-23 — Legacy server-rendered dashboard not yet retired (parity pending)
-
-- **Detail:** E2 Inc 4 4a serves the React SPA single-host via `relay-serve --web-dir`; when that flag is
-  set the relay serves the built SPA and **bypasses** the legacy server-rendered HTML (`relay/render.py`
-  views), but both code paths still ship. The Tracker page, Scheduling, and **comment writes** are now
-  shipped; the surfaces still unbuilt within 4a's band are the **Showcase guest view** and the **mobile
-  pass**. `render.py` retires "at parity" only once the SPA covers every URL the old dashboard served.
-- **Why it matters:** Until parity, the relay carries two front-ends. Keeping `render.py` working (its
-  tests stay green) is deliberate — it is the fallback while the SPA fills in — but it is dead weight to
-  remove once parity lands.
-- **Severity:** low
-- **Status:** Intended interim state, narrowing. **Comment writes wired** (`POST /api/reports/:id/comments`
-  — cookie-authed JSON, reusing the form route's CSRF/auth/scope; the inert composer is now live). Remaining
-  for parity: Showcase + mobile, then retire `render.py` (and the legacy form comment route with it).
-
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-23** — Legacy server-rendered dashboard not yet retired (the relay carried two front-ends:
+  the React SPA and the `relay/render.py` HTML views). **Resolved 2026-06-27** at parity — the SPA
+  now covers every URL the old dashboard served, so `relay/render.py` and its legacy form routes
+  (`GET/POST /login`, `POST /report/:id/comment`) were removed; the relay keeps the JSON API, the
+  cookie-authed comment write, the auth/CSP machinery, and SPA serving. See CHANGELOG → *"E2 Inc 4 —
+  sectioned dashboard rebuild (SPA): legacy server-rendered HTML retired at parity"*.
 - **KI-8** — Vestigial Phase-1 state artifacts after the Phase-2 marker migration: the
   `project_state` table (backfill source) and the always-`""` `ReportBlob.source_marker`.
   **Resolved 2026-06-25** by dropping both — the Phase-1→Phase-2 backfill window closed long

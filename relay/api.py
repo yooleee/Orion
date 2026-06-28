@@ -34,11 +34,42 @@ from .derive import (
     slipping_item_keys,
 )
 
-# The display title / portfolio headline is the report body's first line. render.py owns
-# that extraction today; we borrow it so the SPA's title and the old HTML headline agree
-# byte-for-byte. When render.py retires (at parity), this helper moves here. Importing it
-# does not create a cycle: render imports from store/derive, never from api.
-from .render import _headline as headline
+# The display title / portfolio headline is the report body's first line. This extraction
+# moved here when render.py retired (E2 Inc 4, KI-23) — the SPA is now the only front-end,
+# so api.py owns the rule outright (it formerly lived in render.py and was imported here).
+_HEADLINE_MAX_CHARS = 100
+
+
+def _headline(body: str, limit: int = _HEADLINE_MAX_CHARS) -> str:
+    """Extract a one-line headline from a report body for a portfolio card / title.
+
+    Args:
+        body: The report's full body text (may be multi-line, or empty).
+        limit: Max characters before truncation. Defaults to _HEADLINE_MAX_CHARS.
+
+    Returns:
+        The first non-empty line, stripped and truncated to `limit` characters with a
+        trailing "…" when it was longer. Returns "" when the body has no non-empty line,
+        so the caller can OMIT the headline rather than render a blank one.
+
+    Why:
+        The portfolio home + report timeline show each project's latest update at a glance,
+        and the report's own first line is the most honest one-liner available (no invented
+        text). Keeping it to one line keeps a card scannable. Truncation is a presentation
+        choice, so it lives in this presentation/serializer layer (the store query stays
+        content-agnostic). The empty-string fallback means a report with no usable body
+        simply drops the headline line — honest over decorative.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            # Add the ellipsis only when we actually cut text (a first line exactly `limit`
+            # long is shown whole). One "…" char keeps the rendered length predictable.
+            if len(stripped) > limit:
+                return stripped[:limit].rstrip() + "…"
+            return stripped
+    return ""
+
 
 # An open deadline that is neither overdue nor due-soon: dated, but beyond the at-risk
 # horizon. Not a "flagged" state (no glyph/colour in the design vocabulary) — the SPA
@@ -280,7 +311,7 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
         entry["at_risk_items"] = _at_risk_items(items, today)
     else:
         # A software project: the one-line headline from the latest report + its id.
-        entry["headline"] = headline(row["latest_body"]) if row["latest_body"] else ""
+        entry["headline"] = _headline(row["latest_body"]) if row["latest_body"] else ""
         entry["report_id"] = row["latest_report_id"]
     return entry
 
@@ -342,10 +373,10 @@ def _showcase_card(row: dict) -> dict:
         keeping with observe-and-reframe.
     """
     progress = _progress(row["checklist_done"] or 0, row["checklist_total"] or 0)
-    # A curated blurb wins; else the latest report's headline; else empty. headline() needs
+    # A curated blurb wins; else the latest report's headline; else empty. _headline() needs
     # a non-empty body, so guard the checklist-only case (no report → latest_body is None).
     description = row.get("blurb") or (
-        headline(row["latest_body"]) if row.get("latest_body") else ""
+        _headline(row["latest_body"]) if row.get("latest_body") else ""
     )
     return {
         "name": row["project"],
@@ -524,7 +555,7 @@ def serialize_project(
                 # The report's display title for the timeline — the body headline (its first
                 # line), the same rule serialize_report uses, so the timeline entry and the
                 # report page agree on the title.
-                "title": headline(r["body"]) if r["body"] else "",
+                "title": _headline(r["body"]) if r["body"] else "",
                 "generated_at": r["generated_at"],
                 "lane": r["lane"],
                 "share_level": r["share_level"],
@@ -651,7 +682,7 @@ def serialize_report(
         "id": report["id"],
         "number": numbers.get(report["id"]),  # per-project ordinal (id stays the identity)
         "project": report["project"],
-        "title": headline(report["body"]) if report["body"] else "",
+        "title": _headline(report["body"]) if report["body"] else "",
         "sections": report["sections"],
         "body": report["body"],
         "lane": report["lane"],

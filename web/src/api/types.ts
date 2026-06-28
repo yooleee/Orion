@@ -289,6 +289,31 @@ export interface DisciplinesData {
   projects: DisciplineGroup[];
 }
 
+// --- GET /api/skills (the "skills comb") ------------------------------------
+
+/** One merged competency in the skills comb (E2 Inc 4 slice 4c). DERIVED from observed
+ *  activity, never authored. `depth` (1-4) is the comb tooth height — derived server-side
+ *  from how central the skill is (evidence weight) and across how many projects (breadth).
+ *  `projects` are the in-scope projects that evidence it (the honest "observed" anchor);
+ *  `signals` name which kinds of evidence (git/tasks/docs) supported it. */
+export interface Skill {
+  name: string;
+  category: string;
+  depth: number;
+  projects: string[];
+  evidence: string;
+  signals: string[];
+}
+
+/** GET /api/skills: the comb — a flat list of merged skills (ordered by category, then
+ *  tallest tooth first) plus the category order to group them by. `scope` is the same
+ *  viewer-scope block the portfolio ships. */
+export interface SkillsData {
+  scope: Scope;
+  categories: string[];
+  skills: Skill[];
+}
+
 // --- GET /api/showcase ------------------------------------------------------
 
 /** A curated card's derived status pill: "shipped" at 100% done, else "active". */

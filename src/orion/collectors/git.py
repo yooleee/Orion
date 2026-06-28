@@ -333,3 +333,63 @@ def collect(repo_path: Path, since_sha: str | None, share_level: str) -> Collect
     return CollectorResult(
         lane=LANE_RAW, raw_text=raw_text, new_marker=head, has_activity=True
     )
+
+
+def tracked_files(repo_path: Path) -> list[str]:
+    """List the repo-relative paths of all version-controlled files.
+
+    Args:
+        repo_path: Local path to the git repository (already a valid repo, or
+            validated here).
+
+    Returns:
+        Repo-relative paths of every tracked file (may be empty for a repo with no
+        commits / nothing staged). Forward-slash separators as git emits them, so the
+        result is stable across Windows/macOS/Linux.
+
+    Why:
+        The skills collector (E2 Inc 4 slice 4c) derives a project's *languages* from
+        the extensions of its tracked files. `git ls-files` lists exactly what is under
+        version control — never build output, vendored deps, or untracked scratch — so
+        the language signal reflects the code the developer actually authored. Reading
+        through git (not os.walk) reuses the repo boundary git already enforces and
+        keeps every git access in this module (single responsibility), matching how
+        collect() shells out. Read-only, content-free (paths only), so no secret can
+        leak through it.
+    """
+    _ensure_repo(repo_path)
+    out = _git(repo_path, "ls-files")
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def recent_subjects(repo_path: Path, limit: int = 50) -> list[str]:
+    """Return the subject lines of the most recent commits, newest first.
+
+    Args:
+        repo_path: Local path to the git repository (validated here).
+        limit: Maximum number of commit subjects to return (a bound on cost and on how
+            much text reaches the LLM). Defaults to 50.
+
+    Returns:
+        Up to `limit` commit subject lines (the first line of each message), newest
+        first. Empty for a repo with no commits.
+
+    Why:
+        Commit subjects are a cheap, high-signal record of *what work was done* — the
+        evidence the skills collector reframes into competencies. We take only the
+        subject (`%s`), never the body or any diff, so this stays content-free of code
+        and bounded by `limit`. An empty repo (no HEAD) yields no subjects rather than
+        an error, mirroring collect()'s empty-repo tolerance.
+    """
+    _ensure_repo(repo_path)
+    if _head_sha(repo_path) is None:
+        # No commits yet — no subjects to read. Return empty rather than letting the
+        # `git log` below fail on a repo with no HEAD.
+        return []
+    out = _git(
+        repo_path,
+        "log",
+        f"-n{limit}",
+        "--pretty=format:%s",
+    )
+    return [line for line in out.splitlines() if line.strip()]

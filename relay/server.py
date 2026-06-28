@@ -53,6 +53,7 @@ from .store import (
     get_checklist,
     get_disciplines,
     get_project_kind,
+    get_skills,
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
@@ -67,9 +68,11 @@ from .store import (
     record_observations,
     revoke_user,
     set_project_kind,
+    skills_projects,
     update_last_login,
     upsert_checklist,
     upsert_disciplines,
+    upsert_skills,
 )
 
 # The default IANA zone the dashboard renders timestamps in (the SPA reads it from
@@ -412,6 +415,61 @@ def _validate_disciplines_request(payload: object) -> str | None:
     return None
 
 
+# The evidence-signal kinds a skill card may cite (E2 Inc 4 slice 4c). Mirrors the
+# producer's extract.SKILL_SIGNALS, restated here so the relay validates inbound pushes
+# without importing producer code (the relay is the trust boundary, not the producer).
+_VALID_SKILL_SIGNALS = ("git", "tasks", "docs")
+
+
+def _validate_skills_request(payload: object) -> str | None:
+    """Check a parsed payload against the skills-push contract (POST /skills).
+
+    Args:
+        payload: The JSON-parsed request body (any type — untrusted input).
+
+    Returns:
+        None when the payload is a valid `{project, skills}` request; otherwise a short
+        human-readable 400 reason.
+
+    Why:
+        The skills push is an untrusted inbound surface like /ingest and /disciplines, so
+        it validates shape BEFORE storing. `skills` is REQUIRED (the request exists to set
+        it) and each card must carry a non-empty string `name` and `category`, a string
+        `evidence`, an integer `weight`, and a list `signals` whose entries are all known
+        kinds — the exact shape serialize_skills reads. An empty list is valid (it
+        legitimately clears the project's prior set). We validate `weight`/`signals` here
+        rather than trusting them because this is the trust boundary; the serializer still
+        clamps defensively, but a malformed push is rejected loudly, not silently coerced.
+    """
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    project = payload.get("project")
+    if not isinstance(project, str) or not project.strip():
+        return "field 'project' must be a non-empty string"
+    skills = payload.get("skills")
+    if not isinstance(skills, list):
+        return "field 'skills' must be a list"
+    for i, card in enumerate(skills):
+        if not isinstance(card, dict):
+            return f"skills[{i}] must be an object"
+        for field in ("name", "category"):
+            if not isinstance(card.get(field), str) or not card[field].strip():
+                return f"skills[{i}].{field} must be a non-empty string"
+        if not isinstance(card.get("evidence"), str):
+            return f"skills[{i}].evidence must be a string"
+        # bool is a subclass of int, so reject it explicitly — `weight = true` is not a weight.
+        weight = card.get("weight")
+        if not isinstance(weight, int) or isinstance(weight, bool):
+            return f"skills[{i}].weight must be an integer"
+        signals = card.get("signals")
+        if not isinstance(signals, list):
+            return f"skills[{i}].signals must be a list"
+        for s in signals:
+            if s not in _VALID_SKILL_SIGNALS:
+                return f"skills[{i}].signals entries must be one of {_VALID_SKILL_SIGNALS}"
+    return None
+
+
 def _validate_blob(payload: object) -> str | None:
     """Check a parsed payload against the portable blob contract.
 
@@ -572,6 +630,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 "/api/portfolio",
                 "/api/scheduling",
                 "/api/disciplines",
+                "/api/skills",
                 "/api/showcase",
             )
             or path.startswith("/api/projects/")
@@ -636,6 +695,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/disciplines":
             self._handle_disciplines_push()
+            return
+
+        if path == "/skills":
+            self._handle_skills_push()
             return
 
         if path == "/api/comments":
@@ -853,6 +916,55 @@ class _RelayHandler(BaseHTTPRequestHandler):
         )
         # 200 (not 201): an upsert of existing per-project state, not a created resource.
         self._send_json(200, {"updated": payload["project"], "disciplines": count})
+
+    def _handle_skills_push(self) -> None:
+        """Authenticate, validate, and upsert a project's observed skills (POST /skills).
+
+        Why:
+            The dedicated skills-only push (E2 Inc 4 slice 4c — the "skills comb"): it sets
+            a project's observed competencies on the dashboard WITHOUT creating a report,
+            exactly as /disciplines sets its principles. It reuses the ingest Bearer token
+            and the SAME upsert shape (current state, replaced per push). The guard sequence
+            mirrors _handle_disciplines_push; the payload is the small `{project, skills}`.
+        """
+        # 1) Authenticate first (same Bearer token as /ingest).
+        auth_error = self._auth_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return
+
+        # 2) Read and JSON-parse the body.
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return
+
+        # 3) Validate the {project, skills} shape BEFORE storing.
+        error = _validate_skills_request(payload)
+        if error is not None:
+            self._send_json(400, {"error": error})
+            return
+
+        # 4) Upsert this project's skills, stamped with the relay's receive clock.
+        conn = open_relay_store(self.server.db_path)
+        try:
+            upsert_skills(conn, payload["project"], payload["skills"], _utc_now_iso())
+        finally:
+            conn.close()
+        count = len(payload["skills"])
+        print(
+            f"[relay] updated skills for project {payload['project']!r} ({count} skill(s))",
+            file=sys.stderr,
+        )
+        # 200 (not 201): an upsert of existing per-project state, not a created resource.
+        self._send_json(200, {"updated": payload["project"], "skills": count})
 
     def _handle_api_report_comment(self, report_id: int) -> None:
         """Store one comment from the SPA on a report (POST /api/reports/<id>/comments).
@@ -1818,6 +1930,22 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     for name in names
                 ]
                 self._send_json(200, api.serialize_disciplines(projects, allowed))
+                return
+
+            if path == "/api/skills":
+                # The cross-project skills comb: enumerate exactly the projects that have
+                # pushed skills (NOT latest_report_per_project, which would miss a
+                # skills-only project), SCOPE-FILTER FIRST, then fetch each in-scope
+                # project's stored skills. Filtering before the merge is what stops a skill
+                # evidenced only by an out-of-scope project from leaking to a scoped viewer
+                # (existence-hiding) and keeps a merged skill's `projects` anchor in-scope.
+                names = skills_projects(conn)
+                if allowed is not None:
+                    names = [n for n in names if n in allowed]
+                projects = [
+                    {"name": name, "skills": get_skills(conn, name)} for name in names
+                ]
+                self._send_json(200, api.serialize_skills(projects, allowed))
                 return
 
             # No SPA route matched (the do_GET prefix check is broader than the exact set).

@@ -443,6 +443,168 @@ def serialize_disciplines(projects: list[dict], allowed: set | None) -> dict:
     }
 
 
+# The canonical order of a skill's evidence signals on the wire. Defined HERE (not
+# imported from the producer's extract.SKILL_SIGNALS) so the relay stays independent of
+# producer code — the relay validates against this same set in the push handler. Any
+# unknown kind a card carries is simply dropped from the merged output.
+_SKILL_SIGNAL_ORDER = ("git", "tasks", "docs")
+
+# Depth-bucket boundaries for the comb's tooth height (E2 Inc 4 slice 4c). A merged
+# skill's score is `summed per-project weight + (breadth - 1)`, so BREADTH (how many
+# projects independently surface the skill) and per-project CENTRALITY both raise the
+# tooth — the honest "observed-derived depth" the slice settled on. Boundaries are
+# named constants (not magic numbers) so they are tunable in one place and pinned by
+# test. With per-project weight clamped to 1..3 the common case — a single-project skill —
+# spreads its weight straight onto the comb: incidental (1) is depth 1, notable (2) depth 2,
+# central (3) depth 3; a skill demonstrated across projects reaches depth 4. (Tuned so the
+# comb actually varies on real data, where most skills are single-project: collapsing
+# weight 2 and 3 to one depth left the teeth nearly uniform.)
+_DEPTH_T1 = 1  # score <= 1  -> depth 1
+_DEPTH_T2 = 2  # score <= 2  -> depth 2
+_DEPTH_T3 = 3  # score <= 3  -> depth 3  (else depth 4)
+
+
+def _skill_depth(total_weight: int, breadth: int) -> int:
+    """Derive a merged skill's comb depth (1-4) from its evidence weight and breadth.
+
+    Args:
+        total_weight: The sum of the skill's per-project weights (each 1-3).
+        breadth: How many in-scope projects independently surface the skill.
+
+    Returns:
+        An ordinal depth 1-4 driving the tooth height.
+
+    Why:
+        This is the ONE place that sees the whole portfolio, so depth is derived here,
+        not in the producer (which sees one project). Adding a breadth bonus to the
+        summed weight means a skill demonstrated across several projects out-ranks an
+        equally-weighted one confined to a single project — encoding "central across the
+        work," which is what the comb is meant to show. Monotonic and bounded, so a
+        thin portfolio yields short teeth rather than a misleadingly tall one.
+    """
+    score = total_weight + (breadth - 1)
+    if score <= _DEPTH_T1:
+        return 1
+    if score <= _DEPTH_T2:
+        return 2
+    if score <= _DEPTH_T3:
+        return 3
+    return 4
+
+
+def serialize_skills(projects: list[dict], allowed: set | None) -> dict:
+    """Serialize observed skills, merged across projects into the comb (/api/skills).
+
+    Args:
+        projects: Scope-FILTERED entries, each {"name": str, "skills": list | None} where
+            the list is get_skills' result (stored {name, category, evidence, weight,
+            signals} dicts) or None. The server applies scope BEFORE
+            calling, so a skill evidenced only in an out-of-scope project never reaches a
+            scoped viewer, and the `projects` anchor on each merged skill can only name
+            in-scope projects (existence-hiding, consistent with serialize_disciplines).
+        allowed: The viewer's read scope (None unrestricted, else granted names) —
+            reported back only; filtering already happened.
+
+    Returns:
+        {"scope", "categories", "skills"}:
+          - categories: the distinct skill categories, ordered by total depth (the comb's
+            strongest groupings first), tie-broken by name — the comb's section order.
+          - skills: the MERGED skills, each {name, category, depth, projects, evidence,
+            signals}. Sorted by (category order, then descending depth, then name) so the
+            tallest teeth lead each group.
+
+    Why:
+        A skill is a CROSS-PROJECT entity (the same competency may be demonstrated by
+        several projects), unlike a discipline (per-project). So the merge — not just a
+        grouping — lives here: we union by normalized name, sum weights and collect the
+        evidencing projects to derive depth (breadth + centrality), and pick the
+        canonical name/category/evidence deterministically (the lexicographically-first
+        (project) contributor) so the card does not flicker with push order. This mirrors
+        serialize_disciplines' stability rule while doing the heavier cross-project fold
+        the comb needs.
+    """
+    # Merge by normalized (casefolded) name. For each merged skill we accumulate the
+    # contributing projects, the summed weight, the unioned signals, and — keyed on the
+    # lexicographically-first (project, name) — the canonical display name/category/why.
+    merged: dict[str, dict] = {}
+    for entry in sorted(projects, key=lambda e: e["name"]):
+        project_name = entry["name"]
+        for card in entry.get("skills") or []:
+            name = card.get("name", "")
+            norm = name.strip().casefold()
+            if not norm:
+                continue
+            category = card.get("category", "").strip()
+            evidence = card.get("evidence", "").strip()
+            # Defensive weight coercion: the store should hold a 1-3 int, but a stray
+            # value must not distort a tooth — clamp to [1, 3] (booleans are not ints here).
+            raw_weight = card.get("weight", 1)
+            weight = raw_weight if isinstance(raw_weight, int) and not isinstance(raw_weight, bool) else 1
+            weight = max(1, min(3, weight))
+            raw_signals = card.get("signals")
+            signals = set(raw_signals) if isinstance(raw_signals, list) else set()
+
+            slot = merged.get(norm)
+            if slot is None:
+                slot = {
+                    "name": name.strip(),
+                    "category": category,
+                    "evidence": evidence,
+                    "first_key": (project_name, name.strip()),
+                    "projects": set(),
+                    "total_weight": 0,
+                    "signals": set(),
+                }
+                merged[norm] = slot
+            else:
+                # Keep the canonical name/category/evidence from the smallest
+                # (project, name) so the chosen text is stable regardless of push order.
+                if (project_name, name.strip()) < slot["first_key"]:
+                    slot["first_key"] = (project_name, name.strip())
+                    slot["name"] = name.strip()
+                    slot["category"] = category
+                    slot["evidence"] = evidence
+            slot["projects"].add(project_name)
+            slot["total_weight"] += weight
+            slot["signals"].update(signals)
+
+    # Build the wire cards: derive depth, sort projects, and order signals canonically.
+    skills = [
+        {
+            "name": slot["name"],
+            "category": slot["category"],
+            "depth": _skill_depth(slot["total_weight"], len(slot["projects"])),
+            "projects": sorted(slot["projects"]),
+            "evidence": slot["evidence"],
+            "signals": [s for s in _SKILL_SIGNAL_ORDER if s in slot["signals"]],
+        }
+        for slot in merged.values()
+    ]
+
+    # Category order: strongest groupings first (by summed depth), tie-broken by name —
+    # so the comb leads with the developer's deepest area. Deterministic for the SPA.
+    depth_by_category: dict[str, int] = {}
+    for s in skills:
+        depth_by_category[s["category"]] = depth_by_category.get(s["category"], 0) + s["depth"]
+    categories = sorted(
+        depth_by_category, key=lambda c: (-depth_by_category[c], c)
+    )
+    category_rank = {c: i for i, c in enumerate(categories)}
+
+    # Flat skills list ordered by (category rank, tallest tooth first, then name) so the
+    # SPA can render each category group in a sensible, stable order without re-sorting.
+    skills.sort(key=lambda s: (category_rank[s["category"]], -s["depth"], s["name"]))
+
+    return {
+        "scope": {
+            "unrestricted": allowed is None,
+            "projects": None if allowed is None else sorted(allowed),
+        },
+        "categories": categories,
+        "skills": skills,
+    }
+
+
 def _showcase_card(row: dict) -> dict:
     """Serialize one curated project into a public Showcase card (summary facts only).
 

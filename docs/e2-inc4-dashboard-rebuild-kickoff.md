@@ -12,13 +12,27 @@ Role in project: Read this at the START of the next session, THEN plan the
 
 # Kickoff: E2 Inc 4 — the sectioned dashboard rebuild (richer-client SPA)
 
-## Status — **4b Disciplines SHIPPED**; next is **4c Connections** (2026-06-27)
+## Status — **4c Skills comb SHIPPED** (the last section); E2 Inc 4 complete (2026-06-27)
 
-> **Opener for the next session:** Read this doc, then `docs/dashboard-api-contract.md` (the seam) and
-> `design/README.md` + `design/screenshots/`. The **4a band and 4b are done**. Next is **4c —
-> Cross-project Connections** (`desktop-07`), its own PR. Start the slice with a plan-mode pass per the
-> repo discipline; eyes-on every screen vs `design/screenshots/` across all three themes; ship + redeploy
-> (see **Deployment** below).
+> **Opener for the next session:** E2 Inc 4 (the sectioned SPA rebuild) is **complete** — 4a band, 4b
+> Disciplines, and 4c are all shipped + deployed. Read this doc + `docs/dashboard-api-contract.md` (the
+> seam) for where things landed. The next substantial work is a NEW phase (not 4x); see
+> `plans/orion-plan.md`.
+>
+> **4c — pivot from Connections to a Skills comb (just shipped):** the design's `desktop-07` was a
+> *Cross-project Connections* graph, but the projects are mostly independent, so a literal connections
+> graph is thin. 4c was reframed (mid-session, with the developer) into a **Skills comb** — a "partial
+> living resume" of the kinds of work and skills the projects *demonstrate*, built on the **Comb Method**
+> (Capability Comb: competencies as teeth whose height encodes depth). It stays observe-not-originate: a
+> per-project collector LLM-extracts skills **grounded only in observed evidence** (git languages + commit
+> subjects + doc focus), the relay **merges them across the portfolio** and derives each tooth's depth
+> (evidence weight + breadth), and the SPA renders the comb + evidence cards anchoring each skill to its
+> projects. Seam mirrors 4b end to end: `orion skills-push` (a `skills = true` opt-in flag) →
+> `POST /skills` → `relay_project_skills` → `GET /api/skills` (`api.serialize_skills`, merge + depth +
+> scope-first) → `web/src/routes/Skills.tsx` (replaces the Connections nav stub). Eyes-on verified on
+> GENUINE extracted data across all three themes. This **supersedes `design/README.md` §8 + `desktop-07`**
+> (recorded here + in `known-issues.md`/the CHANGELOG). Future refinement: tune extraction toward
+> resume-grade specificity. Backend 744 + web 43 green.
 >
 > **4b — Disciplines & directions (just shipped):** a new doc-centric collector reads a project's own
 > instruction/decision docs UNCHANGED and reframes the principles their author stated into cards via an
@@ -102,8 +116,12 @@ and **destroyed**.
   → `relay_project_disciplines` → `GET /api/disciplines` (Global/project split, scope-filter-first) →
   `Disciplines.tsx`. The collector stamps the repo-relative `source` so `observed · <doc>` is honest. See
   the Status block at the top for detail.
-- **4c — Cross-project Connections** (`desktop-07`): a new cross-project relationship derivation (shared
-  items/topics, feeds) → the SVG graph section. E4's developer-view flavor.
+- **4c — Skills comb** (replaces `desktop-07` Connections) — **SHIPPED.** A "partial living resume" built
+  on the Comb Method: a per-project collector LLM-extracts skills grounded in observed activity (git
+  languages + commit subjects + doc focus), the relay merges them across the portfolio and derives each
+  tooth's depth (weight + breadth), the SPA renders the comb + evidence cards. Pivoted from the Connections
+  graph (mostly-independent projects made a literal graph thin); observe-not-originate holds. See the
+  Status block at the top for detail.
 
 The original 4a entry-point material below is retained for context; the API contract it called for now
 lives in [`docs/dashboard-api-contract.md`](dashboard-api-contract.md).

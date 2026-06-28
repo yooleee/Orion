@@ -17,9 +17,12 @@ import pytest
 
 from orion.extract import (
     AnthropicDisciplineExtractor,
+    AnthropicSkillExtractor,
     Discipline,
     ExtractError,
+    Skill,
     _parse_disciplines,
+    _parse_skills,
 )
 
 
@@ -178,3 +181,117 @@ def test_backend_wraps_api_error():
     err = anthropic.APIError("boom", request=None, body=None)
     with pytest.raises(ExtractError):
         _extractor(error=err).extract("doc", source="CLAUDE.md")
+
+
+# --- _parse_skills: the skills validation contract (E2 Inc 4 slice 4c) ------------
+# Skills are stricter on IDENTITY (name + category required) and LENIENT on the
+# secondary fields (weight clamps, signals filter), so one odd field degrades a card
+# rather than dropping a real competency. These pin that asymmetry.
+
+
+def _skill_extractor(reply_text="[]", error=None, model="claude-haiku-4-5"):
+    """Build an AnthropicSkillExtractor over a fake client (reuses the doc fakes)."""
+    return AnthropicSkillExtractor(_FakeClient(_FakeMessages(reply_text, error)), model)
+
+
+def test_parse_skills_valid_array():
+    """A well-formed array parses into Skills with all fields preserved.
+
+    Why this matters: the baseline contract — the wire shape the relay merge depends on
+    is exactly {name, category, evidence, weight, signals}.
+    """
+    raw = (
+        '[{"name": "Python stdlib backends", "category": "Backend", '
+        '"evidence": "Built the relay.", "weight": 3, "signals": ["git", "docs"]}]'
+    )
+    out = _parse_skills(raw)
+    assert out == (
+        Skill(
+            name="Python stdlib backends",
+            category="Backend",
+            evidence="Built the relay.",
+            weight=3,
+            signals=("git", "docs"),
+        ),
+    )
+
+
+def test_parse_skills_clamps_weight_and_filters_signals():
+    """An out-of-range weight clamps and unknown signal kinds are dropped.
+
+    Why this matters: the secondary fields must degrade, not corrupt — a weight of 9
+    becomes the max tooth height (not an oversized one), and a bogus signal never
+    reaches the SPA's provenance display. Signals come back in SKILL_SIGNALS order.
+    """
+    raw = (
+        '[{"name": "X", "category": "Backend", "evidence": "", '
+        '"weight": 9, "signals": ["bogus", "docs", "git"]}]'
+    )
+    out = _parse_skills(raw)
+    assert out[0].weight == 3  # clamped to SKILL_WEIGHT_MAX
+    assert out[0].signals == ("git", "docs")  # filtered + reordered to canonical order
+
+
+def test_parse_skills_defaults_missing_weight_and_signals():
+    """A card with no weight/signals still parses (min weight, empty signals).
+
+    Why this matters: identity is enough to draw a tooth — a missing secondary field
+    must not drop a real skill.
+    """
+    raw = '[{"name": "X", "category": "Backend", "evidence": "ev"}]'
+    out = _parse_skills(raw)
+    assert out[0].weight == 1
+    assert out[0].signals == ()
+
+
+def test_parse_skills_drops_cards_missing_identity():
+    """Cards missing name or category are skipped; valid ones survive.
+
+    Why this matters: a tooth with no name or no group is unusable; a single malformed
+    card must not abort the whole extraction.
+    """
+    raw = (
+        '[{"category": "Backend", "evidence": "no name"},'
+        ' {"name": "Has name", "evidence": "no category"},'
+        ' {"name": "Good", "category": "Frontend", "evidence": "ok", "weight": 2, "signals": []}]'
+    )
+    out = _parse_skills(raw)
+    assert [s.name for s in out] == ["Good"]
+
+
+def test_parse_skills_non_array_raises():
+    """A non-array reply is a contract break and raises ExtractError.
+
+    Why this matters: a single bad card is skipped, but a wholesale contract break
+    (object, prose) must surface so the CLI aborts rather than pushing garbage.
+    """
+    with pytest.raises(ExtractError):
+        _parse_skills('{"name": "X"}')
+    with pytest.raises(ExtractError):
+        _parse_skills("Here are the skills:")
+
+
+def test_skills_backend_sends_bundle_and_parses():
+    """The redacted evidence bundle is sent as the user message and the reply parsed.
+
+    Why this matters: confirms the backend passes the bundle to the configured model
+    and returns parsed Skills, with no real API call.
+    """
+    reply = '[{"name": "A", "category": "Backend", "evidence": "e", "weight": 1, "signals": ["git"]}]'
+    ext = _skill_extractor(reply, model="claude-haiku-4-5")
+    out = ext.extract("REDACTED EVIDENCE BUNDLE")
+    kwargs = ext._client.messages.last_kwargs
+    assert kwargs["model"] == "claude-haiku-4-5"
+    assert kwargs["messages"] == [{"role": "user", "content": "REDACTED EVIDENCE BUNDLE"}]
+    assert [s.name for s in out] == ["A"]
+
+
+def test_skills_backend_wraps_api_error():
+    """An Anthropic APIError becomes an ExtractError (so the CLI aborts without pushing).
+
+    Why this matters: a leaked SDK exception would crash; the wrapped error is what the
+    CLI catches to leave the relay's prior skills intact.
+    """
+    err = anthropic.APIError("boom", request=None, body=None)
+    with pytest.raises(ExtractError):
+        _skill_extractor(error=err).extract("bundle")

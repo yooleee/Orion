@@ -54,6 +54,7 @@ from relay.store import (
     get,
     get_checklist,
     get_disciplines,
+    get_skills,
     list_projects,
     observed_history,
     open_relay_store,
@@ -2640,3 +2641,91 @@ def test_api_disciplines_is_scoped_for_a_viewer(tmp_path):
         # The out-of-scope project's global never appears, and only 'granted' is a group.
         assert out["global"] == []
         assert [g["name"] for g in out["projects"]] == ["granted"]
+
+
+# --- POST /skills + GET /api/skills (E2 Inc 4 slice 4c, the skills comb) ----------
+# /skills upserts a project's observed competencies WITHOUT a report (like /disciplines);
+# /api/skills serves them MERGED across projects into the comb (depth derived server-side).
+
+
+def _skill(name, *, category="Backend", evidence="ev", weight=2, signals=("git",)):
+    """Build one skill card dict (the push/serialize shape)."""
+    return {
+        "name": name,
+        "category": category,
+        "evidence": evidence,
+        "weight": weight,
+        "signals": list(signals),
+    }
+
+
+def _push_skills(base_url, project, cards, *, token=_TOKEN):
+    """Push a {project, skills} body through the real /skills endpoint."""
+    body = json.dumps({"project": project, "skills": cards}).encode("utf-8")
+    return _post(base_url, body, token=token, path="/skills")
+
+
+def test_skills_push_upserts_without_a_report(tmp_path):
+    """A valid POST /skills stores the cards and returns 200, creating no report.
+
+    Why this matters: the dedicated push sets the dashboard's Skills comb with no report
+    row — the same near-real-time model as /disciplines.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        status, body = _push_skills(base_url, "demo", [_skill("Python backends", weight=3)])
+        assert status == 200
+        assert json.loads(body) == {"updated": "demo", "skills": 1}
+
+        conn = open_relay_store(db)
+        assert get_skills(conn, "demo") == [_skill("Python backends", weight=3)]
+        assert list_projects(conn) == []  # no report row was created
+
+
+def test_skills_push_malformed_is_400_and_stores_nothing(tmp_path):
+    """A card with a non-integer weight is rejected 400 and nothing is stored.
+
+    Why this matters: /skills is an untrusted surface, so a malformed card must fail
+    validation before any write — the comb can never hold a shape the SPA can't render.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        bad = [{"name": "X", "category": "Backend", "evidence": "e", "weight": "lots", "signals": []}]
+        body = json.dumps({"project": "demo", "skills": bad}).encode("utf-8")
+        status, resp = _post(base_url, body, path="/skills")
+        assert status == 400
+        assert "weight" in json.loads(resp)["error"]
+        conn = open_relay_store(db)
+        assert get_skills(conn, "demo") is None
+
+
+def test_api_skills_merges_across_projects(tmp_path):
+    """GET /api/skills merges the same skill across two projects into one deeper card.
+
+    Why this matters: the end-to-end read the comb renders — a competency pushed by two
+    projects becomes a single card whose breadth raises its depth, anchored to both.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        _push_skills(base_url, "orion", [_skill("Python backends", weight=2)])
+        _push_skills(base_url, "sar_hackathon", [_skill("python backends", weight=2)])
+        status, out = _get_json(base_url, "/api/skills")
+        assert status == 200
+        assert len(out["skills"]) == 1
+        merged = out["skills"][0]
+        assert merged["projects"] == ["orion", "sar_hackathon"]
+        assert merged["depth"] == 4  # breadth bonus lifts it to the top, above a single-project skill
+
+
+def test_api_skills_is_scoped_for_a_viewer(tmp_path):
+    """A scoped viewer never sees a skill evidenced only by an out-of-scope project.
+
+    Why this matters: scope-filter-FIRST is the leak guard — a skill (and the project that
+    evidences it) outside the viewer's grant must not surface in the merge.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _push_skills(base_url, "granted", [_skill("Mine", weight=2)])
+        _push_skills(base_url, "secret", [_skill("Hidden", weight=2)])
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["granted"])
+
+        status, out = _get_json(base_url, "/api/skills", cookie=_login(base_url, "mum-key"))
+        assert status == 200
+        assert [s["name"] for s in out["skills"]] == ["Mine"]
+        assert out["skills"][0]["projects"] == ["granted"]

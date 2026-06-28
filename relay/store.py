@@ -127,6 +127,22 @@ CREATE TABLE IF NOT EXISTS relay_project_disciplines (
     updated_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay last received it
 );
 
+-- E2 Inc 4 (4c): a project's OBSERVED SKILLS — the competencies Orion DERIVED from the
+-- project's own activity (languages from tracked files, commit subjects, doc focus),
+-- the honest alternative to an authored resume. Like relay_project_disciplines this is
+-- CURRENT STATE: ONE row per project, REPLACED on each push (project is the PRIMARY KEY,
+-- ingest upserts), NOT history. skills is a JSON array of {name, category, evidence,
+-- weight, signals} objects. Unlike disciplines (a per-project flat list), the relay
+-- MERGES these across projects into the cross-project "skills comb" — but each project
+-- still pushes only its OWN skills, so the per-project row shape is the natural store.
+-- A brand-new "IF NOT EXISTS" table, so the already-deployed relay gains it with NO
+-- column migration.
+CREATE TABLE IF NOT EXISTS relay_project_skills (
+    project    TEXT PRIMARY KEY,    -- one current skill set per project
+    skills     TEXT NOT NULL,       -- JSON array of {name, category, evidence, weight, signals}
+    updated_at TEXT NOT NULL        -- ISO 8601 UTC, when the relay last received it
+);
+
 -- C2: supervisor comments on a report. Append-only and flat (no threading, edit, or
 -- delete) — the v1 model. report_id points at relay_reports.id but is deliberately
 -- NOT a foreign key: sqlite enforces FKs only when explicitly enabled per-connection,
@@ -412,6 +428,84 @@ def disciplines_projects(conn: sqlite3.Connection) -> list[str]:
     """
     rows = conn.execute(
         "SELECT project FROM relay_project_disciplines ORDER BY project"
+    ).fetchall()
+    return [row["project"] for row in rows]
+
+
+def upsert_skills(
+    conn: sqlite3.Connection, project: str, skills: list, updated_at: str
+) -> None:
+    """Replace a project's observed skills with the latest push.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the skills belong to.
+        skills: The current skills as a list of
+            {"name", "category", "evidence", "weight", "signals"} dicts (the validated
+            shape the push carries). May be empty — an enabled-but-empty push legitimately
+            clears the project's prior set.
+        updated_at: ISO 8601 UTC timestamp of when the relay received this push.
+
+    Why:
+        Skills are CURRENT STATE, not history, so each push REPLACES the project's row
+        rather than appending — identical to upsert_disciplines. ON CONFLICT(project) DO
+        UPDATE makes it one idempotent statement. Stored verbatim (already redacted and
+        validated upstream), JSON-encoded for the TEXT column because sqlite has no list type.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_skills (project, skills, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project) DO UPDATE SET
+            skills = excluded.skills,
+            updated_at = excluded.updated_at
+        """,
+        (project, json.dumps(skills), updated_at),
+    )
+    conn.commit()
+
+
+def get_skills(conn: sqlite3.Connection, project: str) -> list | None:
+    """Return a project's observed skills, or None if it has none.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to fetch skills for.
+
+    Returns:
+        The skills as a list of {"name", "category", "evidence", "weight", "signals"}
+        dicts (decoded from JSON), or None when the project has no skills row. None (no
+        row) is deliberately distinct from [] (a row with an empty list).
+
+    Why:
+        Backs the cross-project skills comb. Decoding the JSON here (like get_disciplines)
+        hands the serializer real dicts, not a raw string. Returning None for a project
+        that never pushed lets the serializer simply skip it.
+    """
+    row = conn.execute(
+        "SELECT skills FROM relay_project_skills WHERE project = ?",
+        (project,),
+    ).fetchone()
+    return json.loads(row["skills"]) if row is not None else None
+
+
+def skills_projects(conn: sqlite3.Connection) -> list[str]:
+    """Return the names of every project that has pushed skills, sorted.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        A sorted list of project names that have a skills row. Empty when none.
+
+    Why:
+        The comb enumerates exactly the projects that have skills — NOT
+        latest_report_per_project, which would miss a skills-only project. A dedicated
+        enumeration keeps the section correct and independent of the report/checklist
+        surfaces, mirroring disciplines_projects.
+    """
+    rows = conn.execute(
+        "SELECT project FROM relay_project_skills ORDER BY project"
     ).fetchall()
     return [row["project"] for row in rows]
 

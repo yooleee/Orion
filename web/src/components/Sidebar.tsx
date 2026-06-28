@@ -18,10 +18,6 @@ import type { Me, Portfolio } from "../api/types";
 import { navActive } from "../lib/navState";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
-// The not-yet-built sections, shown as disabled NEW stubs (built in 4c). Scheduling and
-// Disciplines are now real routes (below); they keep their NEW pill as recently-added sections.
-const COMING_SOON = ["Connections"];
-
 interface SidebarProps {
   me: Me;
   portfolio: Portfolio | null;
@@ -67,12 +63,10 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
           <span>Disciplines</span>
           <span className="pill-new">NEW</span>
         </Link>
-        {COMING_SOON.map((name) => (
-          <div key={name} className="nav-item disabled" aria-disabled="true">
-            <span>{name}</span>
-            <span className="pill-new">NEW</span>
-          </div>
-        ))}
+        <Link to="/skills" className={`nav-item${active.skills ? " active" : ""}`}>
+          <span>Skills</span>
+          <span className="pill-new">NEW</span>
+        </Link>
       </div>
 
       {/* PROJECTS list */}

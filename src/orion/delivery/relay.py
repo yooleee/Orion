@@ -230,6 +230,68 @@ def push_disciplines(
         raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
 
 
+def push_skills(
+    relay_url: str,
+    project: str,
+    skills: list,
+    token: str,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """POST a project's observed skills to a relay's /skills endpoint.
+
+    Args:
+        relay_url: The relay's configured URL (the [relay] table's `url`, e.g. an
+            ".../ingest" URL); the /skills endpoint is derived from it.
+        project: The project the skills belong to (the upsert key on the relay).
+        skills: The current skills as a list of
+            {"name", "category", "evidence", "weight", "signals"} dicts — ALREADY
+            redacted by the caller (the privacy net runs before this).
+        token: The Bearer token authenticating the push (the SAME ingest credential),
+            sent as `Authorization: Bearer <token>`.
+        timeout: Seconds to wait for the request before failing.
+
+    Returns:
+        None. Raises DeliveryError on any non-2xx response or network failure.
+
+    Why:
+        The transport for the dedicated skills push (E2 Inc 4 slice 4c) — it sets the
+        project's observed competencies on the dashboard WITHOUT a report, exactly as
+        push_disciplines sets its principles. Skills are current full state (a
+        full-state upsert on the relay), so a dedicated push mirroring the disciplines
+        one is the natural carrier. Like push(), it is pure transport: the caller owns
+        that the texts are redacted; this only encodes the {project, skills} payload and
+        POSTs it with the auth header. The endpoint is derived with urljoin (as
+        push_disciplines derives /disciplines), so a relay URL configured as ".../ingest"
+        still resolves to ".../skills".
+    """
+    endpoint = urllib.parse.urljoin(relay_url, "/skills")
+    data = json.dumps({"project": project, "skills": skills}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": _USER_AGENT,
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            # The skills endpoint returns 200 (an upsert); accept any 2xx.
+            if not (200 <= status < 300):
+                raise DeliveryError(f"Relay skills push returned HTTP {status}.")
+    except urllib.error.HTTPError as exc:
+        raise DeliveryError(
+            f"Relay skills push returned HTTP {exc.code}: {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+
 def pull_comments(
     relay_url: str,
     token: str,

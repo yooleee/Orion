@@ -1720,3 +1720,135 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Skills comb (E2 Inc 4 slice 4c) ------------------------------------------
+   Per category: a row of "teeth" rising from a shared baseline (the spine), then a
+   grid of evidence cards. Teeth heights are set inline from the derived depth; the
+   accent fill + spine re-theme via tokens, so all three themes work from one rule. */
+.skill-section {
+  margin-top: 30px;
+}
+
+/* The comb BAND: one horizontal row of category clusters, so the whole thing reads as a
+   single segmented comb (the Capability Comb shape) rather than isolated per-category
+   bars. Clusters align at their spines (flex-end) and the band scrolls if it overflows. */
+.comb-band {
+  display: flex;
+  align-items: flex-end;
+  gap: 34px; /* a wide gap visually separates one category's teeth from the next */
+  margin: 8px 0 36px;
+  padding: 18px 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow-x: auto;
+}
+/* One category's teeth + its caption. The teeth share a spine; the caption sits beneath. */
+.comb-cluster {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
+.comb-cluster-label {
+  margin-top: 9px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--tfaint);
+}
+
+/* The comb: each column is one skill — a fixed-height track holding a bottom-anchored
+   bar, with the skill name beneath. The bottom border is this cluster's "spine". */
+.comb {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  padding-bottom: 0;
+  border-bottom: 2px solid var(--accent);
+}
+.comb-col {
+  flex: 0 0 auto;
+  width: 92px; /* fixed tooth column so names have room and clusters size to their teeth */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+/* Fixed-height track so every bar shares the same baseline regardless of its height;
+   the bar itself is bottom-anchored and its height comes from the depth (inline style). */
+.comb-bar-track {
+  height: 132px;
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  justify-content: center;
+}
+.comb-bar {
+  width: 38px;
+  max-width: 70%;
+  background: var(--accent);
+  border-radius: 6px 6px 0 0;
+  transition: background 0.25s;
+}
+.comb-name {
+  margin-top: 9px;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  color: var(--tmid);
+  /* Sit just below the spine; a touch of breathing room from the 2px accent line. */
+  padding-top: 2px;
+}
+
+/* Evidence cards: the honest provenance behind each tooth — same card shape as the
+   disciplines cards but its own classes so the comb section stays self-contained. */
+.skill-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 18px 20px;
+}
+.skill-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--thi);
+  margin-bottom: 9px;
+}
+.skill-card-why {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--tlow);
+  margin: 0 0 16px;
+}
+/* Footer pinned to the card bottom so cards of different lengths align their
+   "observed · <projects>" line on a shared top border. The signals sit to the right. */
+.skill-card-foot {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--tfaint);
+}
+.skill-card-signals {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .skill-grid {
+    grid-template-columns: 1fr;
+  }
+}

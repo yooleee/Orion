@@ -328,6 +328,23 @@ Deferred).
   seam (`{title, why, scope, source}`) already supports it. Tracked here so the approximation reads as
   intentional. Relates to [[KI-6]].
 
+## KI-25 — Skills comb omits the project/tracker glyph on evidence anchors (E2 Inc 4 4c)
+
+- **Detail:** A merged skill card anchors to the projects that evidence it (`projects: [names]`), but
+  the `/api/skills` wire carries only the project NAMES, not each project's `kind` ("project" vs
+  "tracker"). The relay's `get_project_kind` was deliberately NOT threaded into `serialize_skills`, so
+  the SPA cannot draw the `◇` project / `⊟` tracker glyph beside an anchor the way Scheduling and the
+  portfolio do.
+- **Why it matters:** in practice `skills = true` is only ever set on real software projects (the
+  applications tracker is a to-do list, not a coding-skills showcase), so every anchor is a project and
+  the distinction adds no signal today — carrying `kind` would have been dead data. The cost is only that
+  IF a tracker ever opts into the comb, its anchor would render identically to a project's.
+- **Severity:** low
+- **Status:** Open by-design for 4c (a deliberate simplicity call, not an oversight). Restoring the
+  distinction is additive: the server already has `get_project_kind`, so threading a `kind` per anchor
+  into `serialize_skills` + a glyph in `Skills.tsx` is a localized change with no store/wire migration.
+  Tracked here so the omission reads as intentional. Relates to the Scheduling source-tag glyphs.
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

@@ -17,6 +17,7 @@ export interface NavActive {
   todos: boolean;
   scheduling: boolean;
   disciplines: boolean;
+  skills: boolean;
 }
 
 /**
@@ -39,5 +40,6 @@ export function navActive(path: string): NavActive {
     todos: path === "/todos" || path.startsWith("/tracker/"),
     scheduling: path === "/scheduling",
     disciplines: path === "/disciplines",
+    skills: path === "/skills",
   };
 }

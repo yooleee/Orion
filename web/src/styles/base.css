@@ -360,6 +360,21 @@ h3 {
   color: var(--tlow);
   font-size: 14px;
 }
+/* A wrapped text block inside .center-note: keeps inline children (e.g. a mono flag) from
+   becoming separate flex items, and gives the prose a readable, centered measure. */
+.center-note-text {
+  max-width: 460px;
+  margin: 0;
+  text-align: center;
+  line-height: 1.5;
+}
+/* An inline config token in running prose (e.g. `skills = true`) — same size as the
+   surrounding text (no oversized browser-default <code>), just the mono face. */
+.mono-inline {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--tmid);
+}
 
 /* =============================================================================
    Home — portfolio overview (slice 4a.3)

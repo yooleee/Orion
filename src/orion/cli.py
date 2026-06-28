@@ -4042,3 +4042,12 @@ def _preview_and_confirm(
         # No interactive input available -> treat as "no" (fail closed).
         return False
     return answer.strip().lower() in ("y", "yes")
+
+
+# Make `python -m orion.cli ...` behave like the `orion` console script and `python -m orion`.
+# Without this guard that invocation merely IMPORTS the module and exits 0 WITHOUT running
+# main() — a silent no-op. That footgun masked a real failure once: `python -m orion.cli
+# skills-push <p>` returned exit 0 while pushing nothing, so the live dashboard stayed empty.
+# Forwarding main()'s exit code here means every reasonable invocation actually runs.
+if __name__ == "__main__":
+    sys.exit(main())

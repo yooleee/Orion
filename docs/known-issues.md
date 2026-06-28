@@ -345,6 +345,28 @@ Deferred).
   into `serialize_skills` + a glyph in `Skills.tsx` is a localized change with no store/wire migration.
   Tracked here so the omission reads as intentional. Relates to the Scheduling source-tag glyphs.
 
+## KI-26 — Skills comb is per-project + component-flavored, and the comb visual is approximate (E2 Inc 4 4c)
+
+- **Detail:** The shipped skills comb has three known limitations, surfaced on real data and to be
+  addressed in a dedicated rework (see [`docs/skills-comb-rework-kickoff.md`](skills-comb-rework-kickoff.md)):
+  (a) **per-project extraction, not global** — skills are extracted per project and merged by normalized
+  title, so the same competency phrased differently across projects ("Python backends with CLI tooling" vs
+  "Python backend development") does NOT collapse, producing near-duplicate teeth (mirrors KI-6/KI-24's
+  identity-by-text); (b) **component-vs-skill** — the prompt sometimes emits a *system the developer built*
+  ("multi-drone tracking") rather than a *skill* (the Bayesian-probability / geospatial competencies that
+  system was built with); the bar to hit is resume-grade / job-description-grade competencies; (c) **comb
+  visual fidelity** — the vertical-bars-by-depth rendering is not faithful to the actual Comb Method /
+  Capability Comb visual (needs design research).
+- **Why it matters:** the tab works and is observe-not-originate, but it does not yet read like a resume an
+  outside reader (or a recruiter) would find legible — duplicates and component-entries dilute it, and the
+  visual undersells the comb metaphor.
+- **Severity:** low (cosmetic + content quality, not correctness or security)
+- **Status:** Open by-design for the initial 4c build. The rework is the **next step** for the tab: move to
+  a GLOBAL portfolio analysis (one deduplicated skill set, resume-calibrated against
+  `~/Applications/Documents/ygolding_resume_2026.md`) and a true-to-method comb visual — while keeping the
+  observe-not-originate invariant and resolving the global-vs-scope-filtering tension. Tracked here so the
+  approximation reads as intentional. Relates to [[KI-25]] and the kickoff doc above.
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

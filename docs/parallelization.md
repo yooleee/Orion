@@ -13,7 +13,7 @@
 > analysis changes. Mechanism constraint we hold to: **Claude Code only** (sub-agents and/or multiple
 > Claude Code sessions), **not** cross-harness (no Claude + Codex-style mixing).
 
-_Last synced: 2026-06-28 (E2 **4c Skills-comb rework CP1 SHIPPED** — global two-pass `skills-sync` + atomic `/skills-batch` + depth re-tune; CP2 comb visual pending — see the 4c-rework coupling note below). Prior: 2026-06-27 (E2 **Inc 4 COMPLETE** — 4a band + 4b Disciplines + 4c **Skills comb** (reframed from Connections) all shipped). Prior: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
+_Last synced: 2026-06-29 (E2 **Inc 5 — supervisor-interaction loop SHIPPED + MERGED** (PR #74): the read-write/identity watershed's first concrete step — a per-project, identity-first, **two-way** discussion (supervisor ↔ developer) across **relay + CLI + SPA**. It played out as the predicted **vertical slice, build-coordinated** (store → relay → CLI → SPA against a fixed `/api/discussions` wire): Unit 1 (store + `supervisor` role) gated all; Units 2 (cookie endpoints) and 3 (Bearer machine routes + `orion discussions pull/reply` watermark) shared the wire; Unit 4 (SPA panel) depended only on the fixed read shape. The genuine coupling was the identity/role work touching C3 auth (`relay_users`, `_authenticate`, `_allowed_projects`), kept minimal (an allowlist add + the deliberate non-change of leaving `supervisor` viewer-scoped). On review, comments + discussion were judged **two overlapping conversation systems** (KI-28): **consolidation Stage 1 shipped** (project page = single Discussion surface), **Stage 2 deferred** (data-model unification + a parity migration — the one slice with genuine **live-data coupling**; kickoff `docs/stage2-comments-discussion-consolidation-kickoff.md`). Prior: 2026-06-28 (E2 **4c Skills-comb rework CP1 SHIPPED** — global two-pass `skills-sync` + atomic `/skills-batch` + depth re-tune; CP2 comb visual pending — see the 4c-rework coupling note below). Prior: 2026-06-27 (E2 **Inc 4 COMPLETE** — 4a band + 4b Disciplines + 4c **Skills comb** (reframed from Connections) all shipped). Prior: 2026-06-26 (E2 **Inc 3 rung 1 COMPLETE + DEPLOYED** (PR #60); **Inc 4 4a BUILT (in review)** —
 the SPA ⟂ JSON-API seam realized, single-host serving shipped — see the (updated) coupling fact #3 and the
 Inc 4 map below, plus the kickoff
 [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](e2-inc4-dashboard-rebuild-kickoff.md). The forward-looking
@@ -50,8 +50,14 @@ P, decision-gated launch work._
   client + a `cli` `checklist-push`/`--watch` poll command + a project-page render), all additive on
   Inc 2's store/helpers; Inc 3 forward-looking layer **≡ E1 ≡
   B5** (forward-state). E3 enriched chat bots
-  (`bot/`); E4 cross-project coordination (broad); E5 read-write dashboard (`relay/` write paths + auth —
-  the watershed).
+  (`bot/`); E4 cross-project coordination (broad); **E5 read-write dashboard — the watershed: first step
+  SHIPPED** as the **supervisor-interaction loop** (E2 Inc 5, PR #74 merged) — the two-way discussion
+  across `relay/store`+`relay/server`+`relay/api` (the `/api/discussions` cookie + Bearer routes), `state`
+  (`discussion_watermark`) + `delivery/relay` + `cli` (`orion discussions`), and `web/` (the SPA panel).
+  Remaining E5: **comments→discussion consolidation Stage 2 (KI-28)** — `relay/store` (+nullable
+  `report_id`) + `relay/server`/`relay/api` (retire comment routes) + a one-time **`report_comments`
+  migration** (the live-data-coupled unit) + `cli`/`bot` (retire `orion comments` / `/api/comments`) +
+  `web/` (report page → discussion components); then full read-write + hosting-as-primary stay aspirational.
 - **Independent KIs (small):** KI-5 compose unknown-channel raise (`compose.py`, keep in sync with
   `cli._sender_for`); KI-8 vestigial state cleanup (`state.py` + `report.py` migration). (KI-19 dashboard
   CSP ✅ resolved 2026-06-24 — hash-based CSP + headers.) KI-4 is an eval experiment (not code).

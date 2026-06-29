@@ -390,6 +390,27 @@ Deferred).
   checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
   vocabulary until it is sourced. Flagged here rather than silently left.
 
+## KI-28 — Comments and Discussion are two overlapping conversation systems (E2 Inc 5)
+
+- **Detail:** The E2 Inc 5 supervisor-interaction loop (`relay_discussion_items`, the `/api/discussions`
+  routes, `orion discussions`, the SPA panel) is the matured, identity-first, two-way successor to C2
+  comments (`report_comments`, the comment routes, `orion comments`, `CommentList`/`CommentComposer`). They
+  do one job. **Stage 1 (shipped, PR #74)** removed the *visible* redundancy — the project page now shows
+  only the Discussion thread, with per-report comments kept on the report-detail page. But underneath, **two
+  stores, two endpoint families, two CLI surfaces, and two component sets** still coexist.
+- **Why it matters:** carrying two parallel systems for one feature is a DRY/maintenance smell and a source of
+  confusion (which surface authors what, with which identity). It also leaves comments stuck with pre-C3
+  attribution (free-text author, `role: null`) while discussion has first-class identity.
+- **Severity:** medium (no correctness or security impact — both render inert and are scope-filtered — but a
+  real architectural-debt + clarity cost that grows with every touch to either system).
+- **Status:** Deferred (Stage 2, planned). Direction settled 2026-06-28: **fold comments into the discussion
+  model** — express a "comment on report N" as a report-tagged discussion message (or retire comments outright
+  if dogfooding shows report-context goes unused), migrate `report_comments` **at parity** (the KI-23 /
+  `render.py` retirement precedent), and remove the comment endpoints/UI/CLI/bot path. Sequenced **after some
+  dogfooding** so real usage decides the report-context fork. Plan + open decisions + the A–F unit ladder:
+  [`docs/stage2-comments-discussion-consolidation-kickoff.md`](stage2-comments-discussion-consolidation-kickoff.md).
+  Roadmap: the E5 row of [`plans/orion-plan.md`](../plans/orion-plan.md).
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

@@ -14,9 +14,17 @@ Role in project: Defines the seam fixed in slice 4a.0 so the backend
 # Orion Dashboard JSON API Contract (slice 4a)
 
 This is the seam between the React SPA and the relay. The relay becomes a read-only JSON API. Every
-domain object is observed from external sources and read-only in the UI. The only user-authored content is
-comments; the SPA write path is `POST /api/reports/:id/comments` (below). (4a originally shipped the
-composer inert; the comment-writes slice wired it.)
+domain object is observed from external sources and read-only in the UI. The user-authored content is
+**comments** (`POST /api/reports/:id/comments`, below — 4a originally shipped the composer inert; the
+comment-writes slice wired it) and, since E2 Inc 5, the **supervisor-interaction discussion** thread
+(`POST /api/discussions/:project/items` + the Bearer machine routes, below).
+
+> **Consolidation note (KI-28, Stage 2 planned):** comments and discussion are two overlapping
+> conversation systems — the discussion loop is the identity-first, two-way successor to comments. Stage 1
+> (shipped) made Discussion the project page's only conversation surface; Stage 2 will fold comments into
+> the discussion model and retire the comment routes documented here **at parity**. Until then both
+> families are live and documented below. Plan:
+> [`stage2-comments-discussion-consolidation-kickoff.md`](stage2-comments-discussion-consolidation-kickoff.md).
 
 ## Conventions
 

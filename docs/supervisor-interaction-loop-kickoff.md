@@ -136,3 +136,15 @@ cross-project inbox; threaded replies; supervisor self-provisioning.
   relay-serve local recipe), including XSS-inert rendering.
 - **End-to-end loop:** supervisor posts (dashboard) → developer pulls + replies (CLI) →
   supervisor sees the reply (dashboard).
+
+## Outcome (2026-06-29) — SHIPPED + MERGED
+
+Units 1–4 of the ladder shipped and merged in **PR #74** (Unit 5, the optional "open
+directions" derivation, stays deferred-additive). The loop is feature-complete across relay
++ CLI + SPA, verified end-to-end against a running relay (CLI round-trip; SPA eyes-on across
+all 3 themes with a live post that persisted server-side). On review, comments and the
+discussion thread were judged **two overlapping conversation systems** doing one job: the
+**consolidation** follow-on is now tracked as **KI-28**, with **Stage 1** (project page =
+single Discussion surface) shipped in #74 and **Stage 2** (data-model unification + a parity
+migration) planned — see
+[`stage2-comments-discussion-consolidation-kickoff.md`](stage2-comments-discussion-consolidation-kickoff.md).

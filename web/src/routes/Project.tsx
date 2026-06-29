@@ -11,7 +11,7 @@
 import { useEffect, useState } from "react";
 import { useOutletContext, useParams } from "react-router-dom";
 import type { ShellContext } from "../components/Shell";
-import type { Comment } from "../api/types";
+import type { Comment, DiscussionItem } from "../api/types";
 import { ApiError, getProject } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import { deadlineLabel } from "../lib/time";
@@ -22,6 +22,8 @@ import { ChecklistRow } from "../components/ChecklistRow";
 import { ReportTimeline } from "../components/ReportTimeline";
 import { CommentList } from "../components/CommentList";
 import { CommentComposer } from "../components/CommentComposer";
+import { DiscussionList } from "../components/DiscussionList";
+import { DiscussionComposer } from "../components/DiscussionComposer";
 
 export function Project() {
   const { name = "" } = useParams();
@@ -30,8 +32,18 @@ export function Project() {
   const tz = me.display_tz;
   // Comments posted this session, appended to the fetched thread; reset on project change.
   const [posted, setPosted] = useState<Comment[]>([]);
-  useEffect(() => setPosted([]), [name]);
+  // Discussion items posted this session (the two-way thread); also reset on change.
+  const [postedDiscussion, setPostedDiscussion] = useState<DiscussionItem[]>([]);
+  useEffect(() => {
+    setPosted([]);
+    setPostedDiscussion([]);
+  }, [name]);
   const canComment = me.authenticated || !me.gated;
+  // Posting to the discussion needs a thread standing: a supervisor or the developer
+  // (admin). A viewer reads it but cannot join — matching the server's 403 gate.
+  const canDiscuss =
+    me.authenticated &&
+    (me.identity?.role === "admin" || me.identity?.role === "supervisor");
 
   if (loading) return <div className="center-note">Loading…</div>;
   if (error) {
@@ -105,6 +117,17 @@ export function Project() {
           <section>
             <div className="eyebrow block-label">Reports</div>
             <ReportTimeline reports={data.reports} />
+          </section>
+
+          <section>
+            <div className="eyebrow block-label">Discussion</div>
+            <DiscussionList items={[...data.discussions, ...postedDiscussion]} />
+            <DiscussionComposer
+              projectName={data.name}
+              authorName={me.identity?.name ?? null}
+              canDiscuss={canDiscuss}
+              onPosted={(d) => setPostedDiscussion((prev) => [...prev, d])}
+            />
           </section>
 
           <section>

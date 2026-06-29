@@ -2,8 +2,11 @@
 // web/src/routes/Project.tsx
 // -----------------------------------------------------------------------------
 // Responsible for: One project's full page — header stats, FORWARD LOOK milestones,
-//                  LIVE CHECKLIST, the REPORTS timeline, and COMMENTS (read + inert
-//                  composer). Two-column layout per the design.
+//                  LIVE CHECKLIST, the REPORTS timeline, and the project-level DISCUSSION
+//                  thread (the one conversation surface here). Two-column layout.
+// Note: per-report COMMENTS live on the report-detail page, not here — the project-level
+//       conversation is the Discussion thread (E2 Inc 5). Keeping both on this page would
+//       be two near-identical surfaces doing one job; they were consolidated to Discussion.
 // Role in project: Everything observed about a project. Reads /api/projects/:name; a
 //                  404 renders a clean not-found (existence-hiding carries through).
 // =============================================================================
@@ -11,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { useOutletContext, useParams } from "react-router-dom";
 import type { ShellContext } from "../components/Shell";
-import type { Comment, DiscussionItem } from "../api/types";
+import type { DiscussionItem } from "../api/types";
 import { ApiError, getProject } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import { deadlineLabel } from "../lib/time";
@@ -20,8 +23,6 @@ import { Breadcrumb } from "../components/Breadcrumb";
 import { MilestoneCard } from "../components/MilestoneCard";
 import { ChecklistRow } from "../components/ChecklistRow";
 import { ReportTimeline } from "../components/ReportTimeline";
-import { CommentList } from "../components/CommentList";
-import { CommentComposer } from "../components/CommentComposer";
 import { DiscussionList } from "../components/DiscussionList";
 import { DiscussionComposer } from "../components/DiscussionComposer";
 
@@ -30,15 +31,9 @@ export function Project() {
   const { me } = useOutletContext<ShellContext>();
   const { data, error, loading } = useApiData(() => getProject(name), [name]);
   const tz = me.display_tz;
-  // Comments posted this session, appended to the fetched thread; reset on project change.
-  const [posted, setPosted] = useState<Comment[]>([]);
-  // Discussion items posted this session (the two-way thread); also reset on change.
+  // Discussion items posted this session, appended to the fetched thread; reset on change.
   const [postedDiscussion, setPostedDiscussion] = useState<DiscussionItem[]>([]);
-  useEffect(() => {
-    setPosted([]);
-    setPostedDiscussion([]);
-  }, [name]);
-  const canComment = me.authenticated || !me.gated;
+  useEffect(() => setPostedDiscussion([]), [name]);
   // Posting to the discussion needs a thread standing: a supervisor or the developer
   // (admin). A viewer reads it but cannot join — matching the server's 403 gate.
   const canDiscuss =
@@ -127,18 +122,6 @@ export function Project() {
               authorName={me.identity?.name ?? null}
               canDiscuss={canDiscuss}
               onPosted={(d) => setPostedDiscussion((prev) => [...prev, d])}
-            />
-          </section>
-
-          <section>
-            <div className="eyebrow block-label">Comments</div>
-            <CommentList comments={[...data.comments, ...posted]} />
-            {/* A project's comments attach to its latest report (newest-first → [0]). */}
-            <CommentComposer
-              reportId={data.reports[0]?.id ?? null}
-              authorName={me.identity?.name ?? null}
-              canComment={canComment}
-              onPosted={(c) => setPosted((prev) => [...prev, c])}
             />
           </section>
         </div>

@@ -444,6 +444,125 @@ def pull_comments(
         raise DeliveryError("Relay returned an unparseable comments response.") from exc
 
 
+def pull_discussions(
+    relay_url: str,
+    token: str,
+    project: str,
+    since_id: int,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    """GET a project's discussion items newer than since_id from the relay (E2 Inc 5).
+
+    Args:
+        relay_url: The configured relay URL (the [relay] `url`, e.g. ".../ingest"); the
+            read URL is DERIVED from it, so the caller passes one configured URL.
+        token: The Bearer token authenticating this pull (the SAME ingest credential).
+        project: The project whose discussion thread to fetch. Sent as a query parameter.
+        since_id: Return only items with id strictly greater than this — the developer's
+            unread watermark. Pass 0 to fetch the whole thread.
+        timeout: Seconds to wait for the request before failing.
+
+    Returns:
+        The parsed JSON response: {"discussions": [ {id, project, author_id, author_name,
+        role, body, created_at}, ... ], "latest_id": <int>}. `latest_id` is the highest
+        item id seen (or `since_id` when nothing is newer). Raises DeliveryError on any
+        non-2xx, network failure, or unparseable body.
+
+    Why:
+        The developer's read half of the supervisor-interaction loop — a near-verbatim
+        twin of pull_comments against the /api/discussions route, so the two pulls read
+        alike and fail-soft identically. The read URL is derived with urljoin against a
+        root-relative "/api/discussions" exactly as pull_comments derives "/api/comments".
+    """
+    base = urllib.parse.urljoin(relay_url, "/api/discussions")
+    query = urllib.parse.urlencode({"project": project, "since_id": since_id})
+    request = urllib.request.Request(
+        f"{base}?{query}",
+        headers={
+            "User-Agent": _USER_AGENT,
+            "Authorization": f"Bearer {token}",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raise DeliveryError(
+            f"Relay discussions returned HTTP {exc.code}: {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise DeliveryError("Relay returned an unparseable discussions response.") from exc
+
+
+def post_discussion(
+    relay_url: str,
+    token: str,
+    project: str,
+    body: str,
+    author: str,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    """POST the developer's reply to a project's discussion thread (E2 Inc 5).
+
+    Args:
+        relay_url: The configured relay URL (the [relay] `url`); the write URL is derived.
+        token: The Bearer token authenticating the write (the SAME ingest credential).
+        project: The project whose thread to append to.
+        body: The reply text. The relay validates non-empty + length-caps it.
+        author: The developer's display name (the CLI's `--as`), or "" to let the relay
+            stamp its default "developer" label. A free-text label — NOT a role: the relay
+            always fixes role to "developer" on this Bearer path, so a name cannot escalate.
+        timeout: Seconds to wait for the request before failing.
+
+    Returns:
+        The parsed JSON response {"id": <int>} — the new item's id. Raises DeliveryError
+        on any non-2xx, network failure, or unparseable body.
+
+    Why:
+        The developer's write half of the loop — modelled on push_checklist's POST plumbing
+        but, like pull_comments, it PARSES the response (the caller echoes the new id). The
+        write URL is derived with urljoin against root-relative "/api/discussions" (the
+        Bearer machine route, distinct from the cookie ".../items" route the SPA uses).
+    """
+    endpoint = urllib.parse.urljoin(relay_url, "/api/discussions")
+    data = json.dumps({"project": project, "body": body, "author": author}).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": _USER_AGENT,
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        # 401 token mismatch; 404 unknown project; 400 bad body — all reported.
+        raise DeliveryError(
+            f"Relay discussion reply returned HTTP {exc.code}: {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
+
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise DeliveryError("Relay returned an unparseable reply response.") from exc
+
+
 # --- C3 admin API client: provisioning over HTTP (backs the relay-user CLI) -------
 # These call the relay's admin endpoints with the SEPARATE admin token (never the
 # ingest token). Unlike push/pull (fail-soft background calls), these back explicit

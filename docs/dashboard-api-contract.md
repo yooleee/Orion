@@ -165,12 +165,24 @@ Everything observed about one project. `404` when missing or out of scope.
   "comments": [
     { "id": 1, "author": "Alex", "role": null, "body": "…",
       "created_at": "2026-06-25T09:00:00+00:00" }
+  ],
+  "discussions": [
+    { "id": 1, "author_name": "Dad", "role": "supervisor", "body": "How's the auth slice?",
+      "created_at": "2026-06-26T09:00:00+00:00" },
+    { "id": 2, "author_name": "Yusuf", "role": "developer", "body": "Landed.",
+      "created_at": "2026-06-26T12:00:00+00:00" }
   ]
 }
 ```
 
 - Source: `history` (reports + count + nav), `get_checklist`, `observed_history` ->
-  `slipping_item_keys`, `derive.milestones`, `classify_item` per item, `comments_for_project`.
+  `slipping_item_keys`, `derive.milestones`, `classify_item` per item, `comments_for_project`,
+  `discussion_items_for_project`.
+- `discussions` is the project's two-way **supervisor-interaction thread** (E2 Inc 5), oldest first —
+  the persistent per-project conversation, distinct from the per-report `comments`. Unlike a comment,
+  each item carries a **real** `role` (`supervisor | developer`; `orion` reserved, unused) and a
+  server-derived `author_name`. The internal `author_id` is **not** on the wire. Written via
+  `POST /api/discussions/:project/items` (below).
 - `stats.next_due` is the soonest open deadline across the checklist (`derive.next_open_due` + its state),
   or `null`. `milestones[].slipping` is `true` when any open item in the group is in the slipping set.
 - `checklist[].state` is `done | overdue | due_soon | in_progress | not_started`: `done` when done, else
@@ -480,6 +492,68 @@ the read path emits (so the SPA appends it without a refetch):
   retired with `render.py` (KI-23).
 - Source: `_authenticate` / `_allowed_projects` / `_origin_error` / `get` / `add_comment` (all reused).
 
+### `POST /api/discussions/:project/items`
+
+Append one entry to a project's **supervisor-interaction thread** (E2 Inc 5) — the persistent, two-way
+per-project conversation between a supervisor and the developer. Cookie session (not Bearer), JSON in/out,
+same-origin like the comment write. The thread anchor is the **project**, not a report.
+
+Body `{"body": "<text>"}`. Returns `201` with the created item in the same shape the read path emits (the
+`discussions[]` element above, so the SPA appends it without a refetch):
+
+```json
+{ "id": 12, "author_name": "Dad", "role": "supervisor", "body": "How's the auth slice?",
+  "created_at": "2026-06-27T01:00:00+00:00" }
+```
+
+- **Identity is fully server-derived.** `author_name`, `role`, and the stored `author_id` come from the
+  authenticated principal, **never** the request body — a client-supplied `author`/`role`/`author_id` is
+  silently ignored, so attribution is unforgeable. `role` maps from the principal's `relay_users` role:
+  `supervisor → "supervisor"`, `admin → "developer"` (the developer/owner, including the legacy bootstrap
+  admin). The `orion` item role is never producible by a human write (reserved for a later
+  grounded-responder rung — observe-not-originate).
+- **Auth is always required** — unlike a comment there is **no** open-loopback free-text-author path. An
+  attributable thread needs identity, so the discussion loop requires a gated (C3) relay.
+- **Guards, in order:** `401 {"error":"login required"}` when there is no session → `403 {"error":"origin
+  check failed"}` on an Origin/Referer mismatch → `403 {"error":"not permitted"}` when the principal is a
+  **viewer** (read-only, no thread standing) → `400` for a non-object body or a non-string/empty `body` /
+  one over `MAX_COMMENT_BODY_CHARS` (4000) → `404 {"error":"not found"}` when the project is out of scope
+  **or** does not exist (identical response — existence-hiding).
+- **Append-only.** No edit or delete path; the thread is the memory.
+- **XSS:** the body is stored verbatim and rendered as an inert React text node (same guarantee as comments).
+- Source: `_authenticate` / `_allowed_projects` / `_origin_error` / `history` / `get_checklist` /
+  `add_discussion_item` (the first three reused from the comment path).
+
+#### `GET /api/discussions` + `POST /api/discussions` (developer CLI loop — machine, not the SPA)
+
+The developer's terminal half of the loop (E2 Inc 5, Unit 3), **Bearer**-authed with the ingest token —
+the machine siblings of the cookie write above, exactly as `GET`/`POST /api/comments` are to the SPA
+comment write. No cookie, no CSRF (a Bearer token is never browser-auto-attached). Driven by
+`orion discussions pull` / `orion discussions reply`.
+
+- **`GET /api/discussions?project=<name>&since_id=<int>`** — pull a project's thread for the terminal.
+  `since_id` is optional (default 0 → all). Returns the **raw store rows** (not the SPA wire shape) plus a
+  watermark, oldest first:
+
+  ```json
+  { "discussions": [ { "id": 7, "project": "orion", "author_id": 4, "author_name": "Dad",
+      "role": "supervisor", "body": "How's auth?", "created_at": "2026-06-26T09:00:00+00:00" } ],
+    "latest_id": 7 }
+  ```
+
+  `latest_id` is the highest id returned, or `since_id` when nothing is newer (so the CLI advances its
+  `(project, relay_url)` watermark unconditionally). An unknown project → `200` with `[]`. `400` on a
+  missing `project` or a non-integer `since_id`; `401` (+ `WWW-Authenticate: Bearer`) on a bad token.
+  Mirrors `GET /api/comments`.
+
+- **`POST /api/discussions`** — append the developer's reply. Body `{"project", "body", "author"?}`. The
+  `author` is the CLI's optional `--as` display name, defaulting to the fixed label `"developer"`. Returns
+  `201 {"id": <int>}`. **`role` is server-fixed to `"developer"` and `author_id` to `null`** — the ingest
+  token authorizes "the developer" and nothing more, so this path can **never** forge a `supervisor` entry
+  (a `role`/`author_id` in the body is ignored). `404` when the project does not exist (reports or a
+  checklist), so a typo cannot spawn an orphan thread; `400` on an empty/oversized body; `401` on a bad
+  token. Mirrors `POST /api/comments`.
+
 ## The `kind` flag (projects vs trackers)
 
 The home splits real software projects from general trackers (e.g. the applications tracker). This fact is
@@ -504,7 +578,11 @@ backend scope). Each is shown above with its 4a value.
    originating collector set. 4a ships `source_tags: []`. Closing it needs `collectors` on the blob.
 5. **Project `description`** — none stored. 4a ships `description: null`.
 6. **Report `title`** — no separate title field. 4a uses the first section title, else the body headline.
-7. **Comment author `role`** — free-text author name only. 4a ships `role: null`.
+7. **Comment author `role`** — free-text author name only; report `comments` still ship `role: null`.
+   **Closed for the discussion surface** (E2 Inc 5): `GET /api/projects/:name` `discussions[]` and the
+   `POST /api/discussions/:project/items` response carry a real, server-derived `role`
+   (`supervisor | developer`), because discussion items have first-class identity. Comments keep
+   `role: null` until comment authors carry an identity too.
 8. **Embedded item status** (`in_progress` / `submitted`, the tracker's circular indicators) — **CLOSED**
    (Tracker slice, E2 Inc 4). The producer now ships a first-class `status` field (`not_started |
    in_progress | submitted | closed`, the semantic form of its canonical status) alongside the still-present

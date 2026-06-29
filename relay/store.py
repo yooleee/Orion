@@ -162,6 +162,34 @@ CREATE TABLE IF NOT EXISTS report_comments (
 -- Comments are always fetched for one report; the index keeps that filter fast.
 CREATE INDEX IF NOT EXISTS idx_report_comments_report ON report_comments(report_id);
 
+-- Supervisor-interaction loop (E2 Inc 5, Unit 1). The append-only log behind a
+-- per-project two-way discussion between a supervisor and the developer, with Orion as
+-- medium + memory only (it authors NOTHING this phase — observe-not-originate). The thread
+-- anchors on `project`, not on a report (the report is context inside the thread, not the
+-- anchor), so reads need no JOIN. Unlike report_comments.author (self-entered free text),
+-- attribution here is FIRST-CLASS and SERVER-DERIVED: author_id is the relay_users.id of
+-- the authenticated principal (NULL for the legacy bootstrap admin and for the developer's
+-- Bearer machine reply, neither of which has a relay_users row), author_name is the
+-- principal's name, and role is the principal's standing in the thread. role is an open
+-- TEXT enum ("supervisor" | "developer" | "orion") validated at the server boundary, not
+-- here (the store is a dumb writer, mirroring report_comments); "orion" is reserved for the
+-- later grounded-responder rung and is unused this phase. Append-only, time-ordered: the
+-- log IS the memory, with no edit/delete path.
+CREATE TABLE IF NOT EXISTS relay_discussion_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project     TEXT NOT NULL,       -- the per-project thread anchor
+    author_id   INTEGER,             -- relay_users.id; NULL for legacy-admin / machine posts
+    author_name TEXT NOT NULL,       -- server-derived display name (never client-supplied)
+    role        TEXT NOT NULL,       -- "supervisor" | "developer" | "orion" (orion reserved)
+    body        TEXT NOT NULL,       -- plain text; escaped on render
+    created_at  TEXT NOT NULL        -- ISO 8601 UTC, when the relay received it
+);
+
+-- Discussion items are read per project, oldest-first, often newer-than a watermark id;
+-- the composite index keeps both that filter and the since_id pull fast.
+CREATE INDEX IF NOT EXISTS idx_relay_discussion_items_project
+    ON relay_discussion_items(project, id);
+
 -- C3 / multi-party access (Increment 1). relay_users is the per-user identity +
 -- credential store. The login credential is a server-minted high-entropy random key;
 -- only its VERIFIER = HMAC-SHA256(pepper, key) is stored (the raw key is shown once at
@@ -1133,6 +1161,111 @@ def comments_for_project(
             "id": row["id"],
             "report_id": row["report_id"],
             "author": row["author"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def add_discussion_item(
+    conn: sqlite3.Connection,
+    project: str,
+    author_id: int | None,
+    author_name: str,
+    role: str,
+    body: str,
+    created_at: str,
+) -> int:
+    """Append one entry to a project's discussion thread and return its new row id.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project this thread belongs to. Matched exactly; this is the
+            thread anchor (the report is context inside the thread, not the anchor).
+        author_id: The relay_users.id of the authenticated author, or None for the
+            legacy bootstrap admin and the developer's Bearer machine reply — neither
+            has a relay_users row. Server-derived from the principal, never the request body.
+        author_name: The author's display name, server-derived from the authenticated
+            principal (never client-supplied — the attribution invariant). Already
+            validated by the server.
+        role: The author's standing in the thread ("supervisor" | "developer" |
+            "orion"). Validated against the allowed set at the server boundary BEFORE
+            this call; stored as-is here. "orion" is reserved for the later
+            grounded-responder rung and is unused this phase (observe-not-originate).
+        body: The plain-text message. Validated non-empty and length-capped by the
+            server; stored as-is and escaped only on render.
+        created_at: ISO 8601 UTC timestamp of when the relay received the entry. Passed
+            in (not generated here) so the server controls the clock and this function
+            stays deterministic and easy to test — same pattern as add_comment().
+
+    Returns:
+        The autoincrement id of the inserted discussion row.
+
+    Why:
+        Mirrors add_comment(): a single INSERT + commit returning the new id. The
+        discussion log is append-only (no update/delete path) — the log IS the memory.
+        All validation (role allowlist, body limits, scope/existence checks) lives in
+        the server, the inbound boundary, keeping this a thin, trusted persistence call.
+        author_id/author_name/role being server-derived is what makes attribution
+        unforgeable; this function simply trusts what the boundary already proved.
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO relay_discussion_items
+            (project, author_id, author_name, role, body, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (project, author_id, author_name, role, body, created_at),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def discussion_items_for_project(
+    conn: sqlite3.Connection, project: str, since_id: int = 0
+) -> list[dict]:
+    """Return a project's discussion items newer than `since_id`, oldest first.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project name whose thread to fetch. Matched exactly.
+        since_id: Return only items with id strictly greater than this. Defaults to 0,
+            which (since the autoincrement id starts at 1) returns ALL of the project's
+            items — the first-pull / `--all` case.
+
+    Returns:
+        A list of {"id", "project", "author_id", "author_name", "role", "body",
+        "created_at"} dicts in ascending-id (chronological) order. Empty when the
+        project has no newer items (or none at all). The LAST element holds the highest
+        id, which the producer pull uses as the watermark to advance to.
+
+    Why:
+        Backs every reader of the thread: the dashboard panel, the read endpoint, and
+        the CLI watermark pull. Unlike comments_for_project this needs NO JOIN — the
+        thread anchors on `project` directly, so the project column resolves the link
+        the comment table could only express through relay_reports. The `id > since_id`
+        filter is the unread cursor: ids are a monotonic autoincrement, so comparing ids
+        is robust with no clock/precision/tie issues a created_at filter would have.
+        Returning [] (not None) lets renderers show a clean empty state without a null
+        check. Parameterized binds keep both `project` and `since_id` injection-safe.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, project, author_id, author_name, role, body, created_at
+        FROM relay_discussion_items
+        WHERE project = ? AND id > ?
+        ORDER BY id ASC
+        """,
+        (project, since_id),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "project": row["project"],
+            "author_id": row["author_id"],
+            "author_name": row["author_name"],
+            "role": row["role"],
             "body": row["body"],
             "created_at": row["created_at"],
         }

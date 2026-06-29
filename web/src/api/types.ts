@@ -31,7 +31,12 @@ export type ProjectKind = "project" | "tracker";
  *  and "closed" are both done; "in_progress" is the open state `state` alone could not carry. */
 export type ItemStatus = "not_started" | "in_progress" | "submitted" | "closed";
 
-export type Role = "admin" | "viewer";
+export type Role = "admin" | "viewer" | "supervisor";
+
+/** A discussion item's thread role (E2 Inc 5) — distinct from the relay_users `Role`.
+ *  "orion" is reserved for a later grounded-responder rung and never appears this phase
+ *  (observe-not-originate: Orion authors nothing). */
+export type DiscussionRole = "supervisor" | "developer" | "orion";
 
 /** done/total with a precomputed percentage (null when total is 0). */
 export interface Progress {
@@ -168,6 +173,17 @@ export interface Comment {
   created_at: string;
 }
 
+/** One entry in a project's two-way supervisor↔developer discussion thread (E2 Inc 5).
+ *  Unlike Comment, attribution is first-class and server-derived: `author_name` (never a
+ *  client-typed name) and a REAL `role` (gap 7 closed for this surface). */
+export interface DiscussionItem {
+  id: number;
+  author_name: string;
+  role: DiscussionRole;
+  body: string;
+  created_at: string;
+}
+
 export interface ProjectDetail {
   name: string;
   kind: ProjectKind;
@@ -177,6 +193,7 @@ export interface ProjectDetail {
   checklist: ChecklistItem[];
   reports: ReportSummary[];
   comments: Comment[];
+  discussions: DiscussionItem[];
 }
 
 // --- GET /api/reports/:id ---------------------------------------------------

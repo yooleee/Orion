@@ -867,6 +867,29 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+/* Discussion role badge (E2 Inc 5): a real role per item (supervisor / developer), so the
+   pill is filled and colour-coded — unlike the faint comment-role text — to make the
+   back-and-forth legible at a glance. Both hues are token-derived, so all 3 themes follow. */
+.discussion-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--tmid);
+}
+.discussion-role--supervisor {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+.discussion-role--developer {
+  color: var(--tmid);
+  background: var(--panel2);
+}
+
 .composer {
   margin-top: 16px;
 }

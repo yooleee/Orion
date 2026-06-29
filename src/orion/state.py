@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS comment_watermark (
     PRIMARY KEY (project, relay_url)
 );
 
+-- E2 Inc 5: the developer's "unread" cursor over a project's discussion thread — the exact
+-- analogue of comment_watermark for the supervisor-interaction loop. The discussion-item id
+-- space is its own (relay_discussion_items, distinct from report_comments), so this is a
+-- SEPARATE table: reusing comment_watermark would conflate two unrelated id streams and a
+-- pull on one would corrupt the other's cursor. Keyed by (project, relay_url) for the same
+-- reason as comments — pointing a project at a different relay starts a fresh cursor.
+CREATE TABLE IF NOT EXISTS discussion_watermark (
+    project           TEXT NOT NULL,
+    relay_url         TEXT NOT NULL,
+    last_seen_item_id INTEGER NOT NULL,  -- highest relay discussion-item id pulled so far
+    updated_at        TEXT NOT NULL,     -- ISO 8601 UTC of the pull that set it
+    PRIMARY KEY (project, relay_url)
+);
+
 -- E2 Inc 4 (4b): a per-(project, collector, key) cache so an EXPENSIVE collector step
 -- runs only when its input actually changed. The disciplines collector keys on the doc
 -- path, stores the doc's content hash + the extracted disciplines JSON, and reuses the
@@ -248,6 +262,73 @@ def set_comment_watermark(
             updated_at = excluded.updated_at
         """,
         (project, relay_url, last_seen_comment_id, updated_at),
+    )
+    conn.commit()
+
+
+def get_discussion_watermark(
+    conn: sqlite3.Connection, project: str, relay_url: str
+) -> int:
+    """Return the highest discussion-item id already pulled for a (project, relay), or 0.
+
+    Args:
+        conn: An open state connection.
+        project: The project whose thread the cursor tracks.
+        relay_url: The relay the items were pulled from (the configured [relay] `url`).
+            Part of the key so a different relay gets its own cursor.
+
+    Returns:
+        The stored last-seen item id, or 0 when there is no row yet (a first-ever pull).
+        0 is the natural "seen nothing" sentinel: relay item ids start at 1, so `id > 0`
+        returns everything — exactly what a first pull should show.
+
+    Why:
+        The read side of the developer's unread cursor over the discussion thread, the
+        direct analogue of get_comment_watermark. Returning 0 (not None) lets the caller
+        pass it straight to pull_discussions as since_id with no null handling.
+    """
+    row = conn.execute(
+        "SELECT last_seen_item_id FROM discussion_watermark "
+        "WHERE project = ? AND relay_url = ?",
+        (project, relay_url),
+    ).fetchone()
+    return row[0] if row is not None else 0
+
+
+def set_discussion_watermark(
+    conn: sqlite3.Connection,
+    project: str,
+    relay_url: str,
+    last_seen_item_id: int,
+    updated_at: str,
+) -> None:
+    """Record the highest discussion-item id pulled for a (project, relay) (insert/update).
+
+    Args:
+        conn: An open state connection.
+        project: The project whose thread the cursor tracks.
+        relay_url: The relay they were pulled from (the configured [relay] `url`).
+        last_seen_item_id: The new high-water mark — the `latest_id` the relay returned.
+        updated_at: ISO 8601 UTC timestamp of this pull.
+
+    Returns:
+        None. Side effect: upserts the discussion_watermark row and commits.
+
+    Why:
+        Mirrors set_comment_watermark's UPSERT on a composite key — first pull inserts,
+        later pulls update the same row. The caller advances this AFTER a successful pull
+        (and only for a normal run, not an `--all` re-read), so the cursor always reflects
+        what was actually shown.
+    """
+    conn.execute(
+        """
+        INSERT INTO discussion_watermark (project, relay_url, last_seen_item_id, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project, relay_url) DO UPDATE SET
+            last_seen_item_id = excluded.last_seen_item_id,
+            updated_at = excluded.updated_at
+        """,
+        (project, relay_url, last_seen_item_id, updated_at),
     )
     conn.commit()
 

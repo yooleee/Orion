@@ -740,6 +740,7 @@ def serialize_project(
     checklist: list | None,
     observations: list[dict],
     comments: list[dict],
+    discussions: list[dict],
     today: date,
 ) -> dict:
     """Serialize one project's full detail (/api/projects/:name).
@@ -751,6 +752,8 @@ def serialize_project(
         checklist: The live checklist items (store.get_checklist), or None.
         observations: The project's observed history (store.observed_history), for slippage.
         comments: The project's comments (store.comments_for_project).
+        discussions: The project's discussion thread oldest-first
+            (store.discussion_items_for_project) — the supervisor-interaction loop (E2 Inc 5).
         today: The reference date (display zone).
 
     Returns:
@@ -829,6 +832,34 @@ def serialize_project(
             for r in reports
         ],
         "comments": [_comment(c) for c in comments],
+        "discussions": [_discussion_item(d) for d in discussions],
+    }
+
+
+def _discussion_item(d: dict) -> dict:
+    """Serialize one discussion-thread item to the wire shape (E2 Inc 5, Unit 2).
+
+    Args:
+        d: A store discussion dict ({"id","author_name","role","body","created_at", ...}).
+
+    Returns:
+        {"id","author_name","role","body","created_at"} — like a comment, but role is a
+        REAL value ("supervisor" | "developer"), not null: discussion items carry first-class
+        identity, which is what closes contract gap 7 (the role badge) for this surface.
+
+    Why:
+        The thread renders on the project page (and, later, a cross-project inbox), so the
+        per-item shape is defined once here. author_id is intentionally dropped from the
+        wire: the badge needs author_name + role, and the internal relay_users id is not the
+        SPA's business. project is dropped too (the panel already knows its project), exactly
+        as _comment drops report_id.
+    """
+    return {
+        "id": d["id"],
+        "author_name": d["author_name"],
+        "role": d["role"],
+        "body": d["body"],
+        "created_at": d["created_at"],
     }
 
 

@@ -21,7 +21,9 @@ from orion.delivery import DeliveryError
 from orion.delivery.relay import (
     create_user,
     list_users,
+    post_discussion,
     pull_comments,
+    pull_discussions,
     push,
     revoke_user,
 )
@@ -246,6 +248,77 @@ def test_pull_unparseable_body_becomes_delivery_error(monkeypatch):
 
     with pytest.raises(DeliveryError):
         pull_comments("https://relay.test/ingest", "tok", "demo", 0)
+
+
+# --- E2 Inc 5: pull_discussions + post_discussion (the developer's CLI loop) ------
+
+
+def test_pull_discussions_derives_url_sends_query_and_bearer(monkeypatch):
+    """pull_discussions derives /api/discussions, carries project+since_id, parses the body.
+
+    Why this matters: the developer's read half must mirror pull_comments exactly — one
+    configured (ingest) URL, the read endpoint derived from it, both params escaped, the
+    Bearer token sent, and the JSON returned verbatim for the CLI to render + watermark.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.headers.get("Authorization")
+        body = json.dumps(
+            {"discussions": [{"id": 4, "role": "supervisor", "author_name": "Dad",
+                              "body": "How's auth?"}], "latest_id": 4}
+        ).encode("utf-8")
+        return _FakeReadResponse(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = pull_discussions("https://relay.test/ingest", "s3cr3t", "my proj", 2)
+
+    assert captured["url"].startswith("https://relay.test/api/discussions?")
+    assert "project=my+proj" in captured["url"] and "since_id=2" in captured["url"]
+    assert captured["authorization"] == "Bearer s3cr3t"
+    assert result["latest_id"] == 4
+    assert result["discussions"][0]["role"] == "supervisor"
+
+
+def test_post_discussion_sends_payload_and_returns_id(monkeypatch):
+    """post_discussion POSTs {project, body, author} with Bearer and returns the new id.
+
+    Why this matters: the developer's write half. The body must carry exactly the three
+    fields (role is NOT sent — the relay fixes it), and the parsed {id} is handed back so
+    the CLI can echo it.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeReadResponse(json.dumps({"id": 11}).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = post_discussion("https://relay.test/ingest", "tok", "demo", "Landed.", "Yusuf")
+
+    assert captured["url"] == "https://relay.test/api/discussions"
+    assert captured["method"] == "POST"
+    assert captured["authorization"] == "Bearer tok"
+    # Exactly the three fields; no client-set role/author_id.
+    assert captured["payload"] == {"project": "demo", "body": "Landed.", "author": "Yusuf"}
+    assert result == {"id": 11}
+
+
+def test_post_discussion_http_error_becomes_delivery_error(monkeypatch):
+    """A 4xx on the reply (e.g. 404 unknown project / 401 bad token) becomes DeliveryError."""
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(DeliveryError):
+        post_discussion("https://relay.test/ingest", "tok", "ghost", "x", "")
 
 
 # --- C3 admin API client: create_user / list_users / revoke_user -----------------

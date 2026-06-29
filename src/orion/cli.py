@@ -66,7 +66,9 @@ from orion.delivery.discord import send as discord_send
 from orion.delivery.relay import (
     create_user as relay_create_user,
     list_users as relay_list_users,
+    post_discussion,
     pull_comments,
+    pull_discussions,
     push as relay_push,
     push_checklist,
     push_disciplines,
@@ -99,12 +101,14 @@ from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_cache,
     get_comment_watermark,
+    get_discussion_watermark,
     get_last_report_time,
     get_marker,
     open_state,
     record_report,
     set_cache,
     set_comment_watermark,
+    set_discussion_watermark,
     set_marker,
 )
 from orion.summarize import AnthropicSummarizer, LocalSummarizer, Summarizer, SummarizerError
@@ -659,6 +663,63 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    # `discussions` is a command GROUP (pull/reply) — the two-way supervisor-interaction
+    # loop (E2 Inc 5). Unlike `comments` (read-only on the CLI; the bot writes), the
+    # developer both reads and replies here, so a group fits. Bearer-authed machine path.
+    discussions_parser = subparsers.add_parser(
+        "discussions",
+        help="Read and reply to a project's two-way supervisor discussion thread (E2 Inc 5).",
+    )
+    discussions_subs = discussions_parser.add_subparsers(
+        dest="discussions_command", required=True
+    )
+
+    disc_pull = discussions_subs.add_parser(
+        "pull", help="Pull new supervisor messages on a project's discussion thread."
+    )
+    disc_pull.add_argument("project", help="Project name as defined in orion.toml.")
+    disc_pull.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    disc_pull.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit the raw JSON response instead of the human-readable listing.",
+    )
+    disc_pull.add_argument(
+        "--all",
+        dest="show_all",
+        action="store_true",
+        help=(
+            "Show the WHOLE thread without advancing the unread marker (the default "
+            "shows only messages new since your last pull, and advances the marker)."
+        ),
+    )
+
+    disc_reply = discussions_subs.add_parser(
+        "reply", help="Post a developer reply to a project's discussion thread."
+    )
+    disc_reply.add_argument("project", help="Project name as defined in orion.toml.")
+    disc_reply.add_argument("body", help="The reply text.")
+    disc_reply.add_argument(
+        "--as",
+        dest="author",
+        default="",
+        metavar="NAME",
+        help=(
+            "Display name for this reply (e.g. --as \"Yusuf\"). Defaults to the label "
+            "\"developer\". The role is always 'developer' regardless of this name."
+        ),
+    )
+    disc_reply.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     bot_parser = subparsers.add_parser(
         "bot",
         help="Run the always-on Slack bot: relay channel replies into report comments (C2-bots).",
@@ -798,9 +859,13 @@ def main(argv: list[str] | None = None) -> int:
     ru_add.add_argument("name", help="The user's unique display name / handle.")
     ru_add.add_argument(
         "--role",
-        choices=("viewer", "admin"),
+        choices=("viewer", "admin", "supervisor"),
         default="viewer",
-        help="The user's role (default: viewer). An admin sees all projects.",
+        help=(
+            "The user's role (default: viewer). An admin sees all projects; a viewer "
+            "or supervisor is scoped to its granted projects (a supervisor may also "
+            "post to a project's discussion thread)."
+        ),
     )
     ru_add.add_argument(
         "--project",
@@ -908,6 +973,16 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_comments(
             args.project, Path(args.config), as_json=args.as_json, show_all=args.show_all
         )
+    if args.command == "discussions":
+        if args.discussions_command == "pull":
+            return cmd_discussions_pull(
+                args.project, Path(args.config),
+                as_json=args.as_json, show_all=args.show_all,
+            )
+        if args.discussions_command == "reply":
+            return cmd_discussions_reply(
+                args.project, args.body, args.author, Path(args.config)
+            )
     if args.command == "bot":
         return cmd_bot(Path(args.config))
     if args.command == "relay-serve":
@@ -3264,6 +3339,154 @@ def _format_pacific(iso: str) -> str:
     # instant to California wall-clock time (zoneinfo applies DST -> PDT/PST).
     pacific = datetime.fromisoformat(iso).astimezone(ZoneInfo("America/Los_Angeles"))
     return pacific.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def cmd_discussions_pull(
+    project_name: str, config_path: Path, *, as_json: bool, show_all: bool
+) -> int:
+    """Pull new supervisor messages on a project's discussion thread (E2 Inc 5).
+
+    Args:
+        project_name: The project whose thread to pull.
+        config_path: Path to orion.toml.
+        as_json: When True, print the raw JSON response; else a human-readable listing.
+        show_all: When True, show the WHOLE thread and do NOT advance the unread marker;
+            when False (default), show only items newer than the watermark and advance it.
+
+    Returns:
+        Exit code: 0 on a successful pull (including "nothing new"); 1 on a config/secrets
+        error, a disabled relay, or a failed pull.
+
+    Why:
+        The developer's read half of the supervisor-interaction loop — a direct twin of
+        cmd_comments. The pull is BY PROJECT, Bearer-authed with the ingest token, and the
+        unread cursor is a LOCAL watermark (the relay stays append-only). pull_discussions
+        is the module-global so a test can monkeypatch it, mirroring pull_comments.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+        load_secrets(config_path)
+
+        relay_cfg = config.relay
+        if not relay_cfg.enabled:
+            print(
+                f"Error: cannot pull discussions for {project.name!r} — no relay is "
+                f"enabled in {config_path}. The thread lives on the relay you push reports "
+                f"to; enable the [relay] table to read it.",
+                file=sys.stderr,
+            )
+            return 1
+
+        token = get_required(relay_cfg.token_env_var)
+
+        conn = open_state(config.state_db)
+        # since_id is the unread cursor: 0 for --all (whole thread), else the stored
+        # watermark (only what's newer). Keyed by (project, relay_url).
+        since_id = (
+            0 if show_all else get_discussion_watermark(conn, project.name, relay_cfg.url)
+        )
+        response = pull_discussions(relay_cfg.url, token, project.name, since_id)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        # User-fixable (a config typo, a missing token, a down relay). Never advance the
+        # watermark on a failed pull.
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    items = response.get("discussions", [])
+    latest_id = response.get("latest_id", since_id)
+
+    if as_json:
+        print(json.dumps(response))
+    else:
+        _print_discussions(items, project.name, show_all)
+
+    # Advance the watermark ONLY on a normal run — --all is an explicit re-read. Advancing
+    # to latest_id is idempotent (it echoes since_id when nothing is new).
+    if not show_all:
+        pulled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        set_discussion_watermark(conn, project.name, relay_cfg.url, latest_id, pulled_at)
+
+    return 0
+
+
+def cmd_discussions_reply(
+    project_name: str, body: str, author: str, config_path: Path
+) -> int:
+    """Post a developer reply to a project's discussion thread (E2 Inc 5).
+
+    Args:
+        project_name: The project whose thread to reply on.
+        body: The reply text.
+        author: The display name for this reply (the `--as` value), or "" to let the relay
+            stamp its default "developer" label.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 when the reply is posted; 1 on a config/secrets error, a disabled
+        relay, or a failed post.
+
+    Why:
+        The developer's write half of the loop, closing it from the terminal without the
+        dashboard. The reply lands as role="developer" server-side (the Bearer token IS the
+        developer's authority), so `--as` only sets the display name, never the role.
+        post_discussion is the module-global so a test can monkeypatch it.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+        load_secrets(config_path)
+
+        relay_cfg = config.relay
+        if not relay_cfg.enabled:
+            print(
+                f"Error: cannot reply on {project.name!r} — no relay is enabled in "
+                f"{config_path}. Enable the [relay] table to post to the thread.",
+                file=sys.stderr,
+            )
+            return 1
+
+        token = get_required(relay_cfg.token_env_var)
+        result = post_discussion(relay_cfg.url, token, project.name, body, author)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # author may be "" → the relay used its "developer" fallback; reflect that to the user.
+    shown = author or "developer"
+    print(f"Reply posted to {project.name!r} as {shown!r} (id {result.get('id')}).")
+    return 0
+
+
+def _print_discussions(items: list[dict], project_name: str, show_all: bool) -> None:
+    """Print a project's pulled discussion items as a human-readable listing.
+
+    Args:
+        items: The item dicts from pull_discussions (role, author_name, body, created_at).
+        project_name: The project the thread belongs to (for the header/empty line).
+        show_all: Whether this was an --all pull, which only changes the empty-state wording.
+
+    Returns:
+        None. Writes to stdout.
+
+    Why:
+        The default human-facing output, mirroring _print_comments but leading each line
+        with the [role] tag so the developer can tell a supervisor turn from their own at a
+        glance. An empty result is a friendly one-liner, with wording that distinguishes
+        "no messages at all" (--all) from "nothing new since last pull" (default).
+    """
+    if not items:
+        qualifier = "" if show_all else " new"
+        print(f"No{qualifier} discussion messages for {project_name!r}.")
+        return
+
+    print(f"{len(items)} discussion message(s) for {project_name!r}:")
+    for item in items:
+        # role tags the turn (supervisor/developer); author_name is server-derived.
+        print(
+            f"  [{item['role']}] {item['author_name']} · "
+            f"{_format_pacific(item['created_at'])} · {item['body']}"
+        )
 
 
 def _load_run_bot():

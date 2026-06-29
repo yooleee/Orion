@@ -1564,6 +1564,144 @@ def test_comments_pull_failure_does_not_advance_watermark(tmp_path, monkeypatch)
     assert calls == [("demo", 0)]
 
 
+# --- `orion discussions pull/reply` — the developer's loop (E2 Inc 5, Unit 3b) ---
+# Same approach: cli.pull_discussions / cli.post_discussion are monkeypatched so the
+# command logic (watermark read/advance, output, the reply payload, errors) is tested
+# with no relay running. Mirrors the comment CLI tests above.
+
+
+def _capture_pull_discussions(mp, response):
+    """Monkeypatch cli.pull_discussions to record (project, since_id) and return canned data."""
+    calls: list[tuple[str, int]] = []
+
+    def fake_pull(relay_url, token, project, since_id, **_kw):
+        calls.append((project, since_id))
+        return response
+
+    mp.setattr(cli, "pull_discussions", fake_pull)
+    return calls
+
+
+def _capture_post_discussion(mp, result=None):
+    """Monkeypatch cli.post_discussion to record (project, body, author) and return an id."""
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_post(relay_url, token, project, body, author, **_kw):
+        calls.append((project, body, author))
+        return result if result is not None else {"id": 1}
+
+    mp.setattr(cli, "post_discussion", fake_post)
+    return calls
+
+
+def _two_discussions():
+    """A canned thread: a supervisor message and the developer's reply (latest_id = 2)."""
+    return {
+        "discussions": [
+            {"id": 1, "project": "demo", "author_id": 7, "author_name": "Dad",
+             "role": "supervisor", "body": "How's auth?",
+             "created_at": "2026-06-28T19:30:00+00:00"},
+            {"id": 2, "project": "demo", "author_id": None, "author_name": "Yusuf",
+             "role": "developer", "body": "Landed.",
+             "created_at": "2026-06-28T20:00:00+00:00"},
+        ],
+        "latest_id": 2,
+    }
+
+
+def test_discussions_pull_shows_thread_and_advances_watermark(tmp_path, monkeypatch, capsys):
+    """A default pull renders the thread (with role tags), then advances the watermark.
+
+    Why this matters: the unread cursor is the feature, exactly as for comments. First pull
+    starts at 0; after it the watermark advances so the second starts at latest_id (2).
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_pull_discussions(monkeypatch, _two_discussions())
+
+    assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "[supervisor] Dad" in out and "How's auth?" in out
+    assert "[developer] Yusuf" in out and "Landed." in out
+
+    assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 0
+    assert [since for _project, since in calls] == [0, 2]
+
+
+def test_discussions_pull_all_does_not_advance(tmp_path, monkeypatch, capsys):
+    """`--all` pulls from 0 and leaves the cursor untouched (the explicit re-read)."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_pull_discussions(monkeypatch, _two_discussions())
+
+    cli.main(["discussions", "pull", "demo", "--config", str(toml)])           # -> advances to 2
+    cli.main(["discussions", "pull", "demo", "--config", str(toml), "--all"])  # -> since_id 0
+    cli.main(["discussions", "pull", "demo", "--config", str(toml)])           # -> still 2
+    assert [since for _project, since in calls] == [0, 0, 2]
+
+
+def test_discussions_pull_empty_is_friendly(tmp_path, monkeypatch, capsys):
+    """With nothing new, the default prints a friendly 'no new' line and exits 0."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    _capture_pull_discussions(monkeypatch, {"discussions": [], "latest_id": 0})
+
+    assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 0
+    assert "No new discussion messages" in capsys.readouterr().out
+
+
+def test_discussions_reply_posts_with_author_and_echoes_id(tmp_path, monkeypatch, capsys):
+    """`reply --as NAME` posts {project, body, author} and prints the returned id.
+
+    Why this matters: the developer's write half. The --as name is sent as the author label
+    (role is fixed server-side, not here), and the new id is echoed for confirmation.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_post_discussion(monkeypatch, {"id": 11})
+
+    rc = cli.main(
+        ["discussions", "reply", "demo", "Landed.", "--as", "Yusuf", "--config", str(toml)]
+    )
+    assert rc == 0
+    assert calls == [("demo", "Landed.", "Yusuf")]
+    assert "id 11" in capsys.readouterr().out
+
+
+def test_discussions_reply_without_as_sends_empty_author(tmp_path, monkeypatch, capsys):
+    """Without --as, the reply sends author="" so the relay applies its 'developer' fallback."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    calls = _capture_post_discussion(monkeypatch)
+
+    assert cli.main(["discussions", "reply", "demo", "hi", "--config", str(toml)]) == 0
+    assert calls == [("demo", "hi", "")]
+
+
+def test_discussions_disabled_relay_is_clean_error(tmp_path, monkeypatch, capsys):
+    """Both pull and reply fail cleanly (exit 1) with no relay enabled, and never call out."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo, enabled=False)
+    pulls = _capture_pull_discussions(monkeypatch, _two_discussions())
+    posts = _capture_post_discussion(monkeypatch)
+
+    assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 1
+    assert cli.main(["discussions", "reply", "demo", "x", "--config", str(toml)]) == 1
+    assert pulls == [] and posts == []
+    assert "no relay" in capsys.readouterr().err.lower()
+
+
 # --- `orion relay-user` admin CLI (C3 / PR B) ---------------------------------
 #
 # These pin the provisioning commands WITHOUT a running relay: the admin client

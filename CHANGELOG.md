@@ -11,14 +11,14 @@ phase, changes are grouped under **Added / Changed / Fixed / Removed** in the
 noting *why* where it aids understanding.
 
 This file looks **backward** (what was built). For the forward-looking design and phase plan,
-see [`plans/orion-plan.md`](plans/orion-plan.md); for open issues and cross-phase concerns,
+see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
 ## E2 Inc 4 — sectioned dashboard rebuild (SPA) — in progress
 
 The dashboard rebuilt as a React/Vite single-page app served single-host by the relay (a read-only
 JSON API), faithful to the `design/` handoff. Shipped slice by slice (each its own PR); per-slice
-detail and the band map live in [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](docs/e2-inc4-dashboard-rebuild-kickoff.md).
+detail and the band map live in `docs/e2-inc4-dashboard-rebuild-kickoff.md`.
 
 ### Added
 
@@ -80,7 +80,7 @@ detail and the band map live in [`docs/e2-inc4-dashboard-rebuild-kickoff.md`](do
 
 The forward-looking layer (E1): due-dates, at-risk, slippage, and derived milestones, built on an
 **observe-and-remember, never originate** model. Shipped unit by unit (each its own PR); see the
-six-unit ladder in [`docs/e2-inc3-kickoff.md`](docs/e2-inc3-kickoff.md).
+six-unit ladder in `docs/e2-inc3-kickoff.md`.
 
 ### Added
 
@@ -368,7 +368,7 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
   `--recipient "Name:channel:ENV_VAR"`, previews the stanza, and appends it (never rewrites existing
   content). Creates a minimal config when none exists. `--print` shows without writing; `--yes` is
   non-interactive. This refines the "Orion never writes config" rule to "never as a *side effect* of a
-  run" — see [`plans/orion-plan.md`](plans/orion-plan.md) "D1". Dependency-free (stdlib has no TOML
+  run" — see `plans/orion-plan.md` "D1". Dependency-free (stdlib has no TOML
   writer; an appended known-shape stanza needs none).
 - **`orion status`** — a read-only, cross-project digest of what still needs reporting. Per project it
   shows new unreported activity (`new: git`) or `up to date`, plus how long since the last report. It
@@ -426,7 +426,7 @@ Opens Horizon D (OSS-readiness & local enhancements), acting on the hackathon do
 
 ## C2-bots — native Slack bot: two-way in chat (2026-06-19)
 
-The next Horizon-C slice ([`docs/phase-c2-bots-kickoff.md`](docs/archive/phase-c2-bots-kickoff.md)): an
+The next Horizon-C slice (`docs/phase-c2-bots-kickoff.md`): an
 always-on **Slack bot** so a supervisor's reply in a mapped channel lands in the **existing relay
 comment store** — visible on the dashboard and via `orion comments`, unchanged. Built in four
 reviewable checkpoints (PRs #16–#19). `pytest`: **367**. The first new runtime dependency
@@ -498,7 +498,7 @@ dashboard rendered **Pacific**, so the same report showed two different times. `
 Closes the C2 loop **into the developer's workflow**: supervisor replies that previously lived only
 on the dashboard are now pulled back to the machine where you work. The first C2 slice made the loop
 two-way *on the dashboard*; this increment surfaces those replies where you report. All stdlib, **no
-new dependencies**. `pytest`: **304**. See [`docs/phase-c2-kickoff.md`](docs/archive/phase-c2-kickoff.md).
+new dependencies**. `pytest`: **304**. See `docs/phase-c2-kickoff.md`.
 
 ### Added
 
@@ -769,7 +769,7 @@ sequencing analysis puts the real need for in-Orion scheduling state alongside t
 bidirectional listener that would host it. The seam stays clean (KI-13: no new schema needed —
 last-report time is derivable from `report_history`), so a later build is additive. With B1–B4
 and B6 signed off and B5 deferred, **Horizon B's local-automation scope is complete.** Details in
-[`plans/orion-plan.md`](plans/orion-plan.md) (Phase B5 status) and
+`plans/orion-plan.md` (Phase B5 status) and
 [`docs/known-issues.md`](docs/known-issues.md) (KI-13). No code changed; `pytest`: **172/172**.
 
 ### Verified

@@ -43,7 +43,7 @@ describe("Skills — comb grouping + evidence anchor", () => {
           name: "Python stdlib backends",
           category: "Backend",
           depth: 3,
-          projects: ["orion", "sar_hackathon"],
+          projects: ["demo-project", "orion"],
           evidence: "Built the relay's stdlib HTTP API.",
           signals: ["git", "docs"],
         },
@@ -67,7 +67,7 @@ describe("Skills — comb grouping + evidence anchor", () => {
     expect(screen.getAllByText("Python stdlib backends").length).toBeGreaterThanOrEqual(1);
     // The evidence card anchors the skill to the projects that demonstrate it (the honest
     // observe-not-originate footer), listing BOTH evidencing projects.
-    expect(screen.getByText("observed · orion, sar_hackathon")).toBeInTheDocument();
+    expect(screen.getByText("observed · demo-project, orion")).toBeInTheDocument();
     expect(screen.getByText("Wrote the Haiku summarizer.")).toBeInTheDocument();
   });
 

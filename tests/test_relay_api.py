@@ -62,12 +62,12 @@ def test_me_admin_is_identified_and_unrestricted():
     """An admin principal surfaces name+role and unrestricted scope."""
     me = api.serialize_me(
         gated=True,
-        principal={"user_id": 1, "role": "admin", "name": "Yusuf"},
+        principal={"user_id": 1, "role": "admin", "name": "Teammate B"},
         allowed=None,
         display_tz=_LA,
     )
     assert me["authenticated"] is True
-    assert me["identity"] == {"name": "Yusuf", "role": "admin"}
+    assert me["identity"] == {"name": "Teammate B", "role": "admin"}
     assert me["scope"]["unrestricted"] is True
 
 
@@ -76,13 +76,13 @@ def test_me_viewer_scope_is_the_sorted_granted_projects():
     me = api.serialize_me(
         gated=True,
         principal={"user_id": 2, "role": "viewer", "name": "Mum"},
-        allowed={"orion", "barebones-ai-village"},
+        allowed={"orion", "sample-app"},
         display_tz=_LA,
     )
     assert me["identity"] == {"name": "Mum", "role": "viewer"}
     assert me["scope"] == {
         "unrestricted": False,
-        "projects": ["barebones-ai-village", "orion"],  # sorted
+        "projects": ["orion", "sample-app"],  # sorted
     }
 
 
@@ -95,7 +95,7 @@ def test_me_showcase_enabled_flag_passes_through():
     """
     me = api.serialize_me(
         gated=True,
-        principal={"user_id": 1, "role": "admin", "name": "Yusuf"},
+        principal={"user_id": 1, "role": "admin", "name": "Teammate B"},
         allowed=None,
         display_tz=_LA,
         showcase_enabled=True,
@@ -132,14 +132,14 @@ def test_showcase_card_status_is_active_until_complete_then_shipped():
     out = api.serialize_showcase(
         [
             _showcase_row("orion", done=6, total=15),  # 40% -> active
-            _showcase_row("barebones-ai-village", done=4, total=4),  # 100% -> shipped
+            _showcase_row("sample-app", done=4, total=4),  # 100% -> shipped
         ]
     )
     cards = {c["name"]: c for c in out["projects"]}
     assert cards["orion"]["status"] == "active"
     assert cards["orion"]["progress"] == {"done": 6, "total": 15, "pct": 40}
-    assert cards["barebones-ai-village"]["status"] == "shipped"
-    assert cards["barebones-ai-village"]["progress"]["pct"] == 100
+    assert cards["sample-app"]["status"] == "shipped"
+    assert cards["sample-app"]["progress"]["pct"] == 100
 
 
 def test_showcase_preserves_allowlist_order_and_report_count():
@@ -347,7 +347,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
     # A two-turn discussion thread: a supervisor message and the developer's reply. The
     # store dict carries author_id + project, which the wire shape drops (see assertion).
     discussions = [
-        {"id": 1, "project": "orion", "author_id": 7, "author_name": "Dad",
+        {"id": 1, "project": "orion", "author_id": 7, "author_name": "Supervisor A",
          "role": "supervisor", "body": "How's auth?", "created_at": "2026-06-26T09:00:00+00:00"},
         {"id": 2, "project": "orion", "author_id": None, "author_name": "orion-cli",
          "role": "developer", "body": "Landed.", "created_at": "2026-06-26T12:00:00+00:00"},
@@ -399,7 +399,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
     # Discussions (E2 Inc 5): a REAL role per item (gap 7 closed for this surface), oldest
     # first. author_id and project are dropped from the wire (the badge needs name + role).
     assert out["discussions"] == [
-        {"id": 1, "author_name": "Dad", "role": "supervisor", "body": "How's auth?",
+        {"id": 1, "author_name": "Supervisor A", "role": "supervisor", "body": "How's auth?",
          "created_at": "2026-06-26T09:00:00+00:00"},
         {"id": 2, "author_name": "orion-cli", "role": "developer", "body": "Landed.",
          "created_at": "2026-06-26T12:00:00+00:00"},
@@ -835,13 +835,13 @@ def test_skills_merge_across_projects_raises_depth_via_breadth():
     out = api.serialize_skills(
         [
             {"name": "orion", "skills": [_skill("Python backends", weight=2)]},
-            {"name": "sar_hackathon", "skills": [_skill("python backends", weight=2)]},
+            {"name": "demo-project", "skills": [_skill("python backends", weight=2)]},
         ],
         allowed=None,
     )
     assert len(out["skills"]) == 1  # casefold-merged despite the capitalization difference
     merged = out["skills"][0]
-    assert merged["projects"] == ["orion", "sar_hackathon"]
+    assert merged["projects"] == ["demo-project", "orion"]
     assert merged["depth"] == 3  # score 5 <= T3 (6)
 
 

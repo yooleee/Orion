@@ -2135,11 +2135,11 @@ def test_api_me_is_reachable_unauthenticated_on_a_gated_relay(tmp_path):
 def test_api_me_reflects_admin_and_viewer_scope(tmp_path):
     """With a session, /api/me carries identity and the right scope per role."""
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        _provision_user(db, "Teammate B", "admin-key", role="admin")
         _provision_user(db, "Mum", "mum-key", role="viewer", projects=["orion"])
 
         _, admin_me = _get_json(base_url, "/api/me", cookie=_login(base_url, "admin-key"))
-        assert admin_me["identity"] == {"name": "Yusuf", "role": "admin"}
+        assert admin_me["identity"] == {"name": "Teammate B", "role": "admin"}
         assert admin_me["scope"]["unrestricted"] is True
 
         _, viewer_me = _get_json(base_url, "/api/me", cookie=_login(base_url, "mum-key"))
@@ -2214,11 +2214,11 @@ def test_api_report_detail_carries_nav_and_404s_unknown(tmp_path):
 def test_api_login_sets_cookie_and_rejects_bad_key(tmp_path):
     """POST /api/login returns {ok,user}+Set-Cookie on a good key, 401 {ok:false} on a bad one."""
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        _provision_user(db, "Teammate B", "admin-key", role="admin")
 
         status, body, headers = _post_api_json(base_url, "/api/login", {"key": "admin-key"})
         assert status == 200
-        assert body == {"ok": True, "user": {"name": "Yusuf", "role": "admin"}}
+        assert body == {"ok": True, "user": {"name": "Teammate B", "role": "admin"}}
         assert _SESSION_COOKIE_NAME in (headers.get("Set-Cookie") or "")
 
         bad, bad_body, _ = _post_api_json(base_url, "/api/login", {"key": "wrong"})
@@ -2228,7 +2228,7 @@ def test_api_login_sets_cookie_and_rejects_bad_key(tmp_path):
 def test_api_login_minted_cookie_authenticates_me(tmp_path):
     """The cookie from /api/login authenticates a subsequent /api/me as that user."""
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        _provision_user(db, "Teammate B", "admin-key", role="admin")
         _, _body, headers = _post_api_json(base_url, "/api/login", {"key": "admin-key"})
         jar = SimpleCookie()
         jar.load(headers["Set-Cookie"])
@@ -2236,13 +2236,13 @@ def test_api_login_minted_cookie_authenticates_me(tmp_path):
 
         _, me = _get_json(base_url, "/api/me", cookie=cookie)
         assert me["authenticated"] is True
-        assert me["identity"] == {"name": "Yusuf", "role": "admin"}
+        assert me["identity"] == {"name": "Teammate B", "role": "admin"}
 
 
 def test_api_login_rejects_foreign_origin(tmp_path):
     """A cross-origin POST /api/login is refused 403 (the CSRF guard)."""
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _provision_user(db, "Yusuf", "admin-key", role="admin")
+        _provision_user(db, "Teammate B", "admin-key", role="admin")
         status, _body, _h = _post_api_json(
             base_url, "/api/login", {"key": "admin-key"}, origin="https://evil.example"
         )
@@ -2562,8 +2562,8 @@ def test_api_discussion_supervisor_post_stores_and_returns_created(tmp_path):
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         _ingest_one(base_url)  # creates project "demo"
-        uid = _provision_user(db, "Dad", "dad-key", role="supervisor", projects=["demo"])
-        cookie = _login(base_url, "dad-key")
+        uid = _provision_user(db, "Supervisor A", "supervisor-a-key", role="supervisor", projects=["demo"])
+        cookie = _login(base_url, "supervisor-a-key")
 
         status, body, _ = _post_api_json(
             base_url, "/api/discussions/demo/items",
@@ -2575,7 +2575,7 @@ def test_api_discussion_supervisor_post_stores_and_returns_created(tmp_path):
         assert status == 201
         assert body["body"] == "How's the auth slice?"
         assert body["role"] == "supervisor"          # derived from the principal, not the body
-        assert body["author_name"] == "Dad"          # session identity, not the spoofed name
+        assert body["author_name"] == "Supervisor A"          # session identity, not the spoofed name
         assert "author_id" not in body               # internal id is not on the wire
         assert isinstance(body["id"], int) and body["created_at"]
 
@@ -2583,7 +2583,7 @@ def test_api_discussion_supervisor_post_stores_and_returns_created(tmp_path):
         stored = discussion_items_for_project(conn, "demo")
         assert len(stored) == 1
         assert stored[0]["author_id"] == uid         # real principal id, not the spoofed 999
-        assert stored[0]["author_name"] == "Dad" and stored[0]["role"] == "supervisor"
+        assert stored[0]["author_name"] == "Supervisor A" and stored[0]["role"] == "supervisor"
 
 
 def test_api_discussion_admin_posts_as_developer(tmp_path):
@@ -2650,8 +2650,8 @@ def test_api_discussion_rejects_foreign_origin(tmp_path):
     """A cross-site Origin is 403 even with a valid supervisor session (CSRF guard)."""
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         _ingest_one(base_url)
-        _provision_user(db, "Dad", "dad-key", role="supervisor", projects=["demo"])
-        cookie = _login(base_url, "dad-key")
+        _provision_user(db, "Supervisor A", "supervisor-a-key", role="supervisor", projects=["demo"])
+        cookie = _login(base_url, "supervisor-a-key")
         status, _body, _ = _post_api_json(
             base_url, "/api/discussions/demo/items", {"body": "x"},
             cookie=cookie, origin="https://evil.example",
@@ -2719,9 +2719,9 @@ def test_api_discussion_thread_appears_in_project_detail_read(tmp_path):
     """
     with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
         _ingest_one(base_url)
-        _provision_user(db, "Dad", "dad-key", role="supervisor", projects=["demo"])
+        _provision_user(db, "Supervisor A", "supervisor-a-key", role="supervisor", projects=["demo"])
         _provision_user(db, "Owner", "owner-key", role="admin")  # the developer/owner
-        sup_cookie = _login(base_url, "dad-key")
+        sup_cookie = _login(base_url, "supervisor-a-key")
         _post_api_json(
             base_url, "/api/discussions/demo/items", {"body": "How's auth?"}, cookie=sup_cookie
         )
@@ -2735,7 +2735,7 @@ def test_api_discussion_thread_appears_in_project_detail_read(tmp_path):
         assert status == 200
         thread = detail["discussions"]
         assert [(d["author_name"], d["role"], d["body"]) for d in thread] == [
-            ("Dad", "supervisor", "How's auth?"),
+            ("Supervisor A", "supervisor", "How's auth?"),
             ("Owner", "developer", "Landed."),
         ]
         assert all("author_id" not in d for d in thread)  # internal id stays off the wire
@@ -2792,7 +2792,7 @@ def test_api_discussions_pull_returns_thread_and_latest_id(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         _ingest_one(base_url)  # project "demo"
         d1, d2 = _seed_discussion(
-            db, "demo", [("Dad", "supervisor", "How's auth?"), ("Yusuf", "developer", "Landed.")]
+            db, "demo", [("Supervisor A", "supervisor", "How's auth?"), ("Teammate B", "developer", "Landed.")]
         )
         code, body = _get(base_url, _api_discussions_path(project="demo"), bearer=_TOKEN)
         assert code == 200
@@ -2809,7 +2809,7 @@ def test_api_discussions_pull_since_id_and_caught_up(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         _ingest_one(base_url)
         d1, d2 = _seed_discussion(
-            db, "demo", [("Dad", "supervisor", "seen"), ("Dad", "supervisor", "new")]
+            db, "demo", [("Supervisor A", "supervisor", "seen"), ("Supervisor A", "supervisor", "new")]
         )
         code, body = _get(
             base_url, _api_discussions_path(project="demo", since_id=d1), bearer=_TOKEN
@@ -2845,7 +2845,7 @@ def test_api_discussion_post_stores_as_developer_and_returns_201(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         _ingest_one(base_url)
         status, raw = _post(
-            base_url, json.dumps({"project": "demo", "author": "Yusuf", "body": "Landed."}).encode(),
+            base_url, json.dumps({"project": "demo", "author": "Teammate B", "body": "Landed."}).encode(),
             token=_TOKEN, path="/api/discussions",
         )
         assert status == 201 and isinstance(json.loads(raw)["id"], int)
@@ -2854,7 +2854,7 @@ def test_api_discussion_post_stores_as_developer_and_returns_201(tmp_path):
         stored = discussion_items_for_project(conn, "demo")
         assert len(stored) == 1
         assert stored[0]["role"] == "developer"
-        assert stored[0]["author_id"] is None and stored[0]["author_name"] == "Yusuf"
+        assert stored[0]["author_id"] is None and stored[0]["author_name"] == "Teammate B"
         assert stored[0]["body"] == "Landed."
 
 
@@ -3162,12 +3162,12 @@ def test_api_skills_merges_across_projects(tmp_path):
     """
     with _running_relay(tmp_path) as (base_url, _db):
         _push_skills(base_url, "orion", [_skill("Python backends", weight=2)])
-        _push_skills(base_url, "sar_hackathon", [_skill("python backends", weight=2)])
+        _push_skills(base_url, "demo-project", [_skill("python backends", weight=2)])
         status, out = _get_json(base_url, "/api/skills")
         assert status == 200
         assert len(out["skills"]) == 1
         merged = out["skills"][0]
-        assert merged["projects"] == ["orion", "sar_hackathon"]
+        assert merged["projects"] == ["demo-project", "orion"]
         assert merged["depth"] == 3  # re-tuned scale: total 4 + breadth 1 = score 5 -> depth 3
 
 

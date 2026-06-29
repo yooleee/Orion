@@ -28,6 +28,45 @@ dist/
 # OS noise — macOS Finder metadata, never useful in the repo.
 .DS_Store
 
-# Design handoff archive: the zip is redundant with the unpacked design/ files
-# (README + screenshots + .dc.html), which ARE committed as the visual spec.
-design/*.zip
+# =============================================================================
+# Public-showcase hiding (Horizon P): these files stay on local disk but are kept
+# OUT of the public tree. They are internal planning scratch, premature OSS-community
+# scaffolding, or design-process artifacts — useful to the developer, not to a cold
+# reader of the showcase repo. Untracked via `git rm --cached`, ignored here so they
+# don't reappear. (History still contains them; that is the accepted stance.)
+# =============================================================================
+
+# Internal AI-pairing instructions (still read locally by Claude Code) + scratch to-do.
+CLAUDE.md
+tasks.md
+
+# Internal planning corpus: the dense roadmap, kickoff docs, the coupling map, idea/strategy
+# notes, the old kickoff archive. CHANGELOG.md + docs/known-issues.md stay tracked as the
+# reader-friendly progression/rigor signals.
+plans/orion-plan.md
+docs/archive/
+docs/consolidation-slice-kickoff.md
+docs/dashboard-design-brief.md
+docs/dashboard-hardening-kickoff.md
+docs/e2-inc3-kickoff.md
+docs/e2-inc3-unit5-kickoff.md
+docs/e2-inc4-dashboard-rebuild-kickoff.md
+docs/feature-ideas-meta-session.md
+docs/feature-ideas-reconciliation.md
+docs/orion-strategy.md
+docs/oss-showcase-readiness-kickoff.md
+docs/parallelization.md
+docs/skills-comb-rework-kickoff.md
+docs/stage2-comments-discussion-consolidation-kickoff.md
+docs/supervisor-interaction-loop-kickoff.md
+docs/test-messages.md
+
+# OSS-community scaffolding — deferred until an actual OSS launch (showcase, not launch).
+CONTRIBUTING.md
+SECURITY.md
+.github/ISSUE_TEMPLATE/
+.github/PULL_REQUEST_TEMPLATE.md
+
+# Design-process artifacts: mockup HTML, explorations, and screenshots that render real
+# example names/projects as image text. The shipped product UI lives in web/.
+design/

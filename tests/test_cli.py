@@ -1148,14 +1148,14 @@ def test_parse_showcase_projects_splits_name_and_optional_blurb():
     pairs = cli._parse_showcase_projects(
         [
             "orion:A tracker: observed, not authored",  # blurb keeps its inner colon
-            "barebones-ai-village",  # no blurb -> ""
+            "sample-app",  # no blurb -> ""
             "  ",  # blank -> dropped
             " spaced : trimmed ",  # both sides stripped
         ]
     )
     assert pairs == (
         ("orion", "A tracker: observed, not authored"),
-        ("barebones-ai-village", ""),
+        ("sample-app", ""),
         ("spaced", "trimmed"),
     )
     assert cli._parse_showcase_projects(None) == ()  # flag never passed
@@ -1182,7 +1182,7 @@ def test_relay_serve_showcase_flags_build_a_showcase_config(tmp_path, monkeypatc
             "--host", "127.0.0.1",
             "--showcase",
             "--showcase-project", "orion:A local-first tracker.",
-            "--showcase-project", "barebones-ai-village",
+            "--showcase-project", "sample-app",
             "--config", str(tmp_path / "orion.toml"),
         ]
     )
@@ -1192,7 +1192,7 @@ def test_relay_serve_showcase_flags_build_a_showcase_config(tmp_path, monkeypatc
     assert showcase.enabled is True
     assert showcase.projects == (
         ("orion", "A local-first tracker."),
-        ("barebones-ai-village", ""),
+        ("sample-app", ""),
     )
 
 
@@ -1598,10 +1598,10 @@ def _two_discussions():
     """A canned thread: a supervisor message and the developer's reply (latest_id = 2)."""
     return {
         "discussions": [
-            {"id": 1, "project": "demo", "author_id": 7, "author_name": "Dad",
+            {"id": 1, "project": "demo", "author_id": 7, "author_name": "Supervisor A",
              "role": "supervisor", "body": "How's auth?",
              "created_at": "2026-06-28T19:30:00+00:00"},
-            {"id": 2, "project": "demo", "author_id": None, "author_name": "Yusuf",
+            {"id": 2, "project": "demo", "author_id": None, "author_name": "Teammate B",
              "role": "developer", "body": "Landed.",
              "created_at": "2026-06-28T20:00:00+00:00"},
         ],
@@ -1623,8 +1623,8 @@ def test_discussions_pull_shows_thread_and_advances_watermark(tmp_path, monkeypa
 
     assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 0
     out = capsys.readouterr().out
-    assert "[supervisor] Dad" in out and "How's auth?" in out
-    assert "[developer] Yusuf" in out and "Landed." in out
+    assert "[supervisor] Supervisor A" in out and "How's auth?" in out
+    assert "[developer] Teammate B" in out and "Landed." in out
 
     assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 0
     assert [since for _project, since in calls] == [0, 2]
@@ -1669,10 +1669,10 @@ def test_discussions_reply_posts_with_author_and_echoes_id(tmp_path, monkeypatch
     calls = _capture_post_discussion(monkeypatch, {"id": 11})
 
     rc = cli.main(
-        ["discussions", "reply", "demo", "Landed.", "--as", "Yusuf", "--config", str(toml)]
+        ["discussions", "reply", "demo", "Landed.", "--as", "Teammate B", "--config", str(toml)]
     )
     assert rc == 0
-    assert calls == [("demo", "Landed.", "Yusuf")]
+    assert calls == [("demo", "Landed.", "Teammate B")]
     assert "id 11" in capsys.readouterr().out
 
 

@@ -35,22 +35,22 @@ describe("DiscussionComposer — gating", () => {
 
   it("shows 'Posting as {name}' when a supervisor/developer may post", () => {
     render(
-      <DiscussionComposer projectName="demo" authorName="Dad" canDiscuss={true} onPosted={() => {}} />,
+      <DiscussionComposer projectName="demo" authorName="Supervisor A" canDiscuss={true} onPosted={() => {}} />,
     );
-    expect(screen.getByText("Posting as Dad")).toBeInTheDocument();
+    expect(screen.getByText("Posting as Supervisor A")).toBeInTheDocument();
   });
 });
 
 describe("DiscussionComposer — posting", () => {
   it("posts the typed body for the project and hands the created item to onPosted", async () => {
     const created = {
-      id: 9, author_name: "Dad", role: "supervisor" as const, body: "Nice work",
+      id: 9, author_name: "Supervisor A", role: "supervisor" as const, body: "Nice work",
       created_at: "2026-06-28T00:00:00+00:00",
     };
     mockPost.mockResolvedValue(created);
     const onPosted = vi.fn();
     render(
-      <DiscussionComposer projectName="demo" authorName="Dad" canDiscuss={true} onPosted={onPosted} />,
+      <DiscussionComposer projectName="demo" authorName="Supervisor A" canDiscuss={true} onPosted={onPosted} />,
     );
 
     fireEvent.change(screen.getByPlaceholderText("Add to the discussion…"), {
@@ -64,7 +64,7 @@ describe("DiscussionComposer — posting", () => {
 
   it("does not post an empty/whitespace body", () => {
     render(
-      <DiscussionComposer projectName="demo" authorName="Dad" canDiscuss={true} onPosted={() => {}} />,
+      <DiscussionComposer projectName="demo" authorName="Supervisor A" canDiscuss={true} onPosted={() => {}} />,
     );
     fireEvent.change(screen.getByPlaceholderText("Add to the discussion…"), {
       target: { value: "   " },

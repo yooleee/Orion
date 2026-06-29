@@ -18,7 +18,7 @@ Orion has **no built-in scheduler**. It is a one-shot command: to fire on a cade
 that is alive at the right time must run it, and Orion can't wake itself. Rather than ship a
 daemon, Orion delegates timing to the scheduler your OS already has — which already handles
 running-at-boot, missed runs, and run-as-user. (The reasoning behind this choice is recorded in
-[`../plans/orion-plan.md`](../plans/orion-plan.md).)
+`plans/orion-plan.md`.)
 
 The command a scheduler should run is:
 

@@ -62,7 +62,7 @@ describe("Showcase — derived status pill", () => {
       projects: [
         card({ name: "orion", status: "active", progress: { done: 6, total: 15, pct: 40 } }),
         card({
-          name: "barebones-ai-village",
+          name: "sample-app",
           status: "shipped",
           progress: { done: 4, total: 4, pct: 100 },
           report_count: 1,

@@ -329,7 +329,7 @@ makes it a portfolio/OSS asset), so the dashboard-visibility thrust moves from "
   **parked** — secondary to the dashboard. **Function before looks:** a dedicated dashboard *aesthetic*
   pass is its own later slice.
 
-**Horizon P — Publish / OSS-launch** *(decision-gated, order-flexible — triggered when going public)*
+**Horizon P — Publish / OSS-launch** *(NOW ACTIVE as the OSS / public-showcase push — triggered 2026-06-29: the developer is sending job applications and wants the repo presentable to a recruiter. Kickoff: [`docs/oss-showcase-readiness-kickoff.md`](../docs/oss-showcase-readiness-kickoff.md). Scout finding: scaffolding (P2) + CI (P3) are **mostly already done**; the live gap is the **P1 personal-reference scrub** + a README first-impression pass + a confirming secret-scan.)*
 
 The discrete, one-time push to make the repo publishable. Lettered **P** (not F) on purpose: A–E
 imply dependency order, but this band is **not** sequenced after E — it lands whenever the go-public
@@ -341,10 +341,10 @@ until the decision firms it up.
 
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
-| P1 | Personal-reference scrub — remove family / a name / `sar_hackathon` and any private paths from committed planning docs (the deferred D3 publish-prep item, now homed here) | 🔭 Decision-gated |
-| P2 | OSS scaffolding — `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates, Code of Conduct (the standard public-repo files Orion currently lacks) | 🔭 Decision-gated |
-| P3 | Public-repo hygiene / CI — CI suitable for a public, fork-friendly repo (ties to the Actions-quota cap), secret-scanning, branch protection | 🔭 Decision-gated |
-| P4 | Final readiness sweep — re-run the ≤10-min setup test from a clean clone, final README/docs pass, confirm no machine-local paths or secrets in any committed artifact | 🔭 Decision-gated |
+| P1 | **Personal-reference scrub** — family refs (`Dad`), a private project name (`sar_hackathon`), private absolute paths (`/Users/…`), and incidental identity leakage, across examples/docs/tests/source. Distinguish *intentional authorship* (keep) from *leakage* (scrub). **The dominant remaining gap.** | 🛠️ **NOW ACTIVE** (the showcase push) — kickoff above |
+| P2 | OSS scaffolding — `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates | ✅ **Mostly DONE** (all present as of 2026-06-29). Remaining: `CODE_OF_CONDUCT.md` (secondary for a showcase) + a correctness pass |
+| P3 | Public-repo hygiene / CI — CI pipeline, secret-scanning, branch protection | 🟡 **Partly done:** `.github/workflows/ci.yml` exists (Actions-quota cap is the constraint); a confirming **secret-scan** is a showcase must-do; branch-protection is a repo setting |
+| P4 | Final readiness sweep — re-run the ≤10-min setup test from a clean clone, final README/docs pass, confirm no machine-local paths or secrets in any committed artifact. Config (`orion.toml`/`.env`) confirmed **never committed**; history clean of obvious secrets (scanner pass to confirm) | 🔭 After P1 (the final pass) |
 
 *The **continuous** "stay OSS-clean / simple setup" discipline stays cross-cutting (below); Horizon P
 is only the **one-time launch push**, not that ongoing hygiene.*

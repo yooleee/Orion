@@ -8,43 +8,25 @@ delivers them to designated **reviewers** (stakeholders, collaborators, or mento
 Discord and Slack. Collectors read your local files; only delivery makes an outbound call.
 Reports are previewed in your terminal before anything is sent.
 
-> **Status: Horizons A–C shipped; polishing for a public showcase.** `orion report <project>` collects from each
-> enabled signal (git, tasks, notes), redacts secrets, summarizes only the raw git activity with
-> Claude (structured signals skip the LLM), previews the message, and on your confirmation
-> delivers it to each recipient's Discord **and/or** Slack webhook — then records what was sent so
-> the next run only covers what's new. `orion intake <project>` sends a pushed or hand-written
-> update. `orion add-project` registers a new project from its own directory, and `orion status`
-> shows what is unreported across your projects. **Unattended scheduled digests** (`orion report --all --yes` from your OS scheduler;
-> see [Scheduling](#scheduling)), **event-driven git-hook triggers**
-> (see [Event-driven reports](#event-driven-reports-git-hooks)), and a **Claude Code session
-> skill** (see [below](#claude-code-session-skill)) are all available. Reports render as
-> **Discord embeds and Slack Block Kit** (with a plain-text fallback). An **optional local relay**
-> can additionally store reports and serve a **read-only web dashboard**
-> (see [Web dashboard](#web-dashboard-optional-local-relay)); a *hosted, shareable* dashboard is a
-> later horizon.
+**How it works.** You point Orion at a project and run `orion report`. It gathers what changed
+since your last update (new commits, finished to-dos, notes), summarizes the raw git activity into
+plain prose with Claude, and shows you the result in your terminal. On your approval it posts the
+update to the people following your progress on Discord or Slack, then records what it sent so the
+next run only covers what's new. Scheduling, git-hook triggers, a web dashboard, and a Claude Code
+session skill are optional add-ons.
 
-## How it compares
-
-Orion is not the first tool that turns git activity into progress updates. Auto-report tools like
-[Gitmore](https://gitmore.io/) and [Gitrecap](https://www.gitrecap.com/) summarize commits and post
-to Slack, dev-journal builds standups from git plus shell history, and async-standup bots like
-[Geekbot](https://geekbot.com/) and Standuply prompt people and compile the replies. Each does part
-of what Orion does.
-
-What Orion combines that they mostly do not:
+## Highlights
 
 - **Four signals, not just git.** It fuses git, a to-do/milestone checklist, hand-written notes, and
   **Claude Code session summaries** (via a portable skill that works from any project), so an update
   reflects the whole of what you did, including agentic work.
 - **A two-way loop.** Reviewers reply on the dashboard or in chat, and those replies come back to
-  where you work (`orion comments`). Most standup tools are one-way.
+  where you work (`orion comments`).
 - **Own your data.** Collection is local-first, the config is yours to read and edit, secrets stay in
-  a gitignored `.env`, and every report is previewed before anything leaves your machine. Most
-  alternatives are cloud SaaS.
+  a gitignored `.env`, and every report is previewed before anything leaves your machine.
 
-Honest framing: Orion is **personal infrastructure and a portfolio piece**, with open-sourcing as an
-aspiration rather than a product launch. No single feature here is novel. The combination, plus the
-agentic-native session integration, is the part that is genuinely uncommon.
+Orion is **personal infrastructure and a portfolio piece**, with open-sourcing an aspiration rather
+than a current goal.
 
 ## Supported platforms
 
@@ -322,7 +304,8 @@ value (the config holds env-var *names* and paths, not secrets).
 ## Web dashboard (optional local relay)
 
 Orion can **also** push each report to a small local **relay** that stores it and serves a
-**read-only web dashboard** — *in addition to* your Discord/Slack delivery, which is unchanged.
+**web dashboard** for browsing your reports — *in addition to* your Discord/Slack delivery, which
+is unchanged. Reports themselves are read-only; reviewers can add comments and discussion replies.
 It is **opt-in and additive**: with no `[relay]` table in your config, nothing changes.
 
 Enable it by adding a `[relay]` table (an ingest URL + the name of an `.env` variable holding a

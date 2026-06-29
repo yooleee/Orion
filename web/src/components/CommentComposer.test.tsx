@@ -31,26 +31,26 @@ describe("CommentComposer — gating", () => {
   });
 
   it("is disabled when there is no report to attach to", () => {
-    render(<CommentComposer reportId={null} authorName="Yusuf" canComment={true} onPosted={() => {}} />);
+    render(<CommentComposer reportId={null} authorName="Teammate B" canComment={true} onPosted={() => {}} />);
     expect(screen.getByText("No reports yet to comment on")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /post comment/i })).toBeDisabled();
   });
 
   it("shows 'Commenting as {name}' when authed with a report to attach to", () => {
-    render(<CommentComposer reportId={5} authorName="Yusuf" canComment={true} onPosted={() => {}} />);
-    expect(screen.getByText("Commenting as Yusuf")).toBeInTheDocument();
+    render(<CommentComposer reportId={5} authorName="Teammate B" canComment={true} onPosted={() => {}} />);
+    expect(screen.getByText("Commenting as Teammate B")).toBeInTheDocument();
   });
 });
 
 describe("CommentComposer — posting", () => {
   it("posts the typed body and hands the created comment to onPosted", async () => {
     const created = {
-      id: 9, author: "Yusuf", role: null, body: "Nice work",
+      id: 9, author: "Teammate B", role: null, body: "Nice work",
       created_at: "2026-06-27T00:00:00+00:00",
     };
     mockPost.mockResolvedValue(created);
     const onPosted = vi.fn();
-    render(<CommentComposer reportId={5} authorName="Yusuf" canComment={true} onPosted={onPosted} />);
+    render(<CommentComposer reportId={5} authorName="Teammate B" canComment={true} onPosted={onPosted} />);
 
     fireEvent.change(screen.getByPlaceholderText("Add a comment…"), {
       target: { value: "Nice work" },
@@ -62,7 +62,7 @@ describe("CommentComposer — posting", () => {
   });
 
   it("does not post an empty/whitespace body", () => {
-    render(<CommentComposer reportId={5} authorName="Yusuf" canComment={true} onPosted={() => {}} />);
+    render(<CommentComposer reportId={5} authorName="Teammate B" canComment={true} onPosted={() => {}} />);
     fireEvent.change(screen.getByPlaceholderText("Add a comment…"), { target: { value: "   " } });
     // The button stays disabled for a whitespace-only body, so no post fires.
     expect(screen.getByRole("button", { name: /post comment/i })).toBeDisabled();

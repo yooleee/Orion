@@ -710,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         metavar="NAME",
         help=(
-            "Display name for this reply (e.g. --as \"Yusuf\"). Defaults to the label "
+            "Display name for this reply (e.g. --as \"Teammate B\"). Defaults to the label "
             "\"developer\". The role is always 'developer' regardless of this name."
         ),
     )

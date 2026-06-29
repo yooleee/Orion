@@ -20,7 +20,7 @@ describe("DiscussionList — bodies render inert", () => {
     const items: DiscussionItem[] = [
       {
         id: 1,
-        author_name: "Dad",
+        author_name: "Supervisor A",
         role: "supervisor",
         body: EVIL_BODY,
         created_at: "2026-06-28T10:00:00+00:00",
@@ -37,9 +37,9 @@ describe("DiscussionList — bodies render inert", () => {
 
   it("shows each item's role badge so supervisor and developer turns are distinguishable", () => {
     const items: DiscussionItem[] = [
-      { id: 1, author_name: "Dad", role: "supervisor", body: "How's auth?",
+      { id: 1, author_name: "Supervisor A", role: "supervisor", body: "How's auth?",
         created_at: "2026-06-28T10:00:00+00:00" },
-      { id: 2, author_name: "Yusuf", role: "developer", body: "Landed.",
+      { id: 2, author_name: "Teammate B", role: "developer", body: "Landed.",
         created_at: "2026-06-28T11:00:00+00:00" },
     ];
     const { getByText, container } = render(<DiscussionList items={items} />);

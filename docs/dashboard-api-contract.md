@@ -23,8 +23,7 @@ comment-writes slice wired it) and, since E2 Inc 5, the **supervisor-interaction
 > conversation systems — the discussion loop is the identity-first, two-way successor to comments. Stage 1
 > (shipped) made Discussion the project page's only conversation surface; Stage 2 will fold comments into
 > the discussion model and retire the comment routes documented here **at parity**. Until then both
-> families are live and documented below. Plan:
-> [`stage2-comments-discussion-consolidation-kickoff.md`](stage2-comments-discussion-consolidation-kickoff.md).
+> families are live and documented below.
 
 ## Conventions
 
@@ -70,7 +69,7 @@ shell and to know whether to redirect to login.
 {
   "gated": true,
   "authenticated": true,
-  "identity": { "name": "Yusuf", "role": "admin" },
+  "identity": { "name": "Teammate B", "role": "admin" },
   "scope": { "unrestricted": true, "projects": null },
   "display_tz": "America/Los_Angeles",
   "showcase_enabled": false
@@ -175,9 +174,9 @@ Everything observed about one project. `404` when missing or out of scope.
       "created_at": "2026-06-25T09:00:00+00:00" }
   ],
   "discussions": [
-    { "id": 1, "author_name": "Dad", "role": "supervisor", "body": "How's the auth slice?",
+    { "id": 1, "author_name": "Supervisor A", "role": "supervisor", "body": "How's the auth slice?",
       "created_at": "2026-06-26T09:00:00+00:00" },
-    { "id": 2, "author_name": "Yusuf", "role": "developer", "body": "Landed.",
+    { "id": 2, "author_name": "Teammate B", "role": "developer", "body": "Landed.",
       "created_at": "2026-06-26T12:00:00+00:00" }
   ]
 }
@@ -351,7 +350,7 @@ the change is recorded in the kickoff and `known-issues.md`.)
   "categories": ["Backend", "ML / NLP", "Frontend"],
   "skills": [
     { "name": "Python stdlib-first backends", "category": "Backend", "depth": 4,
-      "projects": ["barebones-ai-village", "orion", "sar_hackathon"],
+      "projects": ["demo-project", "orion", "sample-app"],
       "evidence": "Built the relay's stdlib HTTP API and CLI.", "signals": ["git", "docs"] }
   ]
 }
@@ -428,7 +427,7 @@ in allowlist order.
   "projects": [
     { "name": "orion", "description": "A local-first tracker that observes & reframes.",
       "status": "active", "progress": { "done": 6, "total": 15, "pct": 40 }, "report_count": 12 },
-    { "name": "barebones-ai-village", "description": "A structural detection layer — shipped.",
+    { "name": "sample-app", "description": "A sample project, shipped.",
       "status": "shipped", "progress": { "done": 4, "total": 4, "pct": 100 }, "report_count": 1 }
   ]
 }
@@ -460,7 +459,7 @@ check applies. This is the relay's only login surface — the legacy HTML form l
 `render.py` (KI-23).
 
 ```json
-{ "ok": true, "user": { "name": "Yusuf", "role": "admin" } }
+{ "ok": true, "user": { "name": "Teammate B", "role": "admin" } }
 ```
 
 On a bad or revoked key: `401 {"ok": false}` (no cookie set).
@@ -481,7 +480,7 @@ Body `{"body": "<text>", "author"?: "<name>"}`. Returns `201` with the created c
 the read path emits (so the SPA appends it without a refetch):
 
 ```json
-{ "id": 12, "author": "Yusuf", "role": null, "body": "Looks great.", "created_at": "2026-06-27T01:00:00+00:00" }
+{ "id": 12, "author": "Teammate B", "role": null, "body": "Looks great.", "created_at": "2026-06-27T01:00:00+00:00" }
 ```
 
 - **Guards, in order** (reusing the shared auth/scope/origin helpers):
@@ -510,7 +509,7 @@ Body `{"body": "<text>"}`. Returns `201` with the created item in the same shape
 `discussions[]` element above, so the SPA appends it without a refetch):
 
 ```json
-{ "id": 12, "author_name": "Dad", "role": "supervisor", "body": "How's the auth slice?",
+{ "id": 12, "author_name": "Supervisor A", "role": "supervisor", "body": "How's the auth slice?",
   "created_at": "2026-06-27T01:00:00+00:00" }
 ```
 
@@ -544,7 +543,7 @@ comment write. No cookie, no CSRF (a Bearer token is never browser-auto-attached
   watermark, oldest first:
 
   ```json
-  { "discussions": [ { "id": 7, "project": "orion", "author_id": 4, "author_name": "Dad",
+  { "discussions": [ { "id": 7, "project": "orion", "author_id": 4, "author_name": "Supervisor A",
       "role": "supervisor", "body": "How's auth?", "created_at": "2026-06-26T09:00:00+00:00" } ],
     "latest_id": 7 }
   ```

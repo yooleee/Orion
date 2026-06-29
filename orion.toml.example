@@ -108,7 +108,7 @@ state_db = "orion.sqlite3"
 # Windows: a backslash is a TOML escape, so use forward slashes
 # (repo_path = "C:/Users/you/orion") or a single-quoted literal
 # (repo_path = 'C:\Users\you\orion'). A double-quoted "C:\Users\..." is misread.
-repo_path = "/home/yoolee/orion"
+repo_path = "/home/you/orion"
 
 # How much detail leaves the machine. "high_level" (default, safest) sends only
 # commit messages + a diffstat — NO code diff. "detailed" sends a capped,

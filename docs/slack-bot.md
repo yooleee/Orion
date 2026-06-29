@@ -132,5 +132,5 @@ relay) is a documented future, not part of this slice.
   access-gated supervisor input, not the developer's own outbound secrets); the control on it is
   XSS-escaping on render, already in the relay.
 
-See [`docs/phase-c2-bots-kickoff.md`](archive/phase-c2-bots-kickoff.md) for the scoping decision and the
+See `docs/phase-c2-bots-kickoff.md` for the scoping decision and the
 dogfood capture sheet.

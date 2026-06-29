@@ -652,7 +652,7 @@ def test_add_discussion_item_round_trips_every_field(tmp_path):
     conn = open_relay_store(tmp_path / "relay.sqlite3")
 
     item_id = add_discussion_item(
-        conn, "alpha", 7, "Dad", "supervisor",
+        conn, "alpha", 7, "Supervisor A", "supervisor",
         "How's the auth slice going?", "2026-06-28T10:00:00+00:00",
     )
 
@@ -662,7 +662,7 @@ def test_add_discussion_item_round_trips_every_field(tmp_path):
     assert only["id"] == item_id
     assert only["project"] == "alpha"
     assert only["author_id"] == 7
-    assert only["author_name"] == "Dad"
+    assert only["author_name"] == "Supervisor A"
     assert only["role"] == "supervisor"
     assert only["body"] == "How's the auth slice going?"
     assert only["created_at"] == "2026-06-28T10:00:00+00:00"
@@ -677,9 +677,9 @@ def test_discussion_items_are_oldest_first(tmp_path):
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
 
-    add_discussion_item(conn, "alpha", 7, "Dad", "supervisor", "first", "2026-06-28T10:00:00+00:00")
+    add_discussion_item(conn, "alpha", 7, "Supervisor A", "supervisor", "first", "2026-06-28T10:00:00+00:00")
     add_discussion_item(conn, "alpha", None, "orion-cli", "developer", "second", "2026-06-28T11:00:00+00:00")
-    add_discussion_item(conn, "alpha", 7, "Dad", "supervisor", "third", "2026-06-28T12:00:00+00:00")
+    add_discussion_item(conn, "alpha", 7, "Supervisor A", "supervisor", "third", "2026-06-28T12:00:00+00:00")
 
     bodies = [i["body"] for i in discussion_items_for_project(conn, "alpha")]
     assert bodies == ["first", "second", "third"]
@@ -695,7 +695,7 @@ def test_discussion_items_are_scoped_to_their_project(tmp_path):
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
 
-    add_discussion_item(conn, "alpha", 7, "Dad", "supervisor", "on alpha", "2026-06-28T10:00:00+00:00")
+    add_discussion_item(conn, "alpha", 7, "Supervisor A", "supervisor", "on alpha", "2026-06-28T10:00:00+00:00")
     add_discussion_item(conn, "beta", 8, "Mum", "supervisor", "on beta", "2026-06-28T11:00:00+00:00")
 
     assert [i["body"] for i in discussion_items_for_project(conn, "alpha")] == ["on alpha"]
@@ -731,9 +731,9 @@ def test_discussion_items_since_id_returns_only_newer(tmp_path):
     pull with since_id at the second's id, expecting only the third.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
-    d1 = add_discussion_item(conn, "demo", 7, "Dad", "supervisor", "first", "2026-06-28T10:00:00+00:00")
+    d1 = add_discussion_item(conn, "demo", 7, "Supervisor A", "supervisor", "first", "2026-06-28T10:00:00+00:00")
     d2 = add_discussion_item(conn, "demo", None, "orion-cli", "developer", "second", "2026-06-28T11:00:00+00:00")
-    d3 = add_discussion_item(conn, "demo", 7, "Dad", "supervisor", "third", "2026-06-28T12:00:00+00:00")
+    d3 = add_discussion_item(conn, "demo", 7, "Supervisor A", "supervisor", "third", "2026-06-28T12:00:00+00:00")
 
     # since_id defaults to 0 → everything.
     assert [i["id"] for i in discussion_items_for_project(conn, "demo")] == [d1, d2, d3]
@@ -752,7 +752,7 @@ def test_discussion_items_unknown_or_caught_up_is_empty(tmp_path):
     one pulled with since_id at its newest item.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
-    last = add_discussion_item(conn, "demo", 7, "Dad", "supervisor", "only", "2026-06-28T10:00:00+00:00")
+    last = add_discussion_item(conn, "demo", 7, "Supervisor A", "supervisor", "only", "2026-06-28T10:00:00+00:00")
 
     assert discussion_items_for_project(conn, "never-seen") == []
     assert discussion_items_for_project(conn, "demo", since_id=last) == []

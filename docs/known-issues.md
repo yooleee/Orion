@@ -9,7 +9,7 @@ full write-up moves to the relevant slice's section of [`CHANGELOG.md`](../CHANG
 (Added / Changed / Fixed / Removed) and the open entry is removed from here, leaving a
 one-line pointer in the **[Resolved](#resolved)** index at the bottom so the id and its
 fate stay traceable. Phase-specific work belongs in
-[`plans/orion-plan.md`](../plans/orion-plan.md), not here.
+`plans/orion-plan.md`, not here.
 
 **Fields per entry:** a stable id, a one-line title, the detail, *why it matters*, a
 severity (low / medium / high), and a status (Open / Needs decision / Monitored /
@@ -180,7 +180,7 @@ Deferred).
   for `--due`.
 - **Severity:** low
 - **Convergence (2026-06-18):** the deferred **light planning/tracking layer** (milestones/sprints/
-  due-dates/at-risk; see "Horizon-C direction settled" in `[plans/orion-plan.md](../plans/orion-plan.md)`
+  due-dates/at-risk; see "Horizon-C direction settled" in `plans/orion-plan.md`
   and the strategy doc) lands at the *same* "cadence needs Orion's own state" threshold — so it most
   naturally arrives **with** this scheduling layer and the Horizon-C stateful process, not separately.
 - **Status:** Deferred → Horizon C (gate evaluated 2026-06-17; build when per-project cadence or
@@ -348,7 +348,7 @@ Deferred).
 ## KI-26 — Skills comb is per-project + component-flavored, and the comb visual is approximate (E2 Inc 4 4c)
 
 - **Detail:** The shipped skills comb has three known limitations, surfaced on real data and to be
-  addressed in a dedicated rework (see [`docs/skills-comb-rework-kickoff.md`](skills-comb-rework-kickoff.md)):
+  addressed in a dedicated rework (see `docs/skills-comb-rework-kickoff.md`):
   (a) **per-project extraction, not global** — skills are extracted per project and merged by normalized
   title, so the same competency phrased differently across projects ("Python backends with CLI tooling" vs
   "Python backend development") does NOT collapse, producing near-duplicate teeth (mirrors KI-6/KI-24's
@@ -371,8 +371,7 @@ Deferred).
   breadth. Part (c): `Skills.tsx` + `skillsComb.ts` + `base.css` redesigned to the true comb-shaped-skills
   form — a horizontal **spine** (breadth) with **teeth hanging down**, length = depth ("broken comb"), in
   category-labelled segments, evidence cards kept; eyes-on-verified on real data across all 3 themes.
-  Calibration-validated against the resume oracle `~/Developer/Applications/Documents/ygolding_resume_2026.md`
-  (the kickoff's `~/Applications/...` path was stale). Residual: run-to-run name flicker (a more advanced
+  Calibration-validated against a private resume oracle kept outside the repo. Residual: run-to-run name flicker (a more advanced
   persistent-identity "living skills" store is the proper long-term fix) and KI-27 (dead `tasks` signal).
   Relates to [[KI-25]] and the kickoff doc above.
 
@@ -408,8 +407,8 @@ Deferred).
   if dogfooding shows report-context goes unused), migrate `report_comments` **at parity** (the KI-23 /
   `render.py` retirement precedent), and remove the comment endpoints/UI/CLI/bot path. Sequenced **after some
   dogfooding** so real usage decides the report-context fork. Plan + open decisions + the A–F unit ladder:
-  [`docs/stage2-comments-discussion-consolidation-kickoff.md`](stage2-comments-discussion-consolidation-kickoff.md).
-  Roadmap: the E5 row of [`plans/orion-plan.md`](../plans/orion-plan.md).
+  `docs/stage2-comments-discussion-consolidation-kickoff.md`.
+  Roadmap: the E5 row of `plans/orion-plan.md`.
 
 ## Resolved
 

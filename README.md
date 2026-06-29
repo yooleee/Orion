@@ -4,11 +4,11 @@
 
 A **local-first** tool that turns your project activity — git commits, a to-do/milestone
 checklist, hand-written notes, and pushed updates — into readable progress updates and
-delivers them to designated "supervisors" over Discord and Slack. Collectors read your local
-files; only delivery makes an outbound call. Reports are previewed in your terminal before
-anything is sent.
+delivers them to designated **reviewers** (stakeholders, collaborators, or mentors) over
+Discord and Slack. Collectors read your local files; only delivery makes an outbound call.
+Reports are previewed in your terminal before anything is sent.
 
-> **Status: Horizons A–C shipped, Horizon D (OSS-readiness) underway.** `orion report <project>` collects from each
+> **Status: Horizons A–C shipped; polishing for a public showcase.** `orion report <project>` collects from each
 > enabled signal (git, tasks, notes), redacts secrets, summarizes only the raw git activity with
 > Claude (structured signals skip the LLM), previews the message, and on your confirmation
 > delivers it to each recipient's Discord **and/or** Slack webhook — then records what was sent so
@@ -36,7 +36,7 @@ What Orion combines that they mostly do not:
 - **Four signals, not just git.** It fuses git, a to-do/milestone checklist, hand-written notes, and
   **Claude Code session summaries** (via a portable skill that works from any project), so an update
   reflects the whole of what you did, including agentic work.
-- **A two-way loop.** Supervisors reply on the dashboard or in chat, and those replies come back to
+- **A two-way loop.** Reviewers reply on the dashboard or in chat, and those replies come back to
   where you work (`orion comments`). Most standup tools are one-way.
 - **Own your data.** Collection is local-first, the config is yours to read and edit, secrets stay in
   a gitignored `.env`, and every report is previewed before anything leaves your machine. Most
@@ -189,12 +189,12 @@ notes_file  = "NOTES.md"          # required when "notes" is enabled (a hand-wri
 # incubator_file = "index.md"     # required when "incubator" is enabled (an idea-pipeline table)
 
   [[projects.orion.recipients]]
-  name            = "Alex (supervisor)"
+  name            = "Alex (reviewer)"
   channel         = "discord"     # "discord" or "slack"
   webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"   # names the .env key holding the URL
 
   [[projects.orion.recipients]]
-  name            = "Sam (supervisor)"
+  name            = "Sam (reviewer)"
   channel         = "slack"
   webhook_env_var = "ORION_SLACK_WEBHOOK_SAM"
 ```
@@ -224,7 +224,7 @@ untouched). To reuse another project's recipients instead of typing them, copy t
 
 ```bash
 cd ~/code/my-other-project
-python -m orion add-project --like orion        # same supervisors as the "orion" project
+python -m orion add-project --like orion        # same reviewers as the "orion" project
 ```
 
 Each `--recipient` is `"Name:channel:ENV_VAR"`, where the last field **names** a `.env` variable
@@ -336,7 +336,7 @@ A subsequent `orion report` / `orion intake` delivers as usual **and** pushes th
 relay, which you can browse at `http://127.0.0.1:8787` (projects → history → one report). The
 push is **fail-soft** — a relay that is down or misconfigured never blocks or fails a delivered
 report. By default the relay binds **loopback only** (`127.0.0.1`), so the dashboard is for your
-own machine. To give a **supervisor** a real URL, you can **deploy it beyond loopback** (Docker or
+own machine. To give a **reviewer** a real URL, you can **deploy it beyond loopback** (Docker or
 a reverse proxy, with TLS and per-user login) — see
 [**docs/deployment.md**](docs/deployment.md). For the local walkthrough, see
 [**docs/new-project-setup.md**](docs/new-project-setup.md).
@@ -412,7 +412,7 @@ hook managers — are in [`docs/git-hooks.md`](docs/git-hooks.md).
 
 Orion's fourth signal — your **coding sessions** — arrives as a *pushed summary*, not by Orion
 parsing session files. A bundled [Claude Code skill](skills/orion-session/SKILL.md) summarizes
-the current session and sends it to a project's supervisor(s) via `intake`:
+the current session and sends it to a project's reviewer(s) via `intake`:
 
 ```sh
 cp -r skills/orion-session ~/.claude/skills/    # install once (per-user)
@@ -453,15 +453,3 @@ python -m pytest                    # run the test suite
 What the suite covers and why — plus what's intentionally *not* covered — is documented in
 [`docs/testing.md`](docs/testing.md). The manual cross-OS checks (native Windows/macOS) live
 in [`docs/portability-smoke-test.md`](docs/portability-smoke-test.md).
-
-## Contributing
-
-Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to set up a dev
-environment, run the test suite, and the conventions to follow (cross-platform, minimal
-dependencies, secret-safe).
-
-## Security
-
-Orion is built around leak prevention (see [Privacy & security](#privacy--security)). If you
-find a vulnerability, please **do not** open a public issue — follow the private disclosure
-process in [`SECURITY.md`](SECURITY.md).

@@ -266,7 +266,7 @@ def test_pull_discussions_derives_url_sends_query_and_bearer(monkeypatch):
         captured["url"] = request.full_url
         captured["authorization"] = request.headers.get("Authorization")
         body = json.dumps(
-            {"discussions": [{"id": 4, "role": "supervisor", "author_name": "Dad",
+            {"discussions": [{"id": 4, "role": "supervisor", "author_name": "Supervisor A",
                               "body": "How's auth?"}], "latest_id": 4}
         ).encode("utf-8")
         return _FakeReadResponse(body)
@@ -300,13 +300,13 @@ def test_post_discussion_sends_payload_and_returns_id(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    result = post_discussion("https://relay.test/ingest", "tok", "demo", "Landed.", "Yusuf")
+    result = post_discussion("https://relay.test/ingest", "tok", "demo", "Landed.", "Teammate B")
 
     assert captured["url"] == "https://relay.test/api/discussions"
     assert captured["method"] == "POST"
     assert captured["authorization"] == "Bearer tok"
     # Exactly the three fields; no client-set role/author_id.
-    assert captured["payload"] == {"project": "demo", "body": "Landed.", "author": "Yusuf"}
+    assert captured["payload"] == {"project": "demo", "body": "Landed.", "author": "Teammate B"}
     assert result == {"id": 11}
 
 

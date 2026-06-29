@@ -524,6 +524,36 @@ Body `{"body": "<text>"}`. Returns `201` with the created item in the same shape
 - Source: `_authenticate` / `_allowed_projects` / `_origin_error` / `history` / `get_checklist` /
   `add_discussion_item` (the first three reused from the comment path).
 
+#### `GET /api/discussions` + `POST /api/discussions` (developer CLI loop — machine, not the SPA)
+
+The developer's terminal half of the loop (E2 Inc 5, Unit 3), **Bearer**-authed with the ingest token —
+the machine siblings of the cookie write above, exactly as `GET`/`POST /api/comments` are to the SPA
+comment write. No cookie, no CSRF (a Bearer token is never browser-auto-attached). Driven by
+`orion discussions pull` / `orion discussions reply`.
+
+- **`GET /api/discussions?project=<name>&since_id=<int>`** — pull a project's thread for the terminal.
+  `since_id` is optional (default 0 → all). Returns the **raw store rows** (not the SPA wire shape) plus a
+  watermark, oldest first:
+
+  ```json
+  { "discussions": [ { "id": 7, "project": "orion", "author_id": 4, "author_name": "Dad",
+      "role": "supervisor", "body": "How's auth?", "created_at": "2026-06-26T09:00:00+00:00" } ],
+    "latest_id": 7 }
+  ```
+
+  `latest_id` is the highest id returned, or `since_id` when nothing is newer (so the CLI advances its
+  `(project, relay_url)` watermark unconditionally). An unknown project → `200` with `[]`. `400` on a
+  missing `project` or a non-integer `since_id`; `401` (+ `WWW-Authenticate: Bearer`) on a bad token.
+  Mirrors `GET /api/comments`.
+
+- **`POST /api/discussions`** — append the developer's reply. Body `{"project", "body", "author"?}`. The
+  `author` is the CLI's optional `--as` display name, defaulting to the fixed label `"developer"`. Returns
+  `201 {"id": <int>}`. **`role` is server-fixed to `"developer"` and `author_id` to `null`** — the ingest
+  token authorizes "the developer" and nothing more, so this path can **never** forge a `supervisor` entry
+  (a `role`/`author_id` in the body is ignored). `404` when the project does not exist (reports or a
+  checklist), so a typo cannot spawn an orphan thread; `400` on an empty/oversized body; `401` on a bad
+  token. Mirrors `POST /api/comments`.
+
 ## The `kind` flag (projects vs trackers)
 
 The home splits real software projects from general trackers (e.g. the applications tracker). This fact is

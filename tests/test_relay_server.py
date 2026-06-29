@@ -48,6 +48,7 @@ from relay.server import (
 )
 from relay.store import (
     add_comment,
+    add_discussion_item,
     add_user,
     bump_session_version,
     comments_for,
@@ -2738,6 +2739,193 @@ def test_api_discussion_thread_appears_in_project_detail_read(tmp_path):
             ("Owner", "developer", "Landed."),
         ]
         assert all("author_id" not in d for d in thread)  # internal id stays off the wire
+
+
+# --- GET/POST /api/discussions: the developer's Bearer machine loop (E2 Inc 5, Unit 3a) ---
+# The CLI's terminal half: a Bearer pull (mirrors GET /api/comments) + a Bearer reply that
+# ALWAYS lands as role="developer" (the token is the developer's credential — it cannot forge
+# a supervisor entry). Distinct from Unit 2's cookie routes.
+
+
+def _api_discussions_path(project=None, since_id=None):
+    """Build a "/api/discussions" path with an (optionally) encoded query string."""
+    params = {}
+    if project is not None:
+        params["project"] = project
+    if since_id is not None:
+        params["since_id"] = since_id
+    query = urllib.parse.urlencode(params)
+    return "/api/discussions" + (f"?{query}" if query else "")
+
+
+def _seed_discussion(db, project, entries):
+    """Append discussion items directly via the store; return their ids.
+
+    entries: list of (author_name, role, body). author_id is None (machine-style).
+    """
+    conn = open_relay_store(db)
+    try:
+        return [
+            add_discussion_item(conn, project, None, name, role, body,
+                                "2026-06-28T10:00:00+00:00")
+            for (name, role, body) in entries
+        ]
+    finally:
+        conn.close()
+
+
+def test_api_discussions_pull_requires_bearer_and_never_echoes_secret(tmp_path):
+    """The machine pull is Bearer-gated; a wrong token is 401 and never leaks the secret."""
+    with _running_relay(tmp_path) as (base_url, db):
+        code, body = _get(base_url, _api_discussions_path(project="demo"), bearer="wrong")
+        assert code == 401
+        assert _TOKEN not in body
+
+
+def test_api_discussions_pull_returns_thread_and_latest_id(tmp_path):
+    """A Bearer pull returns the project's items oldest-first plus a latest_id watermark.
+
+    Why this matters: this is the developer's read promise — each item's fields (including
+    the real role, so the terminal can label supervisor vs developer turns) and the highest
+    id to advance the local watermark to.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)  # project "demo"
+        d1, d2 = _seed_discussion(
+            db, "demo", [("Dad", "supervisor", "How's auth?"), ("Yusuf", "developer", "Landed.")]
+        )
+        code, body = _get(base_url, _api_discussions_path(project="demo"), bearer=_TOKEN)
+        assert code == 200
+        payload = json.loads(body)
+        assert [(d["role"], d["body"]) for d in payload["discussions"]] == [
+            ("supervisor", "How's auth?"), ("developer", "Landed."),
+        ]
+        assert [d["id"] for d in payload["discussions"]] == [d1, d2]
+        assert payload["latest_id"] == d2
+
+
+def test_api_discussions_pull_since_id_and_caught_up(tmp_path):
+    """since_id returns only newer items; with nothing newer, [] and latest_id echoes since_id."""
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)
+        d1, d2 = _seed_discussion(
+            db, "demo", [("Dad", "supervisor", "seen"), ("Dad", "supervisor", "new")]
+        )
+        code, body = _get(
+            base_url, _api_discussions_path(project="demo", since_id=d1), bearer=_TOKEN
+        )
+        payload = json.loads(body)
+        assert [d["body"] for d in payload["discussions"]] == ["new"]
+        assert payload["latest_id"] == d2
+
+        # Caught up: nothing newer than d2 → empty, watermark stays at d2 (idempotent advance).
+        code2, body2 = _get(
+            base_url, _api_discussions_path(project="demo", since_id=d2), bearer=_TOKEN
+        )
+        assert code2 == 200
+        payload2 = json.loads(body2)
+        assert payload2["discussions"] == [] and payload2["latest_id"] == d2
+
+
+def test_api_discussions_pull_unknown_project_is_200_empty_and_missing_is_400(tmp_path):
+    """An unknown project pulls a clean 200 empty; a missing project param is a 400."""
+    with _running_relay(tmp_path) as (base_url, db):
+        code, body = _get(base_url, _api_discussions_path(project="ghost"), bearer=_TOKEN)
+        assert code == 200 and json.loads(body)["discussions"] == []
+        miss, _ = _get(base_url, _api_discussions_path(), bearer=_TOKEN)  # no project
+        assert miss == 400
+
+
+def test_api_discussion_post_stores_as_developer_and_returns_201(tmp_path):
+    """A Bearer reply lands as role='developer' with author_id None and the supplied name.
+
+    Why this matters: the developer's write half. The 201 echoes the new id; the row is
+    stored with the server-fixed role and the --as name, ready for the supervisor to read.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)
+        status, raw = _post(
+            base_url, json.dumps({"project": "demo", "author": "Yusuf", "body": "Landed."}).encode(),
+            token=_TOKEN, path="/api/discussions",
+        )
+        assert status == 201 and isinstance(json.loads(raw)["id"], int)
+
+        conn = open_relay_store(db)
+        stored = discussion_items_for_project(conn, "demo")
+        assert len(stored) == 1
+        assert stored[0]["role"] == "developer"
+        assert stored[0]["author_id"] is None and stored[0]["author_name"] == "Yusuf"
+        assert stored[0]["body"] == "Landed."
+
+
+def test_api_discussion_post_omitted_author_uses_default_label(tmp_path):
+    """With no author, the reply is stored under the fixed 'developer' fallback label."""
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)
+        status, _ = _post(
+            base_url, json.dumps({"project": "demo", "body": "no name given"}).encode(),
+            token=_TOKEN, path="/api/discussions",
+        )
+        assert status == 201
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo")[0]["author_name"] == "developer"
+
+
+def test_api_discussion_post_cannot_forge_supervisor_role(tmp_path):
+    """A body claiming role='supervisor' is ignored: the Bearer path always stores 'developer'.
+
+    Why this matters: this is the core integrity property of the machine write — the ingest
+    token authorizes 'the developer' and nothing more, so a client cannot forge a supervisor
+    entry by stuffing a role into the body (the handler never reads role from the body).
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)
+        status, _ = _post(
+            base_url,
+            json.dumps({"project": "demo", "body": "I am dad", "role": "supervisor",
+                        "author_id": 7}).encode(),
+            token=_TOKEN, path="/api/discussions",
+        )
+        assert status == 201
+        conn = open_relay_store(db)
+        stored = discussion_items_for_project(conn, "demo")[0]
+        assert stored["role"] == "developer" and stored["author_id"] is None
+
+
+def test_api_discussion_post_wrong_token_is_401_and_stores_nothing(tmp_path):
+    """A wrong Bearer token is 401 and writes nothing."""
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)
+        status, _ = _post(
+            base_url, json.dumps({"project": "demo", "body": "x"}).encode(),
+            token="wrong", path="/api/discussions",
+        )
+        assert status == 401
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
+
+
+def test_api_discussion_post_unknown_project_is_404(tmp_path):
+    """Replying to a project with no reports or checklist is 404 (no orphan threads)."""
+    with _running_relay(tmp_path) as (base_url, db):
+        status, _ = _post(
+            base_url, json.dumps({"project": "ghost", "body": "x"}).encode(),
+            token=_TOKEN, path="/api/discussions",
+        )
+        assert status == 404
+
+
+def test_api_discussion_post_empty_body_is_400(tmp_path):
+    """A whitespace-only body is 400 and stores nothing."""
+    with _running_relay(tmp_path) as (base_url, db):
+        _ingest_one(base_url)
+        status, _ = _post(
+            base_url, json.dumps({"project": "demo", "body": "   "}).encode(),
+            token=_TOKEN, path="/api/discussions",
+        )
+        assert status == 400
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
 
 
 # --- POST /disciplines + GET /api/disciplines (E2 Inc 4 slice 4b) ----------------

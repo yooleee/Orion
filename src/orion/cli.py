@@ -798,9 +798,13 @@ def main(argv: list[str] | None = None) -> int:
     ru_add.add_argument("name", help="The user's unique display name / handle.")
     ru_add.add_argument(
         "--role",
-        choices=("viewer", "admin"),
+        choices=("viewer", "admin", "supervisor"),
         default="viewer",
-        help="The user's role (default: viewer). An admin sees all projects.",
+        help=(
+            "The user's role (default: viewer). An admin sees all projects; a viewer "
+            "or supervisor is scoped to its granted projects (a supervisor may also "
+            "post to a project's discussion thread)."
+        ),
     )
     ru_add.add_argument(
         "--project",

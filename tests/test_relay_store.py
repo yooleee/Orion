@@ -22,10 +22,12 @@ import pytest
 
 from relay.store import (
     add_comment,
+    add_discussion_item,
     add_user,
     bump_session_version,
     comments_for,
     comments_for_project,
+    discussion_items_for_project,
     get,
     get_checklist,
     get_disciplines,
@@ -630,6 +632,130 @@ def test_comments_for_project_unknown_or_caught_up_is_empty(tmp_path):
 
     assert comments_for_project(conn, "never-seen") == []
     assert comments_for_project(conn, "demo", since_id=last) == []
+
+
+# --- Supervisor-interaction loop: discussion items (E2 Inc 5, Unit 1) ----------
+# These pin the append-only per-project discussion log the two-way loop builds on: that
+# an entry round-trips with first-class, server-derived attribution (author_id/name/role),
+# that the thread is ordered and project-scoped, that a NULL author_id (legacy-admin /
+# machine post) survives, and that the since_id watermark behaves like the comment pull.
+
+
+def test_add_discussion_item_round_trips_every_field(tmp_path):
+    """An added discussion entry comes back from the read with every field intact.
+
+    Why this matters: this is the discussion store's core promise — what the dashboard
+    panel and the CLI pull render must equal what was posted. We add one entry with a
+    real author_id and confirm all seven fields (id, project, author_id, author_name,
+    role, body, created_at) survive the round-trip, since every consumer reads them.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+
+    item_id = add_discussion_item(
+        conn, "alpha", 7, "Dad", "supervisor",
+        "How's the auth slice going?", "2026-06-28T10:00:00+00:00",
+    )
+
+    items = discussion_items_for_project(conn, "alpha")
+    assert len(items) == 1
+    only = items[0]
+    assert only["id"] == item_id
+    assert only["project"] == "alpha"
+    assert only["author_id"] == 7
+    assert only["author_name"] == "Dad"
+    assert only["role"] == "supervisor"
+    assert only["body"] == "How's the auth slice going?"
+    assert only["created_at"] == "2026-06-28T10:00:00+00:00"
+
+
+def test_discussion_items_are_oldest_first(tmp_path):
+    """The read returns a project's items in chronological (insertion / id ASC) order.
+
+    Why this matters: an append-only thread must read top-to-bottom in the order it was
+    written, alternating supervisor and developer turns. We add three entries and assert
+    they come back in insertion order, which the panel relies on to lay the thread out.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+
+    add_discussion_item(conn, "alpha", 7, "Dad", "supervisor", "first", "2026-06-28T10:00:00+00:00")
+    add_discussion_item(conn, "alpha", None, "orion-cli", "developer", "second", "2026-06-28T11:00:00+00:00")
+    add_discussion_item(conn, "alpha", 7, "Dad", "supervisor", "third", "2026-06-28T12:00:00+00:00")
+
+    bodies = [i["body"] for i in discussion_items_for_project(conn, "alpha")]
+    assert bodies == ["first", "second", "third"]
+
+
+def test_discussion_items_are_scoped_to_their_project(tmp_path):
+    """The read returns only the named project's thread, never another's.
+
+    Why this matters: each project has its own thread; an entry on project A must never
+    leak into project B's. Unlike comments this needs no report to exist first — the
+    project column IS the anchor — so we post straight to two projects and confirm
+    each read sees only its own (also pinning that a thread needs no prior report).
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+
+    add_discussion_item(conn, "alpha", 7, "Dad", "supervisor", "on alpha", "2026-06-28T10:00:00+00:00")
+    add_discussion_item(conn, "beta", 8, "Mum", "supervisor", "on beta", "2026-06-28T11:00:00+00:00")
+
+    assert [i["body"] for i in discussion_items_for_project(conn, "alpha")] == ["on alpha"]
+    assert [i["body"] for i in discussion_items_for_project(conn, "beta")] == ["on beta"]
+
+
+def test_discussion_item_null_author_id_round_trips(tmp_path):
+    """A NULL author_id is stored and read back as None (machine / legacy-admin post).
+
+    Why this matters: the developer's CLI reply (Unit 3) and the legacy bootstrap admin
+    have no relay_users row, so they post with author_id=None. That None must survive the
+    round-trip rather than erroring or coercing to 0, since the renderer distinguishes
+    "a registered user" from "a machine/legacy author" by this field.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+
+    add_discussion_item(
+        conn, "alpha", None, "orion-cli", "developer",
+        "Auth slice landed.", "2026-06-28T12:00:00+00:00",
+    )
+
+    only = discussion_items_for_project(conn, "alpha")[0]
+    assert only["author_id"] is None
+    assert only["role"] == "developer"
+
+
+def test_discussion_items_since_id_returns_only_newer(tmp_path):
+    """since_id returns only items with a strictly greater id (the watermark cursor).
+
+    Why this matters: this is the unread-cursor mechanism the developer's pull uses
+    (Unit 3). After seeing up to id N, the next pull passes since_id=N and must get back
+    only what came after — never a re-seen entry, never a skipped one. We add three and
+    pull with since_id at the second's id, expecting only the third.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    d1 = add_discussion_item(conn, "demo", 7, "Dad", "supervisor", "first", "2026-06-28T10:00:00+00:00")
+    d2 = add_discussion_item(conn, "demo", None, "orion-cli", "developer", "second", "2026-06-28T11:00:00+00:00")
+    d3 = add_discussion_item(conn, "demo", 7, "Dad", "supervisor", "third", "2026-06-28T12:00:00+00:00")
+
+    # since_id defaults to 0 → everything.
+    assert [i["id"] for i in discussion_items_for_project(conn, "demo")] == [d1, d2, d3]
+    # since_id = d2 → only the strictly-newer d3.
+    newer = discussion_items_for_project(conn, "demo", since_id=d2)
+    assert [i["body"] for i in newer] == ["third"]
+    assert newer[0]["id"] == d3
+
+
+def test_discussion_items_unknown_or_caught_up_is_empty(tmp_path):
+    """An unknown project, or one with nothing newer than since_id, returns [].
+
+    Why this matters: "no new messages" and "no such thread" both map to a clean empty
+    list (not None, not an error), which the endpoint turns into a 200 empty response and
+    the client reads as "nothing new". We check both: a never-seen project, and a real
+    one pulled with since_id at its newest item.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    last = add_discussion_item(conn, "demo", 7, "Dad", "supervisor", "only", "2026-06-28T10:00:00+00:00")
+
+    assert discussion_items_for_project(conn, "never-seen") == []
+    assert discussion_items_for_project(conn, "demo", since_id=last) == []
 
 
 # --- Multi-party access: users, scope, revocation, audit (Increment 1) ---------

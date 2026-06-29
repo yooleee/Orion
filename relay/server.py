@@ -126,10 +126,14 @@ _SESSION_COOKIE_NAME = "orion_session"
 _SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at once
 
 # Roles an admin may PROVISION today. relay_users.role is an open enum
-# (contributor/guest are reserved for later increments), but only these two are
-# creatable now, so the provisioning endpoint allowlists them and 400s anything else —
-# an unvalidated role string must never become a stored value.
-_PROVISIONABLE_ROLES = ("admin", "viewer")
+# (contributor/guest are reserved for later increments), but only these are creatable
+# now, so the provisioning endpoint allowlists them and 400s anything else — an
+# unvalidated role string must never become a stored value. "supervisor" (E2 Inc 5) is a
+# SCOPED participant: it deliberately is NOT added to _allowed_projects, so it falls
+# through to the viewer's default-deny scope (sees only its granted projects). Its added
+# capability is writing to a project's discussion thread, granted at that endpoint — not
+# by widening read scope here.
+_PROVISIONABLE_ROLES = ("admin", "viewer", "supervisor")
 
 # Actor label written to the admin audit trail for token-driven provisioning. The admin
 # API authenticates with a shared admin token (not a named identity), so the trail

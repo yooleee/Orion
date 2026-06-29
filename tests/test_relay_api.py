@@ -344,6 +344,14 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
     comments = [
         {"id": 1, "report_id": 26, "author": "Alex", "body": "nice", "created_at": "2026-06-25T00:00:00+00:00"}
     ]
+    # A two-turn discussion thread: a supervisor message and the developer's reply. The
+    # store dict carries author_id + project, which the wire shape drops (see assertion).
+    discussions = [
+        {"id": 1, "project": "orion", "author_id": 7, "author_name": "Dad",
+         "role": "supervisor", "body": "How's auth?", "created_at": "2026-06-26T09:00:00+00:00"},
+        {"id": 2, "project": "orion", "author_id": None, "author_name": "orion-cli",
+         "role": "developer", "body": "Landed.", "created_at": "2026-06-26T12:00:00+00:00"},
+    ]
     out = api.serialize_project(
         name="orion",
         kind="project",
@@ -351,6 +359,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
         checklist=checklist,
         observations=observations,
         comments=comments,
+        discussions=discussions,
         today=_TODAY,
     )
     assert out["name"] == "orion" and out["kind"] == "project"
@@ -387,6 +396,14 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
     assert out["comments"] == [
         {"id": 1, "author": "Alex", "role": None, "body": "nice", "created_at": "2026-06-25T00:00:00+00:00"}
     ]
+    # Discussions (E2 Inc 5): a REAL role per item (gap 7 closed for this surface), oldest
+    # first. author_id and project are dropped from the wire (the badge needs name + role).
+    assert out["discussions"] == [
+        {"id": 1, "author_name": "Dad", "role": "supervisor", "body": "How's auth?",
+         "created_at": "2026-06-26T09:00:00+00:00"},
+        {"id": 2, "author_name": "orion-cli", "role": "developer", "body": "Landed.",
+         "created_at": "2026-06-26T12:00:00+00:00"},
+    ]
 
 
 def test_project_detail_emits_in_progress_state_and_passes_status_through():
@@ -412,6 +429,7 @@ def test_project_detail_emits_in_progress_state_and_passes_status_through():
         checklist=checklist,
         observations=[],
         comments=[],
+        discussions=[],
         today=_TODAY,
     )
     by_text = {r["text"]: r for r in out["checklist"]}
@@ -438,6 +456,7 @@ def test_project_detail_handles_no_checklist():
         checklist=None,
         observations=[],
         comments=[],
+        discussions=[],
         today=_TODAY,
     )
     assert out["stats"]["progress"] == {"done": 0, "total": 0, "pct": None}

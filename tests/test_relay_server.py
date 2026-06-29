@@ -51,6 +51,7 @@ from relay.store import (
     add_user,
     bump_session_version,
     comments_for,
+    discussion_items_for_project,
     get,
     get_checklist,
     get_disciplines,
@@ -2542,6 +2543,201 @@ def test_api_report_comment_rejects_empty_and_oversized_body(tmp_path):
         assert s_big == 400
         conn = open_relay_store(db)
         assert comments_for(conn, report_id) == []
+
+
+# --- POST /api/discussions/<project>/items: the supervisor-interaction loop (E2 Inc 5) ---
+# The SPA's cookie-authed discussion write. Unlike the comment write, identity is fully
+# server-derived (a viewer cannot post; a client-supplied author/role is ignored) and the
+# project — not a report — is the thread anchor. The read folds into GET /api/projects/<name>.
+
+
+def test_api_discussion_supervisor_post_stores_and_returns_created(tmp_path):
+    """A supervisor's same-origin post → 201 as role 'supervisor', attributed to the session.
+
+    Why this matters: the happy path of the loop's human-write surface. The supervisor is a
+    scoped principal; the returned shape matches the read path (_discussion_item) so the SPA
+    appends it directly. Crucially, a client-supplied author/role/author_id is IGNORED in
+    favour of the server-derived identity — a poster cannot forge who they are.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)  # creates project "demo"
+        uid = _provision_user(db, "Dad", "dad-key", role="supervisor", projects=["demo"])
+        cookie = _login(base_url, "dad-key")
+
+        status, body, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items",
+            # Spoofed attribution in the body — every field here must be ignored.
+            {"body": "How's the auth slice?", "author": "Mallory",
+             "role": "developer", "author_id": 999},
+            cookie=cookie,
+        )
+        assert status == 201
+        assert body["body"] == "How's the auth slice?"
+        assert body["role"] == "supervisor"          # derived from the principal, not the body
+        assert body["author_name"] == "Dad"          # session identity, not the spoofed name
+        assert "author_id" not in body               # internal id is not on the wire
+        assert isinstance(body["id"], int) and body["created_at"]
+
+        conn = open_relay_store(db)
+        stored = discussion_items_for_project(conn, "demo")
+        assert len(stored) == 1
+        assert stored[0]["author_id"] == uid         # real principal id, not the spoofed 999
+        assert stored[0]["author_name"] == "Dad" and stored[0]["role"] == "supervisor"
+
+
+def test_api_discussion_admin_posts_as_developer(tmp_path):
+    """The admin/owner (here the legacy bootstrap admin) posts as role 'developer'.
+
+    Why this matters: this is the mapping that lets the developer hold up their half of the
+    thread from the dashboard (admin → 'developer'), so the loop is demonstrable end-to-end
+    before the Unit 3 CLI path. The legacy admin has no relay_users row, so author_id is None
+    — which the nullable column must store cleanly.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users provisioned)
+
+        status, body, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "Auth slice landed."},
+            cookie=cookie,
+        )
+        assert status == 201
+        assert body["role"] == "developer" and body["author_name"] == "legacy-admin"
+
+        conn = open_relay_store(db)
+        stored = discussion_items_for_project(conn, "demo")
+        assert stored[0]["author_id"] is None and stored[0]["role"] == "developer"
+
+
+def test_api_discussion_viewer_is_403(tmp_path):
+    """A plain viewer has no thread standing: their post is 403 and stores nothing.
+
+    Why this matters: a read-only family member can view the dashboard but is not a
+    participant in the discussion. The role→403 gate is the authorization boundary that
+    keeps the loop to supervisors and the developer.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)
+        _provision_user(db, "Kid", "kid-key", role="viewer", projects=["demo"])
+        cookie = _login(base_url, "kid-key")
+
+        status, body, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "let me in"}, cookie=cookie
+        )
+        assert status == 403
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
+
+
+def test_api_discussion_requires_session_when_gated(tmp_path):
+    """A gated relay rejects an unauthenticated discussion post with 401 (stores nothing).
+
+    Why this matters: a discussion entry is attributable by definition, so unlike a comment
+    there is no anonymous/open-loopback path — no session means 401, full stop.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)
+        status, body, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "hi"}  # no cookie
+        )
+        assert status == 401 and body == {"error": "login required"}
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
+
+
+def test_api_discussion_rejects_foreign_origin(tmp_path):
+    """A cross-site Origin is 403 even with a valid supervisor session (CSRF guard)."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)
+        _provision_user(db, "Dad", "dad-key", role="supervisor", projects=["demo"])
+        cookie = _login(base_url, "dad-key")
+        status, _body, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "x"},
+            cookie=cookie, origin="https://evil.example",
+        )
+        assert status == 403
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
+
+
+def test_api_discussion_404_out_of_scope_and_missing_project(tmp_path):
+    """An out-of-scope project and a nonexistent one both 404 (existence-hiding), store nothing.
+
+    Why this matters: a supervisor scoped to other projects must not even learn that 'demo'
+    exists (out-of-scope == missing), and an admin (unrestricted) posting to a phantom
+    project is 404 too — the same two-part scope+existence rule the project read applies.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)  # project "demo"
+        _provision_user(db, "Aunt", "aunt-key", role="supervisor", projects=["other"])
+        cookie = _login(base_url, "aunt-key")
+
+        # Out of scope: 'demo' is real but not granted → 404, identical to missing.
+        s1, b1, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "x"}, cookie=cookie
+        )
+        assert s1 == 404 and b1 == {"error": "not found"}
+
+        # Unrestricted admin posting to a project that does not exist → 404 (existence check).
+        # A real admin user (legacy-admin is off once any user is provisioned).
+        _provision_user(db, "Owner", "owner-key", role="admin")
+        admin_cookie = _login(base_url, "owner-key")
+        s2, _, _ = _post_api_json(
+            base_url, "/api/discussions/ghost/items", {"body": "x"}, cookie=admin_cookie
+        )
+        assert s2 == 404
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
+
+
+def test_api_discussion_rejects_empty_and_oversized_body(tmp_path):
+    """A whitespace-only body and an over-cap body are both 400 (and store nothing)."""
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)
+        cookie = _login(base_url, _VIEW)
+
+        s_empty, _, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "   "}, cookie=cookie
+        )
+        assert s_empty == 400
+        s_big, _, _ = _post_api_json(
+            base_url, "/api/discussions/demo/items",
+            {"body": "x" * (MAX_COMMENT_BODY_CHARS + 1)}, cookie=cookie,
+        )
+        assert s_big == 400
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "demo") == []
+
+
+def test_api_discussion_thread_appears_in_project_detail_read(tmp_path):
+    """A posted item shows up under 'discussions' in GET /api/projects/<name>, oldest first.
+
+    Why this matters: the read side folds the thread into the project detail (where the panel
+    lives), mirroring comments. This is the end-to-end write→read the SPA depends on, and it
+    confirms the real role rides the wire (gap 7 closed for this surface).
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _ingest_one(base_url)
+        _provision_user(db, "Dad", "dad-key", role="supervisor", projects=["demo"])
+        _provision_user(db, "Owner", "owner-key", role="admin")  # the developer/owner
+        sup_cookie = _login(base_url, "dad-key")
+        _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "How's auth?"}, cookie=sup_cookie
+        )
+        # The developer (admin) replies, so the read shows both roles.
+        dev_cookie = _login(base_url, "owner-key")
+        _post_api_json(
+            base_url, "/api/discussions/demo/items", {"body": "Landed."}, cookie=dev_cookie
+        )
+
+        status, detail = _get_json(base_url, "/api/projects/demo", cookie=sup_cookie)
+        assert status == 200
+        thread = detail["discussions"]
+        assert [(d["author_name"], d["role"], d["body"]) for d in thread] == [
+            ("Dad", "supervisor", "How's auth?"),
+            ("Owner", "developer", "Landed."),
+        ]
+        assert all("author_id" not in d for d in thread)  # internal id stays off the wire
 
 
 # --- POST /disciplines + GET /api/disciplines (E2 Inc 4 slice 4b) ----------------

@@ -45,10 +45,12 @@ from . import api
 from .derive import today_in_tz
 from .store import (
     add_comment,
+    add_discussion_item,
     add_user,
     comments_for,
     comments_for_project,
     disciplines_projects,
+    discussion_items_for_project,
     get,
     get_checklist,
     get_disciplines,
@@ -94,6 +96,16 @@ _MAX_BLOB_BYTES = 1_000_000
 # KI-23). NOTE: the native-bot package keeps its OWN independent copies in orion.bot.core.
 MAX_COMMENT_BODY_CHARS = 4_000
 MAX_AUTHOR_CHARS = 200
+
+# Map an authenticated principal's relay_users role to its standing in a project
+# discussion thread (E2 Inc 5, Unit 2). The discussion role is ALWAYS derived here from the
+# server-trusted principal, NEVER read from the request body, so a poster cannot forge their
+# own attribution. supervisor -> "supervisor"; admin (the developer/owner, including the
+# legacy bootstrap admin) -> "developer". A principal whose role is absent from this map
+# (today: viewer) is read-only and may not post — the call site turns a None lookup into a
+# 403. The "orion" item role is intentionally NOT producible by any human write: it is
+# reserved for the later grounded-responder rung (observe-not-originate).
+_DISCUSSION_ROLE_BY_PRINCIPAL = {"supervisor": "supervisor", "admin": "developer"}
 
 # The blob fields the relay consumes, each required to be a string. NOTE: the legacy
 # `source_marker` field (removed from the producer in KI-8; older blobs may still carry
@@ -627,6 +639,33 @@ def _parse_api_comment_path(path: str) -> int | None:
     return int(middle) if middle.isdigit() else None
 
 
+def _parse_api_discussion_path(path: str) -> str | None:
+    """Extract the project name from "/api/discussions/<project>/items", or None.
+
+    Args:
+        path: The request path, already stripped of any query string.
+
+    Returns:
+        The (URL-decoded) project name when `path` is exactly
+        "/api/discussions/<non-empty>/items"; otherwise None (the route did not match).
+
+    Why:
+        The discussion write is RESTfully scoped to a project (the thread anchor), the way
+        the comment write is scoped to a report. do_POST routes by path, so it needs a
+        yes/no-with-name matcher. A project name can contain spaces or other reserved
+        characters, so it arrives percent-encoded and is unquoted here — mirroring how
+        GET /api/projects/<name> decodes its segment, so write and read agree on identity.
+        An empty middle segment fails to match and falls through to the 404.
+    """
+    prefix, suffix = "/api/discussions/", "/items"
+    if not (path.startswith(prefix) and path.endswith(suffix)):
+        return None
+    middle = path[len(prefix):-len(suffix)]
+    if not middle:
+        return None
+    return urllib.parse.unquote(middle)
+
+
 class _RelayHandler(BaseHTTPRequestHandler):
     """Handles relay HTTP requests; reads its config from self.server (RelayServer).
 
@@ -791,6 +830,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
         api_comment_report_id = _parse_api_comment_path(path)
         if api_comment_report_id is not None:
             self._handle_api_report_comment(api_comment_report_id)
+            return
+
+        # E2 Inc 5: the SPA's cookie-authed discussion write (supervisor-interaction loop).
+        # Attribution is server-derived from the principal — see _handle_api_discussion_item.
+        api_discussion_project = _parse_api_discussion_path(path)
+        if api_discussion_project is not None:
+            self._handle_api_discussion_item(api_discussion_project)
             return
 
         self._send_json(404, {"error": "not found"})
@@ -1197,6 +1243,125 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 "id": new_id,
                 "author": author,
                 "role": None,
+                "body": body,
+                "created_at": created_at,
+            },
+        )
+
+    def _handle_api_discussion_item(self, project: str) -> None:
+        """Append one entry from the SPA to a project's discussion thread
+        (POST /api/discussions/<project>/items).
+
+        Args:
+            project: The thread anchor — the project name parsed + URL-decoded from the path.
+
+        Why:
+            The supervisor-interaction loop's human-write surface (E2 Inc 5, Unit 2). The
+            SPA posts a message via fetch and appends the returned item to the thread. It
+            mirrors the comment write (cookie-session + CSRF, scope-filtered, JSON-in/out),
+            but with two deliberate divergences that make attribution first-class:
+
+              - Auth is ALWAYS required. A discussion entry is attributable by definition,
+                so there is no open-loopback free-text-author fallback (the comment path's
+                escape hatch). No principal -> 401, whether the relay is ungated or the
+                browser is simply logged out.
+              - Identity is ENTIRELY server-derived. author_id/author_name/role come from
+                the trusted principal, never the request body, so a poster cannot forge who
+                they are. role is mapped from the principal's relay_users role
+                (_DISCUSSION_ROLE_BY_PRINCIPAL); a viewer has no thread standing -> 403.
+
+            Inbound-security checklist, enforced IN ORDER:
+              1. Auth — a valid session principal, else 401.
+              2. CSRF — the cookie is auto-sent by the browser, so require a matching
+                 Origin/Referer (_origin_error), else 403. Checked before any authz work.
+              3. Authz — map the principal's role to a thread role; a viewer is read-only
+                 (403). The "orion" role is never reachable from a human write.
+              4. Validate — JSON {body}; a non-empty body within the cap, else 400. Any
+                 client-supplied author/role/author_id is silently IGNORED, not trusted.
+              5. Project exists AND is in scope — else 404, identical to a missing project
+                 (existence-hiding), the same rule GET /api/projects/<name> applies.
+              6. Store + 201 — append-only via add_discussion_item, returning the item in
+                 the read-path shape (api._discussion_item) so the SPA needs no refetch.
+        """
+        conn = open_relay_store(self.server.db_path)
+        try:
+            # 1) Auth: an attributable entry REQUIRES an authenticated principal. An ungated
+            # relay has no session at all, so principal stays None and this 401s — the
+            # discussion loop is a multi-party feature that needs C3 identity configured.
+            gated = self._auth_required(conn)
+            principal = self._authenticate(conn) if gated else None
+            if principal is None:
+                self._send_json(401, {"error": "login required"})
+                return
+
+            # 2) CSRF: reject a forged cross-site POST before any authz logic runs.
+            if self._origin_error() is not None:
+                self._send_json(403, {"error": "origin check failed"})
+                return
+
+            # 3) Authz: derive the thread role from the server-trusted principal (never the
+            # body). A principal with no mapping (today: viewer) cannot post -> 403.
+            role = _DISCUSSION_ROLE_BY_PRINCIPAL.get(principal["role"])
+            if role is None:
+                self._send_json(403, {"error": "not permitted"})
+                return
+
+            # 4) Read + JSON-parse + validate the body (1 MB cap inside _read_raw_body).
+            # Only `body` is read; author_id/author_name/role are all server-derived, so a
+            # client-supplied attribution in the payload is ignored, not honored.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+            if not isinstance(payload, dict):
+                self._send_json(400, {"error": "payload must be a JSON object"})
+                return
+            body = payload.get("body")
+            if not isinstance(body, str):
+                self._send_json(400, {"error": "field 'body' must be a string"})
+                return
+            body = body.strip()  # whitespace-only counts as empty
+            if not body:
+                self._send_json(400, {"error": "a message body is required"})
+                return
+            if len(body) > MAX_COMMENT_BODY_CHARS:
+                self._send_json(400, {"error": "message is too long"})
+                return
+
+            # 5) Project exists AND is in this principal's scope, else 404 (existence-hiding,
+            # identical to a missing project) — the same two-part check the project read uses.
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and project not in allowed:
+                self._send_json(404, {"error": "not found"})
+                return
+            if not history(conn, project) and get_checklist(conn, project) is None:
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 6) Store. Attribution is entirely server-derived: author_id from the principal
+            # (None for the legacy bootstrap admin, which has no relay_users row), the
+            # trusted DB name, and the mapped role.
+            author_id = principal["user_id"]
+            author_name = principal["name"]
+            created_at = _utc_now_iso()
+            new_id = add_discussion_item(
+                conn, project, author_id, author_name, role, body, created_at
+            )
+        finally:
+            conn.close()
+        # Return the created item in the SAME shape the read path emits
+        # (api._discussion_item) so the SPA appends it to the thread without a refetch.
+        self._send_json(
+            201,
+            {
+                "id": new_id,
+                "author_name": author_name,
+                "role": role,
                 "body": body,
                 "created_at": created_at,
             },
@@ -2005,6 +2170,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         checklist=checklist,
                         observations=observed_history(conn, name),
                         comments=comments_for_project(conn, name),
+                        discussions=discussion_items_for_project(conn, name),
                         today=today,
                     ),
                 )

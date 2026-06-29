@@ -106,6 +106,18 @@ describe("Showcase — untrusted card text renders inert", () => {
   });
 });
 
+describe("Showcase — sample-project demo card", () => {
+  it("always offers a clickable demo card linking to the walkthrough", async () => {
+    // The demo card is fixture-backed, so it renders regardless of the API result.
+    mockGet.mockResolvedValue({ projects: [] });
+    renderShowcase();
+
+    const link = await screen.findByTestId("demo-card");
+    expect(link).toHaveAttribute("href", "/showcase/demo");
+    expect(link).toHaveTextContent("sample-app");
+  });
+});
+
 // Note: the disabled-relay 404 path (the "not available" note) is pinned server-side by
 // test_api_showcase_404_when_disabled and confirmed in eyes-on. A component test for it is
 // omitted because mocking a rejected fetch trips Vitest's unhandled-rejection guard before

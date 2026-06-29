@@ -14,7 +14,7 @@
 //           A guarantee-test pins this.
 // =============================================================================
 
-import type { Discipline } from "../api/types";
+import type { Discipline, DisciplinesData } from "../api/types";
 import { getDisciplines } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 
@@ -55,13 +55,18 @@ function DisciplineGroupSection({
   );
 }
 
-export function Disciplines() {
-  const { data, error, loading } = useApiData(getDisciplines, []);
-
-  if (loading) return <div className="center-note">Loading…</div>;
-  if (error) return <div className="center-note">Could not load disciplines.</div>;
-  if (!data) return null;
-
+/**
+ * The presentational Disciplines page, given already-loaded data.
+ *
+ * Args:
+ *   data: a DisciplinesData (the Global group + per-project groups).
+ *
+ * Returns: the rendered page (no fetching).
+ *
+ * Why: separating render from fetch lets the public Showcase demo render this exact page
+ * from fabricated fixtures (no API call), while the route below keeps fetching live data.
+ */
+export function DisciplinesView({ data }: { data: DisciplinesData }) {
   const isEmpty = data.global.length === 0 && data.projects.length === 0;
 
   return (
@@ -101,4 +106,14 @@ export function Disciplines() {
       )}
     </div>
   );
+}
+
+export function Disciplines() {
+  const { data, error, loading } = useApiData(getDisciplines, []);
+
+  if (loading) return <div className="center-note">Loading…</div>;
+  if (error) return <div className="center-note">Could not load disciplines.</div>;
+  if (!data) return null;
+
+  return <DisciplinesView data={data} />;
 }

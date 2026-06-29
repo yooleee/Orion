@@ -23,6 +23,7 @@ import { Scheduling } from "./routes/Scheduling";
 import { Disciplines } from "./routes/Disciplines";
 import { Skills } from "./routes/Skills";
 import { Showcase } from "./routes/Showcase";
+import { ShowcaseDemo } from "./routes/ShowcaseDemo";
 import { NotFound, Todos } from "./routes/placeholders";
 
 export function App() {
@@ -55,6 +56,8 @@ export function App() {
       <Route path="/login" element={<Login me={me} onAuthChange={loadMe} />} />
       {/* Public, no-login — full-bleed, OUTSIDE the Shell (its own top bar, no sidebar). */}
       <Route path="/showcase" element={<Showcase />} />
+      {/* The fabricated sample-project walkthrough reached from the Showcase landing. */}
+      <Route path="/showcase/demo" element={<ShowcaseDemo />} />
       <Route element={<Shell me={me} onAuthChange={loadMe} />}>
         <Route index element={<Home />} />
         <Route path="project/:name" element={<Project />} />

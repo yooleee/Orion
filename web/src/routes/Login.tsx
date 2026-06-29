@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { useState, type FormEvent } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import type { Me } from "../api/types";
 import { login } from "../api/client";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
@@ -82,6 +82,14 @@ export function Login({ me, onAuthChange }: LoginProps) {
 
         {error && <div className="login-error">{error}</div>}
       </form>
+
+      {/* A way out of the login wall for someone who arrived without the showcase link.
+          Shown ONLY when the relay actually exposes a public showcase (else it'd dead-end). */}
+      {me.showcase_enabled && (
+        <Link to="/showcase" className="login-showcase-link">
+          View the public showcase →
+        </Link>
+      )}
 
       <ThemeSwitcher />
     </div>

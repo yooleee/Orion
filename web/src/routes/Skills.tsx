@@ -20,7 +20,7 @@
 //           dangerouslySetInnerHTML). A guarantee-test pins this.
 // =============================================================================
 
-import type { Skill } from "../api/types";
+import type { Skill, SkillsData } from "../api/types";
 import { getSkills } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import { groupByCategory, toothHeight } from "../lib/skillsComb";
@@ -106,13 +106,18 @@ function SkillCards({ category, skills }: { category: string; skills: Skill[] })
   );
 }
 
-export function Skills() {
-  const { data, error, loading } = useApiData(getSkills, []);
-
-  if (loading) return <div className="center-note">Loading…</div>;
-  if (error) return <div className="center-note">Could not load skills.</div>;
-  if (!data) return null;
-
+/**
+ * The presentational Skills page (the comb + evidence cards), given already-loaded data.
+ *
+ * Args:
+ *   data: a SkillsData (the merged skills + their category order).
+ *
+ * Returns: the rendered page (no fetching).
+ *
+ * Why: separating render from fetch lets the public Showcase demo render this exact comb
+ * from fabricated fixtures (no API call), while the route below keeps fetching live data.
+ */
+export function SkillsView({ data }: { data: SkillsData }) {
   const groups = groupByCategory(data.skills, data.categories);
 
   return (
@@ -155,4 +160,14 @@ export function Skills() {
       )}
     </div>
   );
+}
+
+export function Skills() {
+  const { data, error, loading } = useApiData(getSkills, []);
+
+  if (loading) return <div className="center-note">Loading…</div>;
+  if (error) return <div className="center-note">Could not load skills.</div>;
+  if (!data) return null;
+
+  return <SkillsView data={data} />;
 }

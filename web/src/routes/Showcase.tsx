@@ -17,6 +17,7 @@ import { getShowcase } from "../api/client";
 import { ApiError } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import type { ShowcaseCard } from "../api/types";
+import { DEMO_SHOWCASE_CARD } from "../demo/demoData";
 import { ProgressBar } from "../components/ProgressBar";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
 
@@ -36,7 +37,7 @@ const HOW_I_WORK: Array<{ n: string; title: string; body: string }> = [
   {
     n: "03",
     title: "Legible to anyone",
-    body: "Every state carries a glyph, a label, and a colour, so the work stays legible to a supervisor or family member at a glance.",
+    body: "Every state carries a glyph, a label, and a colour, so the work stays legible to a reviewer at a glance.",
   },
 ];
 
@@ -96,6 +97,30 @@ export function Showcase() {
           </p>
         </section>
 
+        {/* Try it — a clickable, fabricated sample project (static frontend data, no login,
+            no backend). Lets a guest see how Orion presents a monitored project. */}
+        <section className="showcase-section">
+          <div className="showcase-section-head">
+            <h2>Try it</h2>
+            <span className="showcase-rule" aria-hidden="true" />
+          </div>
+          <p className="showcase-section-note">
+            An interactive sample — click to explore how Orion presents a monitored project.
+          </p>
+          <Link to="/showcase/demo" className="showcase-card showcase-card-link" data-testid="demo-card">
+            <div className="showcase-card-head">
+              <span className="showcase-card-name">{DEMO_SHOWCASE_CARD.name}</span>
+              <span className="showcase-status showcase-status-active">sample</span>
+            </div>
+            <p className="showcase-card-desc">{DEMO_SHOWCASE_CARD.description}</p>
+            <div className="showcase-card-meta">
+              <span>{DEMO_SHOWCASE_CARD.progress.pct}% complete</span>
+              <span className="demo-card-cta">Explore the sample →</span>
+            </div>
+            <ProgressBar progress={DEMO_SHOWCASE_CARD.progress} />
+          </Link>
+        </section>
+
         {/* Selected projects — the only data-driven part. While loading or unavailable we
             still render the static hero + How-I-work, so the page never looks broken. */}
         <section className="showcase-section">
@@ -103,6 +128,9 @@ export function Showcase() {
             <h2>Selected projects</h2>
             <span className="showcase-rule" aria-hidden="true" />
           </div>
+          <p className="showcase-section-note">
+            Live, read-only summaries — the same card a real project produces.
+          </p>
           {loading && <p className="showcase-note">Loading…</p>}
           {error && (
             <p className="showcase-note">

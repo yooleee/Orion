@@ -14,7 +14,6 @@
 // =============================================================================
 
 import type {
-  Comment,
   DisciplinesData,
   DiscussionItem,
   LoginResult,
@@ -91,19 +90,10 @@ export const logout = () =>
     body: "{}",
   });
 
-// Post a comment on a report (the only user-authored write). Same-origin cookie + JSON,
-// like login/logout; the server attributes it to the session identity. Returns the created
-// comment (the read-path shape) so the caller can append it without a refetch.
-export const postComment = (reportId: number, body: string) =>
-  apiFetch<Comment>(`/api/reports/${encodeURIComponent(String(reportId))}/comments`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ body }),
-  });
-
-// Post to a project's discussion thread (E2 Inc 5). Same-origin cookie + JSON, like
-// postComment; the server derives author/role from the session identity (a viewer is
-// rejected). Returns the created item (the read-path shape) for optimistic append.
+// Post to a project's discussion thread (E2 Inc 5) — the only user-authored write.
+// Same-origin cookie + JSON, like login/logout; the server derives author/role from the
+// session identity (a viewer is rejected). Returns the created item (the read-path shape)
+// for optimistic append.
 export const postDiscussion = (project: string, body: string) =>
   apiFetch<DiscussionItem>(`/api/discussions/${encodeURIComponent(project)}/items`, {
     method: "POST",

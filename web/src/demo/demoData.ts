@@ -107,7 +107,6 @@ export const DEMO_PROJECT: ProjectDetail = {
   ],
   // The demo project page shows the discussion thread read-only (no composer for a guest);
   // these two items illustrate the two-way loop. Both are fabricated.
-  comments: [],
   discussions: [
     { id: 1, author_name: "Reviewer", role: "supervisor", body: "How's the OAuth piece coming? Anything blocking the launch milestone?", created_at: "2026-06-26T09:00:00+00:00" },
     { id: 2, author_name: "Developer", role: "developer", body: "Token exchange works end to end — just polishing the callback error states, then it's done.", created_at: "2026-06-26T15:30:00+00:00" },
@@ -145,7 +144,6 @@ export const DEMO_REPORTS: ReportDetail[] = [
         { text: "Google OAuth login", done: false, state: "not_started", due_date: null },
       ],
     },
-    comments: [],
     nav: { prev_id: null, prev_number: null, next_id: 1002, next_number: 2 },
   },
   {
@@ -176,7 +174,6 @@ export const DEMO_REPORTS: ReportDetail[] = [
         { text: "Google OAuth login", done: false, state: "in_progress", due_date: "2026-07-03" },
       ],
     },
-    comments: [],
     nav: { prev_id: 1001, prev_number: 1, next_id: 1003, next_number: 3 },
   },
   {
@@ -207,7 +204,6 @@ export const DEMO_REPORTS: ReportDetail[] = [
         { text: "Mobile layout pass", done: false, state: "upcoming", due_date: "2026-08-15" },
       ],
     },
-    comments: [],
     nav: { prev_id: 1002, prev_number: 2, next_id: null, next_number: null },
   },
 ];

@@ -4,9 +4,9 @@
 // Responsible for: One project's full page — header stats, FORWARD LOOK milestones,
 //                  LIVE CHECKLIST, the REPORTS timeline, and the project-level DISCUSSION
 //                  thread (the one conversation surface here). Two-column layout.
-// Note: per-report COMMENTS live on the report-detail page, not here — the project-level
-//       conversation is the Discussion thread (E2 Inc 5). Keeping both on this page would
-//       be two near-identical surfaces doing one job; they were consolidated to Discussion.
+// Note: this project-level Discussion thread (E2 Inc 5) is the ONE conversation surface —
+//       per-report comments were retired outright in KI-28 Stage 2 (two near-identical
+//       surfaces doing one job, consolidated to Discussion).
 // Role in project: Everything observed about a project. Reads /api/projects/:name; a
 //                  404 renders a clean not-found (existence-hiding carries through).
 // =============================================================================

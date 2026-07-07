@@ -165,17 +165,10 @@ export interface ReportSummary {
   source_tags: string[]; // [] in 4a (gap 4)
 }
 
-export interface Comment {
-  id: number;
-  author: string;
-  role: Role | null; // null in 4a (gap 7)
-  body: string;
-  created_at: string;
-}
-
-/** One entry in a project's two-way supervisor↔developer discussion thread (E2 Inc 5).
- *  Unlike Comment, attribution is first-class and server-derived: `author_name` (never a
- *  client-typed name) and a REAL `role` (gap 7 closed for this surface). */
+/** One entry in a project's two-way supervisor↔developer discussion thread (E2 Inc 5) —
+ *  the single conversation surface since KI-28 Stage 2 retired per-report comments.
+ *  Attribution is first-class and server-derived: `author_name` (never a client-typed
+ *  name) and a REAL `role`. */
 export interface DiscussionItem {
   id: number;
   author_name: string;
@@ -192,7 +185,6 @@ export interface ProjectDetail {
   milestones: Milestone[];
   checklist: ChecklistItem[];
   reports: ReportSummary[];
-  comments: Comment[];
   discussions: DiscussionItem[];
 }
 
@@ -240,7 +232,6 @@ export interface ReportDetail {
   participants: Participant[];
   source_tags: string[]; // [] in 4a (gap 4)
   checklist_snapshot: ChecklistSnapshot;
-  comments: Comment[];
   nav: ReportNav;
 }
 

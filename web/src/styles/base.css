@@ -994,10 +994,6 @@ h3 {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.report-comments {
-  margin-top: 28px;
-}
-
 /* Context rail. */
 .rail {
   display: flex;

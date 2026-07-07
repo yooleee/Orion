@@ -14,7 +14,60 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
-## E2 Inc 4 — sectioned dashboard rebuild (SPA) — in progress
+## Horizon P — public-showcase pass (2026-06-29)
+
+Horizon P (publish) fired early, in a reframed form: not the OSS launch (that decision stays
+untriggered), but a **public-showcase pass** — the repo made safe and presentable to show
+(applications, portfolio) with all private data out. Shipped as PRs #75–#76; detail in the
+roadmap's Horizon P band.
+
+### Added
+
+- **A clickable simulated demo project on the public showcase (PR #76).** The no-login `/showcase`
+  gains a fabricated sample project a cold visitor can click through (overview, to-dos, reports,
+  Disciplines, Skills) to see the dashboard populated. Built as **frontend-only typed fixtures** —
+  no backend endpoint, no store seeding — so an anonymous leak of real data is impossible by
+  construction. The real login stays one link away.
+
+### Changed
+
+- **Personal-reference scrub + repo tidy (PR #75).** Personal references replaced with role-indexed
+  placeholders across the tracked tree; internal and OSS-launch files (kickoff docs, the prepared
+  OSS docs) untracked + gitignored, kept local until an actual OSS launch. A **secret-scan over the
+  full history** came back clean, so history was left intact. Why: the repo doubles as a portfolio
+  piece — the showcase pass makes it safe to show now without burning the later go-public option.
+
+## E2 Inc 5 — supervisor-interaction loop (2026-06-29)
+
+The first concrete E5 step: an ongoing, attributable, per-project **two-way discussion**
+(supervisor ↔ developer) with Orion as connective tissue + memory — it carries, threads, and
+remembers; it **generates nothing** (observe-not-originate holds). Merged as PR #74; kickoff in
+`docs/supervisor-interaction-loop-kickoff.md`.
+
+### Added
+
+- **Per-project discussion thread, end to end (Units 1–4, PR #74).** A `relay_discussion_items`
+  store with first-class identity (`author_id` + role `supervisor|developer|orion`, and a new
+  `supervisor` role on `relay_users`); cookie-authed write + project-read endpoints (identity
+  server-derived, append-only, existence-hiding 404s); Bearer machine routes plus an
+  `orion discussions pull/reply` CLI loop with a local watermark (a reply lands as
+  role=developer); and an SPA discussion panel with colour-coded role badges, XSS-inert bodies,
+  and a role-gated composer. 799 backend+CLI + 50 web tests green; the full loop verified
+  end-to-end against a running relay. Unit 5 (a read-only "open directions" derivation —
+  supervisor messages awaiting a reply) is deferred-additive.
+
+### Changed
+
+- **Comments↔Discussion consolidation, stage 1.** Seeing the loop rendered showed the project page
+  had two near-identical conversation surfaces (Discussion + Comments) doing one job. The project
+  page now carries only the project-level **Discussion** thread; per-report **Comments** stay on
+  the report-detail page (report-scoped feedback). Stage 2 — unify the data model (optional
+  `report_id` context on discussion items), retire `report_comments` and the comment UI at parity,
+  migrate existing rows, fold the bot comment path — is planned as
+  [KI-28](docs/known-issues.md), deliberately after some dogfooding. Kickoff:
+  `docs/stage2-comments-discussion-consolidation-kickoff.md`.
+
+## E2 Inc 4 — sectioned dashboard rebuild (SPA) (2026-06-28)
 
 The dashboard rebuilt as a React/Vite single-page app served single-host by the relay (a read-only
 JSON API), faithful to the `design/` handoff. Shipped slice by slice (each its own PR); per-slice
@@ -58,6 +111,24 @@ detail and the band map live in `docs/e2-inc4-dashboard-rebuild-kickoff.md`.
   `dangerouslySetInnerHTML`). `discipline_docs` is an explicit, opt-in per-project config list. Verified
   eyes-on vs `desktop-06` across all three themes against the live `orion` docs. Backend 714 + web 36 green.
 
+### Changed
+
+- **Skills comb reworked to a global, resume-grade extraction + a true comb visual (4c rework;
+  resolves [KI-26](docs/known-issues.md)).** The initial 4c was judged not-yet-reasonable on real
+  data: skills arrived per-project (a fragmented vocabulary), read as project components rather
+  than resume-grade skills, and the visual wasn't true to the comb form. `orion skills-push` became
+  **`orion skills-sync`**, a **global two-pass** extraction: pass 1 derives one deduplicated,
+  resume-grade canonical vocabulary across all projects (on Sonnet — the one step judged worth the
+  step-up, since it synthesizes cross-project); pass 2 attributes skills per project **blind to the
+  others**, so existence-hiding stays structural. Writes go through a new atomic batch endpoint
+  (`POST /skills-batch`: one transaction + prune + an empty-clobber guard), and depth boundaries
+  were re-tuned for the now-accurate breadth. The visual (`web/src/routes/Skills.tsx`,
+  `web/src/lib/skillsComb.ts`, `base.css`) was redesigned to the true comb-shaped-skills form: a
+  horizontal spine (breadth) with teeth hanging down (tooth length = depth), category-labelled
+  segments, evidence cards kept. Backend 763 green; web 7/7 + build green; eyes-on-verified on real
+  seeded data across all three themes. This entry supersedes the pre-rework `skills-push` shape
+  described under "Added" above.
+
 ### Removed
 
 - **Legacy server-rendered HTML retired at parity (closes [KI-23](docs/known-issues.md)).** With the
@@ -76,7 +147,7 @@ detail and the band map live in `docs/e2-inc4-dashboard-rebuild-kickoff.md`.
   deleted; legacy route tests either dropped as redundant with the `test_api_*` coverage or repointed
   to the JSON routes): backend suite 676 green, web 33 green.
 
-## E2 Inc 3 — forward-looking planning layer, rung 1 (observe + remember) — in progress
+## E2 Inc 3 — forward-looking planning layer, rung 1 (observe + remember) (2026-06-26)
 
 The forward-looking layer (E1): due-dates, at-risk, slippage, and derived milestones, built on an
 **observe-and-remember, never originate** model. Shipped unit by unit (each its own PR); see the

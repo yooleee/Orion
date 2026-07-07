@@ -1628,16 +1628,21 @@ def test_discipline_docs_resolve_absolute(tmp_path):
     Why this matters: the collector reads these paths, so a relative entry must be made
     absolute against the config dir (mirroring tasks_file), and an absolute entry kept.
     """
+    # The "kept" fixture must be genuinely absolute on EVERY OS: a POSIX literal like
+    # "/abs/..." has no drive letter, so Windows treats it as relative and the loader
+    # (correctly) resolves it against the config dir, failing the assert (KI-29).
+    # Built from tmp_path; as_posix() keeps the TOML string free of backslash escapes.
+    abs_doc = tmp_path / "design" / "README.md"
     path = _write(
         tmp_path,
-        """
+        f"""
         [summarizer]
         provider = "anthropic"
 
         [projects.demo]
         repo_path = "/tmp/demo"
         collectors = ["git", "disciplines"]
-        discipline_docs = ["CLAUDE.md", "/abs/design/README.md"]
+        discipline_docs = ["CLAUDE.md", "{abs_doc.as_posix()}"]
 
         [[projects.demo.recipients]]
         name = "Alex"
@@ -1648,7 +1653,7 @@ def test_discipline_docs_resolve_absolute(tmp_path):
     project = get_project(load_config(path), "demo")
     assert project.discipline_docs == (
         (tmp_path / "CLAUDE.md").resolve(),
-        Path("/abs/design/README.md"),
+        abs_doc,
     )
 
 

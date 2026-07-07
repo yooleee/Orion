@@ -410,30 +410,20 @@ Deferred).
   `docs/stage2-comments-discussion-consolidation-kickoff.md`.
   Roadmap: the E5 row of `plans/orion-plan.md`.
 
-## KI-29 — Windows CI red: a config test's "absolute path" fixture is POSIX-only (E2 Inc 4 4b)
-
-- **Detail:** The first real weekly full-matrix CI run after the Actions quota reset (2026-07-06,
-  run 28783306587) failed on **all three Windows jobs** (py3.11/3.12/3.13); Linux and macOS were green.
-  One test fails: `tests/test_config.py::test_discipline_docs_resolve_absolute` asserts that the
-  absolute entry in `discipline_docs = ["CLAUDE.md", "/abs/design/README.md"]` is kept untouched — but a
-  drive-less path is **not absolute on Windows** (`Path("/abs/…").is_absolute()` is `False` there), so
-  the loader correctly resolves it against the config dir and the equality assert fails. The product
-  behavior is right per-platform; the **test fixture** is the bug.
-- **Why it matters:** Cross-platform (Windows/macOS/Linux) is a hard constraint, and the weekly Windows
-  matrix is its automated proof. The failure went unseen because per-PR CI is Ubuntu-only and the matrix
-  hadn't run since before 4b landed (quota exhausted). A permanently red weekly run also masks any
-  future, *real* Windows regression.
-- **Severity:** low as product impact (test-only, no runtime behavior involved) — but a real signal cost:
-  the cross-platform guarantee is currently unproven on Windows.
-- **Status:** Open. Fix: build the "stays untouched" fixture from a genuinely absolute path portably
-  (e.g. anchor it on `tmp_path.anchor`, or point at a second `tmp_path`-based file) instead of the POSIX
-  literal, then re-run the full matrix manually (`workflow_dispatch`) to confirm green.
-
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-29** — Weekly Windows CI matrix red: `tests/test_config.py::test_discipline_docs_resolve_absolute`
+  used a POSIX-only "absolute" fixture (`"/abs/…"` has no drive letter, so Windows treated it as relative
+  and the loader — correctly — resolved it against the config dir, failing the assert; found by the first
+  real matrix run after the Actions quota reset, 2026-07-06). **Resolved 2026-07-07** by building the
+  fixture from `tmp_path` (genuinely absolute on every OS; `as_posix()` keeps the TOML string free of
+  backslash escapes). Product behavior was correct throughout — test-only fix. Verified by a manual
+  full-matrix `workflow_dispatch` run: all 9 OS × Python jobs green. (The first attempt's single
+  py3.12-Windows failure was an unrelated flaky relay live-server socket test,
+  `test_revoke_unknown_user_is_404`, which passed on re-run — noting here in case it recurs.)
 - **KI-23** — Legacy server-rendered dashboard not yet retired (the relay carried two front-ends:
   the React SPA and the `relay/render.py` HTML views). **Resolved 2026-06-27** at parity — the SPA
   now covers every URL the old dashboard served, so `relay/render.py` and its legacy form routes

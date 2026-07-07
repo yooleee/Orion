@@ -1,0 +1,410 @@
+# =============================================================================
+# relay/migrate_comments.py
+# -----------------------------------------------------------------------------
+# Responsible for: The one-time, idempotent migration that folds legacy C2
+#                  `report_comments` rows into the E2 Inc 5 discussion model
+#                  (`relay_discussion_items`), then drops the comment table.
+#                  This is the parity step of KI-28 Stage 2 (comments retired
+#                  outright) — see docs/stage2-comments-discussion-consolidation-
+#                  kickoff.md, the 2026-07-07 addendum.
+# Role in project: A standalone maintenance tool, run by hand against the relay's
+#                  SQLite store as TWO deliberate invocations:
+#                      python -m relay.migrate_comments migrate --db PATH [--dry-run]
+#                      python -m relay.migrate_comments drop    --db PATH [--dry-run]
+#                  Run from the repo root (repo root is on sys.path for `-m`); in
+#                  production inside the container (PYTHONPATH=/app,
+#                  --db /data/orion-relay.sqlite3). It is NOT part of the request
+#                  path — the relay never imports it.
+# Assumptions: `open_relay_store` (re)creates the schema on connect via
+#              `IF NOT EXISTS`, so `relay_discussion_items` is guaranteed present.
+#              `report_comments.report_id` points at `relay_reports.id` but is NOT
+#              an enforced foreign key, so an "orphan" comment (a report_id with no
+#              report row) is possible and is handled explicitly rather than lost.
+# =============================================================================
+
+import argparse
+import sqlite3
+import sys
+from pathlib import Path
+
+from relay.store import add_discussion_item, open_relay_store
+
+# The historical role we assign migrated comments. Legacy C2 comments carried no
+# identity (free-text author, role NULL); they were supervisor feedback in intent,
+# so "supervisor" is recorded honestly as a best-effort historical mapping. This is
+# the ONE place identity is assigned rather than server-derived (the migration is
+# the documented exception to the attribution invariant).
+_MIGRATED_ROLE = "supervisor"
+
+# Display name used when the legacy `author` was blank (comments allowed an empty
+# author pre-C3). Chosen over "" so the thread renders a real label, not a gap.
+_ANONYMOUS_AUTHOR = "anonymous"
+
+# How many mapped rows a --dry-run prints as a spot-check sample.
+_DRY_RUN_SAMPLE = 5
+
+
+def _migrated_body(report_id: int, body: str) -> str:
+    """Prefix a comment's body with the report it referred to.
+
+    Args:
+        report_id: The relay_reports.id the comment hung off (its only real context).
+        body: The original comment text, preserved verbatim.
+
+    Returns:
+        The body with a leading `[re: report {report_id}]` line, the original words
+        on the lines below it.
+
+    Why:
+        Stage 2 retires the report anchor outright — discussion items anchor on the
+        project, not a report — so the report context would otherwise be lost. Folding
+        it into the body as a header line keeps parity on INFORMATION while staying
+        honest about the schema (the item genuinely has no report column). This exact
+        string is also the migration's dedup key, so it must be deterministic.
+    """
+    return f"[re: report {report_id}]\n{body}"
+
+
+def _resolved_comments(conn: sqlite3.Connection) -> list[dict]:
+    """Return every comment joined to its project, oldest first.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        A list of {"id", "report_id", "author", "body", "created_at", "project"} dicts,
+        one per comment whose report_id resolves to a real report, in ascending-id
+        (chronological) order.
+
+    Why:
+        `report_comments` has no project column — the project lives on the report it
+        hangs off — so we JOIN through relay_reports to resolve the anchor, exactly as
+        the retired `comments_for_project` did. This INNER join silently excludes
+        orphan comments (no matching report); those are surfaced separately by
+        `_orphan_comments` so nothing is dropped without being reported.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.id, c.report_id, c.author, c.body, c.created_at, r.project
+        FROM report_comments c
+        JOIN relay_reports r ON c.report_id = r.id
+        ORDER BY c.id ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "report_id": row["report_id"],
+            "author": row["author"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+            "project": row["project"],
+        }
+        for row in rows
+    ]
+
+
+def _orphan_comments(conn: sqlite3.Connection) -> list[dict]:
+    """Return comments whose report_id has no matching report, oldest first.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        A list of {"id", "report_id"} dicts for every comment the INNER join in
+        `_resolved_comments` would exclude. Empty in the expected case (this system
+        never deletes reports).
+
+    Why:
+        `report_id` is deliberately not an enforced foreign key, so an orphan is
+        structurally possible. An orphan has no project to attach to, so it cannot be
+        migrated. Rather than let the inner join drop it silently (violating "no comment
+        is lost"), we detect orphans with a LEFT join and report them loudly — and the
+        drop guard refuses while any exist, so a human decides what to do.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.id, c.report_id
+        FROM report_comments c
+        LEFT JOIN relay_reports r ON c.report_id = r.id
+        WHERE r.id IS NULL
+        ORDER BY c.id ASC
+        """
+    ).fetchall()
+    return [{"id": row["id"], "report_id": row["report_id"]} for row in rows]
+
+
+def _discussion_row_exists(
+    conn: sqlite3.Connection,
+    project: str,
+    author_name: str,
+    created_at: str,
+    body: str,
+) -> bool:
+    """Return True if a discussion row already matches this migrated comment.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The thread anchor the comment maps to.
+        author_name: The mapped display name ("anonymous" when the original was blank).
+        created_at: The comment's preserved timestamp.
+        body: The already-prefixed migrated body (`_migrated_body` output).
+
+    Returns:
+        True when a row with this exact four-tuple exists, False otherwise.
+
+    Why:
+        This four-tuple `(project, author_name, created_at, migrated_body)` is the
+        migration's idempotency key (per the addendum): checking it before each insert
+        makes a re-run a no-op with no duplicate rows. role/author_id are excluded from
+        the key deliberately — the mapping fixes them, so they add nothing. Honest edge:
+        two genuinely identical comments (same report, author, timestamp, text) are
+        indistinguishable and collapse to one; that is inherent to a content-based key.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM relay_discussion_items
+        WHERE project = ? AND author_name = ? AND created_at = ? AND body = ?
+        LIMIT 1
+        """,
+        (project, author_name, created_at, body),
+    ).fetchone()
+    return row is not None
+
+
+def _map_comment(comment: dict) -> dict:
+    """Map one resolved comment to its discussion-item fields.
+
+    Args:
+        comment: A dict from `_resolved_comments` (carries project + the raw comment).
+
+    Returns:
+        A dict of the discussion-item fields this comment becomes: project, author_id
+        (always None), author_name, role, body (prefixed), created_at.
+
+    Why:
+        Centralizes the mapping rule in one place so migrate, dry-run, and the drop
+        parity guard all derive the SAME target row (DRY) — the guard can only trust
+        "already migrated?" if it computes the identical body and author_name the
+        migrate step wrote.
+    """
+    author = comment["author"]
+    return {
+        "project": comment["project"],
+        "author_id": None,  # legacy comments never carried an authenticated identity
+        "author_name": author if author.strip() else _ANONYMOUS_AUTHOR,
+        "role": _MIGRATED_ROLE,
+        "body": _migrated_body(comment["report_id"], comment["body"]),
+        "created_at": comment["created_at"],
+    }
+
+
+def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
+    """Migrate report_comments into relay_discussion_items (idempotent).
+
+    Args:
+        conn: An open relay-store connection (its schema is already ensured).
+        dry_run: When True, compute and report everything but insert nothing.
+
+    Returns:
+        0 on success (including a clean re-run where everything is already migrated).
+
+    Why:
+        The parity step of Stage 2: every existing comment becomes a discussion item,
+        preserving body/author/timestamp, so the comment system can be retired at
+        parity. Idempotent by design (the four-tuple check) so it is safe to re-run —
+        the required property for a migration that touches the live relay DB.
+    """
+    resolved = _resolved_comments(conn)
+    orphans = _orphan_comments(conn)
+    total = len(resolved) + len(orphans)
+    projects = sorted({c["project"] for c in resolved})
+
+    migrated = 0
+    already = 0
+    sample: list[dict] = []
+    for comment in resolved:
+        mapped = _map_comment(comment)
+        if _discussion_row_exists(
+            conn,
+            mapped["project"],
+            mapped["author_name"],
+            mapped["created_at"],
+            mapped["body"],
+        ):
+            already += 1
+            continue
+        if len(sample) < _DRY_RUN_SAMPLE:
+            sample.append(mapped)
+        if not dry_run:
+            add_discussion_item(
+                conn,
+                mapped["project"],
+                mapped["author_id"],
+                mapped["author_name"],
+                mapped["role"],
+                mapped["body"],
+                mapped["created_at"],
+            )
+        migrated += 1
+
+    prefix = "migrate --dry-run" if dry_run else "migrate"
+    verb = "would migrate" if dry_run else "migrated"
+    print(f"{prefix}: {total} comment(s) found across {len(projects)} project(s)")
+    print(f"  {verb}:           {migrated}")
+    print(f"  already migrated: {already}")
+    print(f"  skipped (orphan): {len(orphans)}")
+    if orphans:
+        # Loud, itemized report — an orphan cannot be migrated (no project), so it must
+        # never disappear quietly. The drop guard will also refuse while these exist.
+        print(
+            f"  WARNING: {len(orphans)} orphan comment(s) reference a missing report "
+            f"and were NOT migrated:",
+            file=sys.stderr,
+        )
+        for orphan in orphans:
+            print(
+                f"    comment id={orphan['id']} -> missing report_id={orphan['report_id']}",
+                file=sys.stderr,
+            )
+    if dry_run and sample:
+        print(f"  sample of the first {len(sample)} row(s) that would be written:")
+        for mapped in sample:
+            first_line = mapped["body"].splitlines()[0]
+            print(
+                f"    [{mapped['project']}] {mapped['author_name']} "
+                f"({mapped['role']}) @ {mapped['created_at']}: {first_line}"
+            )
+    return 0
+
+
+def cmd_drop(conn: sqlite3.Connection, *, dry_run: bool) -> int:
+    """Drop report_comments — but only once every comment is migrated (parity guard).
+
+    Args:
+        conn: An open relay-store connection.
+        dry_run: When True, report the parity result and row count but drop nothing.
+
+    Returns:
+        0 when the table is dropped (or already gone, or a clean dry-run); 1 when the
+        parity guard refuses because a comment is unmigrated or orphaned.
+
+    Why:
+        The deliberate second invocation of migrate-and-drop. The guard re-derives each
+        comment's mapped row and confirms a matching discussion item exists BEFORE
+        dropping, so "no comment is lost" is enforced structurally, not trusted. Orphans
+        block the drop too — they cannot be migrated, so dropping would lose them; a
+        human must resolve them first. `DROP TABLE IF EXISTS` makes a second drop a
+        clean no-op.
+    """
+    resolved = _resolved_comments(conn)
+    orphans = _orphan_comments(conn)
+
+    unmatched = []
+    for comment in resolved:
+        mapped = _map_comment(comment)
+        if not _discussion_row_exists(
+            conn,
+            mapped["project"],
+            mapped["author_name"],
+            mapped["created_at"],
+            mapped["body"],
+        ):
+            unmatched.append(comment)
+
+    if unmatched or orphans:
+        print(
+            "drop refused: parity not reached — run `migrate` first and resolve orphans.",
+            file=sys.stderr,
+        )
+        for comment in unmatched:
+            print(
+                f"  unmigrated: comment id={comment['id']} in project "
+                f"{comment['project']!r}",
+                file=sys.stderr,
+            )
+        for orphan in orphans:
+            print(
+                f"  orphan: comment id={orphan['id']} -> missing "
+                f"report_id={orphan['report_id']}",
+                file=sys.stderr,
+            )
+        return 1
+
+    count = conn.execute("SELECT COUNT(*) AS n FROM report_comments").fetchone()["n"]
+    if dry_run:
+        print(f"drop --dry-run: parity OK; would drop report_comments ({count} row(s))")
+        return 0
+
+    # Dropping the table drops its index (idx_report_comments_report) with it. IF EXISTS
+    # keeps a re-run a clean no-op. This removes the LIVE data only; the table resurrects
+    # on the next server start until Unit 0.3 removes it from the store's _SCHEMA.
+    conn.execute("DROP TABLE IF EXISTS report_comments")
+    conn.commit()
+    print(f"drop: report_comments dropped ({count} row(s) removed)")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser with the `migrate` and `drop` subcommands.
+
+    Returns:
+        A configured ArgumentParser. `--db` is required on each subcommand; `--dry-run`
+        is an opt-in preview.
+
+    Why:
+        Mirrors the repo's CLI style (argparse subparsers, per-command options) so the
+        tool reads like the rest of Orion. Two subcommands make the migrate-and-drop
+        "two deliberate invocations" explicit at the command line, not a hidden flag.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m relay.migrate_comments",
+        description="One-time, idempotent migration of report_comments into the "
+        "discussion model (KI-28 Stage 2).",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    for name, help_text in (
+        ("migrate", "Fold report_comments into relay_discussion_items (idempotent)."),
+        ("drop", "Drop report_comments once every comment is migrated (parity-guarded)."),
+    ):
+        sub = subparsers.add_parser(name, help=help_text)
+        sub.add_argument(
+            "--db",
+            required=True,
+            help="Path to the relay's sqlite store (e.g. /data/orion-relay.sqlite3).",
+        )
+        sub.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Report what would happen without writing anything.",
+        )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, open the store, and dispatch to the chosen subcommand.
+
+    Args:
+        argv: Argument vector (defaults to sys.argv[1:]). Passed explicitly by tests.
+
+    Returns:
+        The subcommand's exit code (0 success, 1 on a refused drop).
+
+    Why:
+        A thin entry point: it owns argument parsing and the DB connection (opened via
+        the same `open_relay_store` the server uses, so the schema is ensured), and
+        delegates the actual work to the testable cmd_* functions.
+    """
+    args = build_parser().parse_args(argv)
+    conn = open_relay_store(Path(args.db))
+    try:
+        if args.command == "migrate":
+            return cmd_migrate(conn, dry_run=args.dry_run)
+        return cmd_drop(conn, dry_run=args.dry_run)
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

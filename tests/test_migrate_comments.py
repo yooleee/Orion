@@ -7,8 +7,9 @@
 #                  (faithful mapping, idempotency, orphan safety, a parity-guarded
 #                  drop) must be pinned before it is trusted on production data.
 # Test approach: each test builds a real temp store via open_relay_store, seeds
-#                reports (ingest) and comments (add_comment) exactly as the relay
-#                would, then drives the tool through its main() entry point (argv +
+#                reports (ingest) and legacy comments (a hand-built report_comments
+#                table, since the schema retired it), then drives the tool through its
+#                main() entry point (argv +
 #                a fresh connection per invocation, mirroring the two real command
 #                runs). Assertions read back through the store's own query helpers.
 # =============================================================================
@@ -18,7 +19,45 @@ import io
 import sqlite3
 
 from relay.migrate_comments import main
-from relay.store import add_comment, discussion_items_for_project, ingest, open_relay_store
+from relay.store import discussion_items_for_project, ingest, open_relay_store
+
+# The legacy comment table's DDL. KI-28 Stage 2 removed `report_comments` from the relay
+# schema, so open_relay_store no longer creates it and store.add_comment is gone. The
+# migration runs against a LEGACY DB that still has this table, so the tests reconstruct it
+# by hand (a faithful copy of the retired schema) and seed rows via raw SQL — the same shape
+# the migration reads. This keeps the migration test independent of the retired code.
+_LEGACY_REPORT_COMMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS report_comments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id   INTEGER NOT NULL,
+    author      TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+"""
+
+
+def _seed_legacy_comment(conn, report_id, author, body, created_at):
+    """Insert one legacy comment row, creating the retired table on first use.
+
+    Args:
+        conn: An open relay-store connection.
+        report_id: The relay_reports.id the comment hangs off (may be an orphan id).
+        author: The self-entered display name, or "" when omitted.
+        body: The comment text.
+        created_at: ISO 8601 UTC timestamp.
+
+    Why:
+        Stands in for the removed store.add_comment so the tests can build the exact
+        pre-migration state (a legacy `report_comments` table with rows) that the tool
+        migrates from.
+    """
+    conn.executescript(_LEGACY_REPORT_COMMENTS_DDL)
+    conn.execute(
+        "INSERT INTO report_comments (report_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+        (report_id, author, body, created_at),
+    )
+    conn.commit()
 
 
 def _blob(project="demo", *, generated_at="2026-06-18T00:00:00+00:00"):
@@ -80,8 +119,8 @@ def test_round_trip_across_two_projects(tmp_path):
     conn = open_relay_store(db)
     alpha = ingest(conn, _blob("alpha"), "2026-06-18T00:00:01+00:00")
     beta = ingest(conn, _blob("beta"), "2026-06-18T00:00:02+00:00")
-    add_comment(conn, alpha, "Supervisor A", "Nice progress.", "2026-06-19T10:00:00+00:00")
-    add_comment(conn, beta, "Supervisor B", "Ship it.", "2026-06-19T11:00:00+00:00")
+    _seed_legacy_comment(conn, alpha, "Supervisor A", "Nice progress.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, beta, "Supervisor B", "Ship it.", "2026-06-19T11:00:00+00:00")
     conn.close()
 
     assert main(["migrate", "--db", str(db)]) == 0
@@ -111,7 +150,7 @@ def test_blank_author_becomes_anonymous(tmp_path):
     db = tmp_path / "relay.sqlite3"
     conn = open_relay_store(db)
     rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-    add_comment(conn, rid, "", "No name given.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "", "No name given.", "2026-06-19T10:00:00+00:00")
     conn.close()
 
     assert main(["migrate", "--db", str(db)]) == 0
@@ -132,7 +171,7 @@ def test_migrate_is_idempotent(tmp_path):
     db = tmp_path / "relay.sqlite3"
     conn = open_relay_store(db)
     rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-    add_comment(conn, rid, "Supervisor A", "Once only.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "Supervisor A", "Once only.", "2026-06-19T10:00:00+00:00")
     conn.close()
 
     assert main(["migrate", "--db", str(db)]) == 0
@@ -154,9 +193,9 @@ def test_orphan_comment_is_skipped_and_reported(tmp_path):
     db = tmp_path / "relay.sqlite3"
     conn = open_relay_store(db)
     rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-    add_comment(conn, rid, "Supervisor A", "Real one.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "Supervisor A", "Real one.", "2026-06-19T10:00:00+00:00")
     # report_id 999 has no matching report row — an orphan by construction.
-    add_comment(conn, 999, "Ghost", "Orphaned.", "2026-06-19T11:00:00+00:00")
+    _seed_legacy_comment(conn, 999, "Ghost", "Orphaned.", "2026-06-19T11:00:00+00:00")
     conn.close()
 
     err = io.StringIO()
@@ -180,7 +219,7 @@ def test_dry_run_writes_nothing(tmp_path):
     db = tmp_path / "relay.sqlite3"
     conn = open_relay_store(db)
     rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-    add_comment(conn, rid, "Supervisor A", "Preview me.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "Supervisor A", "Preview me.", "2026-06-19T10:00:00+00:00")
     conn.close()
 
     assert main(["migrate", "--db", str(db), "--dry-run"]) == 0
@@ -201,7 +240,7 @@ def test_drop_is_parity_guarded(tmp_path):
     db = tmp_path / "relay.sqlite3"
     conn = open_relay_store(db)
     rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-    add_comment(conn, rid, "Supervisor A", "Keep me.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "Supervisor A", "Keep me.", "2026-06-19T10:00:00+00:00")
     conn.close()
 
     # Guard refuses while the comment is unmigrated, and leaves the table intact.

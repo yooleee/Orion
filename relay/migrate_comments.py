@@ -65,6 +65,28 @@ def _migrated_body(report_id: int, body: str) -> str:
     return f"[re: report {report_id}]\n{body}"
 
 
+def _report_comments_exists(conn: sqlite3.Connection) -> bool:
+    """Return True if the legacy `report_comments` table is present in this DB.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        True when the table exists, False otherwise.
+
+    Why:
+        The current relay schema no longer creates `report_comments` (KI-28 Stage 2
+        removed it from _SCHEMA), so `open_relay_store` does NOT recreate it. This tool
+        runs against a LEGACY DB where the table still holds data; but on a fresh DB — or
+        after `drop` — the table is absent. Checking first lets migrate/drop treat "no
+        table" as "nothing to do" (a clean no-op) instead of raising `no such table`.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='report_comments'"
+    ).fetchone()
+    return row is not None
+
+
 def _resolved_comments(conn: sqlite3.Connection) -> list[dict]:
     """Return every comment joined to its project, oldest first.
 
@@ -74,7 +96,7 @@ def _resolved_comments(conn: sqlite3.Connection) -> list[dict]:
     Returns:
         A list of {"id", "report_id", "author", "body", "created_at", "project"} dicts,
         one per comment whose report_id resolves to a real report, in ascending-id
-        (chronological) order.
+        (chronological) order. Empty when the legacy table is absent.
 
     Why:
         `report_comments` has no project column — the project lives on the report it
@@ -83,6 +105,8 @@ def _resolved_comments(conn: sqlite3.Connection) -> list[dict]:
         orphan comments (no matching report); those are surfaced separately by
         `_orphan_comments` so nothing is dropped without being reported.
     """
+    if not _report_comments_exists(conn):
+        return []
     rows = conn.execute(
         """
         SELECT c.id, c.report_id, c.author, c.body, c.created_at, r.project
@@ -122,6 +146,8 @@ def _orphan_comments(conn: sqlite3.Connection) -> list[dict]:
         is lost"), we detect orphans with a LEFT join and report them loudly — and the
         drop guard refuses while any exist, so a human decides what to do.
     """
+    if not _report_comments_exists(conn):
+        return []
     rows = conn.execute(
         """
         SELECT c.id, c.report_id
@@ -331,7 +357,11 @@ def cmd_drop(conn: sqlite3.Connection, *, dry_run: bool) -> int:
             )
         return 1
 
-    count = conn.execute("SELECT COUNT(*) AS n FROM report_comments").fetchone()["n"]
+    count = (
+        conn.execute("SELECT COUNT(*) AS n FROM report_comments").fetchone()["n"]
+        if _report_comments_exists(conn)
+        else 0
+    )
     if dry_run:
         print(f"drop --dry-run: parity OK; would drop report_comments ({count} row(s))")
         return 0

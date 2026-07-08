@@ -142,15 +142,22 @@ _REQUIRED_STR_FIELDS = (
 _SESSION_COOKIE_NAME = "orion_session"
 _SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at once
 
-# Roles an admin may PROVISION today. relay_users.role is an open enum
-# (contributor/guest are reserved for later increments), but only these are creatable
-# now, so the provisioning endpoint allowlists them and 400s anything else — an
-# unvalidated role string must never become a stored value. "supervisor" (E2 Inc 5) is a
-# SCOPED participant: it deliberately is NOT added to _allowed_projects, so it falls
-# through to the viewer's default-deny scope (sees only its granted projects). Its added
-# capability is writing to a project's discussion thread, granted at that endpoint — not
-# by widening read scope here.
-_PROVISIONABLE_ROLES = ("admin", "viewer", "supervisor")
+# Roles that may resolve an interactive dashboard login. This is an ALLOWLIST and the
+# login boundary is fail-closed: any role NOT named here cannot mint a session (see
+# _resolve_login). "supervisor" (E2 Inc 5) is a SCOPED participant: it deliberately is NOT
+# added to _allowed_projects, so it falls through to the viewer's default-deny scope (sees
+# only its granted projects). Its added capability is writing to a project's discussion
+# thread, granted at that endpoint — not by widening read scope here.
+_INTERACTIVE_ROLES = ("admin", "viewer", "supervisor")
+
+# Roles an admin may PROVISION. "contributor" (C3 Inc 2) is a PUSH-ONLY producer identity:
+# it authenticates the Bearer ingest endpoints with its own server-minted key, but is
+# deliberately ABSENT from _INTERACTIVE_ROLES, so that key can never resolve an interactive
+# login — one credential never spans both auth worlds (a stolen push machine's .env must not
+# grant dashboard access). relay_users.role stays an open enum at the DB layer; the
+# provisioning endpoint allowlists these and 400s anything else — an unvalidated role string
+# must never become a stored value.
+_PROVISIONABLE_ROLES = _INTERACTIVE_ROLES + ("contributor",)
 
 # Actor label written to the admin audit trail for token-driven provisioning. The admin
 # API authenticates with a shared admin token (not a named identity), so the trail
@@ -1772,7 +1779,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return None
         if self.server.user_pepper is not None:
             user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, key))
-            if user is not None and user["active"]:
+            # Fail-closed: only _INTERACTIVE_ROLES may mint a session. A push-only
+            # contributor key thus falls through to the generic `return None` below,
+            # indistinguishable from an unknown key — the login form can't enumerate
+            # producer identities, and one credential never spans both auth worlds.
+            if user is not None and user["active"] and user["role"] in _INTERACTIVE_ROLES:
                 update_last_login(conn, user["id"], _utc_now_iso())
                 return user["id"], user["session_version"], {
                     "name": user["name"],

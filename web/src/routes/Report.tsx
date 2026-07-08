@@ -44,6 +44,9 @@ export function Report() {
           <h1 className="page-title">{data.project}</h1>
           <p className="page-sub">
             Progress report #{data.number} · {relativeTime(data.generated_at)}
+            {/* C3 Inc 2: attribute the push when known; a legacy/older report has
+                author_name null and this line reads exactly as before. */}
+            {data.author_name && <> · pushed by {data.author_name}</>}
           </p>
         </div>
         <div className="report-nav">

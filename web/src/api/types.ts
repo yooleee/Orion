@@ -162,6 +162,7 @@ export interface ReportSummary {
   lane: string;
   share_level: string;
   section_count: number;
+  author_name: string | null; // C3 Inc 2: producer who pushed it; null for legacy/older reports
   source_tags: string[]; // [] in 4a (gap 4)
 }
 
@@ -229,6 +230,7 @@ export interface ReportDetail {
   generated_at: string;
   ingested_at: string;
   orion_version: string;
+  author_name: string | null; // C3 Inc 2: producer who pushed it; null for legacy/older reports
   participants: Participant[];
   source_tags: string[]; // [] in 4a (gap 4)
   checklist_snapshot: ChecklistSnapshot;

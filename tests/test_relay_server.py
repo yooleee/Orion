@@ -2415,6 +2415,55 @@ def test_api_discussion_post_cannot_forge_supervisor_role(tmp_path):
         assert stored["role"] == "developer" and stored["author_id"] is None
 
 
+def test_api_discussion_post_identified_producer_is_attributed(tmp_path):
+    """An identified contributor's reply is stamped with its REAL id + name; --as is ignored.
+
+    Why this matters: C3 Inc 2 attribution. When the key resolves to a named producer, the
+    entry carries that principal's server-derived author_id and name — unforgeable — and the
+    body's `author` (the CLI's --as) is discarded, because a client can never assert its own
+    identity. The 201 echoes the stored name so the CLI can report who it actually posted as.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        uid = _provision_user(
+            db, "Teammate B", "contrib-key", role="contributor", projects=["demo"]
+        )
+        _ingest_one(base_url)  # project "demo" (legacy setup)
+        status, raw = _post(
+            base_url,
+            json.dumps({"project": "demo", "author": "not-me", "body": "Landed."}).encode(),
+            token="contrib-key",
+            path="/api/discussions",
+        )
+        assert status == 201
+        assert json.loads(raw)["author"] == "Teammate B"  # stored name echoed, not "not-me"
+
+        conn = open_relay_store(db)
+        stored = discussion_items_for_project(conn, "demo")[0]
+        assert stored["role"] == "developer"
+        assert stored["author_id"] == uid  # real, server-derived id
+        assert stored["author_name"] == "Teammate B"  # principal's name, --as ignored
+
+
+def test_api_discussion_post_identified_out_of_scope_is_404(tmp_path):
+    """A contributor replying to an ungranted project 404s, indistinguishable from missing.
+
+    Why this matters: the discussion write is scope-checked like every other producer write —
+    an out-of-scope thread is refused before it is even known to exist.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _ingest_project(base_url, "secret-proj")  # exists, but not granted to this contributor
+        status, _ = _post(
+            base_url,
+            json.dumps({"project": "secret-proj", "body": "peek"}).encode(),
+            token="contrib-key",
+            path="/api/discussions",
+        )
+        assert status == 404
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "secret-proj") == []
+
+
 def test_api_discussion_post_wrong_token_is_401_and_stores_nothing(tmp_path):
     """A wrong Bearer token is 401 and writes nothing."""
     with _running_relay(tmp_path) as (base_url, db):

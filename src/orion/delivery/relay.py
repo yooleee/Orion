@@ -442,8 +442,10 @@ def post_discussion(
         timeout: Seconds to wait for the request before failing.
 
     Returns:
-        The parsed JSON response {"id": <int>} — the new item's id. Raises DeliveryError
-        on any non-2xx, network failure, or unparseable body.
+        The parsed JSON response {"id": <int>, "author": <str>} — the new item's id and the
+        STORED author name (an identified producer's own name, or the legacy label/fallback),
+        so the caller can report who the reply actually posted as. Raises DeliveryError on any
+        non-2xx, network failure, or unparseable body.
 
     Why:
         The developer's write half of the loop — modelled on push_checklist's POST plumbing

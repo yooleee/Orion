@@ -3312,9 +3312,18 @@ def cmd_discussions_reply(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    # author may be "" → the relay used its "developer" fallback; reflect that to the user.
-    shown = author or "developer"
+    # The relay echoes the STORED author name (authoritative): an identified producer's own
+    # name, or — on the legacy anonymous path — the supplied label or the "developer"
+    # fallback. Prefer it so the line reflects what was actually recorded.
+    shown = result.get("author") or author or "developer"
     print(f"Reply posted to {project.name!r} as {shown!r} (id {result.get('id')}).")
+    # Honesty: if a --as name was given but the relay recorded a different one, the key is an
+    # identified producer's and the label was ignored (identity is server-derived, not asserted).
+    if author and shown != author:
+        print(
+            f"  Note: --as {author!r} was ignored — this key is an identified producer, "
+            f"so the reply is attributed to {shown!r}."
+        )
     return 0
 
 

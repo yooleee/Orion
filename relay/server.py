@@ -1346,17 +1346,23 @@ class _RelayHandler(BaseHTTPRequestHandler):
         Why:
             The developer's write half of the loop (E2 Inc 5, Unit 3) — the Bearer machine
             sibling of the cookie-authed supervisor write (_handle_api_discussion_item).
-            The crucial invariant: this path ALWAYS fixes role to "developer" and author_id
-            to None. The token is the developer's own
-            credential, so it can never produce a "supervisor" entry — a client cannot forge
-            a role it does not hold, on EITHER write path (the cookie path derives the role
-            from the principal; this one hardcodes it). No CSRF (Bearer, not a cookie).
+            The crucial invariant: this path ALWAYS fixes role to "developer" — the token is a
+            producer credential, so it can never produce a "supervisor" entry, on EITHER write
+            path (the cookie path derives the role from the principal; this one hardcodes it).
+            No CSRF (Bearer, not a cookie).
+
+            Attribution (C3 Inc 2): when the key resolves to an IDENTIFIED producer
+            (contributor/admin), the entry is stamped with that principal's real author_id and
+            name, SERVER-derived and unforgeable — the body's `author`/`--as` is ignored (the
+            response echoes the stored name so the CLI can note it was overridden). A LEGACY
+            shared-token push stays anonymous exactly as before: author_id None, name = the
+            `--as` label or the "developer" fallback (a free-text label, never an identity).
 
             Inbound checklist, in order: 1) Bearer auth (resolve principal); 2) read +
             JSON-parse (1 MB cap); 3) validate project/body/author; 4) scope — a scoped
             contributor may post only to its granted threads (out-of-scope 404s as missing);
             5) project must exist (reports or a checklist), else 404 — so a typo cannot spawn
-            an orphan thread; 6) append + 201 {"id"}.
+            an orphan thread; 6) append + 201 {"id", "author"}.
         """
         # 1) Authenticate FIRST — resolve the principal on the request connection. Bearer,
         # no CSRF (a Bearer token is never browser-auto-attached). One generic 401.
@@ -1418,16 +1424,25 @@ class _RelayHandler(BaseHTTPRequestHandler):
             if not history(conn, project) and get_checklist(conn, project) is None:
                 self._send_json(404, {"error": f"no project {project!r}"})
                 return
-            # 6) Append. Attribution stays server-fixed here (role "developer", no
-            # relay_users id, author_name = the supplied label or the constant fallback) —
-            # the identified-principal stamping lands in the next checkpoint.
-            author_name = author or _DEVELOPER_DEFAULT_NAME
+            # 6) Append. Role is always "developer" on this producer channel. Attribution
+            # splits by principal: an IDENTIFIED producer is stamped with its real, server-
+            # derived id + name (the body's `author`/`--as` is ignored — a client can never
+            # assert its own identity); a LEGACY anonymous push keeps today's behavior, with
+            # no id and the supplied label or the "developer" fallback as the name.
+            if principal["legacy"]:
+                author_id = None
+                author_name = author or _DEVELOPER_DEFAULT_NAME
+            else:
+                author_id = principal["user_id"]
+                author_name = principal["name"]
             new_id = add_discussion_item(
-                conn, project, None, author_name, "developer", body, _utc_now_iso()
+                conn, project, author_id, author_name, "developer", body, _utc_now_iso()
             )
         finally:
             conn.close()
-        self._send_json(201, {"id": new_id})
+        # Echo the STORED author so the CLI can honestly report who the reply posted as (and
+        # note when it overrode a supplied --as for an identified producer).
+        self._send_json(201, {"id": new_id, "author": author_name})
 
     def _handle_create_user(self) -> None:
         """Provision a user and return their raw login key ONCE (POST /api/users).

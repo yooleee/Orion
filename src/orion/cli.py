@@ -828,12 +828,14 @@ def main(argv: list[str] | None = None) -> int:
     ru_add.add_argument("name", help="The user's unique display name / handle.")
     ru_add.add_argument(
         "--role",
-        choices=("viewer", "admin", "supervisor"),
+        choices=("viewer", "admin", "supervisor", "contributor"),
         default="viewer",
         help=(
             "The user's role (default: viewer). An admin sees all projects; a viewer "
             "or supervisor is scoped to its granted projects (a supervisor may also "
-            "post to a project's discussion thread)."
+            "post to a project's discussion thread). A contributor is a push-only "
+            "producer identity: its key authenticates the ingest endpoints for its "
+            "granted projects but never grants dashboard login."
         ),
     )
     ru_add.add_argument(
@@ -3661,6 +3663,8 @@ def cmd_relay_user_add(
         print("  Scope: all projects (admin).")
     elif scope:
         print(f"  Scope: {', '.join(scope)}")
+    elif result["role"] == "contributor":
+        print("  Scope: none yet — grant projects so this contributor can push to them.")
     else:
         print("  Scope: none yet — grant projects so this viewer can see anything.")
     print()

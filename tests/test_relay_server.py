@@ -1179,6 +1179,51 @@ def test_create_admin_role_user_sees_all_projects(tmp_path):
         assert "alpha" in names and "beta" in names  # admin sees every project
 
 
+def test_create_contributor_role_user_provisions(tmp_path):
+    """A "contributor" role provisions cleanly — it is in the allowlist (201, echoed back).
+
+    Why this matters: contributor is the C3 Inc 2 producer identity. Adding it to
+    _PROVISIONABLE_ROLES must let it through the same 400 role-gate that rejects unknown
+    roles (see test_create_user_invalid_role_is_400), so an admin can actually mint one. We
+    assert the 201 echoes role "contributor" and the requested scope.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        status, payload = _admin_post(
+            base_url,
+            "/api/users",
+            {"name": "mac", "role": "contributor", "projects": ["demo"]},
+        )
+        assert status == 201
+        assert payload["role"] == "contributor"
+        assert payload["projects"] == ["demo"]
+
+
+def test_contributor_key_cannot_login(tmp_path):
+    """A contributor key is push-only: /api/login rejects it exactly like an unknown key.
+
+    Why this matters: this is the permanent invariant of C3 Inc 2 — one credential never
+    spans both auth worlds. A contributor's key may authenticate the Bearer ingest path
+    (Unit 1.2) but must NEVER mint a dashboard session. The rejection is the GENERIC 401
+    {"ok": false} with no Set-Cookie, byte-identical to a bad key, so the login form can't
+    tell a producer identity from a miss. We also log in an interactive role through the SAME
+    machinery first, proving the rejection is about the ROLE, not a broken key/pepper setup.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _provision_user(db, "Teammate B", "admin-key", role="admin")
+
+        # Control: an interactive role logs in fine through this exact flow.
+        good, good_body, _ = _post_api_json(base_url, "/api/login", {"key": "admin-key"})
+        assert good == 200 and good_body["ok"] is True
+
+        # The contributor key is refused with the generic miss — no session minted.
+        status, body, headers = _post_api_json(
+            base_url, "/api/login", {"key": "contrib-key"}
+        )
+        assert status == 401 and body == {"ok": False}
+        assert _SESSION_COOKIE_NAME not in (headers.get("Set-Cookie") or "")
+
+
 def test_list_users_excludes_credential_material(tmp_path):
     """GET /api/users lists users with their scope but NEVER any credential material.
 

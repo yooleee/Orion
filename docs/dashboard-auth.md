@@ -40,8 +40,8 @@ service.
 4. They browse, seeing only what their role and scope allow. An admin sees every project. A
    viewer sees only the projects granted to them, and anything else returns a plain
    "not found."
-5. They can comment on a report. The comment is attributed to their account name, not to a
-   name they type.
+5. They can post to a project's discussion thread. The message is attributed to their account
+   name and role, not to anything they type.
 6. `GET /logout` clears the session.
 
 ## Authentication: the access key and the session cookie
@@ -135,13 +135,15 @@ Two security points matter here.
 the `url`), not a list of local projects, so an admin who runs the relay but reports from
 elsewhere can still provision.
 
-## Commenting carries real identity
+## The discussion write carries real identity
 
-When a logged-in viewer comments on a report, the server attaches their authenticated account
-name and ignores any name typed in the form, so a logged-in person cannot post under someone
-else's name. On a bare loopback relay with no login there is no identity to attach, so the
-optional typed name stands. The machine comment path (`POST /api/comments`, used by the chat
-bots) keeps its own free-text author and is unchanged.
+When a logged-in principal posts to a project's discussion thread, the server attaches their
+authenticated account name **and role** and ignores anything they send in the body, so nobody can
+post under someone else's name or claim a role they do not hold. Auth is always required — there is
+no free-text-author fallback (the retired comment write had one; the discussion write does not). The
+Bearer machine path (`POST /api/discussions`, the developer's CLI reply) is always fixed to role
+`developer`. (KI-28 Stage 2 retired the earlier `report_comments` comment write, which this
+supersedes.)
 
 ## The security invariants
 
@@ -154,9 +156,9 @@ A few rules are permanent, not stage-appropriate conveniences.
   relay refuses to start rather than serving a login that could never work. It also refuses to
   bind a non-loopback address without a view secret.
 - **CSRF defense on writes.** The cookie is auto-sent by the browser, so a malicious page could
-  try to forge a comment POST. The server checks the request `Origin` against the configured
-  canonical origin (`ORION_RELAY_PUBLIC_ORIGIN`), and the cookie is `SameSite=Lax`, so a
-  cross-site POST is blocked two ways.
+  try to forge a cookie-authed write (the discussion post, login, logout). The server checks the
+  request `Origin` against the configured canonical origin (`ORION_RELAY_PUBLIC_ORIGIN`), and the
+  cookie is `SameSite=Lax`, so a cross-site POST is blocked two ways.
 - **Cookie hygiene.** Cookies are `HttpOnly` (JavaScript cannot read them, which neutralizes
   theft via XSS) and `Secure` when the relay is HTTPS-exposed (the browser sends them only over
   HTTPS).
@@ -165,9 +167,10 @@ A few rules are permanent, not stage-appropriate conveniences.
   style/script, so no `unsafe-inline` is needed and nothing external loads) and `X-Frame-Options:
   DENY`. All responses carry `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`,
   and `Strict-Transport-Security` when the relay is HTTPS-exposed. (`Referrer-Policy` is
-  `same-origin`, not `no-referrer`: under `no-referrer` a browser sends a comment POST with
-  `Origin: null` and no Referer, which the comment CSRF check then 403s — the bug fixed by switching
-  to `same-origin`, which still leaks no referrer to other origins.) This is defense-in-depth behind
+  `same-origin`, not `no-referrer`: under `no-referrer` a browser sends a cookie-authed POST with
+  `Origin: null` and no Referer, which the origin CSRF check then 403s — a real bug (originally hit on
+  the comment write) fixed by switching to `same-origin`, which still leaks no referrer to other
+  origins.) This is defense-in-depth behind
   the `_esc` escaping discipline: a CSP would neutralize an injected script even if an escaping bug
   slipped through.
 
@@ -201,7 +204,7 @@ the canonical-Origin CSRF check.
 The relay stores everything in one SQLite database on a persistent volume. The multi-party
 tables (`relay_users`, `relay_user_projects`, `relay_admin_audit`) are created with
 `CREATE TABLE IF NOT EXISTS`, so adding multi-party access to a relay that already holds
-reports is additive. Existing reports and comments are untouched.
+reports is additive. Existing reports and discussion threads are untouched.
 
 ## What is not here yet
 

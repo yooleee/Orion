@@ -13,7 +13,7 @@ orion check                    # validate config + .env before anything
 orion baseline myproject       # mark "now" as already-reported (skip the whole back-history)
 # ... do some work, make commits ...
 orion report myproject         # build a report, PREVIEW it, confirm, send
-orion comments myproject       # pull supervisor replies back to your machine
+orion discussions pull myproject   # pull supervisor messages back to your machine
 ```
 
 ## Daily commands
@@ -23,8 +23,8 @@ orion comments myproject       # pull supervisor replies back to your machine
 | `orion report <project>` | Collect activity (git/tasks/notes/incubator), summarize, **preview**, then send. The main command. |
 | `orion report --all --yes` | Report every project, non-interactive (for schedulers; only sends projects with `auto_send=true`). |
 | `orion intake <project> -m "…"` | Send a hand-written update (no LLM). Omit `-m` to type it on stdin. |
-| `orion comments <project>` | Pull supervisor replies from the relay (only new ones; advances your unread marker). |
-| `orion comments <project> --all` | Show **all** replies without moving the unread marker (re-read). |
+| `orion discussions pull <project>` | Pull a project's two-way supervisor↔developer thread from the relay (only new ones; advances your unread marker). `--all` re-reads everything without moving the marker. |
+| `orion discussions reply <project> "<text>"` | Post your reply into the project's thread (lands as role `developer`). `--as "<name>"` sets the display label. |
 
 ## Setup & inspection
 
@@ -45,10 +45,12 @@ orion comments myproject       # pull supervisor replies back to your machine
 |---|---|
 | `orion relay-serve` | Run the relay locally (ingest endpoint + read-only dashboard) on `127.0.0.1:8787`. Needs `ORION_RELAY_TOKEN` in `.env`. Blocks until Ctrl-C. |
 | `orion checklist-push <project>` | Push the project's **current checklist** to the relay dashboard **without a report** (needs `checklist = true` + a `tasks` or `tracker` source + an enabled `[relay]`). Add `--watch` for near-real-time: it polls the checklist source (`tasks_file` and/or `tracker_file`) and pushes on every change until Ctrl-C (`--interval` seconds, default 3). |
-| `orion bot` | Run the always-on **Slack bot**: a reply in a mapped channel becomes a comment on that project's latest report. Blocks until Ctrl-C. |
+| `orion bot` | **PARKED** (KI-28 Stage 2): the bot's write path (relay comments) retired, so `orion bot` prints a parked notice and exits. It is revived — repointed at the discussion write with honest supervisor attribution — once per-user keys land in the follow-on slice. |
 
-**`orion bot` prerequisites:** `pip install orion[slack-bot]`, an enabled `[relay]` **and** `[bot]` in
-`orion.toml`, and the Slack tokens in `.env`. Full setup: [`docs/slack-bot.md`](slack-bot.md).
+**`orion bot` is parked.** Its comment write target was retired in KI-28 Stage 2; pointing it at the
+discussion write must wait for per-user keys (that Bearer path stamps role `developer`, but a chat reply
+is supervisor speech). The pure decision core and the Slack shell are kept as the revival seam. Full
+context: [`docs/slack-bot.md`](slack-bot.md).
 
 ## Dashboard user management (`relay-user`)
 
@@ -70,7 +72,7 @@ ingest token. Full auth model: [`docs/dashboard-auth.md`](dashboard-auth.md).
 - `--yes` / `-y` — skip the preview (only sends projects with `auto_send=true`). For schedulers and
   the session skill; **without it, every run previews first.**
 - `--config PATH` — point at a non-default config (or set `$ORION_CONFIG` once).
-- `--json` (on `comments`) — raw JSON instead of the human listing (used by the session skill).
+- `--json` (on `discussions pull`) — raw JSON instead of the human listing (used by the session skill).
 
 ## Exit codes (for scripts/schedulers)
 

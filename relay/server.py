@@ -159,6 +159,13 @@ _INTERACTIVE_ROLES = ("admin", "viewer", "supervisor")
 # must never become a stored value.
 _PROVISIONABLE_ROLES = _INTERACTIVE_ROLES + ("contributor",)
 
+# Roles whose own key may authenticate a PUSH (Bearer ingest) request — the mirror image of
+# _INTERACTIVE_ROLES, and just as fail-closed: a viewer/supervisor key pointed at the ingest
+# path is refused (it cannot produce), exactly as a contributor key is refused at login.
+# "admin" is here so a single all-scope operator key can push everywhere; "contributor" is
+# the scoped producer identity. (See _resolve_bearer_principal.)
+_BEARER_ROLES = ("admin", "contributor")
+
 # Actor label written to the admin audit trail for token-driven provisioning. The admin
 # API authenticates with a shared admin token (not a named identity), so the trail
 # records the token role rather than a person — enough to attribute the action.
@@ -830,41 +837,44 @@ class _RelayHandler(BaseHTTPRequestHandler):
             local Orion. Kept as its own handler so do_POST stays a short route table as
             other write surfaces (the discussion writes) were added alongside it.
         """
-        # 1) Authenticate FIRST: validate nothing about the payload until the caller
-        # is authorized. We DO distinguish "no/!malformed header" from "wrong token"
-        # in the message: with a single shared token there is no identity to
-        # enumerate, so telling the two apart leaks nothing about the secret token —
-        # while it meaningfully helps a self-hoster debug their push. The actual
-        # secrecy guarantees live elsewhere (constant-time compare in _token_matches;
-        # the token value is never echoed). Both remain 401.
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read and JSON-parse the body.
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-
-        # 3) Validate the blob shape/version.
-        error = _validate_blob(payload)
-        if error is not None:
-            self._send_json(400, {"error": error})
-            return
-
-        # 4) Store and report 201 with the new id. A fresh connection per request
-        # keeps each sqlite handle on its own thread.
+        # 1) Authenticate FIRST — resolve the pushing principal before touching the
+        # payload. One connection serves the whole request so the identity, its project
+        # scope, and the write all read from one consistent snapshot. Every auth failure is
+        # one generic 401 (named contributor keys now exist to enumerate).
         conn = open_relay_store(self.server.db_path)
         try:
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Read and JSON-parse the body.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+
+            # 3) Validate the blob shape/version.
+            error = _validate_blob(payload)
+            if error is not None:
+                self._send_json(400, {"error": error})
+                return
+
+            # 4) Scope: a scoped producer (contributor) may write only its granted
+            # projects; an out-of-scope project 404s byte-identical to a missing one, so a
+            # push never confirms a project the caller cannot touch. Legacy/admin are
+            # unrestricted (allowed is None).
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and payload["project"] not in allowed:
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 5) Store and report 201 with the new id.
             received_at = _utc_now_iso()
             new_id = ingest(conn, payload, received_at)
             # E2 Inc 2: if the push carries a live checklist, REPLACE this project's
@@ -898,37 +908,41 @@ class _RelayHandler(BaseHTTPRequestHandler):
             report row. The flow mirrors _handle_ingest's guard sequence; the payload is
             the smaller `{project, checklist}` instead of a full blob.
         """
-        # 1) Authenticate first (same Bearer token as /ingest) — nothing about the
-        # payload is touched until the caller is authorized.
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read and JSON-parse the body.
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-
-        # 3) Validate the {project, checklist} shape BEFORE storing.
-        error = _validate_checklist_request(payload)
-        if error is not None:
-            self._send_json(400, {"error": error})
-            return
-
-        # 4) Upsert this project's live checklist, stamped with the relay's receive
-        # clock (same provenance meaning as a report's ingested_at). One fresh
-        # connection per request keeps each sqlite handle on its own thread.
+        # 1) Authenticate first — resolve the principal on the request connection before
+        # any payload is touched. One generic 401 on any failure.
         conn = open_relay_store(self.server.db_path)
         try:
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Read and JSON-parse the body.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+
+            # 3) Validate the {project, checklist} shape BEFORE storing.
+            error = _validate_checklist_request(payload)
+            if error is not None:
+                self._send_json(400, {"error": error})
+                return
+
+            # 4) Scope: a contributor may write only its granted projects (out-of-scope
+            # 404s as missing); legacy/admin are unrestricted.
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and payload["project"] not in allowed:
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 5) Upsert this project's live checklist, stamped with the relay's receive
+            # clock (same provenance meaning as a report's ingested_at).
             # One receive clock shared by the live-state upsert and its history append, so
             # the current checklist and its newest observation never disagree by a second.
             received_at = _utc_now_iso()
@@ -965,35 +979,40 @@ class _RelayHandler(BaseHTTPRequestHandler):
             replaced per push). The guard sequence mirrors _handle_checklist_push; the
             payload is the small `{project, disciplines}`.
         """
-        # 1) Authenticate first (same Bearer token as /ingest).
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read and JSON-parse the body.
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-
-        # 3) Validate the {project, disciplines} shape BEFORE storing.
-        error = _validate_disciplines_request(payload)
-        if error is not None:
-            self._send_json(400, {"error": error})
-            return
-
-        # 4) Upsert this project's disciplines, stamped with the relay's receive clock.
-        # One fresh connection per request keeps each sqlite handle on its own thread.
+        # 1) Authenticate first — resolve the principal on the request connection. One
+        # generic 401 on any failure.
         conn = open_relay_store(self.server.db_path)
         try:
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Read and JSON-parse the body.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+
+            # 3) Validate the {project, disciplines} shape BEFORE storing.
+            error = _validate_disciplines_request(payload)
+            if error is not None:
+                self._send_json(400, {"error": error})
+                return
+
+            # 4) Scope: a contributor may write only its granted projects (out-of-scope
+            # 404s as missing); legacy/admin are unrestricted.
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and payload["project"] not in allowed:
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 5) Upsert this project's disciplines, stamped with the relay's receive clock.
             upsert_disciplines(
                 conn, payload["project"], payload["disciplines"], _utc_now_iso()
             )
@@ -1018,34 +1037,40 @@ class _RelayHandler(BaseHTTPRequestHandler):
             and the SAME upsert shape (current state, replaced per push). The guard sequence
             mirrors _handle_disciplines_push; the payload is the small `{project, skills}`.
         """
-        # 1) Authenticate first (same Bearer token as /ingest).
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read and JSON-parse the body.
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-
-        # 3) Validate the {project, skills} shape BEFORE storing.
-        error = _validate_skills_request(payload)
-        if error is not None:
-            self._send_json(400, {"error": error})
-            return
-
-        # 4) Upsert this project's skills, stamped with the relay's receive clock.
+        # 1) Authenticate first — resolve the principal on the request connection. One
+        # generic 401 on any failure.
         conn = open_relay_store(self.server.db_path)
         try:
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Read and JSON-parse the body.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+
+            # 3) Validate the {project, skills} shape BEFORE storing.
+            error = _validate_skills_request(payload)
+            if error is not None:
+                self._send_json(400, {"error": error})
+                return
+
+            # 4) Scope: a contributor may write only its granted projects (out-of-scope
+            # 404s as missing); legacy/admin are unrestricted.
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and payload["project"] not in allowed:
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 5) Upsert this project's skills, stamped with the relay's receive clock.
             upsert_skills(conn, payload["project"], payload["skills"], _utc_now_iso())
         finally:
             conn.close()
@@ -1069,38 +1094,48 @@ class _RelayHandler(BaseHTTPRequestHandler):
             `allow_empty` — that pattern is the signature of a degraded producer run, while
             the producer's own abort-on-failure is the primary guard against partial writes.
         """
-        # 1) Authenticate first (same Bearer token as /ingest and /skills).
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read and JSON-parse the body.
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-
-        # 3) Validate the {projects, allow_empty?} shape BEFORE storing.
-        error = _validate_skills_batch_request(payload)
-        if error is not None:
-            self._send_json(400, {"error": error})
-            return
-
-        projects = payload["projects"]
-        allow_empty = bool(payload.get("allow_empty", False))
-        incoming_total = sum(len(cards) for cards in projects.values())
-
+        # 1) Authenticate first — resolve the principal on the request connection. One
+        # generic 401 on any failure.
         conn = open_relay_store(self.server.db_path)
         try:
-            # 4) Empty-clobber backstop: refuse to reduce a populated comb to nothing
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Read and JSON-parse the body.
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+
+            # 3) Validate the {projects, allow_empty?} shape BEFORE storing.
+            error = _validate_skills_batch_request(payload)
+            if error is not None:
+                self._send_json(400, {"error": error})
+                return
+
+            projects = payload["projects"]
+            allow_empty = bool(payload.get("allow_empty", False))
+            incoming_total = sum(len(cards) for cards in projects.values())
+
+            # 4) Scope: the batch's prune reconciles the store to exactly its project set,
+            #    so a scoped producer (contributor) must be confined to its grants — else its
+            #    batch would delete other producers' skills (the "skills-batch trap"). Every
+            #    batch project must be in scope; any that is not → 404 with NOTHING applied
+            #    (existence-hiding, checked before the write). allowed is None for the
+            #    unrestricted admin/legacy caller, and passes through as a global prune.
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and not set(projects).issubset(allowed):
+                self._send_json(404, {"error": "not found"})
+                return
+
+            # 5) Empty-clobber backstop: refuse to reduce a populated comb to nothing
             #    unless the caller explicitly acknowledges it. One project going empty is
             #    plausible; the WHOLE portfolio going empty is the shape of a degraded run.
             if incoming_total == 0 and not allow_empty and skills_projects(conn):
@@ -1112,8 +1147,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            # 5) Atomically replace + prune.
-            replace_all_skills(conn, projects, _utc_now_iso(), prune=True)
+            # 6) Atomically replace + prune, confined to the caller's scope (None = global).
+            replace_all_skills(
+                conn, projects, _utc_now_iso(), prune=True, prune_scope=allowed
+            )
         finally:
             conn.close()
 
@@ -1254,39 +1291,44 @@ class _RelayHandler(BaseHTTPRequestHandler):
             Unit 3): the Bearer-authed pull the CLI uses to read new supervisor messages.
             It is the machine sibling of the cookie-authed SPA read (which folds the thread
             into GET /api/projects/<name>) — the CLI holds the ingest token, not a browser
-            session, so it needs this Bearer route. The token is the trusted producer's, so
-            there is no per-user scope here (like /ingest). Returns the RAW store rows (not
-            the SPA wire shape) and a `latest_id` watermark that echoes since_id when nothing
-            is newer, so the CLI can always advance.
+            session, so it needs this Bearer route. A scoped contributor sees only its
+            granted threads (C3 Inc 2); an admin/legacy caller reads any project. Returns the
+            RAW store rows (not the SPA wire shape) and a `latest_id` watermark that echoes
+            since_id when nothing is newer, so the CLI can always advance.
         """
-        # 1) Authenticate FIRST, exactly like /ingest — Bearer, no CSRF (a Bearer token is
-        # never browser-auto-attached, so there is no cross-site-forgery vector).
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Parse + validate the query string (do_GET strips it for routing; re-read here).
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        project = query.get("project", [""])[0].strip()
-        if not project:
-            self._send_json(400, {"error": "query parameter 'project' is required"})
-            return
-        since_id_raw = query.get("since_id", ["0"])[0]
-        if not since_id_raw.isdigit():  # only a non-negative integer; else a clean 400
-            self._send_json(
-                400, {"error": "query parameter 'since_id' must be a non-negative integer"}
-            )
-            return
-        since_id = int(since_id_raw)
-
-        # 3) Query + respond. An unknown project simply yields [] (200); the watermark stays
-        # at since_id so the caller advances unconditionally.
+        # 1) Authenticate FIRST — resolve the principal on the request connection. Bearer,
+        # no CSRF (a Bearer token is never browser-auto-attached). One generic 401.
         conn = open_relay_store(self.server.db_path)
         try:
-            items = discussion_items_for_project(conn, project, since_id)
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Parse + validate the query string (do_GET strips it for routing; re-read here).
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            project = query.get("project", [""])[0].strip()
+            if not project:
+                self._send_json(400, {"error": "query parameter 'project' is required"})
+                return
+            since_id_raw = query.get("since_id", ["0"])[0]
+            if not since_id_raw.isdigit():  # only a non-negative integer; else a clean 400
+                self._send_json(
+                    400,
+                    {"error": "query parameter 'since_id' must be a non-negative integer"},
+                )
+                return
+            since_id = int(since_id_raw)
+
+            # 3) Scope + query. A scoped contributor reading an out-of-scope project gets the
+            # EMPTY thread — byte-identical to an unknown project (existence-hiding: never
+            # reveal a project the caller cannot touch). An unknown project also yields []
+            # (200); the watermark stays at since_id so the caller advances unconditionally.
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and project not in allowed:
+                items = []
+            else:
+                items = discussion_items_for_project(conn, project, since_id)
         finally:
             conn.close()
         latest_id = items[-1]["id"] if items else since_id
@@ -1304,78 +1346,103 @@ class _RelayHandler(BaseHTTPRequestHandler):
         Why:
             The developer's write half of the loop (E2 Inc 5, Unit 3) — the Bearer machine
             sibling of the cookie-authed supervisor write (_handle_api_discussion_item).
-            The crucial invariant: this path ALWAYS fixes role to "developer" and author_id
-            to None. The token is the developer's own
-            credential, so it can never produce a "supervisor" entry — a client cannot forge
-            a role it does not hold, on EITHER write path (the cookie path derives the role
-            from the principal; this one hardcodes it). No CSRF (Bearer, not a cookie).
+            The crucial invariant: this path ALWAYS fixes role to "developer" — the token is a
+            producer credential, so it can never produce a "supervisor" entry, on EITHER write
+            path (the cookie path derives the role from the principal; this one hardcodes it).
+            No CSRF (Bearer, not a cookie).
 
-            Inbound checklist, in order: 1) Bearer auth; 2) read + JSON-parse (1 MB cap);
-            3) validate project/body/author; 4) project must exist (reports or a checklist),
-            else 404 — so a typo cannot spawn an orphan thread; 5) append + 201 {"id"}.
+            Attribution (C3 Inc 2): when the key resolves to an IDENTIFIED producer
+            (contributor/admin), the entry is stamped with that principal's real author_id and
+            name, SERVER-derived and unforgeable — the body's `author`/`--as` is ignored (the
+            response echoes the stored name so the CLI can note it was overridden). A LEGACY
+            shared-token push stays anonymous exactly as before: author_id None, name = the
+            `--as` label or the "developer" fallback (a free-text label, never an identity).
+
+            Inbound checklist, in order: 1) Bearer auth (resolve principal); 2) read +
+            JSON-parse (1 MB cap); 3) validate project/body/author; 4) scope — a scoped
+            contributor may post only to its granted threads (out-of-scope 404s as missing);
+            5) project must exist (reports or a checklist), else 404 — so a typo cannot spawn
+            an orphan thread; 6) append + 201 {"id", "author"}.
         """
-        # 1) Authenticate FIRST (Bearer, same token as /ingest).
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read + JSON-parse the body (1 MB cap inside _read_raw_body).
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-        if not isinstance(payload, dict):
-            self._send_json(400, {"error": "payload must be a JSON object"})
-            return
-
-        # 3) Validate. project + body required strings; author optional, defaulting to the
-        # constant fallback. role/author_id are NOT read from the body — they are fixed below.
-        project = payload.get("project")
-        body = payload.get("body")
-        author = payload.get("author", "")
-        if not isinstance(project, str) or not project.strip():
-            self._send_json(400, {"error": "field 'project' must be a non-empty string"})
-            return
-        if not isinstance(body, str):
-            self._send_json(400, {"error": "field 'body' must be a string"})
-            return
-        if not isinstance(author, str):
-            self._send_json(400, {"error": "field 'author' must be a string"})
-            return
-        project = project.strip()
-        body = body.strip()
-        author = author.strip()
-        if not body:
-            self._send_json(400, {"error": "a message body is required"})
-            return
-        if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
-            self._send_json(400, {"error": "message or author is too long"})
-            return
-
-        # 4) Existence: the thread anchors on a real project (reports or a checklist), else
-        # 404 — the same definition the project read + the cookie write use. 5) Append.
+        # 1) Authenticate FIRST — resolve the principal on the request connection. Bearer,
+        # no CSRF (a Bearer token is never browser-auto-attached). One generic 401.
         conn = open_relay_store(self.server.db_path)
         try:
+            principal = self._resolve_bearer_principal(conn)
+            if principal is None:
+                self._bearer_unauthorized()
+                return
+
+            # 2) Read + JSON-parse the body (1 MB cap inside _read_raw_body).
+            raw = self._read_raw_body()
+            if raw is None:
+                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": "body is not valid JSON"})
+                return
+            if not isinstance(payload, dict):
+                self._send_json(400, {"error": "payload must be a JSON object"})
+                return
+
+            # 3) Validate. project + body required strings; author optional, defaulting to the
+            # constant fallback. role/author_id are NOT read from the body — fixed below.
+            project = payload.get("project")
+            body = payload.get("body")
+            author = payload.get("author", "")
+            if not isinstance(project, str) or not project.strip():
+                self._send_json(400, {"error": "field 'project' must be a non-empty string"})
+                return
+            if not isinstance(body, str):
+                self._send_json(400, {"error": "field 'body' must be a string"})
+                return
+            if not isinstance(author, str):
+                self._send_json(400, {"error": "field 'author' must be a string"})
+                return
+            project = project.strip()
+            body = body.strip()
+            author = author.strip()
+            if not body:
+                self._send_json(400, {"error": "a message body is required"})
+                return
+            if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
+                self._send_json(400, {"error": "message or author is too long"})
+                return
+
+            # 4) Scope: a scoped contributor may post only to its granted threads; an
+            # out-of-scope project 404s identically to a genuinely missing one (checked
+            # before existence, so an out-of-scope EXISTING project still reads as missing).
+            allowed = self._allowed_projects(conn, principal)
+            if allowed is not None and project not in allowed:
+                self._send_json(404, {"error": f"no project {project!r}"})
+                return
+
+            # 5) Existence: the thread anchors on a real project (reports or a checklist),
+            # else 404 — the same definition the project read + the cookie write use.
             if not history(conn, project) and get_checklist(conn, project) is None:
                 self._send_json(404, {"error": f"no project {project!r}"})
                 return
-            # Attribution is server-fixed: role "developer", no relay_users id. author_name
-            # is the supplied label or the constant fallback — a name, never an authority.
-            author_name = author or _DEVELOPER_DEFAULT_NAME
+            # 6) Append. Role is always "developer" on this producer channel. Attribution
+            # splits by principal: an IDENTIFIED producer is stamped with its real, server-
+            # derived id + name (the body's `author`/`--as` is ignored — a client can never
+            # assert its own identity); a LEGACY anonymous push keeps today's behavior, with
+            # no id and the supplied label or the "developer" fallback as the name.
+            if principal["legacy"]:
+                author_id = None
+                author_name = author or _DEVELOPER_DEFAULT_NAME
+            else:
+                author_id = principal["user_id"]
+                author_name = principal["name"]
             new_id = add_discussion_item(
-                conn, project, None, author_name, "developer", body, _utc_now_iso()
+                conn, project, author_id, author_name, "developer", body, _utc_now_iso()
             )
         finally:
             conn.close()
-        self._send_json(201, {"id": new_id})
+        # Echo the STORED author so the CLI can honestly report who the reply posted as (and
+        # note when it overrode a supplied --as for an identified producer).
+        self._send_json(201, {"id": new_id, "author": author_name})
 
     def _handle_create_user(self) -> None:
         """Provision a user and return their raw login key ONCE (POST /api/users).
@@ -1564,31 +1631,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"name": name, "revoked": True})
 
-    def _auth_error(self) -> str | None:
-        """Return None if the request is authorized, else a 401 reason string.
-
-        Returns:
-            None when a valid Bearer token is present; otherwise a short message
-            distinguishing a missing/malformed header from a wrong token.
-
-        Why:
-            We separate the two failure modes deliberately. With one shared token
-            there is no account to enumerate, so revealing "you sent no token" vs
-            "your token is wrong" tells an attacker nothing about the secret value —
-            they already know what they sent — while it lets a legitimate self-hoster
-            tell a config-omission from a mismatch at a glance. The real defenses are
-            unchanged: the comparison is constant-time (hmac.compare_digest, so a
-            timing side-channel can't reveal the token byte by byte), and the
-            expected token is never echoed in any message.
-        """
-        header = self.headers.get("Authorization", "")
-        prefix = "Bearer "
-        if not header.startswith(prefix):
-            return "missing or malformed Authorization header (expected 'Bearer <token>')"
-        if not hmac.compare_digest(header[len(prefix):], self.server.token):
-            return "invalid token"
-        return None
-
     def _auth_admin_error(self) -> str | None:
         """Return None if the request bears the ADMIN token, else a reason string.
 
@@ -1738,9 +1780,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Returns:
             None when the principal sees EVERYTHING — an admin, the legacy bootstrap admin
-            (both role == "admin"), or an open relay (principal is None, reads are public).
-            Otherwise a set of the viewer's allowed project names (possibly empty —
-            default-deny, so a viewer with no grants sees nothing).
+            (both role == "admin"), a legacy anonymous push (`legacy` flag, C3 Inc 2), or an
+            open relay (principal is None, reads are public). Otherwise a set of the scoped
+            principal's allowed project names (possibly empty — default-deny, so a viewer or
+            contributor with no grants sees / can write nothing).
 
         Why:
             One place computes read scope, so every route (the index filter, /project,
@@ -1750,7 +1793,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             call site a trivial, hard-to-get-wrong `in`. Scope is re-read per request (not
             cached on the cookie), so a regrant/revoke takes effect immediately.
         """
-        if principal is None or principal["role"] == "admin":
+        if principal is None or principal["role"] == "admin" or principal.get("legacy"):
             return None
         return set(projects_for_user(conn, principal["user_id"]))
 
@@ -1797,6 +1840,80 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # Legacy bootstrap admin: reserved sentinel id/version, synthetic identity.
             return 0, 0, {"name": "legacy-admin", "role": "admin"}
         return None
+
+    def _resolve_bearer_principal(self, conn) -> dict | None:
+        """Resolve a push (Bearer) request to its principal, or None on any failure.
+
+        Args:
+            conn: An open relay-store connection (the same one the handler will write on,
+                so the identity and its scope are read from one consistent snapshot).
+
+        Returns:
+            A principal dict, or None when the request is unauthorized (the caller then
+            sends ONE generic 401 — see below). Two principal shapes:
+              - Identified: {"user_id": int, "role": "contributor"|"admin", "name": str,
+                "legacy": False} — a provisioned user's OWN key, active and push-capable.
+              - Legacy anonymous: {"user_id": None, "role": None, "name": None,
+                "legacy": True} — the shared ingest token, while still enabled.
+            The `legacy` flag lets _allowed_projects treat a legacy push as unrestricted and
+            lets the discussion write keep its anonymous behavior, without a second lookup.
+
+        Why:
+            C3 Inc 2 makes the push path multi-producer. Identity is SERVER-DERIVED from the
+            presented key via the same key_verifier machinery as login (never asserted in a
+            request body), so attribution is unforgeable. The verifier lookup runs FIRST,
+            then the constant-time legacy compare — the resolution never compares one secret
+            against another's store (independent secrets). The legacy shared token stays
+            valid (anonymously) until an operator sets --disable-legacy-ingest, because a
+            machine credential must not silently expire (the failure mode would be a silently
+            401ing cron push, not a human at a login form); each legacy use logs a line so the
+            operator can see when it finally goes quiet. Every failure returns None → one
+            GENERIC 401 at the call site: now that named contributor keys exist, distinguishing
+            "no header" from "wrong key" would help an attacker enumerate them.
+        """
+        header = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not header.startswith(prefix):
+            return None
+        token = header[len(prefix):]
+        # 1) Identified principal: a provisioned user's own key. Only push-capable roles
+        # (_BEARER_ROLES) resolve — a viewer/supervisor key is refused here, fail-closed.
+        if self.server.user_pepper is not None:
+            user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, token))
+            if user is not None and user["active"] and user["role"] in _BEARER_ROLES:
+                return {
+                    "user_id": user["id"],
+                    "role": user["role"],
+                    "name": user["name"],
+                    "legacy": False,
+                }
+        # 2) Legacy shared ingest token — anonymous and unrestricted, unless retired. The
+        # compare is constant-time and the token is never logged (only the fact of its use).
+        if not self.server.disable_legacy_ingest and hmac.compare_digest(
+            token, self.server.token
+        ):
+            print(
+                f"[relay] legacy shared ingest token used (anonymous): "
+                f"{self.command} {self.path}",
+                file=sys.stderr,
+            )
+            return {"user_id": None, "role": None, "name": None, "legacy": True}
+        # 3) Generic miss — the caller sends one indistinguishable 401.
+        return None
+
+    def _bearer_unauthorized(self) -> None:
+        """Send the single generic 401 used for every Bearer auth failure.
+
+        Why:
+            One message for all failure modes (missing header, malformed header, unknown
+            key, non-push role, revoked user, disabled legacy token) so a caller cannot
+            enumerate which named identities exist. Keeps the WWW-Authenticate hint so a
+            well-behaved client still knows the scheme. Factored into one method so all seven
+            push handlers stay byte-identical (no message drifts back apart over time).
+        """
+        self._send_json(
+            401, {"error": "unauthorized"}, extra_headers={"WWW-Authenticate": "Bearer"}
+        )
 
     def _mint_cookie(self, sub: int, sv: int) -> str:
         """Build the Set-Cookie header value for a freshly-minted session.
@@ -2351,6 +2468,9 @@ class AuthConfig:
             cookie-write's Origin must match. None falls back to Origin-vs-Host.
         allow_legacy_admin: Keep the legacy shared view key usable as admin even after
             users exist (default off → it is bootstrap-only).
+        disable_legacy_ingest: Retire the shared ingest token on the push path (default
+            off → the shared token keeps working, anonymously, for backward compatibility).
+            Operator-driven so a machine credential never silently expires (C3 Inc 2).
 
     Why:
         Bundling the seven auth knobs into one frozen object keeps RelayServer /
@@ -2368,6 +2488,7 @@ class AuthConfig:
     session_seconds: int = 30 * 24 * 3600
     public_origin: str | None = None
     allow_legacy_admin: bool = False
+    disable_legacy_ingest: bool = False
 
 
 @dataclass(frozen=True)
@@ -2462,6 +2583,7 @@ class RelayServer(ThreadingHTTPServer):
         self.session_seconds = auth.session_seconds
         self.public_origin = auth.public_origin
         self.allow_legacy_admin = auth.allow_legacy_admin
+        self.disable_legacy_ingest = auth.disable_legacy_ingest
         super().__init__(server_address, _RelayHandler)
 
 

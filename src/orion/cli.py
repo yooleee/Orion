@@ -773,6 +773,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--disable-legacy-ingest",
+        action="store_true",
+        help=(
+            "Retire the shared ingest token on the push path (default: off — the shared "
+            "token keeps working, anonymously, for backward compatibility). Turn this on "
+            "once every producer has its own contributor key: the shared token then 401s "
+            "and only named per-user keys can push. Each legacy use logs a line first, so "
+            "you can confirm it has gone quiet before flipping this."
+        ),
+    )
+    relay_parser.add_argument(
         "--web-dir",
         default=None,
         help=(
@@ -964,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.config),
             session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
+            disable_legacy_ingest=args.disable_legacy_ingest,
             web_dir=Path(args.web_dir) if args.web_dir else None,
             showcase_enabled=args.showcase,
             showcase_projects=args.showcase_projects,
@@ -3300,9 +3312,18 @@ def cmd_discussions_reply(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    # author may be "" → the relay used its "developer" fallback; reflect that to the user.
-    shown = author or "developer"
+    # The relay echoes the STORED author name (authoritative): an identified producer's own
+    # name, or — on the legacy anonymous path — the supplied label or the "developer"
+    # fallback. Prefer it so the line reflects what was actually recorded.
+    shown = result.get("author") or author or "developer"
     print(f"Reply posted to {project.name!r} as {shown!r} (id {result.get('id')}).")
+    # Honesty: if a --as name was given but the relay recorded a different one, the key is an
+    # identified producer's and the label was ignored (identity is server-derived, not asserted).
+    if author and shown != author:
+        print(
+            f"  Note: --as {author!r} was ignored — this key is an identified producer, "
+            f"so the reply is attributed to {shown!r}."
+        )
     return 0
 
 
@@ -3451,6 +3472,7 @@ def cmd_relay_serve(
     config_path: Path,
     session_days: int = 30,
     allow_legacy_admin: bool = False,
+    disable_legacy_ingest: bool = False,
     web_dir: Path | None = None,
     showcase_enabled: bool = False,
     showcase_projects: list[str] | None = None,
@@ -3560,6 +3582,7 @@ def cmd_relay_serve(
             session_seconds=session_days * 24 * 3600,
             public_origin=public_origin,
             allow_legacy_admin=allow_legacy_admin,
+            disable_legacy_ingest=disable_legacy_ingest,
         )
 
         # The public Showcase allowlist + curated blurbs come from the CLI (project names

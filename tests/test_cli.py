@@ -1495,6 +1495,30 @@ def test_discussions_reply_without_as_sends_empty_author(tmp_path, monkeypatch, 
     assert calls == [("demo", "hi", "")]
 
 
+def test_discussions_reply_notes_when_as_is_overridden_by_identity(tmp_path, monkeypatch, capsys):
+    """An identified producer's key overrides --as; the CLI reports the real name + a note.
+
+    Why this matters: with a per-user contributor key the relay attributes the reply to the
+    server-derived identity and IGNORES --as (identity is never client-asserted). The CLI must
+    be honest about this: it reports the name the relay actually recorded and notes that the
+    supplied --as was dropped, so the user is never misled about who the reply posted as.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo)
+    # The relay echoes the STORED identity name, different from the requested --as.
+    _capture_post_discussion(monkeypatch, {"id": 5, "author": "Teammate B"})
+
+    rc = cli.main(
+        ["discussions", "reply", "demo", "Landed.", "--as", "someone-else", "--config", str(toml)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "as 'Teammate B'" in out  # reports the recorded identity, not the requested label
+    assert "--as 'someone-else' was ignored" in out
+
+
 def test_discussions_disabled_relay_is_clean_error(tmp_path, monkeypatch, capsys):
     """Both pull and reply fail cleanly (exit 1) with no relay enabled, and never call out."""
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)

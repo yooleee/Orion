@@ -58,6 +58,7 @@ from relay.store import (
     list_projects,
     observed_history,
     open_relay_store,
+    revoke_user,
     skills_projects,
 )
 
@@ -545,20 +546,19 @@ def test_push_checklist_client_round_trips_through_the_relay(tmp_path):
         assert get_checklist(conn, "demo") == items
 
 
-def test_wrong_token_is_401_invalid_and_stores_nothing(tmp_path):
-    """A valid body with the WRONG token is rejected 401 ("invalid token"), not stored.
+def test_wrong_token_is_401_generic_and_stores_nothing(tmp_path):
+    """A valid body with the WRONG token is rejected with the generic 401, not stored.
 
-    Why this matters: auth is the gate on the inbound surface. A bad token must not
-    only be refused — it must not leave any trace in the store (auth is checked
-    before the body is even read). The message says the token is invalid (not that
-    it is missing), so a self-hoster can tell a mismatch from an omission — and it
-    never echoes the expected token.
+    Why this matters: auth is the gate on the inbound surface. A bad token must not only be
+    refused — it must not leave any trace in the store (auth is checked before the body is
+    even read). Since C3 Inc 2 the failure message is GENERIC ("unauthorized"): named
+    contributor keys now exist, so distinguishing "wrong token" from other failure modes
+    would help an attacker enumerate them. The expected token is never echoed.
     """
     with _running_relay(tmp_path) as (base_url, db):
         status, body = _post(base_url, _real_blob_json().encode("utf-8"), token="wrong")
         assert status == 401
-        message = json.loads(body)["error"]
-        assert "invalid token" in message
+        assert json.loads(body)["error"] == "unauthorized"
         # The expected token must never appear in any response.
         assert _TOKEN not in body.decode("utf-8")
 
@@ -566,18 +566,22 @@ def test_wrong_token_is_401_invalid_and_stores_nothing(tmp_path):
         assert list_projects(conn) == []  # nothing stored
 
 
-def test_absent_token_is_401_missing_header(tmp_path):
-    """A request with no Authorization header is rejected 401 ("missing ... header").
+def test_absent_and_wrong_token_return_the_same_generic_401(tmp_path):
+    """A missing header and a wrong token yield the IDENTICAL generic 401 body.
 
-    Why this matters: missing credentials are still refused (the endpoint is never
-    open by omission), but the message distinguishes "you sent no token" from "your
-    token is wrong" — which leaks nothing about the secret (there is no identity to
-    enumerate) yet tells a self-hoster their config forgot the header entirely.
+    Why this matters: the endpoint is never open by omission (a missing credential is refused
+    just like a wrong one), and — since named contributor keys exist (C3 Inc 2) — the two
+    failures must be indistinguishable so an attacker cannot probe which keys or header shapes
+    exist. We require byte-identical 401 bodies for both, replacing the earlier design that
+    deliberately told them apart (safe only while there was a single, identity-free token).
     """
     with _running_relay(tmp_path) as (base_url, _db):
-        status, body = _post(base_url, _real_blob_json().encode("utf-8"), token=None)
-        assert status == 401
-        assert "missing or malformed" in json.loads(body)["error"]
+        blob = _real_blob_json().encode("utf-8")
+        absent_status, absent_body = _post(base_url, blob, token=None)
+        wrong_status, wrong_body = _post(base_url, blob, token="wrong")
+        assert absent_status == wrong_status == 401
+        assert json.loads(absent_body)["error"] == "unauthorized"
+        assert absent_body == wrong_body  # indistinguishable — no enumeration signal
 
 
 def test_401_advertises_bearer_scheme(tmp_path):
@@ -602,6 +606,212 @@ def test_401_advertises_bearer_scheme(tmp_path):
         except urllib.error.HTTPError as exc:
             assert exc.code == 401
             assert exc.headers.get("WWW-Authenticate") == "Bearer"
+
+
+# ---------------------------------------------------------------------------
+# C3 Increment 2 — contributor push identity + per-project scope (Unit 1.2a).
+# A provisioned "contributor" authenticates the Bearer push path with its OWN key,
+# confined to its granted projects; the legacy shared token keeps working anonymously
+# until --disable-legacy-ingest. Every Bearer failure is one generic 401.
+# ---------------------------------------------------------------------------
+
+
+def _blob_for(project):
+    """A real serialized blob relabeled to `project` (bytes), for push tests."""
+    blob = json.loads(_real_blob_json())
+    blob["project"] = project
+    return json.dumps(blob).encode("utf-8")
+
+
+def test_contributor_key_ingests_granted_project(tmp_path):
+    """A contributor's own key authenticates a push to a project it is granted (201).
+
+    Why this matters: the point of C3 Inc 2 — a producer authenticates the ingest path with
+    a named per-user key, not the shared token. The key resolves through the same
+    key_verifier machinery as login, so identity is SERVER-derived, never asserted.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        status, _ = _post(base_url, _blob_for("demo"), token="contrib-key")
+        assert status == 201
+        conn = open_relay_store(db)
+        assert "demo" in [p["project"] for p in list_projects(conn)]
+
+
+def test_contributor_ingest_out_of_scope_is_404_and_stores_nothing(tmp_path):
+    """A contributor pushing to an UNgranted project 404s, indistinguishable from missing.
+
+    Why this matters: write scope = grant scope (decisions #7/#8). An out-of-scope write must
+    be refused AND look identical to a project that does not exist, so the push path never
+    confirms a project the caller cannot touch. Nothing is stored.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        status, body = _post(base_url, _blob_for("secret-proj"), token="contrib-key")
+        assert status == 404
+        assert json.loads(body)["error"] == "not found"
+        conn = open_relay_store(db)
+        assert "secret-proj" not in [p["project"] for p in list_projects(conn)]
+
+
+def test_viewer_and_supervisor_keys_cannot_push(tmp_path):
+    """A viewer's or supervisor's key is refused on the push path (fail-closed, generic 401).
+
+    Why this matters: the mirror of "a contributor can't log in" — only push-capable roles
+    (_BEARER_ROLES) may authenticate ingest. An interactive-only key pointed at /ingest is
+    refused exactly like an unknown key, so a role can never write outside its world.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "viewer-user", "view-key", role="viewer", projects=["demo"])
+        _provision_user(db, "sup-user", "sup-key", role="supervisor", projects=["demo"])
+        for key in ("view-key", "sup-key"):
+            status, body = _post(base_url, _blob_for("demo"), token=key)
+            assert status == 401
+            assert json.loads(body)["error"] == "unauthorized"
+
+
+def test_revoked_contributor_cannot_push(tmp_path):
+    """A revoked contributor's key stops pushing on its very next request (401).
+
+    Why this matters: authZ trusts current DB state, not a cached credential. Revocation
+    (active=0) takes effect immediately — a decommissioned push machine's key is dead the
+    next time it fires, with no server-side session to expire.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        uid = _provision_user(
+            db, "mac", "contrib-key", role="contributor", projects=["demo"]
+        )
+        assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 201  # works first
+        conn = open_relay_store(db)
+        try:
+            revoke_user(conn, uid)
+        finally:
+            conn.close()
+        assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 401
+
+
+def test_legacy_shared_token_still_ingests_by_default(tmp_path):
+    """The shared ingest token keeps working (anonymously, unrestricted) while enabled.
+
+    Why this matters: decision #4 — a machine credential must not silently expire. Even after
+    named contributors exist, the shared token still ingests by default (any project, no
+    scope), so existing crons do not break the moment the first contributor is provisioned.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        # Shared token, and a project the contributor is NOT granted — legacy is unrestricted.
+        assert _post(base_url, _blob_for("anything"), token=_TOKEN)[0] == 201
+
+
+def test_disable_legacy_ingest_rejects_shared_token_but_contributor_still_pushes(tmp_path):
+    """--disable-legacy-ingest 401s the shared token while named keys keep pushing.
+
+    Why this matters: the deliberate cutover. Once every producer has its own key, the
+    operator retires the shared token; from then on only named per-user keys can push, and the
+    shared token is dead — the moment the operator (not a silent expiry) chooses.
+    """
+    auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, disable_legacy_ingest=True)
+    with _running_relay(tmp_path, auth=auth) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        assert _post(base_url, _blob_for("demo"), token=_TOKEN)[0] == 401  # shared token dead
+        assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 201  # own key lives
+
+
+def test_legacy_ingest_use_logs_a_line_but_identified_push_does_not(tmp_path, capfd):
+    """Each legacy shared-token push logs a line; a named contributor push does not.
+
+    Why this matters: decision #4 makes retirement operator-driven, and the operator's signal
+    for "the shared token has gone quiet" is this log line. It must fire for a legacy push
+    (naming the route, never the token) and NOT for an identified push, so a quiet log means
+    every producer has actually migrated to its own key.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        capfd.readouterr()  # drain startup/setup noise
+
+        _post(base_url, _blob_for("demo"), token=_TOKEN)  # legacy shared token
+        legacy_err = capfd.readouterr().err
+        assert "legacy shared ingest token used" in legacy_err
+        assert "POST /ingest" in legacy_err
+        assert _TOKEN not in legacy_err  # the token itself is never logged
+
+        _post(base_url, _blob_for("demo"), token="contrib-key")  # named key
+        identified_err = capfd.readouterr().err
+        assert "legacy shared ingest token used" not in identified_err
+
+
+def test_contributor_discussion_read_is_scoped(tmp_path):
+    """A contributor's Bearer discussion pull sees granted threads; out-of-scope reads [].
+
+    Why this matters (decided 2026-07-07): reads are scoped too. An out-of-scope project is
+    returned as the EMPTY thread — byte-identical to an unknown project — so a contributor can
+    neither read nor even confirm the existence of a project outside its grants.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _ingest_project(base_url, "demo")
+        _ingest_project(base_url, "secret-proj")
+        _seed_discussion(db, "demo", [("Supervisor A", "supervisor", "hi demo")])
+        _seed_discussion(db, "secret-proj", [("Supervisor A", "supervisor", "hi secret")])
+
+        code, body = _get(
+            base_url, _api_discussions_path(project="demo"), bearer="contrib-key"
+        )
+        assert code == 200
+        assert [d["body"] for d in json.loads(body)["discussions"]] == ["hi demo"]
+
+        code2, body2 = _get(
+            base_url, _api_discussions_path(project="secret-proj"), bearer="contrib-key"
+        )
+        assert code2 == 200 and json.loads(body2)["discussions"] == []
+
+
+def test_contributor_skills_batch_prunes_only_within_scope(tmp_path):
+    """A contributor's skills-batch reconciles ONLY its granted projects; others survive.
+
+    Why this matters: the "skills-batch trap". The batch's prune deletes projects absent from
+    it — but for a scoped producer that must be confined to its grants, or the push would wipe
+    another producer's skills. Here a contributor pushes a batch for "demo" only; "other"
+    (outside its scope) must keep its skills.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _push_skills(base_url, "demo", [_skill("old-demo")])  # legacy setup (unrestricted)
+        _push_skills(base_url, "other", [_skill("keep-me")])
+        status, _ = _push_skills_batch(
+            base_url, {"demo": [_skill("new-demo")]}, token="contrib-key"
+        )
+        assert status == 200
+        conn = open_relay_store(db)
+        try:
+            assert get_skills(conn, "demo") == [_skill("new-demo")]  # reconciled
+            assert get_skills(conn, "other") == [_skill("keep-me")]  # untouched by the prune
+        finally:
+            conn.close()
+
+
+def test_contributor_skills_batch_with_ungranted_project_is_404_nothing_applied(tmp_path):
+    """A batch naming ANY ungranted project 404s and applies nothing.
+
+    Why this matters: the whole batch is validated against the caller's grants BEFORE any
+    write, so a contributor cannot smuggle an out-of-scope project into a batch. On any miss
+    the store is left exactly as it was.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _push_skills(base_url, "demo", [_skill("before")])
+        status, _ = _push_skills_batch(
+            base_url,
+            {"demo": [_skill("after")], "other": [_skill("sneaky")]},
+            token="contrib-key",
+        )
+        assert status == 404
+        conn = open_relay_store(db)
+        try:
+            assert get_skills(conn, "demo") == [_skill("before")]  # unchanged
+            assert get_skills(conn, "other") is None  # never created
+        finally:
+            conn.close()
 
 
 def test_malformed_json_is_400(tmp_path):
@@ -2203,6 +2413,55 @@ def test_api_discussion_post_cannot_forge_supervisor_role(tmp_path):
         conn = open_relay_store(db)
         stored = discussion_items_for_project(conn, "demo")[0]
         assert stored["role"] == "developer" and stored["author_id"] is None
+
+
+def test_api_discussion_post_identified_producer_is_attributed(tmp_path):
+    """An identified contributor's reply is stamped with its REAL id + name; --as is ignored.
+
+    Why this matters: C3 Inc 2 attribution. When the key resolves to a named producer, the
+    entry carries that principal's server-derived author_id and name — unforgeable — and the
+    body's `author` (the CLI's --as) is discarded, because a client can never assert its own
+    identity. The 201 echoes the stored name so the CLI can report who it actually posted as.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        uid = _provision_user(
+            db, "Teammate B", "contrib-key", role="contributor", projects=["demo"]
+        )
+        _ingest_one(base_url)  # project "demo" (legacy setup)
+        status, raw = _post(
+            base_url,
+            json.dumps({"project": "demo", "author": "not-me", "body": "Landed."}).encode(),
+            token="contrib-key",
+            path="/api/discussions",
+        )
+        assert status == 201
+        assert json.loads(raw)["author"] == "Teammate B"  # stored name echoed, not "not-me"
+
+        conn = open_relay_store(db)
+        stored = discussion_items_for_project(conn, "demo")[0]
+        assert stored["role"] == "developer"
+        assert stored["author_id"] == uid  # real, server-derived id
+        assert stored["author_name"] == "Teammate B"  # principal's name, --as ignored
+
+
+def test_api_discussion_post_identified_out_of_scope_is_404(tmp_path):
+    """A contributor replying to an ungranted project 404s, indistinguishable from missing.
+
+    Why this matters: the discussion write is scope-checked like every other producer write —
+    an out-of-scope thread is refused before it is even known to exist.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _ingest_project(base_url, "secret-proj")  # exists, but not granted to this contributor
+        status, _ = _post(
+            base_url,
+            json.dumps({"project": "secret-proj", "body": "peek"}).encode(),
+            token="contrib-key",
+            path="/api/discussions",
+        )
+        assert status == 404
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "secret-proj") == []
 
 
 def test_api_discussion_post_wrong_token_is_401_and_stores_nothing(tmp_path):

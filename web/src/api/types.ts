@@ -178,6 +178,15 @@ export interface DiscussionItem {
   created_at: string;
 }
 
+/** One identified producer's own live checklist (C3 Inc 2) — the same item shape as the
+ *  aggregate `checklist`, plus its own progress and the producer's server-derived name.
+ *  The SPA renders one card per producer only when there are two or more. */
+export interface ProducerChecklist {
+  author_name: string;
+  progress: Progress;
+  items: ChecklistItem[];
+}
+
 export interface ProjectDetail {
   name: string;
   kind: ProjectKind;
@@ -185,6 +194,7 @@ export interface ProjectDetail {
   stats: ProjectStats;
   milestones: Milestone[];
   checklist: ChecklistItem[];
+  producer_checklists: ProducerChecklist[]; // C3 Inc 2: per-contributor checklists
   reports: ReportSummary[];
   discussions: DiscussionItem[];
 }

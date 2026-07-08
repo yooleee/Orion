@@ -741,6 +741,43 @@ h3 {
   color: var(--tmid);
 }
 
+/* --- Per-producer checklists (C3 Inc 2) ------------------------------------ */
+
+/* One card per contributor, laid out side by side; auto-fill collapses to a single
+   column as the container narrows (so it stacks on mobile with no extra media query),
+   and cards wrap when there are more than fit. Card chrome matches .milestone-card. */
+.producer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.producer-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 15px 18px;
+}
+.producer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.producer-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--thi);
+}
+.producer-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tmid);
+}
+.producer-card .bar {
+  margin-bottom: 12px;
+}
+
 /* --- Live checklist -------------------------------------------------------- */
 
 .check-list {

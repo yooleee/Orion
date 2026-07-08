@@ -1,0 +1,120 @@
+// =============================================================================
+// web/src/routes/Project.test.tsx
+// -----------------------------------------------------------------------------
+// Responsible for: Pinning the C3 Inc 2 per-producer checklist section — one card per
+//                  contributor when there are two or more, and NO section for a single
+//                  producer (whose card would just duplicate the aggregate) or none.
+// Approach: mock the API client; provide the shell's outlet context (me) via a Route +
+//           Outlet wrapper (Project reads useOutletContext); assert with findByText/queryByText.
+// =============================================================================
+
+import { render, screen } from "@testing-library/react";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { Project } from "./Project";
+import { getProject } from "../api/client";
+import type { ChecklistItem, Me, ProducerChecklist, ProjectDetail } from "../api/types";
+import type { ShellContext } from "../components/Shell";
+
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
+  return { ...actual, getProject: vi.fn() };
+});
+const mockGet = vi.mocked(getProject);
+
+beforeEach(() => mockGet.mockReset());
+
+const ME: Me = {
+  gated: false,
+  authenticated: true,
+  identity: { name: "root", role: "admin" },
+  scope: { unrestricted: true, projects: null },
+  display_tz: "America/Los_Angeles",
+  showcase_enabled: false,
+};
+
+function item(text: string, done = false): ChecklistItem {
+  return {
+    text,
+    done,
+    due_date: null,
+    key: text,
+    group: null,
+    state: done ? "done" : "not_started",
+    status: null,
+    slipping: false,
+  };
+}
+
+function producer(name: string, items: ChecklistItem[]): ProducerChecklist {
+  const done = items.filter((i) => i.done).length;
+  return {
+    author_name: name,
+    progress: { done, total: items.length, pct: items.length ? Math.round((done / items.length) * 100) : null },
+    items,
+  };
+}
+
+function detail(producers: ProducerChecklist[]): ProjectDetail {
+  return {
+    name: "demo",
+    kind: "project",
+    description: null,
+    stats: { progress: { done: 0, total: 0, pct: null }, next_due: null, reports_count: 0 },
+    milestones: [],
+    checklist: [],
+    producer_checklists: producers,
+    reports: [],
+    discussions: [],
+  };
+}
+
+// Project reads useOutletContext<ShellContext>(), so it must render under an Outlet that
+// provides `me` — a bare MemoryRouter (as ReportTimeline uses) is not enough here.
+function renderProject() {
+  return render(
+    <MemoryRouter initialEntries={["/project/demo"]}>
+      <Routes>
+        <Route element={<Outlet context={{ me: ME, portfolio: null } satisfies ShellContext} />}>
+          <Route path="/project/:name" element={<Project />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+describe("Project — per-producer checklists", () => {
+  it("renders one card per contributor when there are two or more", async () => {
+    mockGet.mockResolvedValue(
+      detail([
+        producer("Teammate B", [item("B1", true), item("B2")]),
+        producer("Teammate C", [item("C1")]),
+      ]),
+    );
+    const { container } = renderProject();
+
+    expect(await screen.findByText("By contributor")).toBeInTheDocument();
+    expect(screen.getByText("Teammate B")).toBeInTheDocument();
+    expect(screen.getByText("Teammate C")).toBeInTheDocument();
+    expect(container.querySelectorAll(".producer-card")).toHaveLength(2);
+    expect(screen.getByText("1/2")).toBeInTheDocument(); // Teammate B's progress count
+    expect(screen.getByText("0/1")).toBeInTheDocument(); // Teammate C's progress count
+  });
+
+  it("renders no per-producer section for a single producer (would duplicate the aggregate)", async () => {
+    mockGet.mockResolvedValue(detail([producer("Teammate B", [item("B1")])]));
+    renderProject();
+
+    // Wait for load, then assert the section is absent.
+    expect(await screen.findByRole("heading", { name: "demo" })).toBeInTheDocument();
+    expect(screen.queryByText("By contributor")).toBeNull();
+  });
+
+  it("renders no per-producer section when there are no producer checklists", async () => {
+    mockGet.mockResolvedValue(detail([]));
+    renderProject();
+
+    expect(await screen.findByRole("heading", { name: "demo" })).toBeInTheDocument();
+    expect(screen.queryByText("By contributor")).toBeNull();
+  });
+});

@@ -100,6 +100,8 @@ export const DEMO_PROJECT: ProjectDetail = {
     { text: "Mobile layout pass", done: false, due_date: "2026-08-15", key: "p2", group: "Polish & launch", state: "upcoming", status: "not_started", slipping: false },
     { text: "Launch checklist", done: false, due_date: null, key: "p3", group: "Polish & launch", state: "not_started", status: "not_started", slipping: false },
   ],
+  // Single-producer demo: no per-contributor cards (the section shows only at 2+ producers).
+  producer_checklists: [],
   reports: [
     { id: 1003, number: 3, title: "OAuth underway; search shipped", generated_at: "2026-06-27T17:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, author_name: "Developer", source_tags: [] },
     { id: 1002, number: 2, title: "Core CRUD and search complete", generated_at: "2026-06-20T16:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, author_name: "Developer", source_tags: [] },

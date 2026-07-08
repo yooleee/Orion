@@ -525,6 +525,7 @@ def replace_all_skills(
     updated_at: str,
     *,
     prune: bool = True,
+    prune_scope: set[str] | None = None,
 ) -> None:
     """Atomically replace every given project's skills in ONE transaction.
 
@@ -537,6 +538,10 @@ def replace_all_skills(
         prune: When True (default), DELETE skill rows for any project NOT present in
             `slices`, so a project that turned `skills` off (or was removed from config)
             does not linger with stale-named cards.
+        prune_scope: The set of project names the caller is allowed to reconcile, or None
+            for an UNRESTRICTED prune (admin / legacy — today's global behavior). When a set
+            is given (a scoped contributor, C3 Inc 2), the prune deletes ONLY projects within
+            that scope that are absent from the batch — never another producer's projects.
 
     Why:
         The global skills-sync writes every project's slice together, and the whole point
@@ -545,19 +550,34 @@ def replace_all_skills(
         entire new set, never a mix of old-named and new-named rows (which would transiently
         reintroduce the per-project duplicate bug this rework fixes). Pruning reconciles the
         store to exactly the synced set, so a renamed/disabled project cannot leave a
-        stale-named row behind to break the merge. Rolls back on any error so a partial
-        batch never lands.
+        stale-named row behind to break the merge. `prune_scope` is the multi-producer
+        safety bound: the reconcile-to-batch semantics stay intact, but they apply ONLY
+        within a scoped caller's grants, so a contributor's batch can never delete skills for
+        a project it has no access to (the "skills-batch trap"). Rolls back on any error so a
+        partial batch never lands.
     """
     try:
         if prune:
-            if slices:
+            if prune_scope is not None:
+                # Scoped prune (C3 Inc 2): reconcile only WITHIN the caller's grants. The
+                # server validates slices.keys() ⊆ prune_scope before calling, so this
+                # deletes exactly the caller's granted projects that dropped out of the
+                # batch, leaving every out-of-scope project untouched.
+                to_delete = [p for p in prune_scope if p not in slices]
+                if to_delete:
+                    placeholders = ",".join("?" for _ in to_delete)
+                    conn.execute(
+                        f"DELETE FROM relay_project_skills WHERE project IN ({placeholders})",
+                        tuple(to_delete),
+                    )
+            elif slices:
                 placeholders = ",".join("?" for _ in slices)
                 conn.execute(
                     f"DELETE FROM relay_project_skills WHERE project NOT IN ({placeholders})",
                     tuple(slices.keys()),
                 )
             else:
-                # An empty batch with prune clears every project's skills.
+                # An empty batch with an unrestricted prune clears every project's skills.
                 conn.execute("DELETE FROM relay_project_skills")
         for project, skills in slices.items():
             conn.execute(

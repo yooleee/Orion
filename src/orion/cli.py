@@ -773,6 +773,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--disable-legacy-ingest",
+        action="store_true",
+        help=(
+            "Retire the shared ingest token on the push path (default: off — the shared "
+            "token keeps working, anonymously, for backward compatibility). Turn this on "
+            "once every producer has its own contributor key: the shared token then 401s "
+            "and only named per-user keys can push. Each legacy use logs a line first, so "
+            "you can confirm it has gone quiet before flipping this."
+        ),
+    )
+    relay_parser.add_argument(
         "--web-dir",
         default=None,
         help=(
@@ -964,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.config),
             session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
+            disable_legacy_ingest=args.disable_legacy_ingest,
             web_dir=Path(args.web_dir) if args.web_dir else None,
             showcase_enabled=args.showcase,
             showcase_projects=args.showcase_projects,
@@ -3451,6 +3463,7 @@ def cmd_relay_serve(
     config_path: Path,
     session_days: int = 30,
     allow_legacy_admin: bool = False,
+    disable_legacy_ingest: bool = False,
     web_dir: Path | None = None,
     showcase_enabled: bool = False,
     showcase_projects: list[str] | None = None,
@@ -3560,6 +3573,7 @@ def cmd_relay_serve(
             session_seconds=session_days * 24 * 3600,
             public_origin=public_origin,
             allow_legacy_admin=allow_legacy_admin,
+            disable_legacy_ingest=disable_legacy_ingest,
         )
 
         # The public Showcase allowlist + curated blurbs come from the CLI (project names

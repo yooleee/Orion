@@ -10,7 +10,11 @@
 # Role in project: A standalone maintenance tool, run by hand against the relay's
 #                  SQLite store as TWO deliberate invocations:
 #                      python -m relay.migrate_comments migrate --db PATH [--dry-run]
+#                                                        [--developer-ids 1,2,3,8]
 #                      python -m relay.migrate_comments drop    --db PATH [--dry-run]
+#                  --developer-ids maps those source comment ids to role "developer"
+#                  (the operator's honest-attribution override for the developer's own
+#                  comments); everything else maps to "supervisor".
 #                  Run from the repo root (repo root is on sys.path for `-m`); in
 #                  production inside the container (PYTHONPATH=/app,
 #                  --db /data/orion-relay.sqlite3). It is NOT part of the request
@@ -35,6 +39,13 @@ from relay.store import add_discussion_item, open_relay_store
 # the ONE place identity is assigned rather than server-derived (the migration is
 # the documented exception to the attribution invariant).
 _MIGRATED_ROLE = "supervisor"
+
+# The role for comments the operator identifies (by source id, via --developer-ids) as
+# actually the developer's own — e.g. a comment the developer wrote on their own report
+# via the dashboard, which the legacy write attributed to the principal name with no role.
+# Without this override every comment would be stamped "supervisor" (the default intent),
+# which would misattribute the developer's own words in the append-only discussion thread.
+_DEVELOPER_ROLE = "developer"
 
 # Display name used when the legacy `author` was blank (comments allowed an empty
 # author pre-C3). Chosen over "" so the thread renders a real label, not a gap.
@@ -202,11 +213,13 @@ def _matching_discussion_row_id(
     return row["id"] if row is not None else None
 
 
-def _map_comment(comment: dict) -> dict:
+def _map_comment(comment: dict, developer_ids: frozenset[int] = frozenset()) -> dict:
     """Map one resolved comment to its discussion-item fields.
 
     Args:
         comment: A dict from `_resolved_comments` (carries project + the raw comment).
+        developer_ids: Source comment ids the operator flagged as the developer's own;
+            those map to role "developer" instead of the default "supervisor".
 
     Returns:
         A dict of the discussion-item fields this comment becomes: project, author_id
@@ -216,25 +229,35 @@ def _map_comment(comment: dict) -> dict:
         Centralizes the mapping rule in one place so migrate, dry-run, and the drop
         parity guard all derive the SAME target row (DRY) — the guard can only trust
         "already migrated?" if it computes the identical body and author_name the
-        migrate step wrote.
+        migrate step wrote. `role` is NOT part of the dedupe key, so the developer_ids
+        override is orthogonal to idempotency and the drop guard (the guard passes no
+        override and simply ignores role).
     """
     author = comment["author"]
+    role = _DEVELOPER_ROLE if comment["id"] in developer_ids else _MIGRATED_ROLE
     return {
         "project": comment["project"],
         "author_id": None,  # legacy comments never carried an authenticated identity
         "author_name": author if author.strip() else _ANONYMOUS_AUTHOR,
-        "role": _MIGRATED_ROLE,
+        "role": role,
         "body": _migrated_body(comment["report_id"], comment["body"]),
         "created_at": comment["created_at"],
     }
 
 
-def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
+def cmd_migrate(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool,
+    developer_ids: frozenset[int] = frozenset(),
+) -> int:
     """Migrate report_comments into relay_discussion_items (idempotent).
 
     Args:
         conn: An open relay-store connection (its schema is already ensured).
         dry_run: When True, compute and report everything but insert nothing.
+        developer_ids: Source comment ids to map to role "developer" instead of the
+            default "supervisor" (the operator's honest-attribution override).
 
     Returns:
         0 on success (including a clean re-run where everything is already migrated).
@@ -263,7 +286,7 @@ def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
     migrated_keys: set[tuple[str, str, str, str]] = set()
     sample: list[dict] = []
     for comment in resolved:
-        mapped = _map_comment(comment)
+        mapped = _map_comment(comment, developer_ids)
         key = (
             mapped["project"],
             mapped["author_name"],
@@ -301,6 +324,8 @@ def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
         migrated_keys.add(key)
         migrated += 1
 
+    dev_applied = sum(1 for c in resolved if c["id"] in developer_ids)
+
     prefix = "migrate --dry-run" if dry_run else "migrate"
     verb = "would migrate" if dry_run else "migrated"
     print(f"{prefix}: {total} comment(s) found across {len(projects)} project(s)")
@@ -308,6 +333,7 @@ def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
     print(f"  already migrated:    {already}")
     print(f"  duplicate/collapsed: {len(duplicates)}")
     print(f"  skipped (orphan):    {len(orphans)}")
+    print(f"  role=developer (override): {dev_applied}   (the rest -> supervisor)")
     if duplicates:
         # Loud, itemized report — a duplicate shares its target row with another comment, so
         # dropping report_comments would lose it. The drop guard refuses until it is resolved.
@@ -437,6 +463,32 @@ def cmd_drop(conn: sqlite3.Connection, *, dry_run: bool) -> int:
     return 0
 
 
+def _parse_id_list(raw: str) -> frozenset[int]:
+    """Parse a comma-separated list of integer ids into a frozenset.
+
+    Args:
+        raw: The raw flag value, e.g. "1,2,3,8" (or "" for none).
+
+    Returns:
+        A frozenset of the parsed ids (empty when `raw` is blank).
+
+    Raises:
+        argparse.ArgumentTypeError: on any non-integer element, so a typo is a clean
+            usage error rather than a silently-ignored override.
+
+    Why:
+        The --developer-ids override must fail loudly on a bad value — a mistyped id that
+        was silently dropped would leave a comment stamped "supervisor" without warning.
+    """
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    try:
+        return frozenset(int(p) for p in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--developer-ids must be comma-separated integers; got {raw!r}"
+        ) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with the `migrate` and `drop` subcommands.
 
@@ -456,6 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subs = {}
     for name, help_text in (
         ("migrate", "Fold report_comments into relay_discussion_items (idempotent)."),
         ("drop", "Drop report_comments once every comment is migrated (parity-guarded)."),
@@ -471,6 +524,19 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="Report what would happen without writing anything.",
         )
+        subs[name] = sub
+
+    # migrate-only: an honest-attribution override for the handful of legacy comments that
+    # were actually the developer's own (identified by source id from a dry-run inspection).
+    subs["migrate"].add_argument(
+        "--developer-ids",
+        type=_parse_id_list,
+        default=frozenset(),
+        help=(
+            "Comma-separated report_comments ids to migrate as role 'developer' instead of "
+            "the default 'supervisor' (e.g. --developer-ids 1,2,3,8)."
+        ),
+    )
     return parser
 
 
@@ -492,7 +558,9 @@ def main(argv: list[str] | None = None) -> int:
     conn = open_relay_store(Path(args.db))
     try:
         if args.command == "migrate":
-            return cmd_migrate(conn, dry_run=args.dry_run)
+            return cmd_migrate(
+                conn, dry_run=args.dry_run, developer_ids=args.developer_ids
+            )
         return cmd_drop(conn, dry_run=args.dry_run)
     finally:
         conn.close()

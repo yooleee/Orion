@@ -18,6 +18,8 @@ import contextlib
 import io
 import sqlite3
 
+import pytest
+
 from relay.migrate_comments import main
 from relay.store import discussion_items_for_project, ingest, open_relay_store
 
@@ -159,6 +161,49 @@ def test_blank_author_becomes_anonymous(tmp_path):
     items = discussion_items_for_project(conn, "demo")
     conn.close()
     assert items[0]["author_name"] == "anonymous"
+
+
+def test_developer_ids_override_role(tmp_path):
+    """--developer-ids maps the named comment ids to role 'developer', rest to 'supervisor'.
+
+    Why this matters: the legacy comment write attributed a comment to any authenticated
+    principal (viewer OR the developer/admin), with no role stored. Blanket 'supervisor'
+    would mislabel the developer's own comments in the append-only thread. The override lets
+    the operator attribute those honestly by source id (identified from a dry-run), without
+    disturbing idempotency or the drop guard (role is not part of the dedupe key).
+    """
+    db = tmp_path / "relay.sqlite3"
+    conn = open_relay_store(db)
+    rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
+    # id 1 = the developer's own test comment; id 2 = a genuine supervisor comment.
+    _seed_legacy_comment(conn, rid, "Dev", "my own note", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "Reviewer", "looks good", "2026-06-19T11:00:00+00:00")
+    conn.close()
+
+    assert main(["migrate", "--db", str(db), "--developer-ids", "1"]) == 0
+
+    conn = open_relay_store(db)
+    items = discussion_items_for_project(conn, "demo")
+    conn.close()
+    by_body = {i["body"].splitlines()[1]: i for i in items}
+    assert by_body["my own note"]["role"] == "developer"  # overridden
+    assert by_body["looks good"]["role"] == "supervisor"  # default
+
+    # The drop guard is role-agnostic (role is not in the dedupe key) — parity still holds.
+    assert main(["drop", "--db", str(db)]) == 0
+    assert _table_exists(db, "report_comments") is False
+
+
+def test_developer_ids_rejects_non_integer(tmp_path):
+    """A non-integer --developer-ids value is a clean usage error, not a silent no-op.
+
+    Why this matters: a mistyped id that was silently dropped would leave a comment stamped
+    'supervisor' with no warning — exactly the misattribution the override exists to prevent.
+    """
+    db = tmp_path / "relay.sqlite3"
+    open_relay_store(db).close()
+    with pytest.raises(SystemExit):  # argparse exits non-zero on a bad --developer-ids type
+        main(["migrate", "--db", str(db), "--developer-ids", "1,oops"])
 
 
 def test_migrate_is_idempotent(tmp_path):

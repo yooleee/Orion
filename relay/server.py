@@ -62,6 +62,7 @@ from .store import (
     list_users,
     observed_history,
     open_relay_store,
+    producer_checklists_for,
     projects_for_user,
     record_admin_audit,
     record_observations,
@@ -71,6 +72,7 @@ from .store import (
     skills_projects,
     update_last_login,
     upsert_checklist,
+    upsert_producer_checklist,
     upsert_disciplines,
     upsert_skills,
 )
@@ -907,9 +909,17 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # state). Validated above, so the items are the expected {text, done} shape.
             checklist = payload.get("checklist")
             if checklist is not None:
-                # The aggregate current checklist stays single-producer (last-writer-wins) —
-                # per-producer checklists are Unit 1.4, so upsert_checklist is unattributed.
+                # The AGGREGATE current checklist is last-writer-wins across producers and
+                # drives the portfolio badge/progress — every push updates it, attributed or not.
                 upsert_checklist(conn, payload["project"], checklist, received_at)
+                # C3 Inc 2: an IDENTIFIED producer ALSO keeps its OWN checklist (dual-write),
+                # so the project page can show one card per contributor. A legacy push has no
+                # id, so it lands in the aggregate only.
+                if author_id is not None:
+                    upsert_producer_checklist(
+                        conn, payload["project"], author_id, author_name,
+                        checklist, received_at,
+                    )
                 # E2 Inc 3: also APPEND each item to the observed-state history (the
                 # forward-store's "remember"), sharing the report's receive clock. The
                 # observing producer is stamped (author_id) for future per-producer slippage.
@@ -974,13 +984,20 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # One receive clock shared by the live-state upsert and its history append, so
             # the current checklist and its newest observation never disagree by a second.
             received_at = _utc_now_iso()
-            # Aggregate current checklist stays single-producer (Unit 1.4 adds per-producer).
+            author_id, author_name = _author_of(principal)
+            # The AGGREGATE (last-writer-wins, drives the badge/progress) always updates.
             upsert_checklist(
                 conn, payload["project"], payload["checklist"], received_at
             )
+            # C3 Inc 2: an identified producer ALSO keeps its own checklist (dual-write); a
+            # legacy push (author_id None) lands in the aggregate only.
+            if author_id is not None:
+                upsert_producer_checklist(
+                    conn, payload["project"], author_id, author_name,
+                    payload["checklist"], received_at,
+                )
             # E2 Inc 3: append each item to the observed-state history (forward-store),
             # stamping the observing producer (C3 Inc 2) for future per-producer slippage.
-            author_id, _ = _author_of(principal)
             record_observations(
                 conn, payload["project"], payload["checklist"], received_at, author_id
             )
@@ -2130,6 +2147,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         reports=reports,
                         checklist=checklist,
                         observations=observed_history(conn, name),
+                        producer_checklists=producer_checklists_for(conn, name),
                         discussions=discussion_items_for_project(conn, name),
                         today=today,
                     ),

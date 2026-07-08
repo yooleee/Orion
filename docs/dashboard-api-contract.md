@@ -166,6 +166,11 @@ Everything observed about one project. `404` when missing or out of scope.
     { "text": "…", "done": false, "due_date": "2026-06-29", "key": "…",
       "group": "Sectioned home", "state": "due_soon", "status": null, "slipping": false }
   ],
+  "producer_checklists": [
+    { "author_name": "Teammate B", "progress": { "done": 3, "total": 5, "pct": 60 },
+      "items": [ { "text": "…", "done": false, "due_date": null, "key": "…",
+        "group": null, "state": "in_progress", "status": null, "slipping": false } ] }
+  ],
   "reports": [
     { "id": 26, "title": "Orion progress update", "generated_at": "2026-06-26T10:00:00+00:00",
       "lane": "structured", "share_level": "high_level", "section_count": 4,
@@ -182,7 +187,15 @@ Everything observed about one project. `404` when missing or out of scope.
 
 - Source: `history` (reports + count + nav), `get_checklist`, `observed_history` ->
   `slipping_item_keys`, `derive.milestones`, `classify_item` per item,
-  `discussion_items_for_project`.
+  `producer_checklists_for`, `discussion_items_for_project`.
+- `producer_checklists` (C3 Inc 2) is each **identified** producer's own live checklist —
+  `{ author_name, progress, items }` per producer, ordered by name, the `items` in the SAME per-item
+  shape as `checklist`. It is a dual-write beside the aggregate `checklist` (which stays last-writer-wins
+  and drives the portfolio badge/progress); a legacy shared-token push writes the aggregate ONLY, so it
+  leaves `producer_checklists` empty. `author_name` is server-derived and denormalized (survives
+  revocation); `author_id` is **not** on the wire. The dashboard renders one card per producer only when
+  there are **two or more** (a single producer's card would just duplicate the aggregate). Note: `items[].slipping`
+  reuses the project-level slipping set (true per-producer slippage is not derived).
 - `reports[].author_name` (C3 Inc 2) is the producer who pushed the report — a server-derived display
   name, or `null` for a legacy (shared-token) push or a report predating attribution. The name is
   denormalized at write time so it survives the user's later revocation; the internal `author_id` is

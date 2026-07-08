@@ -75,6 +75,26 @@ CREATE TABLE IF NOT EXISTS relay_project_checklists (
     updated_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay last received it
 );
 
+-- C3 Inc 2: a project's LIVE checklist PER PRODUCER — the two-person shared base. The
+-- aggregate above is last-writer-wins under multiple producers (it shows only whoever pushed
+-- most recently); this keeps each identified contributor's OWN current checklist so the
+-- dashboard can show one card per producer side by side. Written ALONGSIDE the aggregate (a
+-- dual-write), never replacing it — the aggregate still drives the portfolio badge/progress.
+-- ONE row per (project, author_id), REPLACED on each of that producer's pushes. Only IDENTIFIED
+-- producers land here (author_id is NOT NULL); a legacy anonymous push writes the aggregate
+-- only. author_name is denormalized (server-derived, copied at write) so the card's label
+-- survives the user's later revocation — the same convention relay_discussion_items/relay_reports
+-- use. A brand-new table, so "IF NOT EXISTS" adds it on the already-deployed relay with no
+-- column migration. items is the same JSON {text, done} shape the aggregate carries.
+CREATE TABLE IF NOT EXISTS relay_producer_checklists (
+    project     TEXT NOT NULL,      -- the project this producer's checklist belongs to
+    author_id   INTEGER NOT NULL,   -- the producing contributor's relay_users id (never NULL here)
+    author_name TEXT NOT NULL,      -- server-derived display name, denormalized (survives revocation)
+    items       TEXT NOT NULL,      -- JSON array of {text, done} objects, in file order
+    updated_at  TEXT NOT NULL,      -- ISO 8601 UTC, when the relay last received this producer's push
+    PRIMARY KEY (project, author_id)
+);
+
 -- E2 Inc 3: an APPEND-ONLY log of each checklist item's observed forward state over time
 -- — the "remember" half of the forward-looking layer. Unlike relay_project_checklists
 -- (current state, one upserted row per project), this ACCUMULATES: one row per item per
@@ -418,6 +438,87 @@ def get_checklist(conn: sqlite3.Connection, project: str) -> list | None:
         "SELECT items FROM relay_project_checklists WHERE project = ?", (project,)
     ).fetchone()
     return json.loads(row["items"]) if row is not None else None
+
+
+def upsert_producer_checklist(
+    conn: sqlite3.Connection,
+    project: str,
+    author_id: int,
+    author_name: str,
+    items: list,
+    updated_at: str,
+) -> None:
+    """Replace ONE identified producer's live checklist for a project (C3 Inc 2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project this producer's checklist belongs to.
+        author_id: The producing contributor's relay_users id (never None — only identified
+            producers get a per-producer checklist; a legacy push writes the aggregate only).
+        author_name: That producer's server-derived display name, stored denormalized so the
+            card's label survives the user's later revocation.
+        items: The producer's current checklist as {"text", "done"[, ...]} dicts, in file order.
+            May be empty (an enabled-but-empty checklist legitimately clears this producer's list).
+        updated_at: ISO 8601 UTC timestamp of when the relay received this producer's push.
+
+    Why:
+        The per-producer sibling of upsert_checklist: current state, one row per
+        (project, author_id), REPLACED on each of that producer's pushes via
+        ON CONFLICT(project, author_id). It is a DUAL-WRITE beside the aggregate, never a
+        replacement — the aggregate row still drives the portfolio badge/progress; this table
+        only feeds the per-producer cards. author_name is re-stamped on every push so a renamed
+        producer's card tracks the latest name.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_producer_checklists (project, author_id, author_name, items, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(project, author_id) DO UPDATE SET
+            author_name = excluded.author_name,
+            items = excluded.items,
+            updated_at = excluded.updated_at
+        """,
+        (project, author_id, author_name, json.dumps(items), updated_at),
+    )
+    conn.commit()
+
+
+def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict]:
+    """Return every producer's live checklist for a project, ordered by producer name.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to fetch per-producer checklists for.
+
+    Returns:
+        A list of {"author_id", "author_name", "items"} dicts (items JSON-decoded), one per
+        identified producer that has pushed a checklist, ordered by author_name for stable card
+        positions. Empty when the project has no per-producer checklists (never pushed by an
+        identified producer, e.g. legacy-only or older data).
+
+    Why:
+        Backs the project page's per-producer cards. Ordering by name keeps a card from jumping
+        position when a producer re-pushes. Decoding items here (like get_checklist) hands the
+        serializer real dicts. author_name comes straight from the row (denormalized at write),
+        so the read needs no JOIN and survives a producer's revocation.
+    """
+    rows = conn.execute(
+        """
+        SELECT author_id, author_name, items
+        FROM relay_producer_checklists
+        WHERE project = ?
+        ORDER BY author_name
+        """,
+        (project,),
+    ).fetchall()
+    return [
+        {
+            "author_id": row["author_id"],
+            "author_name": row["author_name"],
+            "items": json.loads(row["items"]),
+        }
+        for row in rows
+    ]
 
 
 def upsert_disciplines(

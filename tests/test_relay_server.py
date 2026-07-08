@@ -721,6 +721,44 @@ def test_contributor_report_is_attributed_through_the_read_api(tmp_path):
         assert "author_id" not in detail  # internal id never on the wire
 
 
+def test_two_contributors_get_separate_producer_checklists(tmp_path):
+    """Two contributors pushing checklists surface as two producer_checklists; legacy stays out.
+
+    Why this matters: the C3 Inc 2 per-producer promise, end to end. Each identified producer's
+    checklist is dual-written and shows as its own entry (name + progress + rows), while the
+    aggregate stays last-writer-wins and a legacy push contributes only to the aggregate — never
+    a producer card. We assert two producer entries with the right names/progress and that a
+    legacy push adds none.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "Teammate B", "b-key", role="contributor", projects=["demo"])
+        _provision_user(db, "Teammate C", "c-key", role="contributor", projects=["demo"])
+        _provision_user(db, "root", "admin-key", role="admin")
+
+        # Each contributor pushes its OWN checklist via /checklist (Bearer, their own key).
+        def push_checklist(project, token, items):
+            body = json.dumps({"project": project, "checklist": items}).encode("utf-8")
+            return _post(base_url, body, token=token, path="/checklist")
+
+        assert push_checklist("demo", "b-key", [
+            {"text": "B task 1", "done": True}, {"text": "B task 2", "done": False},
+        ])[0] == 200
+        assert push_checklist("demo", "c-key", [{"text": "C task", "done": False}])[0] == 200
+        # A legacy push updates the aggregate only — no producer card.
+        assert push_checklist("demo", _TOKEN, [{"text": "legacy", "done": False}])[0] == 200
+
+        cookie = _login(base_url, "admin-key")
+        code, body = _get(base_url, "/api/projects/demo", cookie=cookie)
+        assert code == 200
+        producers = json.loads(body)["producer_checklists"]
+
+        assert [p["author_name"] for p in producers] == ["Teammate B", "Teammate C"]  # by name
+        by_name = {p["author_name"]: p for p in producers}
+        assert by_name["Teammate B"]["progress"] == {"done": 1, "total": 2, "pct": 50}
+        assert [i["text"] for i in by_name["Teammate B"]["items"]] == ["B task 1", "B task 2"]
+        assert by_name["Teammate C"]["progress"] == {"done": 0, "total": 1, "pct": 0}
+
+
 def test_legacy_shared_token_still_ingests_by_default(tmp_path):
     """The shared ingest token keeps working (anonymously, unrestricted) while enabled.
 

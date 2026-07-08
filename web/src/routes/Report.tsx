@@ -2,34 +2,25 @@
 // web/src/routes/Report.tsx
 // -----------------------------------------------------------------------------
 // Responsible for: One progress report in full — breadcrumb + header (with prev/next
-//                  nav), the body card + comments on the left, and the context rail on
-//                  the right.
+//                  nav), the body card on the left, and the context rail on the right.
 // Role in project: The report reader. Reads /api/reports/:id; a 404 renders a clean
 //                  not-found (out-of-scope reports are 404 too — existence-hiding).
+//                  The one conversation surface is the project-level Discussion thread
+//                  (on the project page); the report page carries no thread of its own
+//                  (KI-28 Stage 2 retired per-report comments).
 // =============================================================================
 
-import { useEffect, useState } from "react";
-import { Link, useOutletContext, useParams } from "react-router-dom";
-import type { ShellContext } from "../components/Shell";
-import type { Comment } from "../api/types";
+import { Link, useParams } from "react-router-dom";
 import { ApiError, getReport } from "../api/client";
 import { useApiData } from "../lib/useApiData";
 import { relativeTime } from "../lib/time";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { ReportBody } from "../components/ReportBody";
 import { ContextRail } from "../components/ContextRail";
-import { CommentList } from "../components/CommentList";
-import { CommentComposer } from "../components/CommentComposer";
 
 export function Report() {
   const { id = "" } = useParams();
-  const { me } = useOutletContext<ShellContext>();
   const { data, error, loading } = useApiData(() => getReport(id), [id]);
-  // Comments posted this session, appended to the fetched thread (no full refetch flicker).
-  // Reset when the report changes so they never bleed across navigations.
-  const [posted, setPosted] = useState<Comment[]>([]);
-  useEffect(() => setPosted([]), [id]);
-  const canComment = me.authenticated || !me.gated;
 
   if (loading) return <div className="center-note">Loading…</div>;
   if (error) {
@@ -76,16 +67,6 @@ export function Report() {
       <div className="report-grid">
         <div className="report-main">
           <ReportBody report={data} />
-          <section className="report-comments">
-            <div className="eyebrow block-label">Comments</div>
-            <CommentList comments={[...data.comments, ...posted]} />
-            <CommentComposer
-              reportId={data.id}
-              authorName={me.identity?.name ?? null}
-              canComment={canComment}
-              onPosted={(c) => setPosted((prev) => [...prev, c])}
-            />
-          </section>
         </div>
         <ContextRail report={data} />
       </div>

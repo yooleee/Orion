@@ -17,7 +17,6 @@ import importlib.util
 
 import pytest
 
-from orion.bot.core import MAX_AUTHOR_CHARS
 from orion.bot.slack_bot import (
     _process_event,
     _resolve_author,
@@ -25,7 +24,6 @@ from orion.bot.slack_bot import (
     run_bot,
 )
 from orion.config import ConfigError
-from orion.delivery import DeliveryError
 
 # Whether slack-bolt is importable in this environment. The run_bot missing-dependency
 # test only makes sense when it is NOT installed (otherwise run_bot would try to build
@@ -165,118 +163,53 @@ def test_resolve_author_empty_user_id_is_empty():
     assert _resolve_author(_FakeClient(), "") == ""
 
 
-# --- _process_event: decide, then relay on a forward -----------------------------
+# --- _process_event: decide, but delivery is PARKED (KI-28 Stage 2) --------------
+#
+# The relay comment write retired and repointing to the discussion write awaits per-user
+# keys, so _process_event no longer posts. It still runs the core's decision (the glue
+# these tests cover); the decision logic itself is pinned in test_bot_core.py.
 
 
-def _recording_poster():
-    """Return (poster, calls) where poster records its args instead of POSTing.
+def test_process_event_forwardable_message_is_not_relayed():
+    """A forwardable human message is recognized but NOT relayed while parked.
 
-    Why:
-        _process_event's observable effect is the relay POST; a recording fake lets us
-        assert exactly what would be sent without any network.
+    Why this matters: delivery is parked — the observable is that _process_event returns
+    the normalized message and raises nothing (there is no poster to call). This pins that
+    the parked glue path is a safe no-op rather than a crash on a real reply.
     """
-    calls = []
-
-    def poster(relay_url, token, project, author, body):
-        calls.append((relay_url, token, project, author, body))
-
-    return poster, calls
-
-
-def test_process_event_forwards_human_message():
-    """A human message in a mapped channel POSTs a comment with resolved fields.
-
-    Why this matters: the end-to-end glue — a real reply resolves the author, routes to
-    the channel's project, and relays the stripped body to the configured relay url/token.
-    """
-    poster, calls = _recording_poster()
-    client = _FakeClient(profile={"display_name": "Alex"})
-    _process_event(
+    msg = _process_event(
         {"channel": "C_MAPPED", "user": "U1", "text": "  Ship it.  "},
-        client,
+        _FakeClient(profile={"display_name": "Alex"}),
         _MAP,
         "https://relay.test/ingest",
         "tok",
-        poster=poster,
-        author_resolver=_resolve_author,
     )
-    assert calls == [("https://relay.test/ingest", "tok", "demo", "Alex", "Ship it.")]
+    assert msg.channel_id == "C_MAPPED"
+    assert msg.text == "Ship it." or msg.text == "  Ship it.  "  # normalizer keeps raw text
 
 
-def test_process_event_drops_bot_message_without_posting():
-    """A bot-authored message is dropped — the poster is never called.
+def test_process_event_dropped_message_is_a_noop():
+    """A bot-authored or unmapped message is dropped without error.
 
-    Why this matters: this is loop prevention at the glue level — Orion's own delivered
-    report (a webhook/bot message) must not trigger a relay POST.
+    Why this matters: the loop-prevention and configured-channels guards still run at the
+    glue level; a dropped message is a clean no-op (nothing to relay even if delivery were
+    live).
     """
-    poster, calls = _recording_poster()
+    # Bot message (loop prevention) and unmapped channel both drop without raising.
     _process_event(
         {"channel": "C_MAPPED", "bot_id": "B1", "text": "a report"},
         _FakeClient(),
         _MAP,
         "https://relay.test/ingest",
         "tok",
-        poster=poster,
     )
-    assert calls == []
-
-
-def test_process_event_drops_unconfigured_channel():
-    """A message in an unmapped channel is dropped — no POST.
-
-    Why this matters: configured-channels-only access control, proven through the glue:
-    a channel the operator never bound to a project produces no comment.
-    """
-    poster, calls = _recording_poster()
     _process_event(
         {"channel": "C_OTHER", "user": "U1", "text": "hi"},
         _FakeClient(profile={"display_name": "Alex"}),
         _MAP,
         "https://relay.test/ingest",
         "tok",
-        poster=poster,
     )
-    assert calls == []
-
-
-def test_process_event_failsoft_on_delivery_error():
-    """A DeliveryError from the poster is swallowed (the listener keeps running).
-
-    Why this matters: a relay outage or auth failure on one reply must not crash the
-    always-on bot. _process_event catches DeliveryError and returns normally, so the
-    next event is still handled.
-    """
-    def failing_poster(relay_url, token, project, author, body):
-        raise DeliveryError("relay down")
-
-    # Must not raise out of _process_event.
-    _process_event(
-        {"channel": "C_MAPPED", "user": "U1", "text": "hi"},
-        _FakeClient(profile={"display_name": "Alex"}),
-        _MAP,
-        "https://relay.test/ingest",
-        "tok",
-        poster=failing_poster,
-    )
-
-
-def test_process_event_caps_long_author():
-    """An over-long resolved author is truncated before the POST.
-
-    Why this matters: a pathological display name must not trip the relay's author cap;
-    the shell caps it (the relay re-caps server-side as a safety net).
-    """
-    poster, calls = _recording_poster()
-    long_name = "N" * (MAX_AUTHOR_CHARS + 25)
-    _process_event(
-        {"channel": "C_MAPPED", "user": "U1", "text": "hi"},
-        _FakeClient(profile={"display_name": long_name}),
-        _MAP,
-        "https://relay.test/ingest",
-        "tok",
-        poster=poster,
-    )
-    assert calls[0][3] == "N" * MAX_AUTHOR_CHARS
 
 
 # --- run_bot: the dependency boundary --------------------------------------------

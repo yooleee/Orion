@@ -315,8 +315,8 @@ def test_portfolio_scope_echoes_a_viewers_grants():
 # --- serialize_project: full detail ------------------------------------------
 
 
-def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
-    """The project shape carries stats, milestones (with slipping), checklist, reports, comments."""
+def test_project_detail_assembles_stats_milestones_checklist_reports_discussions():
+    """The project shape carries stats, milestones (with slipping), checklist, reports, discussions."""
     reports = [
         {
             "id": 26,
@@ -341,9 +341,6 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
         {"item_key": "todo-x", "due_date": "2026-06-20", "done": False, "observed_at": "2026-06-22T00:00:00+00:00"},
         {"item_key": "todo-x", "due_date": "2026-06-28", "done": False, "observed_at": "2026-06-26T00:00:00+00:00"},
     ]
-    comments = [
-        {"id": 1, "report_id": 26, "author": "Alex", "body": "nice", "created_at": "2026-06-25T00:00:00+00:00"}
-    ]
     # A two-turn discussion thread: a supervisor message and the developer's reply. The
     # store dict carries author_id + project, which the wire shape drops (see assertion).
     discussions = [
@@ -358,7 +355,6 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
         reports=reports,
         checklist=checklist,
         observations=observations,
-        comments=comments,
         discussions=discussions,
         today=_TODAY,
     )
@@ -392,10 +388,6 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_comments():
         "section_count": 2,
         "source_tags": [],
     }
-    # Comments: role is null in 4a (gap 7), report_id dropped.
-    assert out["comments"] == [
-        {"id": 1, "author": "Alex", "role": None, "body": "nice", "created_at": "2026-06-25T00:00:00+00:00"}
-    ]
     # Discussions (E2 Inc 5): a REAL role per item (gap 7 closed for this surface), oldest
     # first. author_id and project are dropped from the wire (the badge needs name + role).
     assert out["discussions"] == [
@@ -428,7 +420,6 @@ def test_project_detail_emits_in_progress_state_and_passes_status_through():
         reports=[],
         checklist=checklist,
         observations=[],
-        comments=[],
         discussions=[],
         today=_TODAY,
     )
@@ -455,7 +446,6 @@ def test_project_detail_handles_no_checklist():
         reports=[],
         checklist=None,
         observations=[],
-        comments=[],
         discussions=[],
         today=_TODAY,
     )
@@ -487,7 +477,6 @@ def test_report_detail_title_is_body_headline_not_section_label():
     out = api.serialize_report(
         report=_report(),
         checklist=None,
-        comments=[],
         history=[_report()],
         today=_TODAY,
     )
@@ -511,7 +500,6 @@ def test_report_detail_checklist_snapshot_counts_and_states():
     out = api.serialize_report(
         report=_report(),
         checklist=checklist,
-        comments=[],
         history=[_report()],
         today=_TODAY,
     )
@@ -525,7 +513,7 @@ def test_report_detail_nav_points_prev_to_older_next_to_newer():
     # history is newest-first: 27, 26, 25. Per-PROJECT ordinals: 25→1, 26→2, 27→3.
     history = [_report(27), _report(26), _report(25)]
     out = api.serialize_report(
-        report=_report(26), checklist=None, comments=[], history=history, today=_TODAY
+        report=_report(26), checklist=None, history=history, today=_TODAY
     )
     # The middle report: older=25 (#1), newer=27 (#3). ids drive links, numbers the labels.
     assert out["nav"] == {
@@ -534,7 +522,7 @@ def test_report_detail_nav_points_prev_to_older_next_to_newer():
 
     # The newest report has a previous (older) but no next (newer).
     out_latest = api.serialize_report(
-        report=_report(27), checklist=None, comments=[], history=history, today=_TODAY
+        report=_report(27), checklist=None, history=history, today=_TODAY
     )
     assert out_latest["nav"] == {
         "prev_id": 26, "prev_number": 2, "next_id": None, "next_number": None
@@ -553,7 +541,7 @@ def test_report_number_is_per_project_ordinal_not_global_id():
     # Oldest (id 5) is #1, then 18 → #2, newest 29 → #3 — independent of the global ids.
     nums = {
         r["id"]: api.serialize_report(
-            report=r, checklist=None, comments=[], history=history, today=_TODAY
+            report=r, checklist=None, history=history, today=_TODAY
         )["number"]
         for r in history
     }

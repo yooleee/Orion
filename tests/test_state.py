@@ -9,14 +9,12 @@
 from orion.state import (
     _BUSY_TIMEOUT_SECONDS,
     get_cache,
-    get_comment_watermark,
     get_discussion_watermark,
     get_last_report_time,
     get_marker,
     open_state,
     record_report,
     set_cache,
-    set_comment_watermark,
     set_discussion_watermark,
     set_marker,
 )
@@ -155,79 +153,10 @@ def test_record_report_persists_history(tmp_path):
     assert "Alex" in row[2] and "Sam" in row[2]
 
 
-# --- C2 pull-back: the local comment-unread watermark --------------------------
-
-
-def test_comment_watermark_defaults_to_zero(tmp_path):
-    """A (project, relay) never pulled returns watermark 0.
-
-    Why this matters: 0 is the "seen nothing" sentinel the first pull relies on —
-    relay comment ids start at 1, so since_id=0 fetches the full history. If a fresh
-    pair returned anything else, the first pull would silently skip early comments.
-    """
-    conn = open_state(tmp_path / "state.sqlite3")
-    assert get_comment_watermark(conn, "demo", "https://relay.test/ingest") == 0
-
-
-def test_comment_watermark_round_trips(tmp_path):
-    """A set watermark is read back for the same (project, relay).
-
-    Why this matters: the cursor only works if what we record is what the next pull
-    reads — set the high-water mark, then get it back unchanged.
-    """
-    conn = open_state(tmp_path / "state.sqlite3")
-    url = "https://relay.test/ingest"
-    set_comment_watermark(conn, "demo", url, 42, "2026-06-19T12:00:00+00:00")
-    assert get_comment_watermark(conn, "demo", url) == 42
-
-
-def test_comment_watermark_is_upsert(tmp_path):
-    """Setting the watermark twice updates the same row (advances, not duplicates).
-
-    Why this matters: each successful pull advances the cursor in place. A second set
-    must overwrite the first (one row per (project, relay)), so the watermark always
-    reflects the latest pull rather than accumulating stale rows.
-    """
-    conn = open_state(tmp_path / "state.sqlite3")
-    url = "https://relay.test/ingest"
-    set_comment_watermark(conn, "demo", url, 5, "2026-06-19T12:00:00+00:00")
-    set_comment_watermark(conn, "demo", url, 9, "2026-06-19T13:00:00+00:00")
-
-    assert get_comment_watermark(conn, "demo", url) == 9
-    # Exactly one row for the pair — the second set updated, not inserted.
-    (count,) = conn.execute(
-        "SELECT COUNT(*) FROM comment_watermark WHERE project = ? AND relay_url = ?",
-        ("demo", url),
-    ).fetchone()
-    assert count == 1
-
-
-def test_comment_watermark_is_scoped_per_project_and_relay(tmp_path):
-    """Watermarks are independent across projects AND across relays for one project.
-
-    Why this matters: the key is (project, relay_url), not project alone. Two projects
-    must not share a cursor, and pointing the SAME project at a different relay must
-    start fresh — ids from one relay's store are meaningless against another's, so a
-    shared cursor would skip or re-show comments. We set three distinct pairs and
-    confirm each reads back its own value.
-    """
-    conn = open_state(tmp_path / "state.sqlite3")
-    relay_a = "https://a.relay.test/ingest"
-    relay_b = "https://b.relay.test/ingest"
-
-    set_comment_watermark(conn, "demo", relay_a, 10, "2026-06-19T12:00:00+00:00")
-    set_comment_watermark(conn, "other", relay_a, 20, "2026-06-19T12:00:00+00:00")
-    set_comment_watermark(conn, "demo", relay_b, 30, "2026-06-19T12:00:00+00:00")
-
-    assert get_comment_watermark(conn, "demo", relay_a) == 10   # this project+relay
-    assert get_comment_watermark(conn, "other", relay_a) == 20  # different project
-    assert get_comment_watermark(conn, "demo", relay_b) == 30   # same project, other relay
-
-
 # --- E2 Inc 5: the local discussion-unread watermark ---------------------------
-# The supervisor-interaction loop's cursor. A SEPARATE table from comment_watermark
-# (the item id spaces differ), so we re-pin defaults/round-trip/upsert/scoping AND that
-# the two cursors are genuinely independent (advancing one must not move the other).
+# The supervisor-interaction loop's cursor — the live read-cursor since KI-28 Stage 2
+# retired the comment pull-back. A SEPARATE table from the (now-orphaned) comment_watermark,
+# so we re-pin its defaults, round-trip, upsert, and per-(project, relay) scoping.
 
 
 def test_discussion_watermark_defaults_to_zero(tmp_path):
@@ -249,20 +178,6 @@ def test_discussion_watermark_round_trips_and_upserts(tmp_path):
     ).fetchone()
     assert count == 1
 
-
-def test_discussion_and_comment_watermarks_are_independent(tmp_path):
-    """The two cursors live in separate tables: advancing one never moves the other.
-
-    Why this matters: comment ids and discussion-item ids are distinct streams. If they
-    shared a table/cursor, a discussion pull would corrupt the comment cursor (and vice
-    versa), silently skipping or re-showing messages. We set each and confirm isolation.
-    """
-    conn = open_state(tmp_path / "state.sqlite3")
-    url = "https://relay.test/ingest"
-    set_comment_watermark(conn, "demo", url, 7, "2026-06-28T12:00:00+00:00")
-    set_discussion_watermark(conn, "demo", url, 99, "2026-06-28T12:00:00+00:00")
-    assert get_comment_watermark(conn, "demo", url) == 7    # unmoved by the discussion set
-    assert get_discussion_watermark(conn, "demo", url) == 99
 
 
 # --- collector_cache: the content-hash cache (E2 Inc 4 slice 4b) ------------------

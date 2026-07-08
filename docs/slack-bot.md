@@ -11,10 +11,21 @@ Role in project: The how-to companion to the scoping doc
 
 # Native Slack bot (`orion bot`) — two-way in chat
 
-C2 made the loop two-way **on the dashboard** (supervisors comment on a report). The Slack bot
-makes it two-way **in chat**, where the supervisor already reads the report: a reply in a mapped
-Slack channel becomes a comment on that project's report — visible on the dashboard *and* pulled
-back by `orion comments`, exactly like a dashboard comment.
+> **⚠ PARKED (KI-28 Stage 2, 2026-07-07).** The bot's write target — the relay's
+> `POST /api/comments` comment endpoint — was **retired** when comments were folded into the
+> discussion model. Repointing the bot at the discussion write must wait for **per-user keys** (the
+> Bearer discussion route stamps role `developer`, but a chat reply is *supervisor* speech — posting
+> it now would be dishonest attribution). So today `orion bot` **prints a parked notice and exits**;
+> the Slack shell recognizes a forwardable reply but does **not** relay it. The pure decision core
+> (`orion.bot.core`) and the shell are kept as the revival seam, and `[bot]` config + the `slack-bot`
+> extra still parse. The rest of this doc describes the **original C2-bots design** (a chat reply →
+> `POST /api/comments` → `report_comments`); revival will **adapt** it to the discussion write (the
+> comment endpoint and store no longer exist). Treat it as historical/architectural, not current
+> behavior. See `docs/two-person-shared-base-kickoff.md`.
+
+C2 made the loop two-way **on the dashboard**. The Slack bot makes it two-way **in chat**, where the
+supervisor already reads the report: a reply in a mapped Slack channel becomes a message on that
+project's discussion thread — visible on the dashboard *and* pulled back by `orion discussions pull`.
 
 This is the **smallest first slice**: one platform (Slack), no slash commands, no command parsing.
 

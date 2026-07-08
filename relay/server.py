@@ -44,11 +44,8 @@ from zoneinfo import ZoneInfo
 from . import api
 from .derive import today_in_tz
 from .store import (
-    add_comment,
     add_discussion_item,
     add_user,
-    comments_for,
-    comments_for_project,
     disciplines_projects,
     discussion_items_for_project,
     get,
@@ -89,11 +86,12 @@ _DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
 # defensive hygiene on an inbound surface — we do not trust a client-sent length.
 _MAX_BLOB_BYTES = 1_000_000
 
-# Per-field caps for a supervisor comment (C2): the semantic limits on the DECODED
-# comment body / author, enforced by the JSON comment write handlers. The 1 MB raw-body
-# cap above remains the outer memory guard. These formerly lived in render.py (where the
-# form's maxlength hint also used them); they moved here when render.py retired (E2 Inc 4,
-# KI-23). NOTE: the native-bot package keeps its OWN independent copies in orion.bot.core.
+# Per-field caps on the DECODED body / author of a discussion write, enforced by the JSON
+# discussion write handlers. The 1 MB raw-body cap above remains the outer memory guard.
+# The names are historical (they began as the C2 comment caps in render.py, moved here at
+# KI-23, and were inherited by the discussion handlers; the comment write itself retired
+# with KI-28 Stage 2). NOTE: the native-bot package keeps its OWN independent copies in
+# orion.bot.core.
 MAX_COMMENT_BODY_CHARS = 4_000
 MAX_AUTHOR_CHARS = 200
 
@@ -622,30 +620,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _parse_api_comment_path(path: str) -> int | None:
-    """Extract the report id from "/api/reports/<id>/comments", or None.
-
-    Args:
-        path: The request path, already stripped of any query string.
-
-    Returns:
-        The integer report id when `path` is exactly "/api/reports/<digits>/comments";
-        otherwise None (the route did not match).
-
-    Why:
-        The SPA's JSON comment write is RESTfully scoped to a report. do_POST routes by
-        path, so it needs a yes/no-with-id matcher with an all-digit guard: a non-numeric
-        id simply fails to match and falls through to the 404 — no exception, no store
-        touch. The GET /api/reports/<id> read uses the same id segment, so write and read
-        agree on the identity.
-    """
-    prefix, suffix = "/api/reports/", "/comments"
-    if not (path.startswith(prefix) and path.endswith(suffix)):
-        return None
-    middle = path[len(prefix):-len(suffix)]
-    return int(middle) if middle.isdigit() else None
-
-
 def _parse_api_discussion_path(path: str) -> str | None:
     """Extract the project name from "/api/discussions/<project>/items", or None.
 
@@ -657,9 +631,9 @@ def _parse_api_discussion_path(path: str) -> str | None:
         "/api/discussions/<non-empty>/items"; otherwise None (the route did not match).
 
     Why:
-        The discussion write is RESTfully scoped to a project (the thread anchor), the way
-        the comment write is scoped to a report. do_POST routes by path, so it needs a
-        yes/no-with-name matcher. A project name can contain spaces or other reserved
+        The discussion write is RESTfully scoped to a project (the thread anchor). do_POST
+        routes by path, so it needs a yes/no-with-name matcher that returns the id/name to
+        act on. A project name can contain spaces or other reserved
         characters, so it arrives percent-encoded and is unquoted here — mirroring how
         GET /api/projects/<name> decodes its segment, so write and read agree on identity.
         An empty middle segment fails to match and falls through to the 404.
@@ -692,7 +666,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
         """Route a GET request.
 
         Three GET surfaces remain after the server-rendered views retired (KI-23):
-          1. The machine-JSON API ("/api/comments", "/api/users") — Bearer/admin-token
+          1. The machine-JSON API ("/api/discussions", "/api/users") — Bearer/admin-token
              authed, routed FIRST so a browser never reaches it and the CLI never trips
              the session gate.
           2. The SPA's read-only JSON API ("/api/me", "/api/portfolio",
@@ -717,9 +691,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
 
         # Machine-JSON API routes are Bearer-authed and bypass the browser session gate.
-        if path == "/api/comments":
-            self._handle_api_comments()
-            return
         # E2 Inc 5: the developer's Bearer-authed discussion pull (?project=&since_id=).
         if path == "/api/discussions":
             self._handle_api_discussions()
@@ -730,7 +701,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_list_users()
             return
 
-        # E2 Inc 4: the SPA's read-only JSON API. Unlike /api/comments + /api/users (machine
+        # E2 Inc 4: the SPA's read-only JSON API. Unlike /api/discussions + /api/users (machine
         # surfaces authed by a Bearer/admin token), these are consumed by the browser SPA and
         # use the SAME cookie session + scope the dashboard routes do — but answer with JSON
         # (and a 401 instead of a 303 redirect, so the SPA's fetch routes itself to /login).
@@ -777,22 +748,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Route a POST to one of the relay's write surfaces.
 
-        Routes: "/ingest" (the Bearer-authed report push), "/api/comments" (a
-        Bearer-authed MACHINE comment write — the native bot's path, C2-bots),
-        "/api/reports/<id>/comments" (the SPA's cookie-authed BROWSER comment write),
-        and the JSON auth siblings "/api/login" / "/api/logout". Anything else is a 404.
-        Routing is by path only, so any query string is stripped first — mirroring do_GET.
+        Routes: "/ingest" (the Bearer-authed report push), "/api/discussions" (the
+        Bearer-authed MACHINE discussion reply) and "/api/discussions/<project>/items"
+        (the SPA's cookie-authed BROWSER discussion write), plus the JSON auth siblings
+        "/api/login" / "/api/logout". Anything else is a 404. Routing is by path only, so
+        any query string is stripped first — mirroring do_GET.
 
-        Why a router: do_POST used to be the single ingest handler. C2 added a second,
-        differently-authed write path (a CSRF check + cookie session), and the bots slice
-        added a third — a machine sibling of GET /api/comments that takes Bearer (like
-        /ingest). Each path gets its own handler, keeping this method a short, readable
-        table of routes rather than one branching blob.
-
-        Note "/api/comments" is shared between do_GET (the pull-back read) and do_POST
-        (the bot's write): the HTTP method already disambiguates them, so the same
-        Bearer-gated machine path serves both directions. (The legacy form routes
-        POST /login and POST /report/<id>/comment retired with render.py — KI-23.)
+        Why a router: do_POST used to be the single ingest handler. E2 Inc 5 added the
+        discussion writes (a cookie + CSRF browser path and a Bearer machine path), each
+        differently authed. Each path gets its own handler, keeping this method a short,
+        readable table of routes rather than one branching blob. (The legacy form routes
+        POST /login and POST /report/<id>/comment retired with render.py — KI-23; the
+        report-comment write endpoints retired with KI-28 Stage 2.)
         """
         path = urllib.parse.urlparse(self.path).path
 
@@ -814,10 +781,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         if path == "/skills-batch":
             self._handle_skills_batch()
-            return
-
-        if path == "/api/comments":
-            self._handle_api_comment_post()
             return
 
         # E2 Inc 5: the developer's Bearer-authed discussion reply (machine path). Exact
@@ -843,13 +806,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_api_logout()
             return
 
-        # E2 Inc 4: the SPA's cookie-authed JSON comment write — the only user-authored
-        # write path. Distinct from the Bearer-authed machine /api/comments above.
-        api_comment_report_id = _parse_api_comment_path(path)
-        if api_comment_report_id is not None:
-            self._handle_api_report_comment(api_comment_report_id)
-            return
-
         # E2 Inc 5: the SPA's cookie-authed discussion write (supervisor-interaction loop).
         # Attribution is server-derived from the principal — see _handle_api_discussion_item.
         api_discussion_project = _parse_api_discussion_path(path)
@@ -863,10 +819,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
         """Authenticate, validate, and store a pushed report blob (POST /ingest).
 
         Why:
-            This is the original ingest path, unchanged — moved verbatim out of
-            do_POST when the second write route (comments) was added. It speaks JSON
-            (a machine-to-machine push from local Orion), in contrast to the comment
-            route, which speaks HTTP form data from a browser.
+            The original ingest path: a Bearer-authed, machine-to-machine JSON push from
+            local Orion. Kept as its own handler so do_POST stays a short route table as
+            other write surfaces (the discussion writes) were added alongside it.
         """
         # 1) Authenticate FIRST: validate nothing about the payload until the caller
         # is authorized. We DO distinguish "no/!malformed header" from "wrong token"
@@ -1164,108 +1119,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
             200, {"updated": len(projects), "skills": incoming_total}
         )
 
-    def _handle_api_report_comment(self, report_id: int) -> None:
-        """Store one comment from the SPA on a report (POST /api/reports/<id>/comments).
-
-        Args:
-            report_id: The report the comment attaches to (parsed from the path).
-
-        Why:
-            The only user-authored write surface: the SPA posts a comment via fetch and
-            appends the returned comment to the thread. JSON-in / JSON-out, cookie-session
-            authed with a CSRF (Origin) check, scope-filtered, and attributed to the
-            authenticated identity. The machine path POST /api/comments stays Bearer-authed
-            and separate (a browser never auto-sends a Bearer token, so it needs no CSRF
-            check; this cookie path does). Every guard reuses the vetted auth/scope/origin
-            helpers. (This absorbed the retired browser form route's role — KI-23.)
-
-            Inbound-security checklist, enforced IN ORDER:
-              1. Auth — a valid session cookie when the dashboard is gated; 401 otherwise.
-              2. CSRF — the cookie is auto-sent by the browser, so a forged cross-site POST
-                 is the threat; require a matching Origin/Referer (_origin_error), else 403.
-              3. Validate — JSON {body, author?}; a non-empty body within the caps; else 400.
-              4. Report exists AND is in scope — else 404, identical to a missing report
-                 (existence-hiding), so a viewer cannot probe or write outside their grants.
-              5. Store — attribute to the authenticated identity (NEVER the client-supplied
-                 author, so a logged-in user cannot post as someone else); open loopback has
-                 no session, so the typed name stands. Return 201 with the created comment in
-                 the read-path shape (api._comment) so the SPA appends it without a refetch.
-        """
-        conn = open_relay_store(self.server.db_path)
-        try:
-            # 1) Auth: a valid session whenever the dashboard is access-gated (same as reads).
-            gated = self._auth_required(conn)
-            principal = self._authenticate(conn) if gated else None
-            if gated and principal is None:
-                self._send_json(401, {"error": "login required"})
-                return
-
-            # 2) CSRF: require a same-origin POST (the cookie is the forgeable credential).
-            if self._origin_error() is not None:
-                self._send_json(403, {"error": "origin check failed"})
-                return
-
-            # 3) Read + JSON-parse + validate the body (1 MB cap inside _read_raw_body).
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-                return
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
-                return
-            if not isinstance(payload, dict):
-                self._send_json(400, {"error": "payload must be a JSON object"})
-                return
-            body = payload.get("body")
-            client_author = payload.get("author", "")
-            if not isinstance(body, str):
-                self._send_json(400, {"error": "field 'body' must be a string"})
-                return
-            if not isinstance(client_author, str):
-                self._send_json(400, {"error": "field 'author' must be a string"})
-                return
-            # Strip both so a whitespace-only body counts as empty.
-            body = body.strip()
-            client_author = client_author.strip()
-            if not body:
-                self._send_json(400, {"error": "a comment body is required"})
-                return
-            if len(body) > MAX_COMMENT_BODY_CHARS or len(client_author) > MAX_AUTHOR_CHARS:
-                self._send_json(400, {"error": "comment or author is too long"})
-                return
-
-            # 4) Report exists AND is in this principal's scope, else 404 (existence-hiding,
-            # identical to a nonexistent report) — the same rule do_GET applies to reads.
-            allowed = self._allowed_projects(conn, principal)
-            report = get(conn, report_id)
-            if report is None or (
-                allowed is not None and report["project"] not in allowed
-            ):
-                self._send_json(404, {"error": "not found"})
-                return
-
-            # 5) Attribute to the authenticated identity (logged in) or the typed name (open
-            # loopback). The principal name is trusted (from the DB), so not re-length-capped.
-            author = principal["name"] if principal is not None else client_author
-            created_at = _utc_now_iso()
-            new_id = add_comment(conn, report_id, author, body, created_at)
-        finally:
-            conn.close()
-        # Return the created comment in the SAME shape the read path emits (api._comment):
-        # role is null in 4a (contract gap 7). The SPA appends this to the thread directly.
-        self._send_json(
-            201,
-            {
-                "id": new_id,
-                "author": author,
-                "role": None,
-                "body": body,
-                "created_at": created_at,
-            },
-        )
-
     def _handle_api_discussion_item(self, project: str) -> None:
         """Append one entry from the SPA to a project's discussion thread
         (POST /api/discussions/<project>/items).
@@ -1275,14 +1128,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             The supervisor-interaction loop's human-write surface (E2 Inc 5, Unit 2). The
-            SPA posts a message via fetch and appends the returned item to the thread. It
-            mirrors the comment write (cookie-session + CSRF, scope-filtered, JSON-in/out),
-            but with two deliberate divergences that make attribution first-class:
+            SPA posts a message via fetch and appends the returned item to the thread. It is
+            a cookie-session + CSRF, scope-filtered, JSON-in/out write — the one user-authored
+            write surface — with two deliberate properties that make attribution first-class:
 
               - Auth is ALWAYS required. A discussion entry is attributable by definition,
-                so there is no open-loopback free-text-author fallback (the comment path's
-                escape hatch). No principal -> 401, whether the relay is ungated or the
-                browser is simply logged out.
+                so there is no open-loopback free-text-author fallback. No principal -> 401,
+                whether the relay is ungated or the browser is simply logged out.
               - Identity is ENTIRELY server-derived. author_id/author_name/role come from
                 the trusted principal, never the request body, so a poster cannot forge who
                 they are. role is mapped from the principal's relay_users role
@@ -1385,207 +1237,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_api_comments(self) -> None:
-        """Return a project's comments as JSON for the local pull-back (GET /api/comments).
-
-        Query parameters:
-          - project  (required): the project whose comments to return.
-          - since_id (optional): return only comments with id > this. A non-negative
-            integer; defaults to 0 (all of the project's comments).
-
-        The inbound-security checklist, enforced IN ORDER:
-          1. Auth — Bearer, the SAME token /ingest uses (whoever can push a project's
-             reports can read its replies). 401 + WWW-Authenticate: Bearer otherwise.
-             Checked BEFORE any query parsing or store touch.
-          2. Validate — `project` required non-empty (400 if missing/blank); `since_id`
-             must be a non-negative integer (400 on anything else). "Never trust client
-             input," mirroring _read_raw_body and the comment POST.
-          3. Query + respond — JSON {"comments": [...], "latest_id": <n>}.
-
-        Why:
-            This is the machine-readable counterpart to the browser dashboard: the CLI
-            pull-back consumes JSON over Bearer, leaving the HTML routes' Basic scheme
-            untouched. latest_id lets the client advance its local unread watermark even
-            when the rendered list is empty (it echoes since_id then), so the relay stays
-            a dumb append-only store and "unread" is purely a per-developer local notion.
-            Comments are NOT redaction-scanned (same reasoning as the comment POST: they
-            are inbound supervisor text on an access-gated relay, not the developer's own
-            outbound secrets), but the endpoint is still Bearer-gated.
-        """
-        # 1) Authenticate FIRST, exactly like /ingest — validate nothing until authorized.
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Parse and validate the query string. do_GET strips the query for routing,
-        # so we re-read it from self.path here (this is the one GET route with params).
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        # parse_qs maps each key to a LIST of values; take the first (or "" if absent).
-        project = query.get("project", [""])[0].strip()
-        if not project:
-            self._send_json(400, {"error": "query parameter 'project' is required"})
-            return
-        # since_id is optional; default "0". isdigit() accepts only a non-negative
-        # integer (no sign, no whitespace) — same guard do_GET uses for a report id —
-        # so a negative or non-numeric value is a clean 400, never a store touch.
-        since_id_raw = query.get("since_id", ["0"])[0]
-        if not since_id_raw.isdigit():
-            self._send_json(
-                400, {"error": "query parameter 'since_id' must be a non-negative integer"}
-            )
-            return
-        since_id = int(since_id_raw)
-
-        # 3) Query and respond. A fresh connection per request keeps each sqlite handle
-        # on its own thread (the threading-server pattern used throughout this handler).
-        conn = open_relay_store(self.server.db_path)
-        try:
-            comments = comments_for_project(conn, project, since_id)
-        finally:
-            conn.close()
-        # Comments are ordered by ascending id, so the last one carries the highest id;
-        # with none returned the watermark stays where the client asked (since_id), so a
-        # caller can always advance to latest_id unconditionally.
-        latest_id = comments[-1]["id"] if comments else since_id
-        self._send_json(200, {"comments": comments, "latest_id": latest_id})
-
-    def _handle_api_comment_post(self) -> None:
-        """Store a supervisor comment pushed by a machine client (POST /api/comments).
-
-        This is the native-bot write path: a Slack/Discord bot, on a supervisor's reply,
-        POSTs JSON {project, body, author?, report_id?} here and the relay appends it to
-        the project's report_comments — the EXACT same store the SPA comment write
-        (`_handle_api_report_comment`) and the dashboard read from. So a chat reply and a
-        dashboard comment are indistinguishable downstream, and `orion comments` keeps
-        working unchanged.
-
-        Body fields:
-          - project   (required): the project to attach the comment to.
-          - body      (required): the comment text (non-empty after strip, length-capped).
-          - author    (optional): self-entered display name; "" when omitted. NOT an
-            authenticated identity (that is C3) — a free-text label, length-capped.
-          - report_id (optional): attach to THIS specific report instead of the latest.
-            Unused by the smallest-slice bot (which always omits it → latest report), but
-            accepted now so a later reply-targeting feature is a bot-only change with no
-            further relay edit. When present it must name an existing report IN `project`.
-
-        The inbound-security checklist, enforced IN ORDER (mirrors _handle_ingest):
-          1. Auth — Bearer, the SAME token /ingest and GET /api/comments use (whoever can
-             push a project's reports can comment on them). 401 + WWW-Authenticate: Bearer.
-             Checked BEFORE the body is read. NO CSRF/Origin check is needed (unlike the
-             browser `_handle_api_report_comment`): a Bearer token is never auto-attached by
-             a browser, so there is no cross-site-forgery vector — the same reasoning GET
-             /api/comments uses to skip it.
-          2. Read + parse — the 1 MB raw-body cap (`_read_raw_body`), then JSON; a missing/
-             oversized body or non-object/invalid JSON is a 400.
-          3. Validate — `project`/`body` required non-empty strings; `author` optional str;
-             body within MAX_COMMENT_BODY_CHARS and author within MAX_AUTHOR_CHARS. 400 otherwise.
-          4. Resolve the target report — by `report_id` if given (404 if it does not exist,
-             400 if it belongs to another project), else the project's LATEST report (404 if
-             the project has no reports yet — an expected state, e.g. a channel mapped before
-             the first report).
-          5. Store + 201 — `add_comment`, then {"id", "report_id"}.
-
-        Why:
-            Comments are deliberately NOT redaction-scanned — same rationale as
-            `_handle_api_report_comment` and `_handle_api_comments`: redaction is an OUTBOUND
-            control for the developer's own secrets, whereas an inbound supervisor comment
-            shown only on the access-gated dashboard is a different threat (the control there
-            is the SPA's inert React text rendering, never dangerouslySetInnerHTML). This
-            handler stays Bearer-gated all the same.
-        """
-        # 1) Authenticate FIRST, exactly like /ingest — validate nothing until authorized.
-        auth_error = self._auth_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
-            return
-
-        # 2) Read and JSON-parse the body (1 MB cap inside _read_raw_body).
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-        if not isinstance(payload, dict):
-            self._send_json(400, {"error": "payload must be a JSON object"})
-            return
-
-        # 3) Validate the fields. project and body are required strings; author is an
-        # optional string defaulting to "". Strip both text fields so a whitespace-only
-        # body counts as empty — same as the browser comment route.
-        project = payload.get("project")
-        body = payload.get("body")
-        author = payload.get("author", "")
-        if not isinstance(project, str) or not project.strip():
-            self._send_json(400, {"error": "field 'project' must be a non-empty string"})
-            return
-        if not isinstance(body, str):
-            self._send_json(400, {"error": "field 'body' must be a string"})
-            return
-        if not isinstance(author, str):
-            self._send_json(400, {"error": "field 'author' must be a string"})
-            return
-        project = project.strip()
-        body = body.strip()
-        author = author.strip()
-        if not body:
-            self._send_json(400, {"error": "a comment body is required"})
-            return
-        if len(body) > MAX_COMMENT_BODY_CHARS or len(author) > MAX_AUTHOR_CHARS:
-            self._send_json(400, {"error": "comment or author is too long"})
-            return
-
-        # report_id is optional. When present it must be a plain integer (JSON true/false
-        # are ints in Python, so reject bools explicitly) — anything else is a 400 before
-        # we touch the store.
-        report_id = payload.get("report_id")
-        if report_id is not None and (
-            not isinstance(report_id, int) or isinstance(report_id, bool)
-        ):
-            self._send_json(400, {"error": "field 'report_id' must be an integer"})
-            return
-
-        # 4) Resolve the target report, then 5) store. One fresh connection per request
-        # keeps each sqlite handle on its own thread (the threading-server pattern).
-        conn = open_relay_store(self.server.db_path)
-        try:
-            if report_id is not None:
-                # Explicit target: it must exist AND belong to the named project, so a
-                # client cannot attach a comment to another project's report by id.
-                target = get(conn, report_id)
-                if target is None:
-                    self._send_json(404, {"error": f"no report {report_id}"})
-                    return
-                if target["project"] != project:
-                    self._send_json(
-                        400, {"error": "report_id does not belong to project"}
-                    )
-                    return
-            else:
-                # Default (the smallest-slice bot path): the project's LATEST report.
-                # history() is newest-first, so [0] is the most recent.
-                reports = history(conn, project)
-                if not reports:
-                    self._send_json(
-                        404, {"error": f"no reports for project {project!r}"}
-                    )
-                    return
-                report_id = reports[0]["id"]
-
-            new_id = add_comment(conn, report_id, author, body, _utc_now_iso())
-        finally:
-            conn.close()
-        self._send_json(201, {"id": new_id, "report_id": report_id})
-
     def _handle_api_discussions(self) -> None:
         """Pull a project's discussion items for a machine client (GET /api/discussions).
 
@@ -1593,16 +1244,16 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             The developer's terminal half of the supervisor-interaction loop (E2 Inc 5,
-            Unit 3): the Bearer-authed pull the CLI uses to read new supervisor messages,
-            mirroring GET /api/comments. It is the machine sibling of the cookie-authed SPA
-            read (which folds the thread into GET /api/projects/<name>) — the CLI holds the
-            ingest token, not a browser session, so it needs this Bearer route. The token is
-            the trusted producer's, so there is no per-user scope here (like /api/comments).
-            Returns the RAW store rows (not the SPA wire shape) and a `latest_id` watermark
-            that echoes since_id when nothing is newer, so the CLI can always advance.
+            Unit 3): the Bearer-authed pull the CLI uses to read new supervisor messages.
+            It is the machine sibling of the cookie-authed SPA read (which folds the thread
+            into GET /api/projects/<name>) — the CLI holds the ingest token, not a browser
+            session, so it needs this Bearer route. The token is the trusted producer's, so
+            there is no per-user scope here (like /ingest). Returns the RAW store rows (not
+            the SPA wire shape) and a `latest_id` watermark that echoes since_id when nothing
+            is newer, so the CLI can always advance.
         """
-        # 1) Authenticate FIRST, exactly like GET /api/comments — Bearer, no CSRF (a Bearer
-        # token is never browser-auto-attached, so there is no cross-site-forgery vector).
+        # 1) Authenticate FIRST, exactly like /ingest — Bearer, no CSRF (a Bearer token is
+        # never browser-auto-attached, so there is no cross-site-forgery vector).
         auth_error = self._auth_error()
         if auth_error is not None:
             self._send_json(
@@ -1624,8 +1275,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
         since_id = int(since_id_raw)
 
-        # 3) Query + respond. An unknown project simply yields [] (200) — same as the comment
-        # pull; the watermark stays at since_id so the caller advances unconditionally.
+        # 3) Query + respond. An unknown project simply yields [] (200); the watermark stays
+        # at since_id so the caller advances unconditionally.
         conn = open_relay_store(self.server.db_path)
         try:
             items = discussion_items_for_project(conn, project, since_id)
@@ -1645,9 +1296,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             The developer's write half of the loop (E2 Inc 5, Unit 3) — the Bearer machine
-            sibling of the cookie-authed supervisor write (_handle_api_discussion_item),
-            modelled on POST /api/comments. The crucial invariant: this path ALWAYS fixes
-            role to "developer" and author_id to None. The token is the developer's own
+            sibling of the cookie-authed supervisor write (_handle_api_discussion_item).
+            The crucial invariant: this path ALWAYS fixes role to "developer" and author_id
+            to None. The token is the developer's own
             credential, so it can never produce a "supervisor" entry — a client cannot forge
             a role it does not hold, on EITHER write path (the cookie path derives the role
             from the principal; this one hardcodes it). No CSRF (Bearer, not a cookie).
@@ -1656,7 +1307,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             3) validate project/body/author; 4) project must exist (reports or a checklist),
             else 404 — so a typo cannot spawn an orphan thread; 5) append + 201 {"id"}.
         """
-        # 1) Authenticate FIRST (Bearer, same token as /ingest and /api/comments).
+        # 1) Authenticate FIRST (Bearer, same token as /ingest).
         auth_error = self._auth_error()
         if auth_error is not None:
             self._send_json(
@@ -1728,7 +1379,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
           - projects (optional): project names the viewer is scoped to (ignored for an
             admin, which sees all). Defaults to [].
 
-        The inbound-security checklist, IN ORDER (mirrors _handle_api_comment_post):
+        The inbound-security checklist, IN ORDER (auth-first, mirrors _handle_ingest):
           1. Auth — the ADMIN token (NOT the ingest token); 401 otherwise, before the body.
           2. Read + parse — 1 MB cap, then JSON; non-object/invalid -> 400.
           3. Validate — name non-empty str; role in the allowlist; projects a list of str.
@@ -2086,7 +1737,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             One place computes read scope, so every route (the index filter, /project,
-            /report, and the comment POST) enforces the SAME rule from current DB state —
+            /report, and the discussion write) enforces the SAME rule from current DB state —
             authZ never drifts between routes. None vs a set is the explicit "unrestricted
             vs scoped" distinction; returning a set makes the membership checks at each
             call site a trivial, hard-to-get-wrong `in`. Scope is re-read per request (not
@@ -2166,8 +1817,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             The SPA's login: it POSTs {"key": ...} and needs to tell success from failure
             without parsing a redirect, plus get {name, role} back to populate the account
             card. It reuses the factored-out _resolve_login + _mint_cookie helpers and
-            applies the same same-origin CSRF check as the comment POST — the SPA fetch is
-            same-origin (single host in prod, Vite proxy in dev), so it passes.
+            applies the same same-origin CSRF check as the other cookie writes — the SPA
+            fetch is same-origin (single host in prod, Vite proxy in dev), so it passes.
         """
         # CSRF: this sets a cookie, so guard it like the other state-changing POSTs.
         origin_error = self._origin_error()
@@ -2320,7 +1971,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         reports=reports,
                         checklist=checklist,
                         observations=observed_history(conn, name),
-                        comments=comments_for_project(conn, name),
                         discussions=discussion_items_for_project(conn, name),
                         today=today,
                     ),
@@ -2340,7 +1990,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     api.serialize_report(
                         report=report,
                         checklist=get_checklist(conn, report["project"]),
-                        comments=comments_for(conn, report["id"]),
                         history=history(conn, report["project"]),
                         today=today,
                     ),
@@ -2413,8 +2062,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             otherwise a short reason string.
 
         Why:
-            The comment POST is authenticated by the session cookie, which the browser
-            AUTO-SENDS on every request to this origin — including one a malicious
+            The cookie-authed discussion write is authenticated by the session cookie, which
+            the browser AUTO-SENDS on every request to this origin — including one a malicious
             third-party page triggers (classic CSRF). Verifying the request's origin is
             the primary defense (SameSite=Lax on the cookie is a second layer).
 
@@ -2422,7 +2071,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             origin. The fallback covers a request whose Origin is absent OR the literal
             "null" (an opaque origin — e.g. a non-GET request under a strict referrer
             policy serializes Origin as "null"), so requiring a usable Origin alone
-            rejected legitimate comments with a "CSRF" 403. OWASP's CSRF guidance is
+            rejected legitimate writes with a "CSRF" 403. OWASP's CSRF guidance is
             explicitly "verify Origin OR Referer": a cross-site attacker cannot forge a
             Referer that points at our origin (the browser sets it from the real page
             URL), and if BOTH headers are absent we still fail closed. The companion to
@@ -2503,12 +2152,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
             browser renders/frames) needs them, and _send_file attaches them itself — they
             are meaningless on a JSON API reply or a bodyless redirect.
 
-            Referrer-Policy is "same-origin", NOT "no-referrer": "no-referrer" is what
-            broke the comment loop. Per the Fetch standard, a non-GET request under a
-            "no-referrer" policy is sent with `Origin: null` (and no Referer), so EVERY
-            browser comment POST arrived as Origin: null — which the canonical-origin
-            CSRF check (_origin_error) rejects with a 403, and the Referer fallback could
-            not rescue because the same policy strips Referer too. "same-origin" keeps
+            Referrer-Policy is "same-origin", NOT "no-referrer": "no-referrer" once broke the
+            browser cookie-write loop (originally the comment POST; the discussion write
+            inherits the same check). Per the Fetch standard, a non-GET request under a
+            "no-referrer" policy is sent with `Origin: null` (and no Referer), so EVERY such
+            browser POST arrived as Origin: null — which the canonical-origin CSRF check
+            (_origin_error) rejects with a 403, and the Referer fallback could not rescue
+            because the same policy strips Referer too. "same-origin" keeps
             the privacy intent (nothing leaks to OTHER origins) while letting a
             same-origin POST carry its real Origin (and a same-origin Referer), which is
             exactly what the CSRF check needs. Verified with real Chromium: no-referrer ->
@@ -2569,7 +2219,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
         Why:
             GET /logout clears the session cookie and 303-redirects to /login; this is its
             sole remaining caller now that the form login + comment POST routes retired with
-            render.py (the SPA's JSON auth/comment paths use _send_json). It also keeps the
+            render.py (the SPA's JSON auth + discussion paths use _send_json). It also keeps the
             redirect header sequence in one place — same shape as _send_json. A redirect
             needs no body, so we send an explicit zero Content-Length plus the Location.
         """
@@ -2686,8 +2336,8 @@ class AuthConfig:
             ingest token). None disables provisioning.
         secure_cookie: Set the cookie's Secure attribute (true when HTTPS-exposed).
         session_seconds: Session lifetime / cookie Max-Age in seconds.
-        public_origin: The canonical external origin (e.g. "https://app.fly.dev") the
-            comment-POST Origin must match. None falls back to Origin-vs-Host.
+        public_origin: The canonical external origin (e.g. "https://app.fly.dev") a
+            cookie-write's Origin must match. None falls back to Origin-vs-Host.
         allow_legacy_admin: Keep the legacy shared view key usable as admin even after
             users exist (default off → it is bootstrap-only).
 

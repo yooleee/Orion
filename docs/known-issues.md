@@ -288,11 +288,12 @@ Deferred).
   roles** in a report's "SENT TO" — `participants` is a list of plain name strings, so `role` is `null`
   and the SPA shows names only; (4) **report/project `source_tags`** ("git history · checklist · session")
   — the originating collector set is not stored, so the API ships `[]` and the SPA omits the "BUILT FROM"
-  card; (5) **project description** — none stored, so the header sub-line is omitted; (7) **comment author
-  role** — `report_comments.author` is free text with no identity, so `role` is `null` (overlaps KI-17);
+  card; (5) **project description** — none stored, so the header sub-line is omitted; **(7) comment author
+  role is now CLOSED** — the free-text, `role: null` comment surface was retired outright in KI-28 Stage 2,
+  and the one conversation surface (the discussion thread) carries a real server-derived role.
   Separately, the report **title** is the body headline (the report has no distinct
   title field) — a documented choice, not a gap. **(8) embedded item status is now CLOSED** — see below.
-  Gaps 3, 4, 5, 7 remain.
+  Gaps 3, 4, 5 remain.
 - **Why it matters:** Each is a producer/wire extension (richer `participants`, a `collectors` list, a
   `description` on the blob), deliberately out of the read-only 4a backend seam. They are
   flagged so the SPA's omissions read as intentional, and so the closing change is a known additive step.
@@ -402,13 +403,19 @@ Deferred).
   attribution (free-text author, `role: null`) while discussion has first-class identity.
 - **Severity:** medium (no correctness or security impact — both render inert and are scope-filtered — but a
   real architectural-debt + clarity cost that grows with every touch to either system).
-- **Status:** Deferred (Stage 2, planned). Direction settled 2026-06-28: **fold comments into the discussion
-  model** — express a "comment on report N" as a report-tagged discussion message (or retire comments outright
-  if dogfooding shows report-context goes unused), migrate `report_comments` **at parity** (the KI-23 /
-  `render.py` retirement precedent), and remove the comment endpoints/UI/CLI/bot path. Sequenced **after some
-  dogfooding** so real usage decides the report-context fork. Plan + open decisions + the A–F unit ladder:
-  `docs/stage2-comments-discussion-consolidation-kickoff.md`.
-  Roadmap: the E5 row of `plans/orion-plan.md`.
+- **Status:** Stage 2 **code BUILT on branch** `feat/ki-28-stage2-migrate-comments` (2026-07-07);
+  **live migration + merge pending** before this resolves. Decisions settled (2026-07-07 addendum):
+  comments are **retired OUTRIGHT** — no `report_id` tag (the dogfooding stretch was too short to
+  earn the tag; it stays a later additive option; bias to simplicity). Built unit by unit: **0.1** the
+  idempotent migration tool `relay/migrate_comments.py` (migrate `report_comments` → discussion items,
+  role=supervisor, body prefixed `[re: report N]`, four-tuple idempotency + parity-guarded drop); **0.2**
+  SPA retirement; **0.3a** relay backend (store + `_SCHEMA` + endpoints + serializer `comments` gone);
+  **0.3b** CLI/delivery/state/bot (`orion comments` + `pull_comments` + watermark accessors gone,
+  `comment_watermark` table kept orphaned; bot **parked**). Backend 733 + web 48 green. **Remaining to
+  resolve:** back up the production relay DB → dry-run `migrate` on the backup → verify parity → run the
+  real `migrate` + `drop` → merge; then this moves to Resolved (with a CHANGELOG write-up, incl. the
+  orphaned `comment_watermark` note). Plan + the 2026-07-07 addendum:
+  `docs/stage2-comments-discussion-consolidation-kickoff.md`. Roadmap: the E5 row of `plans/orion-plan.md`.
 
 ## Resolved
 

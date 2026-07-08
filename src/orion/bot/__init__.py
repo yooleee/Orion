@@ -5,13 +5,14 @@
 #                  symbols so callers can `from orion.bot import decide_forward`
 #                  without reaching into a submodule.
 # Role in project: The native-bot slice (Horizon C, C2's two-way-in-chat add-on).
-#                  A supervisor's reply in a chat channel is relayed into the
-#                  project's report comments via the relay's POST /api/comments.
+#                  PARKED (KI-28 Stage 2): the relay's comment write retired, so the
+#                  bot has no honest write target until per-user keys land (the next
+#                  slice repoints it at the discussion write). The pure decision core
+#                  and the Slack shell are kept as the seam to repoint.
 #                  The package is split deliberately:
 #                    - core.py        — pure decision logic (no I/O, no slack-bolt)
-#                    - relay_client.py — sync HTTP poster to the relay (stdlib urllib)
 #                    - slack_bot.py    — the always-on Bolt shell (the ONLY file that
-#                                        imports slack-bolt, lazily)
+#                                        imports slack-bolt, lazily); delivery parked
 # Assumptions: This __init__ imports ONLY the pure core. It must NOT import
 #              slack_bot (which imports the optional slack-bolt dependency), so
 #              that `import orion.bot` / `import orion.bot.core` works on a stock

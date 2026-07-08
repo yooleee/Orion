@@ -67,7 +67,6 @@ from orion.delivery.relay import (
     create_user as relay_create_user,
     list_users as relay_list_users,
     post_discussion,
-    pull_comments,
     pull_discussions,
     push as relay_push,
     push_checklist,
@@ -100,14 +99,12 @@ from orion.scaffold import parse_recipient_spec, render_project_stanza, slugify_
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_cache,
-    get_comment_watermark,
     get_discussion_watermark,
     get_last_report_time,
     get_marker,
     open_state,
     record_report,
     set_cache,
-    set_comment_watermark,
     set_discussion_watermark,
     set_marker,
 )
@@ -634,38 +631,10 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
-    comments_parser = subparsers.add_parser(
-        "comments",
-        help="Pull supervisor comments on your reports back from the relay (C2).",
-    )
-    comments_parser.add_argument("project", help="Project name as defined in orion.toml.")
-    comments_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
-    comments_parser.add_argument(
-        "--json",
-        dest="as_json",
-        action="store_true",
-        help=(
-            "Emit the raw JSON response (for the Claude session skill) instead of the "
-            "human-readable listing."
-        ),
-    )
-    comments_parser.add_argument(
-        "--all",
-        dest="show_all",
-        action="store_true",
-        help=(
-            "Show ALL comments without advancing the unread marker (the default shows "
-            "only comments new since your last check, and advances the marker)."
-        ),
-    )
-
     # `discussions` is a command GROUP (pull/reply) — the two-way supervisor-interaction
-    # loop (E2 Inc 5). Unlike `comments` (read-only on the CLI; the bot writes), the
-    # developer both reads and replies here, so a group fits. Bearer-authed machine path.
+    # loop (E2 Inc 5) and the single CLI conversation surface (KI-28 Stage 2 retired the
+    # read-only `comments` command). The developer both reads and replies here, so a group
+    # fits. Bearer-authed machine path.
     discussions_parser = subparsers.add_parser(
         "discussions",
         help="Read and reply to a project's two-way supervisor discussion thread (E2 Inc 5).",
@@ -722,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bot_parser = subparsers.add_parser(
         "bot",
-        help="Run the always-on Slack bot: relay channel replies into report comments (C2-bots).",
+        help="Run the Slack bot (PARKED since KI-28 Stage 2; revived with per-user keys).",
     )
     bot_parser.add_argument(
         "--config",
@@ -969,10 +938,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status(Path(args.config))
     if args.command == "baseline":
         return cmd_baseline(args.project, Path(args.config))
-    if args.command == "comments":
-        return cmd_comments(
-            args.project, Path(args.config), as_json=args.as_json, show_all=args.show_all
-        )
     if args.command == "discussions":
         if args.discussions_command == "pull":
             return cmd_discussions_pull(
@@ -3197,125 +3162,6 @@ def cmd_baseline(project_name: str, config_path: Path) -> int:
     return 0
 
 
-def cmd_comments(
-    project_name: str, config_path: Path, *, as_json: bool, show_all: bool
-) -> int:
-    """Pull supervisor comments on a project's reports back from the relay (C2).
-
-    Args:
-        project_name: The project whose comments to pull.
-        config_path: Path to orion.toml.
-        as_json: When True, print the raw JSON response (for the session skill);
-            otherwise print a human-readable listing.
-        show_all: When True, show ALL comments and do NOT advance the unread marker
-            (an explicit re-read); when False (default), show only comments newer than
-            the stored watermark and advance it afterward.
-
-    Returns:
-        Exit code: 0 on a successful pull (including "nothing new"); 1 on a config /
-        secrets error, a disabled relay, or a failed pull.
-
-    Why:
-        This closes the C2 loop into the developer's workflow: supervisor replies that
-        previously lived only on the dashboard are pulled to the machine where you
-        work. The pull is BY PROJECT (the local side never recorded the relay's comment
-        ids), authenticated with the SAME Bearer token the push uses (whoever can push
-        a project's reports can read its replies), and "unread" is a LOCAL watermark —
-        the relay stays a dumb append-only store. The default advances that watermark so
-        each run shows only what's new; --all is the escape hatch to re-read everything
-        without disturbing the cursor. The token is read here, in the CLI (like every
-        other secret), only when the relay is enabled, and a missing one is named, never
-        printed. pull_comments is the module-global so a test can monkeypatch it,
-        mirroring relay_push.
-    """
-    try:
-        config = load_config(config_path)
-        project = get_project(config, project_name)
-        load_secrets(config_path)
-
-        relay_cfg = config.relay
-        # Pulling comments is only meaningful when a relay is configured — that is
-        # where comments live. A disabled/absent relay is a clean, actionable error
-        # (not a crash), mirroring how the push path treats a disabled relay as a no-op.
-        if not relay_cfg.enabled:
-            print(
-                f"Error: cannot pull comments for {project.name!r} — no relay is "
-                f"enabled in {config_path}. Comments live on the relay you push reports "
-                f"to; enable the [relay] table to read replies back.",
-                file=sys.stderr,
-            )
-            return 1
-
-        # The Bearer token lives in .env, named by token_env_var (never in the config).
-        # A missing one is named by get_required and surfaces as a clean SecretsError.
-        token = get_required(relay_cfg.token_env_var)
-
-        conn = open_state(config.state_db)
-        # since_id is the unread cursor: 0 for --all (fetch the full history), else the
-        # stored watermark (fetch only what's newer). Keyed by (project, relay_url).
-        since_id = (
-            0 if show_all else get_comment_watermark(conn, project.name, relay_cfg.url)
-        )
-        response = pull_comments(relay_cfg.url, token, project.name, since_id)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        # All three are user-fixable (a config typo, a missing token, a down relay).
-        # Print cleanly and fail; never advance the watermark on a failed pull.
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    comments = response.get("comments", [])
-    # latest_id lets us advance the watermark even when the listing is empty; fall back
-    # to since_id defensively if the relay omitted it.
-    latest_id = response.get("latest_id", since_id)
-
-    if as_json:
-        # Emit the response verbatim for the skill to parse (it reads `comments`).
-        print(json.dumps(response))
-    else:
-        _print_comments(comments, project.name, show_all)
-
-    # Advance the watermark ONLY on a normal run — --all is an explicit re-read that
-    # must not move the cursor. Advancing to latest_id is idempotent (it echoes
-    # since_id when nothing is new), so a no-new-comments run is a safe no-op write.
-    if not show_all:
-        pulled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        set_comment_watermark(conn, project.name, relay_cfg.url, latest_id, pulled_at)
-
-    return 0
-
-
-def _print_comments(comments: list[dict], project_name: str, show_all: bool) -> None:
-    """Print a project's pulled comments as a human-readable listing.
-
-    Args:
-        comments: The comment dicts from pull_comments (id, author, body, created_at).
-        project_name: The project the comments belong to (for the header/empty line).
-        show_all: Whether this was an --all pull, which only changes the empty-state
-            wording ("no comments" vs "no new comments").
-
-    Returns:
-        None. Writes to stdout.
-
-    Why:
-        The default, human-facing output: one line per comment as
-        "author · <Pacific time> · body". An empty result is a friendly one-liner
-        rather than silence, so a run that found nothing reads as a deliberate result.
-        The wording distinguishes "no comments at all" (--all) from "nothing new since
-        last check" (default) so the user knows which question was answered.
-    """
-    if not comments:
-        qualifier = "" if show_all else " new"
-        print(f"No{qualifier} comments for {project_name!r}.")
-        return
-
-    print(f"{len(comments)} comment(s) for {project_name!r}:")
-    for comment in comments:
-        # author is the self-entered display name and may be "" (anonymous); show a
-        # placeholder so the line never starts with a bare separator.
-        author = comment["author"] or "(anonymous)"
-        print(f"  {author} · {_format_pacific(comment['created_at'])} · {comment['body']}")
-
-
 def _format_pacific(iso: str) -> str:
     """Render a stored UTC ISO-8601 timestamp as human Pacific wall-clock time.
 
@@ -3327,11 +3173,11 @@ def _format_pacific(iso: str) -> str:
         A human string in America/Los_Angeles, e.g. "2026-06-19 12:30 PDT".
 
     Why:
-        Comments are shown in a fixed Pacific zone (matching the dashboard's display
-        choice) so timestamps read consistently regardless of the machine's local
+        Discussion items are shown in a fixed Pacific zone (matching the dashboard's
+        display choice) so timestamps read consistently regardless of the machine's local
         timezone. ZoneInfo is internally cached, so constructing it per call is cheap;
         doing it HERE rather than at module import keeps a missing tzdata from breaking
-        every other command — only the `comments` listing depends on it. This is its own
+        every other command — only the `discussions` listing depends on it. This is its own
         small formatter rather than a shared one: orion/ shares no code with relay/, the
         same independence the duplicated busy-timeout constant reflects.
     """
@@ -3358,10 +3204,10 @@ def cmd_discussions_pull(
         error, a disabled relay, or a failed pull.
 
     Why:
-        The developer's read half of the supervisor-interaction loop — a direct twin of
-        cmd_comments. The pull is BY PROJECT, Bearer-authed with the ingest token, and the
-        unread cursor is a LOCAL watermark (the relay stays append-only). pull_discussions
-        is the module-global so a test can monkeypatch it, mirroring pull_comments.
+        The developer's read half of the supervisor-interaction loop. The pull is BY
+        PROJECT, Bearer-authed with the ingest token, and the unread cursor is a LOCAL
+        watermark (the relay stays append-only). pull_discussions is the module-global so
+        a test can monkeypatch it, mirroring relay_push.
     """
     try:
         config = load_config(config_path)
@@ -3470,9 +3316,9 @@ def _print_discussions(items: list[dict], project_name: str, show_all: bool) -> 
         None. Writes to stdout.
 
     Why:
-        The default human-facing output, mirroring _print_comments but leading each line
-        with the [role] tag so the developer can tell a supervisor turn from their own at a
-        glance. An empty result is a friendly one-liner, with wording that distinguishes
+        The default human-facing output: one line per item, leading with the [role] tag so
+        the developer can tell a supervisor turn from their own at a glance. An empty result
+        is a friendly one-liner, with wording that distinguishes
         "no messages at all" (--all) from "nothing new since last pull" (default).
     """
     if not items:
@@ -3489,96 +3335,34 @@ def _print_discussions(items: list[dict], project_name: str, show_all: bool) -> 
         )
 
 
-def _load_run_bot():
-    """Import the Slack bot's run_bot() from the installed orion.bot package.
-
-    Returns:
-        The orion.bot.slack_bot.run_bot callable.
-
-    Why:
-        Unlike _load_relay_serve (which reaches a top-level, out-of-wheel package),
-        orion.bot IS part of the installed distribution, so this is a plain import —
-        no sys.path hack needed. We still import it through a tiny loader (rather than
-        at module top) for two reasons: it keeps cli.py importable without touching the
-        bot package on every other command, and it gives tests a single seam to
-        monkeypatch run_bot. The import here does NOT pull in slack-bolt — slack_bot.py
-        imports that lazily inside run_bot — so a missing optional dependency surfaces
-        only when the bot actually starts, as a clean ConfigError cmd_bot reports.
-    """
-    from orion.bot.slack_bot import run_bot
-
-    return run_bot
-
-
 def cmd_bot(config_path: Path) -> int:
-    """Run the always-on Slack bot: relay channel replies into report comments (C2-bots).
+    """Report that the Slack bot is PARKED (its write target retired in KI-28 Stage 2).
 
     Args:
-        config_path: Path to orion.toml (also locates the sibling .env for secrets).
+        config_path: Path to orion.toml (unused while parked; kept for signature parity
+            with the other cmd_* handlers and for the revival that re-reads it).
 
     Returns:
-        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error — the bot or the
-        relay is disabled, a required token is missing, or the optional slack-bolt
-        dependency is not installed.
+        Exit code 1 — the bot cannot run, so this is a clean, actionable notice rather
+        than starting a listener that could never deliver.
 
     Why:
-        This is the thin CLI adapter over the bot shell, mirroring cmd_relay_serve. The
-        bot WRITES INTO the relay (a chat reply becomes a comment on the relay), so both
-        [bot] and [relay] must be enabled — a disabled either is a clean, actionable
-        error, not a crash. Three secrets are read HERE (like every other secret), only
-        when enabled, and a missing one is named by get_required, never printed: the
-        Slack bot token, the Socket Mode app-level token, and the relay Bearer token
-        (reused from [relay]). The channel→project bindings become the runtime map. The
-        run_bot import is the module seam tests monkeypatch; the missing-dependency case
-        surfaces as a ConfigError from inside run_bot and is reported the same way.
+        The bot's only job was to relay chat replies into report comments via the relay's
+        POST /api/comments, which retired in KI-28 Stage 2. Repointing it at the discussion
+        write must wait for per-user keys (the next slice), because that Bearer path stamps
+        role "developer" and a chat reply is supervisor speech — posting it now would be
+        dishonest attribution. So rather than start a live Socket Mode listener that can
+        never land a message, `orion bot` prints why it is parked and exits. The pure core
+        (orion.bot.core) and the Slack shell survive as the seam revival re-wires.
     """
-    try:
-        config = load_config(config_path)
-        load_secrets(config_path)
-
-        bot_cfg = config.bot
-        # The bot is opt-in; without an enabled [bot] there is nothing to run.
-        if not bot_cfg.enabled:
-            print(
-                f"Error: no bot is enabled in {config_path}. Add an enabled [bot] "
-                f"table (platform, token env vars, and [[bot.channels]]) to run it.",
-                file=sys.stderr,
-            )
-            return 1
-
-        relay_cfg = config.relay
-        # The bot's whole job is to land replies in the relay's comment store, so a
-        # relay must be configured — its url + token are the bot's write target.
-        if not relay_cfg.enabled:
-            print(
-                f"Error: the bot writes replies into the relay, but no [relay] is "
-                f"enabled in {config_path}. Enable [relay] (the bot reuses its url and "
-                f"token) before running the bot.",
-                file=sys.stderr,
-            )
-            return 1
-
-        # Secrets live in .env, named by the *_env_var fields (never in the config). A
-        # missing one is named by get_required and surfaces as a clean SecretsError.
-        bot_token = get_required(bot_cfg.token_env_var)
-        app_token = get_required(bot_cfg.app_token_env_var)
-        relay_token = get_required(relay_cfg.token_env_var)
-
-        # The frozen (channel_id, project) pairs become the runtime lookup map.
-        channel_map = dict(bot_cfg.channel_bindings)
-        run_bot = _load_run_bot()
-    except (SecretsError, ConfigError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    try:
-        # Blocks until Ctrl-C. run_bot raises ConfigError if slack-bolt is missing
-        # (the optional extra) — surfaced here as a clean, actionable error.
-        run_bot(bot_token, app_token, channel_map, relay_cfg.url, relay_token)
-    except ConfigError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    return 0
+    print(
+        "The chat bot is parked (KI-28 Stage 2): its write path (relay comments) retired, "
+        "and repointing it at the discussion write awaits per-user keys in the next slice "
+        "so chat replies attribute honestly as supervisor speech. See "
+        "docs/two-person-shared-base-kickoff.md.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _load_relay_serve():

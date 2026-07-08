@@ -739,7 +739,6 @@ def serialize_project(
     reports: list[dict],
     checklist: list | None,
     observations: list[dict],
-    comments: list[dict],
     discussions: list[dict],
     today: date,
 ) -> dict:
@@ -751,17 +750,18 @@ def serialize_project(
         reports: The project's reports newest-first (store.history).
         checklist: The live checklist items (store.get_checklist), or None.
         observations: The project's observed history (store.observed_history), for slippage.
-        comments: The project's comments (store.comments_for_project).
         discussions: The project's discussion thread oldest-first
             (store.discussion_items_for_project) — the supervisor-interaction loop (E2 Inc 5).
+            The single conversation surface since KI-28 Stage 2 retired per-report comments.
         today: The reference date (display zone).
 
     Returns:
-        The project-detail shape: stats, milestones, checklist, reports, comments.
+        The project-detail shape: stats, milestones, checklist, reports, discussions.
 
     Why:
         One project page draws from four stores (reports, live checklist, observation
-        history, comments) plus three derivations (milestones, slippage, per-item state).
+        history, discussion thread) plus three derivations (milestones, slippage, per-item
+        state).
         Assembling them here keeps server.py a thin fetch-and-emit and makes the whole shape
         unit-testable with fixed inputs and a fixed `today`. slipping is resolved once (a set
         of keys) and applied to both the per-item rows and the milestone roll-ups so they
@@ -831,7 +831,6 @@ def serialize_project(
             }
             for r in reports
         ],
-        "comments": [_comment(c) for c in comments],
         "discussions": [_discussion_item(d) for d in discussions],
     }
 
@@ -860,30 +859,6 @@ def _discussion_item(d: dict) -> dict:
         "role": d["role"],
         "body": d["body"],
         "created_at": d["created_at"],
-    }
-
-
-def _comment(c: dict) -> dict:
-    """Serialize one comment to the wire shape (role is null in 4a).
-
-    Args:
-        c: A store comment dict ({"id","author","body","created_at", ...}).
-
-    Returns:
-        {"id","author","role","body","created_at"} — role is None until comment authors
-        carry an identity (contract gap 7).
-
-    Why:
-        Comments appear on both the project page and the report page, so the per-comment
-        shape is defined once. report_id is intentionally dropped: the SPA renders comments
-        inline, not linked, in 4a.
-    """
-    return {
-        "id": c["id"],
-        "author": c["author"],
-        "role": None,
-        "body": c["body"],
-        "created_at": c["created_at"],
     }
 
 
@@ -946,7 +921,6 @@ def serialize_report(
     *,
     report: dict,
     checklist: list | None,
-    comments: list[dict],
     history: list[dict],
     today: date,
 ) -> dict:
@@ -956,19 +930,19 @@ def serialize_report(
         report: The report (store.get / _row_to_report shape).
         checklist: The report's project's live checklist (store.get_checklist), for the rail
             snapshot, or None.
-        comments: The report's comments (store.comments_for).
         history: The project's reports newest-first (store.history), for prev/next nav.
         today: The reference date (display zone), for the snapshot rows' states.
 
     Returns:
         The report-detail shape: body + sections, metadata, participants, checklist
-        snapshot, comments, and prev/next nav.
+        snapshot, and prev/next nav. The one conversation surface is the project-level
+        Discussion thread (KI-28 Stage 2 retired per-report comments).
 
     Why:
         The report reader's body+rail layout pulls the report, its project's live checklist
-        (the snapshot), its comments, and the neighbouring report ids together. Assembling
-        it here keeps the shape testable and the title rule (the body headline, distinct from
-        the section labels) in one place.
+        (the snapshot), and the neighbouring report ids together. Assembling it here keeps
+        the shape testable and the title rule (the body headline, distinct from the section
+        labels) in one place.
     """
     snapshot_items = checklist or []
     snapshot_done = sum(1 for item in snapshot_items if item.get("done"))
@@ -1002,6 +976,5 @@ def serialize_report(
                 for item in snapshot_items
             ],
         },
-        "comments": [_comment(c) for c in comments],
         "nav": _report_nav(report["id"], history, numbers),
     }

@@ -21,12 +21,9 @@ from datetime import date
 import pytest
 
 from relay.store import (
-    add_comment,
     add_discussion_item,
     add_user,
     bump_session_version,
-    comments_for,
-    comments_for_project,
     discussion_items_for_project,
     get,
     get_checklist,
@@ -492,153 +489,12 @@ def test_latest_report_per_project_interleaves_checklist_only_by_recency(tmp_pat
     assert [r["project"] for r in rows].count("both") == 1
 
 
-# --- C2: report comments (append-only, flat) ----------------------------------
-
-
-def test_add_comment_then_fetch_round_trips(tmp_path):
-    """A comment added to a report comes back from comments_for with every field.
-
-    Why this matters: this is the comment store's core promise — what the dashboard
-    renders must equal what was posted. We ingest a real report, attach one comment,
-    and confirm all four user/clock fields survive the round-trip (author, body,
-    created_at, and the report_id linkage), since the renderer reads each of them.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-
-    comment_id = add_comment(
-        conn, report_id, "Alex", "Looks great, ship it.", "2026-06-18T10:00:00+00:00"
-    )
-
-    comments = comments_for(conn, report_id)
-    assert len(comments) == 1
-    only = comments[0]
-    assert only["id"] == comment_id
-    assert only["report_id"] == report_id
-    assert only["author"] == "Alex"
-    assert only["body"] == "Looks great, ship it."
-    assert only["created_at"] == "2026-06-18T10:00:00+00:00"
-
-
-def test_comments_are_oldest_first(tmp_path):
-    """comments_for returns a report's comments in chronological (insertion) order.
-
-    Why this matters: an append-only thread must read top-to-bottom in the order it
-    was written. We add three comments and assert they come back in insertion order
-    (id ASC), which the renderer relies on to lay the thread out correctly.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-
-    add_comment(conn, report_id, "Alex", "first", "2026-06-18T10:00:00+00:00")
-    add_comment(conn, report_id, "Sam", "second", "2026-06-18T11:00:00+00:00")
-    add_comment(conn, report_id, "", "third (anonymous)", "2026-06-18T12:00:00+00:00")
-
-    bodies = [c["body"] for c in comments_for(conn, report_id)]
-    assert bodies == ["first", "second", "third (anonymous)"]
-
-
-def test_comments_are_scoped_to_their_report(tmp_path):
-    """comments_for(report) returns only that report's comments, not another's.
-
-    Why this matters: comments hang off a specific report_id; a comment on report A
-    must never leak into report B's thread. We ingest two reports, comment on each,
-    and confirm each fetch sees only its own.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    report_a = ingest(conn, _blob("alpha"), "2026-06-18T00:00:01+00:00")
-    report_b = ingest(conn, _blob("beta"), "2026-06-18T00:00:02+00:00")
-
-    add_comment(conn, report_a, "Alex", "on A", "2026-06-18T10:00:00+00:00")
-    add_comment(conn, report_b, "Sam", "on B", "2026-06-18T11:00:00+00:00")
-
-    assert [c["body"] for c in comments_for(conn, report_a)] == ["on A"]
-    assert [c["body"] for c in comments_for(conn, report_b)] == ["on B"]
-
-
-def test_comments_for_report_with_none_is_empty(tmp_path):
-    """A report with no comments returns an empty list, not None.
-
-    Why this matters: the render layer shows a clean "No comments yet" empty state;
-    returning [] (not None) lets it iterate without a null check, matching how
-    history() handles a project with no reports.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    report_id = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
-    assert comments_for(conn, report_id) == []
-
-
-# --- C2 pull-back: comments_for_project (by-project pull + since_id cursor) ----
-
-
-def test_comments_for_project_spans_reports_and_scopes_to_project(tmp_path):
-    """comments_for_project gathers a project's comments across reports, excluding others.
-
-    Why this matters: the pull-back fetches by PROJECT, not by a report id the client
-    doesn't hold. A project can have several reports each with comments, and a comment
-    on a DIFFERENT project must never bleed in. We ingest two reports for 'alpha' and
-    one for 'beta', comment on each, and confirm alpha's pull returns exactly its two
-    comments (across both its reports), oldest first.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    alpha_1 = ingest(conn, _blob("alpha"), "2026-06-18T00:00:01+00:00")
-    alpha_2 = ingest(conn, _blob("alpha"), "2026-06-18T00:00:02+00:00")
-    beta_1 = ingest(conn, _blob("beta"), "2026-06-18T00:00:03+00:00")
-
-    add_comment(conn, alpha_1, "Alex", "on alpha report 1", "2026-06-18T10:00:00+00:00")
-    add_comment(conn, beta_1, "Sam", "on beta", "2026-06-18T10:30:00+00:00")
-    add_comment(conn, alpha_2, "Jo", "on alpha report 2", "2026-06-18T11:00:00+00:00")
-
-    comments = comments_for_project(conn, "alpha")
-    # Both alpha comments, across its two reports, in ascending-id (chronological) order.
-    assert [c["body"] for c in comments] == ["on alpha report 1", "on alpha report 2"]
-    # The report_id linkage is preserved (the comments came from different reports).
-    assert [c["report_id"] for c in comments] == [alpha_1, alpha_2]
-
-
-def test_comments_for_project_since_id_returns_only_newer(tmp_path):
-    """since_id returns only comments with a strictly greater id (the unread cursor).
-
-    Why this matters: this is the watermark mechanism. After a client has seen up to
-    comment id N, the next pull passes since_id=N and must get back only what came
-    after — never the already-seen ones, and never missing a new one. We add three
-    comments, then pull with since_id set to the second's id and expect only the third.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    report_id = ingest(conn, _blob("demo"), "2026-06-18T00:00:01+00:00")
-    c1 = add_comment(conn, report_id, "Alex", "first", "2026-06-18T10:00:00+00:00")
-    c2 = add_comment(conn, report_id, "Sam", "second", "2026-06-18T11:00:00+00:00")
-    c3 = add_comment(conn, report_id, "Jo", "third", "2026-06-18T12:00:00+00:00")
-
-    # since_id defaults to 0 → everything.
-    assert [c["id"] for c in comments_for_project(conn, "demo")] == [c1, c2, c3]
-    # since_id = c2 → only the strictly-newer c3.
-    newer = comments_for_project(conn, "demo", since_id=c2)
-    assert [c["body"] for c in newer] == ["third"]
-    assert newer[0]["id"] == c3
-
-
-def test_comments_for_project_unknown_or_caught_up_is_empty(tmp_path):
-    """An unknown project, or one with nothing newer than since_id, returns [].
-
-    Why this matters: "no new replies" and "no such project" both map to a clean empty
-    list (not None, not an error), which the endpoint turns into a 200 empty response
-    and the client reads as "nothing new". We check both: a never-seen project, and a
-    real project pulled with since_id at its newest comment.
-    """
-    conn = open_relay_store(tmp_path / "relay.sqlite3")
-    report_id = ingest(conn, _blob("demo"), "2026-06-18T00:00:01+00:00")
-    last = add_comment(conn, report_id, "Alex", "only", "2026-06-18T10:00:00+00:00")
-
-    assert comments_for_project(conn, "never-seen") == []
-    assert comments_for_project(conn, "demo", since_id=last) == []
-
 
 # --- Supervisor-interaction loop: discussion items (E2 Inc 5, Unit 1) ----------
 # These pin the append-only per-project discussion log the two-way loop builds on: that
 # an entry round-trips with first-class, server-derived attribution (author_id/name/role),
 # that the thread is ordered and project-scoped, that a NULL author_id (legacy-admin /
-# machine post) survives, and that the since_id watermark behaves like the comment pull.
+# machine post) survives, and that the since_id watermark advances correctly.
 
 
 def test_add_discussion_item_round_trips_every_field(tmp_path):
@@ -689,8 +545,8 @@ def test_discussion_items_are_scoped_to_their_project(tmp_path):
     """The read returns only the named project's thread, never another's.
 
     Why this matters: each project has its own thread; an entry on project A must never
-    leak into project B's. Unlike comments this needs no report to exist first — the
-    project column IS the anchor — so we post straight to two projects and confirm
+    leak into project B's. A thread needs no report to exist first — the project column
+    IS the anchor — so we post straight to two projects and confirm
     each read sees only its own (also pinning that a thread needs no prior report).
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")

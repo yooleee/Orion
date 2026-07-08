@@ -130,7 +130,7 @@ def push_checklist(
         updates as the local tasks_file is edited. Like push(), it is pure transport:
         the caller owns that the item texts are redacted; this only encodes the small
         {project, checklist} payload and POSTs it with the auth header. We derive the
-        endpoint with urljoin (exactly as pull_comments derives /api/comments), so a
+        endpoint with urljoin (the same root-relative trick every relay route uses), so a
         relay URL configured as ".../ingest" still resolves to ".../checklist".
         DeliveryError unifies every failure mode so the CLI command / watch loop can
         report it and carry on.
@@ -361,89 +361,6 @@ def push_skills_batch(
         raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
 
 
-def pull_comments(
-    relay_url: str,
-    token: str,
-    project: str,
-    since_id: int,
-    *,
-    timeout: float = 10.0,
-) -> dict:
-    """GET a project's supervisor comments newer than since_id from the relay (C2).
-
-    Args:
-        relay_url: The configured relay URL — the SAME value push() uses (the
-            [relay] table's `url`, which points at the ingest endpoint, e.g.
-            ".../ingest"). The read URL is DERIVED from it (see Why), so the caller
-            passes one configured URL, not two.
-        token: The Bearer token authenticating this pull (read from .env via the
-            relay's `token_env_var`) — the same shared secret the push sends. Sent as
-            `Authorization: Bearer <token>`.
-        project: The project whose comments to fetch. Sent as a query parameter.
-        since_id: Return only comments with id strictly greater than this — the
-            client's unread watermark. Pass 0 to fetch all of the project's comments.
-        timeout: Seconds to wait for the request before failing.
-
-    Returns:
-        The parsed JSON response: {"comments": [ {id, report_id, author, body,
-        created_at}, ... ], "latest_id": <int>}. `latest_id` is the highest comment
-        id seen (or `since_id` when nothing is newer), which the caller advances its
-        local watermark to. Raises DeliveryError on any non-2xx response, network
-        failure, or unparseable body.
-
-    Why:
-        This is the inbound half of the relay seam, mirroring push() as closely as
-        possible (stdlib urllib, the same User-Agent, the same DeliveryError mapping)
-        so the two directions read alike and the caller handles a pull failure with
-        the same fail-soft uniformity. The read URL is derived with urljoin against a
-        ROOT-RELATIVE "/api/comments": urljoin(".../ingest", "/api/comments") ->
-        ".../api/comments", which replaces the whole path and matches the relay's
-        root-level API route — so a single configured `url` serves both push (its own
-        path) and pull (the derived path) without a second config field. Unlike push,
-        we PARSE the response: the body is the data the caller acts on, so a 200 with
-        an unparseable body is itself a DeliveryError rather than a later crash.
-    """
-    # Derive the read URL from the configured (ingest) URL. A root-relative path makes
-    # urljoin replace the entire path, so ".../ingest" -> ".../api/comments" regardless
-    # of the configured path segment.
-    base = urllib.parse.urljoin(relay_url, "/api/comments")
-    # urlencode handles escaping a project name with spaces/special chars; since_id is
-    # an int, str-encoded by urlencode.
-    query = urllib.parse.urlencode({"project": project, "since_id": since_id})
-    request = urllib.request.Request(
-        f"{base}?{query}",
-        headers={
-            "User-Agent": _USER_AGENT,
-            # Same Bearer scheme as push: the relay checks it constant-time and 401s
-            # a mismatch (the /api/comments endpoint authenticates before querying).
-            "Authorization": f"Bearer {token}",
-        },
-        method="GET",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            # urlopen only returns (no raise) for a 2xx, so any body here is the
-            # success payload; 4xx/5xx arrive as HTTPError below.
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        # 401 = token mismatch; 400 = bad project/since_id. Both surface as a reported
-        # DeliveryError, like the push path.
-        raise DeliveryError(
-            f"Relay comments returned HTTP {exc.code}: {exc.reason}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        # Connection refused, DNS failure, timeout, etc. — e.g. the relay is down.
-        raise DeliveryError(f"Could not reach relay: {exc.reason}") from exc
-
-    try:
-        return json.loads(raw)
-    except (ValueError, UnicodeDecodeError) as exc:
-        # A 2xx with a body we can't parse means the relay and client disagree on the
-        # contract — treat it as a transport failure, not a silent empty result.
-        raise DeliveryError("Relay returned an unparseable comments response.") from exc
-
-
 def pull_discussions(
     relay_url: str,
     token: str,
@@ -470,10 +387,11 @@ def pull_discussions(
         non-2xx, network failure, or unparseable body.
 
     Why:
-        The developer's read half of the supervisor-interaction loop — a near-verbatim
-        twin of pull_comments against the /api/discussions route, so the two pulls read
-        alike and fail-soft identically. The read URL is derived with urljoin against a
-        root-relative "/api/discussions" exactly as pull_comments derives "/api/comments".
+        The developer's read half of the supervisor-interaction loop. It mirrors push()
+        (stdlib urllib, the same User-Agent + DeliveryError mapping) but PARSES the
+        response, since the body is the data the caller acts on. The read URL is derived
+        with urljoin against a root-relative "/api/discussions", so a relay URL configured
+        as ".../ingest" still resolves to ".../api/discussions".
     """
     base = urllib.parse.urljoin(relay_url, "/api/discussions")
     query = urllib.parse.urlencode({"project": project, "since_id": since_id})
@@ -529,7 +447,7 @@ def post_discussion(
 
     Why:
         The developer's write half of the loop — modelled on push_checklist's POST plumbing
-        but, like pull_comments, it PARSES the response (the caller echoes the new id). The
+        but, like pull_discussions, it PARSES the response (the caller echoes the new id). The
         write URL is derived with urljoin against root-relative "/api/discussions" (the
         Bearer machine route, distinct from the cookie ".../items" route the SPA uses).
     """
@@ -657,7 +575,7 @@ def create_user(
 
     Args:
         relay_url: The configured relay URL (the [relay] `url`, e.g. ".../ingest"); the
-            admin path is derived from it, same as pull_comments derives /api/comments.
+            admin path is derived from it with the same root-relative urljoin every route uses.
         admin_token: The admin Bearer token (from .env via `admin_token_env_var`).
         name: The new user's unique handle.
         role: "viewer" or "admin".

@@ -243,14 +243,17 @@ Deferred).
   (plus a config switch for optional anonymity) is a clean later add, not a rewrite. Surfaced from
   real dashboard feedback (2026-06-18) so it isn't lost.
 - **Severity:** low
-- **Status:** Partly addressed by C3 Increment 1 (2026-06-25). The multi-party **identity**
-  infrastructure now exists (viewers log in; a session carries an authenticated user), and the
-  **comment half is done**: a logged-in viewer's dashboard comment is now stamped with their
-  authenticated identity, not a self-asserted name, so a commenter cannot spoof someone else. What
-  remains is the **report-submitter** half — reports are still produced by the single local "me" per
-  machine, so the blob carries no `author`/`submitter`. That needs multi-user *submission* (a later
-  increment), at which point an `author` field plus a config switch for optional anonymity is a clean
-  additive step on the existing seam, not new infrastructure.
+- **Status:** **Report-submitter identity resolved by C3 Increment 2 (2026-07-08); optional
+  anonymity remains open.** The comment half was done in Increment 1 (a logged-in viewer's write is
+  stamped with their authenticated identity). Increment 2 (the two-person shared base) closed the
+  **report-submitter** half: a report pushed with a producer's own per-user `contributor` key is now
+  attributed — `relay_reports` carries a server-derived `author_id`/`author_name`, surfaced as "pushed
+  by <name>" on the dashboard. Identity is derived from the key, never self-asserted, so a producer
+  cannot spoof another. **Still open — the *configurable anonymity* switch:** attribution is currently
+  all-or-nothing by credential (an identified producer is always named; only the legacy shared-token
+  path is anonymous). KI-17's original point that some users would *prefer* anonymity by choice is not
+  yet a first-class per-report/per-project option. That remains a clean additive step (a config toggle
+  + an optional null-author path), tracked here rather than closed.
 
 ## KI-21 — Forward-store item identity is the title, so a renamed item is a new item
 

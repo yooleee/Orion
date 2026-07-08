@@ -390,37 +390,21 @@ Deferred).
   checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
   vocabulary until it is sourced. Flagged here rather than silently left.
 
-## KI-28 — Comments and Discussion are two overlapping conversation systems (E2 Inc 5)
-
-- **Detail:** The E2 Inc 5 supervisor-interaction loop (`relay_discussion_items`, the `/api/discussions`
-  routes, `orion discussions`, the SPA panel) is the matured, identity-first, two-way successor to C2
-  comments (`report_comments`, the comment routes, `orion comments`, `CommentList`/`CommentComposer`). They
-  do one job. **Stage 1 (shipped, PR #74)** removed the *visible* redundancy — the project page now shows
-  only the Discussion thread, with per-report comments kept on the report-detail page. But underneath, **two
-  stores, two endpoint families, two CLI surfaces, and two component sets** still coexist.
-- **Why it matters:** carrying two parallel systems for one feature is a DRY/maintenance smell and a source of
-  confusion (which surface authors what, with which identity). It also leaves comments stuck with pre-C3
-  attribution (free-text author, `role: null`) while discussion has first-class identity.
-- **Severity:** medium (no correctness or security impact — both render inert and are scope-filtered — but a
-  real architectural-debt + clarity cost that grows with every touch to either system).
-- **Status:** Stage 2 **code BUILT on branch** `feat/ki-28-stage2-migrate-comments` (2026-07-07);
-  **live migration + merge pending** before this resolves. Decisions settled (2026-07-07 addendum):
-  comments are **retired OUTRIGHT** — no `report_id` tag (the dogfooding stretch was too short to
-  earn the tag; it stays a later additive option; bias to simplicity). Built unit by unit: **0.1** the
-  idempotent migration tool `relay/migrate_comments.py` (migrate `report_comments` → discussion items,
-  role=supervisor, body prefixed `[re: report N]`, four-tuple idempotency + parity-guarded drop); **0.2**
-  SPA retirement; **0.3a** relay backend (store + `_SCHEMA` + endpoints + serializer `comments` gone);
-  **0.3b** CLI/delivery/state/bot (`orion comments` + `pull_comments` + watermark accessors gone,
-  `comment_watermark` table kept orphaned; bot **parked**). Backend 733 + web 48 green. **Remaining to
-  resolve:** back up the production relay DB → dry-run `migrate` on the backup → verify parity → run the
-  real `migrate` + `drop` → merge; then this moves to Resolved (with a CHANGELOG write-up, incl. the
-  orphaned `comment_watermark` note). Plan + the 2026-07-07 addendum:
-  `docs/stage2-comments-discussion-consolidation-kickoff.md`. Roadmap: the E5 row of `plans/orion-plan.md`.
-
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
+
+- **KI-28** — Comments and Discussion were two overlapping conversation systems (E2 Inc 5): the
+  identity-first, two-way discussion loop and the older C2 comments (`report_comments` + its
+  routes/CLI/UI/bot path) did one job with two stores. **Resolved 2026-07-07 (Stage 2, Slice 0)** by
+  retiring comments **outright** (no `report_id` tag) and folding them into the discussion model at
+  parity (the KI-23 / `render.py` precedent): an idempotent migration tool
+  (`relay/migrate_comments.py`) with a lossless collapse-guarded drop, then the SPA / relay-backend /
+  CLI-delivery-state / bot retirements (the bot **parked** pending per-user keys). The **live
+  production migration ran 2026-07-07**: 9 comments → discussion items (4 developer, 5 supervisor via
+  `--developer-ids`), verified at parity, then `report_comments` dropped. See CHANGELOG → *"KI-28
+  Stage 2 — comments retired, folded into the discussion model at parity"*.
 
 - **KI-29** — Weekly Windows CI matrix red: `tests/test_config.py::test_discipline_docs_resolve_absolute`
   used a POSIX-only "absolute" fixture (`"/abs/…"` has no drive letter, so Windows treated it as relative

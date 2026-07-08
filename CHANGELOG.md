@@ -14,6 +14,55 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## KI-28 Stage 2 — comments retired, folded into the discussion model at parity (2026-07-07)
+
+Closes **KI-28**. The E2 Inc 5 discussion loop was the identity-first, two-way successor to C2
+comments; Stage 1 (PR #74) hid the visible redundancy, and this slice removed the second system
+underneath. Comments were retired **outright** (no `report_id` tag — the dogfooding stretch was too
+short to earn it; the tag stays a later additive option), migrated **at parity** (the KI-23 /
+`render.py` precedent). Shipped as PR #80; kickoff `docs/stage2-comments-discussion-consolidation-kickoff.md`
+(+ the 2026-07-07 addendum).
+
+### Added
+
+- **A one-time, idempotent migration tool (`relay/migrate_comments.py`).** Two deliberate
+  invocations: `migrate` folds each `report_comments` row into a `relay_discussion_items` entry
+  (`role=supervisor` by default, `author_id` NULL, blank author → "anonymous", body prefixed
+  `[re: report N]`, timestamp preserved); `drop` removes the table. Idempotent on a four-tuple key so
+  a re-run is a no-op. The drop is **parity-guarded**: it refuses (naming the ids) unless every comment
+  maps **one-to-one** onto a distinct discussion row — so a content-key collision (two byte-identical
+  comments) can never be silently lost on the destructive step. A `--developer-ids` override attributes
+  the developer's own comments as `role=developer` instead of `supervisor` (honest attribution in the
+  append-only thread).
+
+### Removed
+
+- **The entire comment system, at parity.** The `report_comments` store (and its `_SCHEMA` block); the
+  comment endpoints (`GET`/`POST /api/comments`, `POST /api/reports/:id/comments`); the serializers'
+  `comments` field; the SPA `CommentList`/`CommentComposer` + the report page's conversation section +
+  `postComment`/`Comment`; the `orion comments` CLI + `pull_comments`; and the local
+  `get/set_comment_watermark` accessors. The project-level **Discussion** thread is now the single
+  conversation surface (dashboard, CLI, and contract).
+- The local **`comment_watermark` table is intentionally kept** (now orphaned): its accessors are gone,
+  but the `CREATE TABLE` stays so an existing state DB is not force-migrated (the no-local-drops idiom).
+  It can be dropped in a later cleanup.
+
+### Changed
+
+- **The Slack bot is PARKED, not removed.** Its only write target was `POST /api/comments`, which
+  retired; repointing it at the discussion write must wait for per-user keys (that Bearer path stamps
+  role `developer`, but a chat reply is supervisor speech). `orion bot` now prints a parked notice and
+  exits; the pure decision core (`orion.bot.core`) + the Slack shell + `[bot]` config + the `slack-bot`
+  extra are kept as the revival seam.
+
+### Live migration (2026-07-07)
+
+- Ran against the deployed relay (`project-orion.fly.dev`): a WAL-safe backup first, a full dry-run +
+  rehearsal on a copy, then in-container `migrate --developer-ids 1,2,3,8` + `drop`. **9 comments across
+  3 projects** became discussion items — 4 (the developer's own test comments on `orion`) as
+  `developer`, 5 (Paul/Bob/Dad) as `supervisor` — verified at parity (dashboard eyes-on) before the
+  drop. Backend 736 + web 48 tests green.
+
 ## Horizon P — public-showcase pass (2026-06-29)
 
 Horizon P (publish) fired early, in a reframed form: not the OSS launch (that decision stays

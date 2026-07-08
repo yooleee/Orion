@@ -93,10 +93,10 @@ def _table_exists(db, name) -> bool:
         name: Table name to check for.
 
     Why:
-        open_relay_store recreates the whole schema on connect (IF NOT EXISTS), which
-        would resurrect a just-dropped table before we could observe it gone. A raw
-        sqlite3.connect reads the on-disk schema as-is, so the "table was dropped"
-        assertion is honest.
+        A raw sqlite3.connect reads the on-disk schema as-is, so a "table was dropped"
+        assertion is honest and needs no store machinery. (report_comments is not part of
+        the relay's _SCHEMA — Unit 0.3a removed it — so open_relay_store does not recreate
+        it either; the raw read just keeps this helper independent of that.)
     """
     conn = sqlite3.connect(db)
     try:
@@ -252,7 +252,45 @@ def test_drop_is_parity_guarded(tmp_path):
     assert main(["drop", "--db", str(db)]) == 0
     assert _table_exists(db, "report_comments") is False
 
-    # A second drop is a clean no-op (open_relay_store recreates an empty table, which
-    # drop then removes again) — re-running the tool must never error.
+    # A second drop is a clean no-op: report_comments is already gone (the schema no longer
+    # recreates it), so the missing-table guards make drop a parity-OK zero-row no-op that
+    # never errors.
     assert main(["drop", "--db", str(db)]) == 0
     assert _table_exists(db, "report_comments") is False
+
+
+def test_duplicate_comments_collapse_and_drop_refuses(tmp_path):
+    """Two byte-identical comments collapse to one row, and `drop` then REFUSES.
+
+    Why this matters: the four-tuple key is content-based and created_at is only
+    second-precise, so a double-click / retry can produce two genuinely-distinct source
+    comments that share a key. migrate can only write one row for them; if `drop` then ran,
+    the second comment would be lost forever. This pins the safety net: migrate reports the
+    duplicate, and the 1:1 drop guard refuses (naming both ids) rather than destroying data —
+    the "no comment is lost" invariant holds even on the collision path.
+    """
+    db = tmp_path / "relay.sqlite3"
+    conn = open_relay_store(db)
+    rid = ingest(conn, _blob(), "2026-06-18T00:00:01+00:00")
+    # Two DISTINCT rows (different ids) that are byte-identical across the four-tuple.
+    _seed_legacy_comment(conn, rid, "Supervisor A", "Nice work.", "2026-06-19T10:00:00+00:00")
+    _seed_legacy_comment(conn, rid, "Supervisor A", "Nice work.", "2026-06-19T10:00:00+00:00")
+    conn.close()
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert main(["migrate", "--db", str(db)]) == 0
+
+    # Only ONE discussion row was written for the two colliding comments (the key is identity).
+    conn = open_relay_store(db)
+    items = discussion_items_for_project(conn, "demo")
+    conn.close()
+    assert len(items) == 1
+    assert "duplicate" in err.getvalue().lower()
+
+    # drop must REFUSE — dropping now would lose the collapsed duplicate — and name it.
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert main(["drop", "--db", str(db)]) == 1
+    assert "collapsed" in err.getvalue().lower()
+    assert _table_exists(db, "report_comments") is True  # source data preserved, not dropped

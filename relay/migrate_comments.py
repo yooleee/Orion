@@ -160,14 +160,14 @@ def _orphan_comments(conn: sqlite3.Connection) -> list[dict]:
     return [{"id": row["id"], "report_id": row["report_id"]} for row in rows]
 
 
-def _discussion_row_exists(
+def _matching_discussion_row_id(
     conn: sqlite3.Connection,
     project: str,
     author_name: str,
     created_at: str,
     body: str,
-) -> bool:
-    """Return True if a discussion row already matches this migrated comment.
+) -> int | None:
+    """Return the id of a discussion row already matching this migrated comment, or None.
 
     Args:
         conn: An open relay-store connection.
@@ -177,25 +177,29 @@ def _discussion_row_exists(
         body: The already-prefixed migrated body (`_migrated_body` output).
 
     Returns:
-        True when a row with this exact four-tuple exists, False otherwise.
+        The id of the (lowest-id) matching row, or None when no row matches.
 
     Why:
         This four-tuple `(project, author_name, created_at, migrated_body)` is the
-        migration's idempotency key (per the addendum): checking it before each insert
-        makes a re-run a no-op with no duplicate rows. role/author_id are excluded from
-        the key deliberately — the mapping fixes them, so they add nothing. Honest edge:
-        two genuinely identical comments (same report, author, timestamp, text) are
-        indistinguishable and collapse to one; that is inherent to a content-based key.
+        migration's idempotency key (per the addendum): a comment whose key already exists
+        was already migrated, so a re-run skips it — that is what makes re-running safe.
+        role/author_id are excluded from the key deliberately (the mapping fixes them).
+        Returning the ROW ID (not just a bool) lets the drop guard enforce a **one-to-one**
+        mapping: because the key is content-based and `created_at` is only second-precise,
+        two genuinely-distinct comments can share a key and collapse onto one row — which,
+        if the source table were then dropped, would LOSE the duplicate. The drop guard uses
+        these ids to detect that collapse and refuse, upholding the "no comment is lost"
+        invariant instead of silently accepting the loss.
     """
     row = conn.execute(
         """
-        SELECT 1 FROM relay_discussion_items
+        SELECT id FROM relay_discussion_items
         WHERE project = ? AND author_name = ? AND created_at = ? AND body = ?
-        LIMIT 1
+        ORDER BY id ASC LIMIT 1
         """,
         (project, author_name, created_at, body),
     ).fetchone()
-    return row is not None
+    return row["id"] if row is not None else None
 
 
 def _map_comment(comment: dict) -> dict:
@@ -239,7 +243,10 @@ def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
         The parity step of Stage 2: every existing comment becomes a discussion item,
         preserving body/author/timestamp, so the comment system can be retired at
         parity. Idempotent by design (the four-tuple check) so it is safe to re-run —
-        the required property for a migration that touches the live relay DB.
+        the required property for a migration that touches the live relay DB. Genuine
+        duplicates (two distinct comments sharing the four-tuple) are NOT silently
+        collapsed away: they are reported here, and the drop guard refuses while any
+        exists, so no comment is ever lost on the destructive step.
     """
     resolved = _resolved_comments(conn)
     orphans = _orphan_comments(conn)
@@ -248,16 +255,35 @@ def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
 
     migrated = 0
     already = 0
+    duplicates: list[dict] = []
+    # Four-tuple keys this run has migrated. Lets us tell a genuine duplicate (a distinct
+    # source comment colliding with one THIS run just migrated) from an idempotent re-run
+    # skip (a comment a PRIOR run migrated). Tracked even under --dry-run so the preview
+    # surfaces duplicates too.
+    migrated_keys: set[tuple[str, str, str, str]] = set()
     sample: list[dict] = []
     for comment in resolved:
         mapped = _map_comment(comment)
-        if _discussion_row_exists(
+        key = (
+            mapped["project"],
+            mapped["author_name"],
+            mapped["created_at"],
+            mapped["body"],
+        )
+        if key in migrated_keys:
+            # A distinct source comment with a four-tuple identical to one already migrated
+            # THIS run — a real duplicate that would collapse onto the same row. Don't write
+            # a second identical row (the key IS the identity); record it so the operator
+            # sees it. The drop guard refuses while this collapse stands, so nothing is lost.
+            duplicates.append(comment)
+            continue
+        if _matching_discussion_row_id(
             conn,
             mapped["project"],
             mapped["author_name"],
             mapped["created_at"],
             mapped["body"],
-        ):
+        ) is not None:
             already += 1
             continue
         if len(sample) < _DRY_RUN_SAMPLE:
@@ -272,14 +298,31 @@ def cmd_migrate(conn: sqlite3.Connection, *, dry_run: bool) -> int:
                 mapped["body"],
                 mapped["created_at"],
             )
+        migrated_keys.add(key)
         migrated += 1
 
     prefix = "migrate --dry-run" if dry_run else "migrate"
     verb = "would migrate" if dry_run else "migrated"
     print(f"{prefix}: {total} comment(s) found across {len(projects)} project(s)")
-    print(f"  {verb}:           {migrated}")
-    print(f"  already migrated: {already}")
-    print(f"  skipped (orphan): {len(orphans)}")
+    print(f"  {verb}:              {migrated}")
+    print(f"  already migrated:    {already}")
+    print(f"  duplicate/collapsed: {len(duplicates)}")
+    print(f"  skipped (orphan):    {len(orphans)}")
+    if duplicates:
+        # Loud, itemized report — a duplicate shares its target row with another comment, so
+        # dropping report_comments would lose it. The drop guard refuses until it is resolved.
+        print(
+            f"  WARNING: {len(duplicates)} comment(s) are duplicates (identical project, "
+            f"author, second-precise timestamp, and body) that collapse onto an already-"
+            f"migrated row — NOT separately migrated; `drop` will refuse until resolved:",
+            file=sys.stderr,
+        )
+        for comment in duplicates:
+            print(
+                f"    comment id={comment['id']} in project {comment['project']!r} "
+                f"(report_id={comment['report_id']})",
+                file=sys.stderr,
+            )
     if orphans:
         # Loud, itemized report — an orphan cannot be migrated (no project), so it must
         # never disappear quietly. The drop guard will also refuse while these exist.
@@ -317,36 +360,55 @@ def cmd_drop(conn: sqlite3.Connection, *, dry_run: bool) -> int:
 
     Why:
         The deliberate second invocation of migrate-and-drop. The guard re-derives each
-        comment's mapped row and confirms a matching discussion item exists BEFORE
-        dropping, so "no comment is lost" is enforced structurally, not trusted. Orphans
-        block the drop too — they cannot be migrated, so dropping would lose them; a
-        human must resolve them first. `DROP TABLE IF EXISTS` makes a second drop a
-        clean no-op.
+        comment's mapped row and enforces a **one-to-one** mapping BEFORE dropping —
+        every comment must have a matching discussion row (nothing unmigrated), no two
+        comments may share the same row (no collapsed duplicate), and there must be no
+        orphans. Any of those means dropping would lose a comment, so it refuses. This
+        makes "no comment is lost" a structural guarantee, not a trusted claim.
+        `DROP TABLE IF EXISTS` makes a second drop a clean no-op.
     """
     resolved = _resolved_comments(conn)
     orphans = _orphan_comments(conn)
 
     unmatched = []
+    # Discussion row id -> the source comments that map onto it. A row with >1 comment is a
+    # collapse: those comments are indistinguishable under the content key, so dropping the
+    # source table would keep one and lose the rest.
+    comments_by_row: dict[int, list[dict]] = {}
     for comment in resolved:
         mapped = _map_comment(comment)
-        if not _discussion_row_exists(
+        row_id = _matching_discussion_row_id(
             conn,
             mapped["project"],
             mapped["author_name"],
             mapped["created_at"],
             mapped["body"],
-        ):
+        )
+        if row_id is None:
             unmatched.append(comment)
+        else:
+            comments_by_row.setdefault(row_id, []).append(comment)
 
-    if unmatched or orphans:
+    collapsed = {rid: cs for rid, cs in comments_by_row.items() if len(cs) > 1}
+
+    if unmatched or orphans or collapsed:
         print(
-            "drop refused: parity not reached — run `migrate` first and resolve orphans.",
+            "drop refused: dropping now would lose a comment — resolve the items below and "
+            "re-run `migrate` first.",
             file=sys.stderr,
         )
         for comment in unmatched:
             print(
                 f"  unmigrated: comment id={comment['id']} in project "
                 f"{comment['project']!r}",
+                file=sys.stderr,
+            )
+        for row_id, cs in collapsed.items():
+            ids = ", ".join(str(c["id"]) for c in cs)
+            print(
+                f"  collapsed: comment ids [{ids}] all map to discussion row {row_id} "
+                f"(identical project/author/timestamp/body) — dropping would lose "
+                f"{len(cs) - 1} of them",
                 file=sys.stderr,
             )
         for orphan in orphans:
@@ -367,8 +429,8 @@ def cmd_drop(conn: sqlite3.Connection, *, dry_run: bool) -> int:
         return 0
 
     # Dropping the table drops its index (idx_report_comments_report) with it. IF EXISTS
-    # keeps a re-run a clean no-op. This removes the LIVE data only; the table resurrects
-    # on the next server start until Unit 0.3 removes it from the store's _SCHEMA.
+    # keeps a re-run a clean no-op. The table stays dropped: Unit 0.3a removed it from the
+    # store's _SCHEMA, so open_relay_store no longer recreates it on the next server start.
     conn.execute("DROP TABLE IF EXISTS report_comments")
     conn.commit()
     print(f"drop: report_comments dropped ({count} row(s) removed)")

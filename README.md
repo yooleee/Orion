@@ -20,8 +20,8 @@ session skill are optional add-ons.
 - **Four signals, not just git.** It fuses git, a to-do/milestone checklist, hand-written notes, and
   **Claude Code session summaries** (via a portable skill that works from any project), so an update
   reflects the whole of what you did, including agentic work.
-- **A two-way loop.** Reviewers reply on the dashboard or in chat, and those replies come back to
-  where you work (`orion comments`).
+- **A two-way loop.** Reviewers reply in a per-project discussion thread on the dashboard, and those
+  replies come back to where you work (`orion discussions pull`).
 - **Own your data.** Collection is local-first, the config is yours to read and edit, secrets stay in
   a gitignored `.env`, and every report is previewed before anything leaves your machine.
 
@@ -305,7 +305,7 @@ value (the config holds env-var *names* and paths, not secrets).
 
 Orion can **also** push each report to a small local **relay** that stores it and serves a
 **web dashboard** for browsing your reports — *in addition to* your Discord/Slack delivery, which
-is unchanged. Reports themselves are read-only; reviewers can add comments and discussion replies.
+is unchanged. Reports themselves are read-only; reviewers can post to a per-project discussion thread.
 It is **opt-in and additive**: with no `[relay]` table in your config, nothing changes.
 
 Enable it by adding a `[relay]` table (an ingest URL + the name of an `.env` variable holding a

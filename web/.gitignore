@@ -2,3 +2,5 @@ node_modules/
 dist/
 .vite/
 *.local
+# Generated TypeScript incremental build cache — machine-specific, must not be tracked.
+*.tsbuildinfo

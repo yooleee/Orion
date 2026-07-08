@@ -386,6 +386,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         "lane": "structured",
         "share_level": "high_level",
         "section_count": 2,
+        "author_name": None,  # C3 Inc 2: null for an unattributed report
         "source_tags": [],
     }
     # Discussions (E2 Inc 5): a REAL role per item (gap 7 closed for this surface), oldest

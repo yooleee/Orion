@@ -168,7 +168,8 @@ Everything observed about one project. `404` when missing or out of scope.
   ],
   "reports": [
     { "id": 26, "title": "Orion progress update", "generated_at": "2026-06-26T10:00:00+00:00",
-      "lane": "structured", "share_level": "high_level", "section_count": 4, "source_tags": [] }
+      "lane": "structured", "share_level": "high_level", "section_count": 4,
+      "author_name": "Teammate B", "source_tags": [] }
   ],
   "discussions": [
     { "id": 1, "author_name": "Supervisor A", "role": "supervisor", "body": "How's the auth slice?",
@@ -182,6 +183,11 @@ Everything observed about one project. `404` when missing or out of scope.
 - Source: `history` (reports + count + nav), `get_checklist`, `observed_history` ->
   `slipping_item_keys`, `derive.milestones`, `classify_item` per item,
   `discussion_items_for_project`.
+- `reports[].author_name` (C3 Inc 2) is the producer who pushed the report — a server-derived display
+  name, or `null` for a legacy (shared-token) push or a report predating attribution. The name is
+  denormalized at write time so it survives the user's later revocation; the internal `author_id` is
+  **not** on the wire (same convention as `discussions`). The dashboard shows a "pushed by" only when it
+  is non-null, so older reports render unchanged.
 - `discussions` is the project's two-way **supervisor-interaction thread** (E2 Inc 5), oldest first —
   the persistent per-project conversation and, since KI-28 Stage 2, the **only** conversation surface.
   Each item carries a **real** `role` (`supervisor | developer`; `orion` reserved, unused) and a
@@ -212,6 +218,7 @@ One progress report in full. `404` when missing or out of scope (scope resolved 
   "generated_at": "2026-06-26T10:00:00+00:00",
   "ingested_at": "2026-06-26T10:01:00+00:00",
   "orion_version": "0.0.0",
+  "author_name": "Teammate B",
   "participants": [ { "name": "Alex", "role": null }, { "name": "Sam", "role": null } ],
   "source_tags": [],
   "checklist_snapshot": {
@@ -224,6 +231,8 @@ One progress report in full. `404` when missing or out of scope (scope resolved 
 
 - Source: `get`, `get_checklist(report.project)` (the rail snapshot),
   `history(project)` for prev/next neighbours. `sections` is the stored `[title, body]` pairs.
+- `author_name` (C3 Inc 2) is the producer who pushed the report, or `null` for a legacy/older report —
+  same server-derived, revocation-durable, `author_id`-off-the-wire convention as the timeline entry above.
 - The report carries **no** conversation of its own (KI-28 Stage 2 retired per-report comments); the
   project-level `discussions` thread on `GET /api/projects/:name` is the single conversation surface.
 - `title` is the report's display title: the headline of `body` (the shared `_headline` helper, the body's

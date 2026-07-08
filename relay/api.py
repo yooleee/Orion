@@ -827,6 +827,9 @@ def serialize_project(
                 "lane": r["lane"],
                 "share_level": r["share_level"],
                 "section_count": len(r["sections"]),
+                # C3 Inc 2: producer who pushed it, or null for a legacy/old report (the
+                # timeline shows a "pushed by" only when present). author_id stays off the wire.
+                "author_name": r.get("author_name"),
                 "source_tags": [],  # contract gap 4: collector set not stored
             }
             for r in reports
@@ -959,6 +962,10 @@ def serialize_report(
         "generated_at": report["generated_at"],
         "ingested_at": report["ingested_at"],
         "orion_version": report["orion_version"],
+        # C3 Inc 2: who pushed this report — the producer's server-derived display name, or
+        # null for a legacy/old report with no identity. author_id stays off the wire (mirrors
+        # the discussion convention); .get keeps pre-attribution report dicts safe.
+        "author_name": report.get("author_name"),
         # participants are stored as plain name strings; role is null until they carry an
         # identity (contract gap 3).
         "participants": [{"name": p, "role": None} for p in report["participants"]],

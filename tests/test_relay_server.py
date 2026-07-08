@@ -690,6 +690,37 @@ def test_revoked_contributor_cannot_push(tmp_path):
         assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 401
 
 
+def test_contributor_report_is_attributed_through_the_read_api(tmp_path):
+    """A contributor's pushed report surfaces its author_name; a legacy push surfaces null.
+
+    Why this matters: the C3 Inc 2 report-attribution promise, end to end — the producer's
+    server-derived name rides from ingest through the store to BOTH read shapes the dashboard
+    uses (the project timeline and the single-report page), while a legacy push stays anonymous
+    (null), so old/shared-token reports render with no "pushed by".
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "Teammate B", "contrib-key", role="contributor", projects=["demo"])
+        _provision_user(db, "root", "admin-key", role="admin")  # reads via the cookie SPA API
+        assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 201  # attributed
+        assert _post(base_url, _blob_for("demo"), token=_TOKEN)[0] == 201  # legacy, anonymous
+
+        cookie = _login(base_url, "admin-key")
+
+        # Project timeline (serialize_project): newest first — legacy then the contributor's.
+        code, body = _get(base_url, "/api/projects/demo", cookie=cookie)
+        assert code == 200
+        timeline = json.loads(body)["reports"]
+        assert [r["author_name"] for r in timeline] == [None, "Teammate B"]
+
+        # Single-report page (serialize_report) for the attributed report.
+        attributed_id = timeline[1]["id"]
+        code, rbody = _get(base_url, f"/api/reports/{attributed_id}", cookie=cookie)
+        assert code == 200
+        detail = json.loads(rbody)
+        assert detail["author_name"] == "Teammate B"
+        assert "author_id" not in detail  # internal id never on the wire
+
+
 def test_legacy_shared_token_still_ingests_by_default(tmp_path):
     """The shared ingest token keeps working (anonymously, unrestricted) while enabled.
 

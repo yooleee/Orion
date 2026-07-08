@@ -250,10 +250,60 @@ def open_relay_store(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # executescript runs the multi-statement schema and commits implicitly.
     conn.executescript(_SCHEMA)
+    # Additive columns introduced after a table first shipped (the store's first ALTER —
+    # every prior schema change was a whole new table). Run after the CREATEs so a fresh DB
+    # and an already-deployed one converge to the same shape.
+    _ensure_columns(conn)
     return conn
 
 
-def ingest(conn: sqlite3.Connection, blob: dict, ingested_at: str) -> int:
+# Columns added to existing tables after their first ship. Keyed by table, each a list of
+# (column, SQL type). All are NULLABLE (no default): old rows read NULL, which is exactly the
+# "predates attribution" meaning. This is the single canonical place these columns are added —
+# they are deliberately NOT in _SCHEMA's CREATE statements, so a fresh DB creates-then-alters
+# (negligible) and there is one add-path to reason about, not two.
+_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    # C3 Inc 2: producer attribution — who pushed the report (author_name denormalized so the
+    # display name survives revocation, mirroring relay_discussion_items; author_id kept for
+    # the link). relay_observed_items records the observing producer for future per-producer
+    # slippage — provenance must be captured at write time (it cannot be backfilled).
+    "relay_reports": [("author_id", "INTEGER"), ("author_name", "TEXT")],
+    "relay_observed_items": [("author_id", "INTEGER")],
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently ADD any missing additive columns (`_ADDITIVE_COLUMNS`) to their tables.
+
+    Args:
+        conn: An open relay-store connection (schema already CREATEd).
+
+    Returns:
+        None. Mutates the schema in place, committing each ALTER.
+
+    Why:
+        `CREATE TABLE IF NOT EXISTS` never adds a column to a table that already exists, so an
+        already-deployed relay would keep the old shape forever. This guards each ADD COLUMN
+        with `PRAGMA table_info` so it runs once and is a cheap no-op on every subsequent open
+        — the store's first real migration seam, kept deliberately tiny (no framework). The
+        table and column names come from a hardcoded constant, never a request, so the f-string
+        interpolation carries no injection surface (sqlite cannot parameterize DDL identifiers).
+    """
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.commit()
+
+
+def ingest(
+    conn: sqlite3.Connection,
+    blob: dict,
+    ingested_at: str,
+    author_id: int | None = None,
+    author_name: str | None = None,
+) -> int:
     """Store one ingested report blob and return its new row id.
 
     Args:
@@ -265,6 +315,10 @@ def ingest(conn: sqlite3.Connection, blob: dict, ingested_at: str) -> int:
         ingested_at: ISO 8601 UTC timestamp of when the relay received the push.
             Passed in (not generated here) so the server controls the clock and the
             function stays deterministic and easy to test.
+        author_id: The relay_users id of the producer who pushed, or None for a legacy
+            (anonymous shared-token) push. SERVER-derived from the authenticated key.
+        author_name: That producer's display name, snapshotted here so it survives a later
+            revocation of the user, or None for a legacy push. Never client-supplied.
 
     Returns:
         The autoincrement id of the inserted row — the handle the dashboard uses in
@@ -275,15 +329,18 @@ def ingest(conn: sqlite3.Connection, blob: dict, ingested_at: str) -> int:
         rendering. sections and participants are JSON-encoded for storage because
         sqlite has no list/tuple type — the same choice report_history makes for
         recipients — and they are decoded back to structures on read. Returning the
-        new id lets the server report 201 Created with a concrete reference.
+        new id lets the server report 201 Created with a concrete reference. Attribution
+        (C3 Inc 2) is denormalized the same way relay_discussion_items does it: the name is
+        copied in at write time so the report still shows who pushed it after the user is gone.
     """
     cursor = conn.execute(
         """
         INSERT INTO relay_reports (
             project, body, sections, participants,
-            share_level, lane, generated_at, orion_version, ingested_at
+            share_level, lane, generated_at, orion_version, ingested_at,
+            author_id, author_name
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             blob["project"],
@@ -296,6 +353,8 @@ def ingest(conn: sqlite3.Connection, blob: dict, ingested_at: str) -> int:
             blob["generated_at"],
             blob["orion_version"],
             ingested_at,
+            author_id,
+            author_name,
         ),
     )
     conn.commit()
@@ -650,7 +709,11 @@ def get_project_kind(conn: sqlite3.Connection, project: str) -> str:
 
 
 def record_observations(
-    conn: sqlite3.Connection, project: str, items: list, observed_at: str
+    conn: sqlite3.Connection,
+    project: str,
+    items: list,
+    observed_at: str,
+    author_id: int | None = None,
 ) -> None:
     """Append one observation row per checklist item (the forward-store's "remember").
 
@@ -660,6 +723,10 @@ def record_observations(
         items: The checklist items as validated wire dicts ({"text", "done"[, "due_date"]
             [, "key"]}), the same list upsert_checklist receives.
         observed_at: ISO 8601 UTC timestamp of when the relay received this push.
+        author_id: The relay_users id of the producer whose push these observations came from,
+            or None for a legacy (anonymous) push. Stamped now because observation provenance
+            cannot be reconstructed later — a future per-producer slippage view needs it. Not
+            yet read on any path (C3 Inc 2, seam only).
 
     Why:
         Where relay_project_checklists keeps only CURRENT state (one upserted row), this is
@@ -680,13 +747,15 @@ def record_observations(
             item.get("due_date"),
             1 if item.get("done") else 0,
             observed_at,
+            author_id,
         )
         for item in items
     ]
     conn.executemany(
         """
-        INSERT INTO relay_observed_items (project, item_key, due_date, done, observed_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO relay_observed_items
+            (project, item_key, due_date, done, observed_at, author_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -1030,6 +1099,10 @@ def _row_to_report(row: sqlite3.Row) -> dict:
         "generated_at": row["generated_at"],
         "orion_version": row["orion_version"],
         "ingested_at": row["ingested_at"],
+        # C3 Inc 2 attribution. Present on every read via SELECT *; None for legacy/old rows.
+        # author_id stays internal (the serializer drops it); author_name goes on the wire.
+        "author_id": row["author_id"],
+        "author_name": row["author_name"],
     }
 
 

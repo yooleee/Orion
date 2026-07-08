@@ -127,6 +127,87 @@ def test_ingest_then_get_round_trips_all_fields(tmp_path):
     assert report["sections"] == [["Code activity", "Did X."], ["Notes", "Thinking Y."]]
 
 
+def test_ingest_records_report_author_and_defaults_to_none(tmp_path):
+    """A push records its producer's id + name; an unattributed push stores NULL both.
+
+    Why this matters: C3 Inc 2 report attribution. The identified producer's id and (snapshotted)
+    name must round-trip through get(); a legacy/anonymous push leaves both NULL, which the
+    dashboard renders as no "pushed by" — the same shape old, pre-attribution rows have.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    attributed = ingest(
+        conn, _blob("demo"), "2026-06-18T01:00:00+00:00", author_id=7, author_name="Teammate B"
+    )
+    legacy = ingest(conn, _blob("demo"), "2026-06-18T02:00:00+00:00")  # no author
+
+    a = get(conn, attributed)
+    assert a["author_id"] == 7 and a["author_name"] == "Teammate B"
+    l = get(conn, legacy)
+    assert l["author_id"] is None and l["author_name"] is None
+
+
+def test_record_observations_stamps_the_observing_author(tmp_path):
+    """Each observation row carries the pushing producer's id (NULL on a legacy push).
+
+    Why this matters: observation provenance is captured at write time because it cannot be
+    reconstructed later — a future per-producer slippage view will read author_id. We assert an
+    attributed push stamps it and a legacy push leaves it NULL. (author_id is not yet surfaced on
+    any read path, so we query the row directly.)
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    record_observations(
+        conn, "demo", [{"text": "a", "done": False}], "2026-06-18T00:00:00+00:00", author_id=7
+    )
+    record_observations(conn, "demo", [{"text": "b", "done": True}], "2026-06-18T00:01:00+00:00")
+
+    rows = conn.execute(
+        "SELECT item_key, author_id FROM relay_observed_items ORDER BY id"
+    ).fetchall()
+    assert (rows[0]["item_key"], rows[0]["author_id"]) == ("a", 7)
+    assert rows[1]["item_key"] == "b" and rows[1]["author_id"] is None
+
+
+def test_ensure_columns_migrates_a_pre_attribution_schema(tmp_path):
+    """Reopening a DB whose relay_reports predates the author columns adds them; old rows read NULL.
+
+    Why this matters: this is the store's FIRST real migration — an already-deployed relay created
+    relay_reports without author columns, and `CREATE TABLE IF NOT EXISTS` will never add them.
+    `_ensure_columns` must ALTER them in on open, and the existing row must read NULL (it predates
+    attribution). We build the old-shape table by hand, then let open_relay_store migrate it.
+    """
+    db = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE relay_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, body TEXT NOT NULL,
+            sections TEXT NOT NULL, participants TEXT NOT NULL, share_level TEXT NOT NULL,
+            lane TEXT NOT NULL, generated_at TEXT NOT NULL, orion_version TEXT NOT NULL,
+            ingested_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO relay_reports "
+        "(project, body, sections, participants, share_level, lane, generated_at, "
+        " orion_version, ingested_at) "
+        "VALUES ('demo','b','[]','[]','high_level','raw',"
+        "'2026-06-18T00:00:00+00:00','0.0.0','2026-06-18T00:00:01+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_relay_store(db)  # runs _ensure_columns → the ALTERs land
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(relay_reports)")}
+    assert {"author_id", "author_name"} <= cols
+    migrated = get(conn, 1)  # the pre-attribution row
+    assert migrated["author_id"] is None and migrated["author_name"] is None
+    conn.close()
+
+    # Idempotent: a second open must not error (guarded ADD COLUMN is a no-op once present).
+    open_relay_store(db).close()
+
+
 def test_get_missing_id_returns_none(tmp_path):
     """Fetching an id that does not exist returns None, not an error.
 

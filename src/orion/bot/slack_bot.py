@@ -3,12 +3,19 @@
 # -----------------------------------------------------------------------------
 # Responsible for: The always-on Slack listener — the thin "shell" that holds a
 #                  Socket Mode connection, normalizes each inbound message event
-#                  into the pure core's IncomingMessage, asks decide_forward what to
-#                  do, and (on a forward) posts the comment to the relay.
+#                  into the pure core's IncomingMessage, and asks decide_forward what
+#                  to do. Delivery is PARKED (see below), so a forwardable reply is
+#                  recognized but NOT relayed.
 # Role in project: This is the ONLY module that touches slack-bolt, and it imports
 #                  it LAZILY (inside run_bot), so importing this module — or the CLI
 #                  — never requires the optional dependency. All the branching logic
 #                  lives in core.py (pure, fully tested); everything here is glue.
+# PARKED (KI-28 Stage 2): the relay's comment write (POST /api/comments) retired, and
+#                  the discussion write stamps role "developer" — wrong for supervisor
+#                  chat replies — until per-user keys land in the next slice. So the
+#                  forward branch does NOT post; revival re-wires the resolve+post here
+#                  against the keyed discussion route. See docs/two-person-shared-base-
+#                  kickoff.md.
 # Why slack-bolt (Socket Mode): a bot must hold a live connection to receive events.
 #                  Socket Mode is an OUTBOUND WebSocket (no public inbound endpoint to
 #                  host or secure — unlike the Events API HTTP path), the smallest,
@@ -29,10 +36,8 @@ from __future__ import annotations
 
 import sys
 
-from orion.bot.core import MAX_AUTHOR_CHARS, IncomingMessage, decide_forward
-from orion.bot.relay_client import post_comment
+from orion.bot.core import IncomingMessage, decide_forward
 from orion.config import ConfigError
-from orion.delivery import DeliveryError
 
 
 def _to_incoming(event: dict) -> IncomingMessage:
@@ -105,54 +110,40 @@ def _process_event(
     channel_map: dict[str, str],
     relay_url: str,
     relay_token: str,
-    *,
-    poster=post_comment,
-    author_resolver=_resolve_author,
 ) -> IncomingMessage:
-    """Decide on one Slack message event and, if warranted, relay it as a comment.
+    """Decide on one Slack message event. Relaying is PARKED, so nothing is posted.
 
     Args:
         event: The Slack `message` event dict.
-        client: The Slack WebClient (used only to resolve the author display name).
+        client: The Slack WebClient (unused while parked — kept for the revival seam).
         channel_map: channel_id → project name, from the [bot] config.
-        relay_url: The relay's configured URL (the [relay] table's url).
-        relay_token: The relay's Bearer token.
-        poster: The function that POSTs a comment to the relay. Injected so tests can
-            substitute a fake; defaults to relay_client.post_comment.
-        author_resolver: The function that turns a user id into a display name.
-            Injected for the same reason; defaults to _resolve_author.
+        relay_url: The relay's configured URL (unused while parked).
+        relay_token: The relay's Bearer token (unused while parked).
 
     Returns:
-        The normalized IncomingMessage (mainly for tests/logging) — but the side
-        effect (a relay POST on a forward) is the point.
+        The normalized IncomingMessage.
 
     Why:
-        This is the whole glue path, factored OUT of the Bolt listener so it is
-        testable with a plain dict event and a fake client/poster — no slack-bolt and
-        no live connection needed. The pure core makes the forward/drop decision; this
-        function only performs the I/O the decision implies. The author is resolved
-        AFTER the decision so the (rate-limited) users.info call happens only for
-        messages we actually forward, never for the bot/edit/unconfigured traffic the
-        core drops. A relay failure is caught and logged, never propagated — one bad
-        POST (relay down, token wrong) must not crash the listener (fail-soft, the same
-        policy the rest of Orion's delivery uses).
+        The glue path, factored OUT of the Bolt listener so it stays testable with a
+        plain dict event — no slack-bolt and no live connection. The pure core still
+        makes the forward/drop decision, so the loop-prevention and configured-channels
+        guards are exercised. But the WRITE is parked (KI-28 Stage 2): a forwardable
+        reply is recognized and logged, not relayed, until per-user keys let the bot post
+        to the discussion route with honest supervisor attribution (next slice). Revival
+        re-wires the author-resolve + post here — the reason _resolve_author survives.
     """
     msg = _to_incoming(event)
     decision = decide_forward(msg, channel_map)
     if not decision.forward:
         return msg
 
-    # Resolve the friendly author name only now that we know we will forward. Cap it
-    # to the relay's author limit (the relay re-caps server-side as a safety net).
-    author = author_resolver(client, event.get("user", ""))[:MAX_AUTHOR_CHARS]
-    try:
-        poster(relay_url, relay_token, decision.project, author, decision.body)
-        print(
-            f"[bot] relayed a reply to project {decision.project!r}", file=sys.stderr
-        )
-    except DeliveryError as exc:
-        # Fail-soft: a single failed relay POST is reported and dropped, not raised.
-        print(f"[bot] could not relay a reply: {exc}", file=sys.stderr)
+    # PARKED: recognized a forwardable reply but the write target retired (KI-28 Stage 2).
+    # Log it so an operator running the parked bot sees why nothing lands on the dashboard.
+    print(
+        f"[bot] chat delivery is parked — a reply to project {decision.project!r} was "
+        f"NOT relayed (revived with per-user keys in the next slice)",
+        file=sys.stderr,
+    )
     return msg
 
 

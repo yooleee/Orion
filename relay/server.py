@@ -166,6 +166,27 @@ _PROVISIONABLE_ROLES = _INTERACTIVE_ROLES + ("contributor",)
 # the scoped producer identity. (See _resolve_bearer_principal.)
 _BEARER_ROLES = ("admin", "contributor")
 
+
+def _author_of(principal: dict) -> tuple[int | None, str | None]:
+    """Map a resolved push principal to (author_id, author_name) for attribution.
+
+    Args:
+        principal: A principal dict from _resolve_bearer_principal.
+
+    Returns:
+        (user_id, name) for an identified producer, or (None, None) for a legacy anonymous
+        push — reports and observations carry NO identity on the legacy path (decision #5).
+
+    Why:
+        Reports (ingest) and observations share this "identified → id+name, legacy → nothing"
+        rule, so it lives in one place. It deliberately differs from the discussion write, whose
+        legacy path keeps the supplied --as label as a display name — so that one stays inline
+        rather than routing through here.
+    """
+    if principal["legacy"]:
+        return None, None
+    return principal["user_id"], principal["name"]
+
 # Actor label written to the admin audit trail for token-driven provisioning. The admin
 # API authenticates with a shared admin token (not a named identity), so the trail
 # records the token role rather than a person — enough to attribute the action.
@@ -874,9 +895,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "not found"})
                 return
 
-            # 5) Store and report 201 with the new id.
+            # 5) Store and report 201 with the new id. The report + observations are
+            # attributed to the resolved producer (C3 Inc 2); a legacy push is anonymous.
             received_at = _utc_now_iso()
-            new_id = ingest(conn, payload, received_at)
+            author_id, author_name = _author_of(principal)
+            new_id = ingest(conn, payload, received_at, author_id, author_name)
             # E2 Inc 2: if the push carries a live checklist, REPLACE this project's
             # current checklist (upsert). Stamped with the same receive clock as the
             # report. Absent ⇒ leave any existing checklist untouched (an old producer
@@ -884,10 +907,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # state). Validated above, so the items are the expected {text, done} shape.
             checklist = payload.get("checklist")
             if checklist is not None:
+                # The aggregate current checklist stays single-producer (last-writer-wins) —
+                # per-producer checklists are Unit 1.4, so upsert_checklist is unattributed.
                 upsert_checklist(conn, payload["project"], checklist, received_at)
                 # E2 Inc 3: also APPEND each item to the observed-state history (the
-                # forward-store's "remember"), sharing the report's receive clock.
-                record_observations(conn, payload["project"], checklist, received_at)
+                # forward-store's "remember"), sharing the report's receive clock. The
+                # observing producer is stamped (author_id) for future per-producer slippage.
+                record_observations(
+                    conn, payload["project"], checklist, received_at, author_id
+                )
         finally:
             conn.close()
         print(
@@ -946,12 +974,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # One receive clock shared by the live-state upsert and its history append, so
             # the current checklist and its newest observation never disagree by a second.
             received_at = _utc_now_iso()
+            # Aggregate current checklist stays single-producer (Unit 1.4 adds per-producer).
             upsert_checklist(
                 conn, payload["project"], payload["checklist"], received_at
             )
-            # E2 Inc 3: append each item to the observed-state history (forward-store).
+            # E2 Inc 3: append each item to the observed-state history (forward-store),
+            # stamping the observing producer (C3 Inc 2) for future per-producer slippage.
+            author_id, _ = _author_of(principal)
             record_observations(
-                conn, payload["project"], payload["checklist"], received_at
+                conn, payload["project"], payload["checklist"], received_at, author_id
             )
             # E2 Inc 4: record the project's kind (project | tracker) so the home can split
             # projects from trackers. Optional on the wire — absent ⇒ "project" (the safe

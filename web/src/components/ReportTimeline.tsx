@@ -25,6 +25,9 @@ export function ReportTimeline({ reports }: { reports: ReportSummary[] }) {
             <div className="timeline-title">{r.title || `Report #${r.number}`}</div>
             <div className="timeline-meta">
               #{r.number} · {relativeTime(r.generated_at)}
+              {/* C3 Inc 2: show the pushing producer only when attributed — a legacy/older
+                  report has author_name null and renders exactly as before. */}
+              {r.author_name && <> · {r.author_name}</>}
               {r.source_tags.length > 0 && <> · {r.source_tags.join(" ")}</>}
             </div>
           </div>

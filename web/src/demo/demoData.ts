@@ -101,9 +101,9 @@ export const DEMO_PROJECT: ProjectDetail = {
     { text: "Launch checklist", done: false, due_date: null, key: "p3", group: "Polish & launch", state: "not_started", status: "not_started", slipping: false },
   ],
   reports: [
-    { id: 1003, number: 3, title: "OAuth underway; search shipped", generated_at: "2026-06-27T17:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, source_tags: [] },
-    { id: 1002, number: 2, title: "Core CRUD and search complete", generated_at: "2026-06-20T16:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, source_tags: [] },
-    { id: 1001, number: 1, title: "Auth foundation landed", generated_at: "2026-06-12T15:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, source_tags: [] },
+    { id: 1003, number: 3, title: "OAuth underway; search shipped", generated_at: "2026-06-27T17:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, author_name: "Developer", source_tags: [] },
+    { id: 1002, number: 2, title: "Core CRUD and search complete", generated_at: "2026-06-20T16:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, author_name: "Developer", source_tags: [] },
+    { id: 1001, number: 1, title: "Auth foundation landed", generated_at: "2026-06-12T15:00:00+00:00", lane: "structured", share_level: "high_level", section_count: 3, author_name: "Developer", source_tags: [] },
   ],
   // The demo project page shows the discussion thread read-only (no composer for a guest);
   // these two items illustrate the two-way loop. Both are fabricated.
@@ -132,6 +132,7 @@ export const DEMO_REPORTS: ReportDetail[] = [
     generated_at: "2026-06-12T15:00:00+00:00",
     ingested_at: "2026-06-12T15:01:00+00:00",
     orion_version: "0.1.0",
+    author_name: "Developer",
     participants: [{ name: "Reviewer", role: null }],
     source_tags: [],
     checklist_snapshot: {
@@ -162,6 +163,7 @@ export const DEMO_REPORTS: ReportDetail[] = [
     generated_at: "2026-06-20T16:00:00+00:00",
     ingested_at: "2026-06-20T16:01:00+00:00",
     orion_version: "0.1.0",
+    author_name: "Developer",
     participants: [{ name: "Reviewer", role: null }],
     source_tags: [],
     checklist_snapshot: {
@@ -192,6 +194,7 @@ export const DEMO_REPORTS: ReportDetail[] = [
     generated_at: "2026-06-27T17:00:00+00:00",
     ingested_at: "2026-06-27T17:01:00+00:00",
     orion_version: "0.1.0",
+    author_name: "Developer",
     participants: [{ name: "Reviewer", role: null }],
     source_tags: [],
     checklist_snapshot: {

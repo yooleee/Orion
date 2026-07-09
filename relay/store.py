@@ -1556,6 +1556,87 @@ def revoke_user(conn: sqlite3.Connection, user_id: int) -> None:
     conn.commit()
 
 
+def grant_projects(
+    conn: sqlite3.Connection, user_id: int, projects: list[str]
+) -> None:
+    """Add one or more projects to an existing user's read/write scope (C3 Inc 2 follow-up).
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user whose scope to expand.
+        projects: Project names to grant. Already-granted projects are a no-op.
+
+    Returns:
+        None.
+
+    Why:
+        `add_user` sets a user's grants only at creation, so a contributor's project set was
+        frozen once minted — which stranded a multi-project producer (KI-31). This is the same
+        `INSERT OR IGNORE INTO relay_user_projects` loop `add_user` uses, factored out so an
+        admin can widen scope later. IGNORE makes it idempotent: re-granting a held project does
+        nothing, so the caller need not diff first.
+    """
+    for project in projects:
+        conn.execute(
+            "INSERT OR IGNORE INTO relay_user_projects (user_id, project) VALUES (?, ?)",
+            (user_id, project),
+        )
+    conn.commit()
+
+
+def rotate_key(conn: sqlite3.Connection, user_id: int, key_verifier: str) -> None:
+    """Replace a user's key verifier and invalidate their old key + live sessions, atomically.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user whose key to rotate.
+        key_verifier: The verifier for the freshly minted key (the caller computes it, exactly
+            as `add_user` receives one — the raw key never reaches the store).
+
+    Returns:
+        None.
+
+    Why:
+        A compromised or lost key needs replacing without churning the user's identity, grants,
+        or attributed history (KI-31). Swapping `key_verifier` kills the old key; bumping
+        `session_version` in the SAME UPDATE force-logs-out any live cookie session — no window
+        where one applied but not the other (the `revoke_user` guarantee). It deliberately does
+        NOT touch `active`: rotate refreshes a key for an ACTIVE user; reviving a revoked user is
+        `delete` + `add` (the server rejects rotating a revoked user), keeping the verbs distinct.
+    """
+    conn.execute(
+        "UPDATE relay_users SET key_verifier = ?, session_version = session_version + 1 "
+        "WHERE id = ?",
+        (key_verifier, user_id),
+    )
+    conn.commit()
+
+
+def delete_user(conn: sqlite3.Connection, user_id: int) -> None:
+    """Hard-delete a user: remove the row + its grants + its live per-producer checklists.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user to delete.
+
+    Returns:
+        None.
+
+    Why:
+        `revoke` sets active = 0 but keeps the row, so the user's `name` (UNIQUE) stays
+        permanently occupied and can't be re-provisioned (KI-31). `delete` frees the name by
+        removing the row, its `relay_user_projects` grants, and its `relay_producer_checklists`
+        rows (that producer's LIVE cards). It deliberately LEAVES `relay_reports` and
+        `relay_discussion_items`: those are HISTORY, their `author_name` is denormalized (renders
+        after the user is gone) and their `author_id` is already dropped from the wire — so a past
+        report or reply keeps its recorded author. Live state goes; history stays.
+    """
+    conn.execute("DELETE FROM relay_user_projects WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM relay_producer_checklists WHERE author_id = ?", (user_id,))
+    conn.execute("DELETE FROM relay_users WHERE id = ?", (user_id,))
+    conn.commit()
+
+
 def record_admin_audit(
     conn: sqlite3.Connection,
     actor: str,

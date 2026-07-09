@@ -46,6 +46,7 @@ from .derive import today_in_tz
 from .store import (
     add_discussion_item,
     add_user,
+    delete_user,
     disciplines_projects,
     discussion_items_for_project,
     get,
@@ -56,6 +57,7 @@ from .store import (
     get_user_by_id,
     get_user_by_name,
     get_user_by_verifier,
+    grant_projects,
     history,
     ingest,
     latest_report_per_project,
@@ -68,6 +70,7 @@ from .store import (
     record_observations,
     replace_all_skills,
     revoke_user,
+    rotate_key,
     set_project_kind,
     skills_projects,
     update_last_login,
@@ -827,12 +830,21 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_api_discussion_post()
             return
 
-        # Admin API (admin-token authed, NOT the ingest token): provision + revoke users.
+        # Admin API (admin-token authed, NOT the ingest token): the user lifecycle.
         if path == "/api/users":
             self._handle_create_user()
             return
         if path == "/api/users/revoke":
             self._handle_revoke_user()
+            return
+        if path == "/api/users/grant":
+            self._handle_grant_user()
+            return
+        if path == "/api/users/rotate":
+            self._handle_rotate_user()
+            return
+        if path == "/api/users/delete":
+            self._handle_delete_user()
             return
 
         # E2 Inc 4: the SPA's JSON auth siblings (the cookie-session login / logout).
@@ -1678,6 +1690,156 @@ class _RelayHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json(200, {"name": name, "revoked": True})
+
+    def _admin_read_named(self) -> tuple[dict, str] | None:
+        """Admin-gate a request and read its JSON body with a validated `name`.
+
+        Returns:
+            (payload, name) on success — the parsed body dict and the stripped non-empty
+            `name` — or None when it already sent the error response (401 no admin token,
+            400 bad body / missing name). The caller checks `is None` and returns.
+
+        Why:
+            The grant/rotate/delete handlers share the exact same front matter as revoke
+            (admin token → 1 MB JSON object → a non-empty `name`). Factoring it here keeps the
+            three new handlers to just their own action, and keeps that security ordering in ONE
+            place so it can't drift between them. (create/revoke predate this and still inline it.)
+        """
+        auth_error = self._auth_admin_error()
+        if auth_error is not None:
+            self._send_json(
+                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
+            )
+            return None
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return None
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return None
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "payload must be a JSON object"})
+            return None
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            self._send_json(400, {"error": "field 'name' must be a non-empty string"})
+            return None
+        return payload, name.strip()
+
+    def _handle_grant_user(self) -> None:
+        """Add project(s) to an existing user's scope (POST /api/users/grant).
+
+        Body: name (required), projects (required non-empty list of strings).
+        Admin-gated; 404 if no such user; 200 {name, projects: <full scope after the grant>}.
+
+        Why:
+            `add`'s grants are set only at creation, so a contributor's project set was frozen —
+            which stranded a multi-project producer and blocked the legacy-token cutover (KI-31).
+            Grant widens read/write scope on the one grant table, idempotently. It returns the
+            FULL scope after the grant so the caller can show the new coverage in one round-trip.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        projects = payload.get("projects")
+        if not isinstance(projects, list) or not all(isinstance(p, str) for p in projects):
+            self._send_json(400, {"error": "field 'projects' must be a list of strings"})
+            return
+        # Normalize like create: strip, drop blanks, de-dupe (order-preserving).
+        projects = list(dict.fromkeys(p.strip() for p in projects if p.strip()))
+        if not projects:
+            self._send_json(400, {"error": "at least one non-empty project is required"})
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            grant_projects(conn, user["id"], projects)
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "grant", name, user["role"], projects, _utc_now_iso()
+            )
+            scope = projects_for_user(conn, user["id"])
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "projects": scope})
+
+    def _handle_rotate_user(self) -> None:
+        """Re-mint an ACTIVE user's key (POST /api/users/rotate) → a new one-time key.
+
+        Body: name (required). Admin-gated; 404 unknown; **409 if the user is revoked**
+        (delete + add to re-onboard); 500 if user keys are not configured; 200 {name, key}.
+
+        Why:
+            A compromised or lost key needs replacing without churning the user's identity,
+            grants, or attributed history (KI-31). rotate_key swaps the verifier (old key dead)
+            and bumps session_version (live cookie logged out) in one UPDATE. Rotate is for
+            ACTIVE users only — reviving a revoked one is delete+add — so revoke/rotate/delete
+            stay distinct verbs. The new raw key is returned ONCE, like provisioning.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        _, name = got
+        if self.server.user_pepper is None:
+            self._send_json(500, {"error": "user keys are not configured on this relay"})
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            if not user["active"]:
+                self._send_json(
+                    409,
+                    {"error": f"user {name!r} is revoked; delete and re-add to re-onboard"},
+                )
+                return
+            raw_key = mint_key()
+            rotate_key(conn, user["id"], key_verifier(self.server.user_pepper, raw_key))
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "rotate", name, user["role"], [], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "key": raw_key})
+
+    def _handle_delete_user(self) -> None:
+        """Hard-delete a user by name (POST /api/users/delete) → frees the name.
+
+        Body: name (required). Admin-gated; 404 unknown; 200 {name, deleted: true}.
+
+        Why:
+            `revoke` keeps the row, so its UNIQUE name stays occupied forever and can't be
+            re-provisioned (KI-31). delete_user removes the row + its grants + its live
+            per-producer checklists, freeing the name; it deliberately leaves the user's
+            reports/discussion history, whose denormalized author_name survives (author_id is
+            off the wire). The deletion is itself audited (the audit row is keyed by name, so it
+            outlives the user).
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        _, name = got
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            delete_user(conn, user["id"])
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "delete", name, user["role"], [], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "deleted": True})
 
     def _auth_admin_error(self) -> str | None:
         """Return None if the request bears the ADMIN token, else a reason string.

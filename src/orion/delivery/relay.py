@@ -642,3 +642,73 @@ def revoke_user(
     """
     url = urllib.parse.urljoin(relay_url, "/api/users/revoke")
     return _admin_request("POST", url, admin_token, {"name": name}, timeout)
+
+
+def grant_projects(
+    relay_url: str, admin_token: str, name: str, projects: list, *, timeout: float = 10.0
+) -> dict:
+    """Add project(s) to an existing user's scope, for `relay-user grant` (KI-31 follow-up).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The user whose scope to widen.
+        projects: Project names to grant (idempotent server-side).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name": <name>, "projects": [<full scope after grant>]}.
+
+    Why:
+        Closes the "scope frozen at creation" half of KI-31 — an admin can widen a contributor
+        without re-provisioning. Mirrors revoke_user's one-line shape over the shared admin helper.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/grant")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "projects": list(projects)}, timeout
+    )
+
+
+def rotate_key(
+    relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
+) -> dict:
+    """Re-mint an active user's key, for `relay-user rotate` (KI-31 follow-up).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The user whose key to rotate (must be active — the relay 409s a revoked user).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name": <name>, "key": <new one-time raw key>}.
+
+    Why:
+        Lets an admin replace a compromised/lost key without churning the user's identity,
+        grants, or attributed history. The new key is returned once; the old key stops working.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/rotate")
+    return _admin_request("POST", url, admin_token, {"name": name}, timeout)
+
+
+def delete_user(
+    relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
+) -> dict:
+    """Hard-delete a user (frees the name), for `relay-user delete` (KI-31 follow-up).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The user to delete.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name": <name>, "deleted": true}.
+
+    Why:
+        Closes the "revoked name stays occupied" half of KI-31 — delete removes the row + grants
+        + live per-producer checklists (freeing the name), while the user's reports/discussion
+        history keeps its recorded author_name. The counterpart to add.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/delete")
+    return _admin_request("POST", url, admin_token, {"name": name}, timeout)

@@ -411,37 +411,20 @@ Deferred).
   schema change, since the per-producer rows already carry everything needed. Flagged now rather than left
   implicit.
 
-## KI-31 — Contributor lifecycle management is incomplete: no scope-grant, key-rotation, or hard-delete/rename
-
-- **Detail:** the admin API (`relay-user`) is **add / list / revoke** only. Three real management
-  operations are missing: (1) **expand scope** — you cannot grant an existing contributor another project
-  (`add --project` only applies at creation), so a producer's project set is frozen once minted; (2)
-  **rotate a key** — you cannot re-mint a key for an existing user; (3) **hard-delete / rename** — `revoke`
-  sets `active = 0` (an immediate, stateless, correct cutoff) but does **not** free the user's `name`, which
-  is `UNIQUE`, so re-provisioning under it returns **409 "a user named '<name>' already exists"** — names
-  are effectively unique *and single-use*.
-- **Why it matters:** the live two-person dogfood (2026-07-09) hit all three. The `wsl` producer, once
-  revoked (step 6), can't be re-provisioned under `wsl`; the Mac's producer had to become `macos` after
-  `mac` was burned; and because `macos` was minted scoped to `orion` only, **there is no way to give it the
-  Mac's other three projects** (sar_hackathon, barebones-ai-village, applications) — which is exactly what
-  blocked the `--disable-legacy-ingest` cutover (a scoped key can't cover a multi-project machine, and
-  legacy can't be retired until it can). Real re-onboarding / compromised-key rotation hit the same walls.
-- **Severity:** low as a security matter (revocation is correct and immediate; a revoked key stays dead) —
-  but it is a genuine **operability** gap for any real multi-project, multi-machine deployment.
-- **Status:** Open. Near-term additive fixes: **`relay-user grant <name> --project <p>`** (expand scope),
-  **`relay-user rotate <name>`** (re-mint a key for the existing row — would have avoided the `mac`→`macos`
-  churn), and **`relay-user delete <name>`** (hard-delete that frees the name; the producer's attributed
-  rows keep their denormalized `author_name`, so history stays intact). **Larger direction (recorded, user-
-  flagged 2026-07-09):** the "unique + single-use name + one credential = one project-scoped key" model is
-  stretched thin — a future revamp may move to **proper key lifecycle and/or a more authentic login/identity
-  system** (accounts that can hold multiple scopes, rotate credentials, and be renamed) rather than
-  bare keys. A strategic juncture to weigh before the next multi-party increment, not built now.
-
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-31** — Contributor lifecycle management was incomplete: the admin API (`relay-user`) was
+  `add`/`list`/`revoke` only — no way to expand a contributor's scope, rotate a key, or free a revoked
+  (UNIQUE, single-use) name. Surfaced by the live two-person dogfood, where it blocked the
+  `--disable-legacy-ingest` cutover for the multi-project Mac. **Resolved 2026-07-09** by adding
+  **`relay-user grant`** (expand scope, idempotent), **`relay-user rotate`** (re-mint an active user's
+  key), and **`relay-user delete`** (hard-delete that frees the name; the user's reports/discussion keep
+  their denormalized author). The broader **auth-model revamp** (bare keys → a real key lifecycle / a more
+  authentic login system) stays a recorded *direction* in `plans/orion-plan.md`, not part of this fix. See
+  CHANGELOG → *"Contributor lifecycle — grant/rotate/delete + legacy-ingest retired"*.
 - **KI-28** — Comments and Discussion were two overlapping conversation systems (E2 Inc 5): the
   identity-first, two-way discussion loop and the older C2 comments (`report_comments` + its
   routes/CLI/UI/bot path) did one job with two stores. **Resolved 2026-07-07 (Stage 2, Slice 0)** by

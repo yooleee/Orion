@@ -65,4 +65,8 @@ EXPOSE 8787
 # --showcase enables the public, no-login Showcase; --showcase-project allowlists a project
 # (default-deny) with its curated public blurb. Edit/extend this list to curate the guest
 # surface; drop both flags to take it offline (GET /api/showcase then 404s).
-ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist", "--showcase", "--showcase-project", "orion:A local-first knowledge base that observes your real project activity and reframes it into readable progress."]
+# --disable-legacy-ingest (C3 Inc 2, cutover 2026-07-09): retires the shared ingest token on
+# the push path — only named per-user contributor keys can push. Flipped after every producer
+# migrated to its own key (the Mac's `macos`, verified via the dogfood). Remove this flag to
+# re-enable the shared token.
+ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist", "--disable-legacy-ingest", "--showcase", "--showcase-project", "orion:A local-first knowledge base that observes your real project activity and reframes it into readable progress."]

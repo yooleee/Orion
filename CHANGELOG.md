@@ -14,6 +14,33 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Contributor lifecycle — grant/rotate/delete + legacy-ingest retired (2026-07-09)
+
+Closes **KI-31**. The live two-person dogfood showed the admin API was `add`/`list`/`revoke` only —
+you couldn't expand a contributor's scope, rotate a key, or free a revoked name — which stranded the
+multi-project Mac and blocked retiring the shared ingest token. Three commands fill the gap, and with
+them the deliberate legacy-token cutover was finished on the live relay.
+
+### Added
+
+- **`relay-user grant <name> --project P …`** — add project(s) to an existing user's scope
+  (idempotent; returns the full scope after the grant). Closes the "scope frozen at creation" gap.
+- **`relay-user rotate <name>`** — re-mint an **active** user's key: the old key and any live session
+  stop working; the new key is printed once. Identity, grants, and attributed history are untouched. A
+  **revoked** user is a clean **409** (revoke/rotate/delete stay distinct — `delete` + `add` to revive).
+- **`relay-user delete <name>`** — hard-delete: removes the user row, its grants, and its **live**
+  per-producer checklists, **freeing the name**; it **preserves** the user's reports/discussion history,
+  whose denormalized `author_name` still renders (`author_id` is off the wire).
+- New admin endpoints `POST /api/users/{grant,rotate,delete}` (admin-token gated, audited) + store
+  helpers `grant_projects`/`rotate_key`/`delete_user`. No schema change.
+
+### Changed
+
+- **The shared ingest token is retired on the production relay** (`relay-serve
+  --disable-legacy-ingest`, added to the deploy). Only named per-user contributor keys can push now;
+  the shared token 401s. Done after every producer migrated to its own key — the Mac's `macos` was
+  granted all four of its projects and re-keyed via the new `grant`/`rotate` before the cutover.
+
 ## C3 Increment 2 — two-person shared base: attributed producers on the ingest path (2026-07-08)
 
 Advances **C3** ("2 = contribute/write access") and closes the report-submitter half of **KI-17**.

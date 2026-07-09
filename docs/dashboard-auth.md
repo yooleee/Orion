@@ -128,12 +128,21 @@ Users are created and managed through a small admin API on the relay (`POST /api
 orion relay-user add alex --role viewer --project my-app       # a dashboard viewer
 orion relay-user add mac  --role contributor --project my-app  # a push-only producer (a machine)
 orion relay-user list                                          # the roster (no key material)
-orion relay-user revoke mac                                    # instant cutoff
+orion relay-user grant mac --project other-app                 # add a project to an existing user
+orion relay-user rotate mac                                    # re-mint the key (old key dies); prints a new one
+orion relay-user revoke mac                                    # instant cutoff (keeps the name)
+orion relay-user delete mac                                    # hard-delete: frees the name to reuse
 ```
 
-Each `add` prints a one-time access key. For a `contributor`, that key is what the producing
-machine puts in its own `.env` under `ORION_RELAY_TOKEN` (the same variable name the shared
+Each `add` and each `rotate` prints a one-time access key. For a `contributor`, that key is what the
+producing machine puts in its own `.env` under `ORION_RELAY_TOKEN` (the same variable name the shared
 ingest token used), so no `orion.toml` change is needed — each machine simply carries its own key.
+
+The full lifecycle: **`grant`** widens a user's project scope in place (no re-provisioning); **`rotate`**
+replaces a compromised or lost key without churning identity, grants, or attributed history (an active
+user only — a revoked one is `delete` + `add`); **`revoke`** is an immediate cutoff that keeps the name;
+**`delete`** removes the user and frees the `UNIQUE` name to be reused, while their past reports and
+discussion replies keep the author name already recorded on them.
 
 Two security points matter here.
 

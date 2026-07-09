@@ -79,6 +79,7 @@ from .store import (
     upsert_producer_checklist,
     upsert_disciplines,
     upsert_producer_disciplines,
+    upsert_producer_skills,
     upsert_skills,
 )
 
@@ -1146,8 +1147,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "not found"})
                 return
 
-            # 5) Upsert this project's skills, stamped with the relay's receive clock.
-            upsert_skills(conn, payload["project"], payload["skills"], _utc_now_iso())
+            # 5) Store this project's skills, stamped with the relay's receive clock.
+            received_at = _utc_now_iso()
+            author_id, author_name = _author_of(principal)
+            # The AGGREGATE (last-writer-wins) always updates; it feeds the comb.
+            upsert_skills(conn, payload["project"], payload["skills"], received_at)
+            # C3 Inc 2.5: an IDENTIFIED producer ALSO keeps its OWN skills (dual-write; storage
+            # now, display later). A legacy push has no id, so it lands in the aggregate only.
+            if author_id is not None:
+                upsert_producer_skills(
+                    conn, payload["project"], author_id, author_name,
+                    payload["skills"], received_at,
+                )
         finally:
             conn.close()
         count = len(payload["skills"])
@@ -1224,8 +1235,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 )
                 return
             # 6) Atomically replace + prune, confined to the caller's scope (None = global).
+            #    C3 Inc 2.5: an identified producer also reconciles its OWN per-producer skills
+            #    rows inside the SAME transaction; a legacy batch (author_id None) writes the
+            #    aggregate only. The producer prune is author_id-bounded (see replace_all_skills).
+            author_id, author_name = _author_of(principal)
             replace_all_skills(
-                conn, projects, _utc_now_iso(), prune=True, prune_scope=allowed
+                conn, projects, _utc_now_iso(), prune=True, prune_scope=allowed,
+                author_id=author_id, author_name=author_name,
             )
         finally:
             conn.close()

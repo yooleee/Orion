@@ -44,6 +44,7 @@ from relay.store import (
     open_relay_store,
     producer_checklists_for,
     producer_disciplines_for,
+    producer_skills_for,
     projects_for_user,
     record_admin_audit,
     record_observations,
@@ -56,6 +57,7 @@ from relay.store import (
     upsert_producer_checklist,
     upsert_disciplines,
     upsert_producer_disciplines,
+    upsert_producer_skills,
     upsert_skills,
 )
 
@@ -1501,3 +1503,152 @@ def test_replace_all_skills_rolls_back_on_error(tmp_path):
     assert get_skills(conn, "alpha") == [_skill_row("Original")]
     assert get_skills(conn, "beta") is None
     assert skills_projects(conn) == ["alpha"]
+
+
+# --- relay_producer_skills: per-producer skills across BOTH write paths (C3 Inc 2.5, 1.4) --
+# The four-test producer pattern (like 1.3), then the batch-specific behavior: dual-write inside
+# replace_all_skills, the author_id-bounded prune, and both-tables atomicity. Storage-now seam.
+
+
+def test_producer_skills_are_keyed_per_producer_and_replace_in_place(tmp_path):
+    """Two producers' skills coexist; a producer's re-push replaces ONLY its own row."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    c_id = add_user(conn, "Teammate C", "vc", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "demo", b_id, "Teammate B", [_skill_row("B-one")], "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "demo", c_id, "Teammate C", [_skill_row("C-one")], "2026-06-25T01:00:00+00:00")
+    upsert_producer_skills(conn, "demo", b_id, "Teammate B", [_skill_row("B-two")], "2026-06-25T02:00:00+00:00")
+
+    got = producer_skills_for(conn, "demo")
+    assert [(p["author_id"], p["author_name"]) for p in got] == [(b_id, "Teammate B"), (c_id, "Teammate C")]
+    by_id = {p["author_id"]: p for p in got}
+    assert [s["name"] for s in by_id[b_id]["skills"]] == ["B-two"]  # B's row replaced
+    assert [s["name"] for s in by_id[c_id]["skills"]] == ["C-one"]  # C's row untouched
+
+
+def test_producer_skills_excludes_revoked_producers(tmp_path):
+    """A revoked contributor's per-producer skills drop out (INNER JOIN on active users)."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    c_id = add_user(conn, "Teammate C", "vc", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "demo", b_id, "Teammate B", [_skill_row("B")], "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "demo", c_id, "Teammate C", [_skill_row("C")], "2026-06-25T00:00:00+00:00")
+    revoke_user(conn, c_id)
+
+    assert [p["author_name"] for p in producer_skills_for(conn, "demo")] == ["Teammate B"]
+
+
+def test_producer_skills_for_unknown_project_is_empty(tmp_path):
+    """A project with no per-producer skills returns []."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert producer_skills_for(conn, "never-seen") == []
+
+
+def test_producer_skills_for_carries_updated_at(tmp_path):
+    """Each per-producer skills row surfaces its push time."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "demo", b_id, "Teammate B", [_skill_row("B")], "2026-06-25T09:30:00+00:00")
+    (row,) = producer_skills_for(conn, "demo")
+    assert row["updated_at"] == "2026-06-25T09:30:00+00:00"
+
+
+def test_delete_user_removes_per_producer_skills(tmp_path):
+    """Hard-deleting a user removes their live per-producer skills (live state goes)."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "demo", b_id, "Teammate B", [_skill_row("B")], "2026-06-25T00:00:00+00:00")
+    delete_user(conn, b_id)
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS n FROM relay_producer_skills WHERE author_id = ?", (b_id,)
+    ).fetchone()["n"]
+    assert remaining == 0
+
+
+def test_replace_all_skills_dual_writes_producer_rows_for_identified_batch(tmp_path):
+    """A batch with author_id reconciles that producer's own rows alongside the aggregate.
+
+    Why this matters: the batch (/skills-batch) is the PRIMARY skills path, so it must dual-write
+    the per-producer table too — otherwise the producer store goes stale immediately. Here author
+    B's batch writes both the aggregate and B's own per-producer rows for each slice.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["alpha", "beta"], "test", "2026-06-25T00:00:00+00:00")
+
+    replace_all_skills(
+        conn,
+        {"alpha": [_skill_row("Python")], "beta": [_skill_row("React")]},
+        "2026-06-28T10:00:00+00:00",
+        prune=True,
+        prune_scope={"alpha", "beta"},
+        author_id=b_id,
+        author_name="Teammate B",
+    )
+
+    # Aggregate written as before.
+    assert get_skills(conn, "alpha") == [_skill_row("Python")]
+    # AND B's own per-producer rows for each slice.
+    assert [s["name"] for s in producer_skills_for(conn, "alpha")[0]["skills"]] == ["Python"]
+    assert [s["name"] for s in producer_skills_for(conn, "beta")[0]["skills"]] == ["React"]
+
+
+def test_replace_all_skills_producer_prune_is_bounded_to_the_author_and_scope(tmp_path):
+    """The producer prune touches ONLY the batch author's rows within scope; others survive.
+
+    Why this matters: the producer-scoped analogue of the skills-batch trap. Author A's batch
+    reconciles A's own rows within A's grants — it must NOT delete author B's rows for the same
+    project, and it must NOT touch A's rows for a project outside the batch's scope.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    a_id = add_user(conn, "Producer A", "va", "contributor", ["shared", "a-drop"], "test", "2026-06-25T00:00:00+00:00")
+    b_id = add_user(conn, "Producer B", "vb", "contributor", ["shared"], "test", "2026-06-25T00:00:00+00:00")
+    # Pre-seed: A and B both have "shared"; A also has "a-drop" (in scope, will be absent from the
+    # batch) and "out" (OUTSIDE the batch's prune scope).
+    upsert_producer_skills(conn, "shared", a_id, "Producer A", [_skill_row("A-old")], "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "shared", b_id, "Producer B", [_skill_row("B-keep")], "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "a-drop", a_id, "Producer A", [_skill_row("A-drop")], "2026-06-25T00:00:00+00:00")
+    upsert_producer_skills(conn, "out", a_id, "Producer A", [_skill_row("A-out")], "2026-06-25T00:00:00+00:00")
+
+    # A's batch reconciles only "shared", scoped to A's grants {shared, a-drop}.
+    replace_all_skills(
+        conn,
+        {"shared": [_skill_row("A-new")]},
+        "2026-06-28T10:00:00+00:00",
+        prune=True,
+        prune_scope={"shared", "a-drop"},
+        author_id=a_id,
+        author_name="Producer A",
+    )
+
+    shared = {p["author_name"]: p for p in producer_skills_for(conn, "shared")}
+    assert [s["name"] for s in shared["Producer A"]["skills"]] == ["A-new"]  # A upserted
+    assert [s["name"] for s in shared["Producer B"]["skills"]] == ["B-keep"]  # B UNTOUCHED
+    assert producer_skills_for(conn, "a-drop") == []  # A's in-scope, absent row pruned
+    assert [s["name"] for s in producer_skills_for(conn, "out")[0]["skills"]] == ["A-out"]  # out-of-scope survives
+
+
+def test_replace_all_skills_rolls_back_both_tables_on_error(tmp_path):
+    """A mid-batch failure leaves BOTH the aggregate and the per-producer table pre-batch.
+
+    Why this matters: the batch's atomicity must span both tables — a crash cannot leave the
+    producer rows reconciled while the aggregate rolled back (or vice versa). We seed a producer
+    row the prune would delete, run a failing batch (non-serializable slice) with author_id, and
+    assert the producer prune rolled back too.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    a_id = add_user(conn, "Producer A", "va", "contributor", ["alpha", "gone"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_skills(conn, "alpha", [_skill_row("Original")], "2026-06-27T09:00:00+00:00")
+    # A producer row for "gone" — the unrestricted-style prune (NOT IN {alpha,beta}) would delete
+    # it in the prune phase, before the failure. Rollback must restore it.
+    upsert_producer_skills(conn, "gone", a_id, "Producer A", [_skill_row("Keep")], "2026-06-27T09:00:00+00:00")
+
+    bad = {"alpha": [_skill_row("Replaced")], "beta": {"not", "serializable"}}
+    with pytest.raises(TypeError):
+        replace_all_skills(
+            conn, bad, "2026-06-28T10:00:00+00:00", prune=True,
+            author_id=a_id, author_name="Producer A",
+        )
+
+    # Both tables intact: aggregate alpha unchanged AND the producer "gone" row restored.
+    assert get_skills(conn, "alpha") == [_skill_row("Original")]
+    assert [s["name"] for s in producer_skills_for(conn, "gone")[0]["skills"]] == ["Keep"]

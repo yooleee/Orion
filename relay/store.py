@@ -194,6 +194,28 @@ CREATE TABLE IF NOT EXISTS relay_project_skills (
     updated_at TEXT NOT NULL        -- ISO 8601 UTC, when the relay last received it
 );
 
+-- C3 Inc 2.5: a project's OBSERVED SKILLS PER PRODUCER — the skills sibling of
+-- relay_producer_disciplines. The aggregate above is last-writer-wins across producers (two
+-- machines syncing different portfolios flip the shared row, losing provenance that CANNOT be
+-- backfilled); this keeps each identified contributor's OWN pushed skills. Written by BOTH skills
+-- write paths as a dual-write beside the aggregate: the per-project /skills push AND the primary
+-- /skills-batch sync (replace_all_skills, which upserts + prunes these rows inside its one
+-- transaction, bounded to the pushing author). STORAGE NOW, DISPLAY LATER: read back by
+-- producer_skills_for (a seam), but no display surface consumes it yet — the comb-level
+-- per-producer merge is deferred as a KI (merging two machines' independently canonicalized
+-- batches would reintroduce the naming drift the comb rework fixed). ONE row per
+-- (project, author_id), REPLACED on each of that producer's pushes. Only IDENTIFIED producers land
+-- here (author_id NOT NULL); a legacy anonymous push writes the aggregate only. author_name is
+-- denormalized (survives revocation). A brand-new "IF NOT EXISTS" table — no column migration.
+CREATE TABLE IF NOT EXISTS relay_producer_skills (
+    project     TEXT NOT NULL,      -- the project this producer's skills belong to
+    author_id   INTEGER NOT NULL,   -- the producing contributor's relay_users id (never NULL here)
+    author_name TEXT NOT NULL,      -- server-derived display name, denormalized (survives revocation)
+    skills      TEXT NOT NULL,      -- JSON array of {name, category, evidence, weight, signals}
+    updated_at  TEXT NOT NULL,      -- ISO 8601 UTC, when the relay last received this producer's push
+    PRIMARY KEY (project, author_id)
+);
+
 -- Supervisor-interaction loop (E2 Inc 5, Unit 1). The append-only log behind a
 -- per-project two-way discussion between a supervisor and the developer, with Orion as
 -- medium + memory only (it authors NOTHING this phase — observe-not-originate). The thread
@@ -811,6 +833,89 @@ def get_skills(conn: sqlite3.Connection, project: str) -> list | None:
     return json.loads(row["skills"]) if row is not None else None
 
 
+def upsert_producer_skills(
+    conn: sqlite3.Connection,
+    project: str,
+    author_id: int,
+    author_name: str,
+    skills: list,
+    updated_at: str,
+) -> None:
+    """Replace ONE identified producer's observed skills for a project (C3 Inc 2.5).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project this producer's skills belong to.
+        author_id: The producing contributor's relay_users id (never None — only identified
+            producers get a per-producer row; a legacy push writes the aggregate only).
+        author_name: That producer's server-derived display name, stored denormalized so the
+            row survives the user's later revocation.
+        skills: The producer's current skills as {"name", "category", "evidence", "weight",
+            "signals"} dicts (the validated shape the push carries). May be empty.
+        updated_at: ISO 8601 UTC timestamp of when the relay received this producer's push.
+
+    Why:
+        The skills sibling of upsert_producer_disciplines, for the PER-PROJECT /skills push.
+        Current state, one row per (project, author_id), REPLACED via
+        ON CONFLICT(project, author_id). A DUAL-WRITE beside the aggregate, never a replacement.
+        STORAGE NOW, DISPLAY LATER: no surface reads this yet. The BATCH path does the equivalent
+        dual-write inline inside replace_all_skills's transaction (not via this helper, which
+        commits) so a batch reconciles both tables atomically.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_producer_skills (project, author_id, author_name, skills, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(project, author_id) DO UPDATE SET
+            author_name = excluded.author_name,
+            skills = excluded.skills,
+            updated_at = excluded.updated_at
+        """,
+        (project, author_id, author_name, json.dumps(skills), updated_at),
+    )
+    conn.commit()
+
+
+def producer_skills_for(conn: sqlite3.Connection, project: str) -> list[dict]:
+    """Return every producer's observed skills for a project, ordered by producer name.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to fetch per-producer skills for.
+
+    Returns:
+        A list of {"author_id", "author_name", "skills", "updated_at"} dicts (skills
+        JSON-decoded), one per ACTIVE identified producer that has pushed skills for the project,
+        ordered by author_name. Empty when the project has no per-producer skills.
+
+    Why:
+        The read side of the per-producer skills store (C3 Inc 2.5). Like producer_disciplines_for
+        it is a SEAM — stored and readable now, but no display surface consumes it yet (storage
+        now, display later; the comb-level per-producer merge is a deferred KI). Per-producer
+        skills are CURRENT STATE, so we INNER JOIN relay_users and keep only ACTIVE producers — a
+        revoked contributor's stale set should not surface. Ordering by name gives stable positions.
+    """
+    rows = conn.execute(
+        """
+        SELECT ps.author_id, ps.author_name, ps.skills, ps.updated_at
+        FROM relay_producer_skills ps
+        JOIN relay_users u ON u.id = ps.author_id
+        WHERE ps.project = ? AND u.active = 1
+        ORDER BY ps.author_name
+        """,
+        (project,),
+    ).fetchall()
+    return [
+        {
+            "author_id": row["author_id"],
+            "author_name": row["author_name"],
+            "skills": json.loads(row["skills"]),
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
 def skills_projects(conn: sqlite3.Connection) -> list[str]:
     """Return the names of every project that has pushed skills, sorted.
 
@@ -839,6 +944,8 @@ def replace_all_skills(
     *,
     prune: bool = True,
     prune_scope: set[str] | None = None,
+    author_id: int | None = None,
+    author_name: str | None = None,
 ) -> None:
     """Atomically replace every given project's skills in ONE transaction.
 
@@ -855,6 +962,11 @@ def replace_all_skills(
             for an UNRESTRICTED prune (admin / legacy — today's global behavior). When a set
             is given (a scoped contributor, C3 Inc 2), the prune deletes ONLY projects within
             that scope that are absent from the batch — never another producer's projects.
+        author_id: The identified producer behind this batch, or None for a legacy/anonymous
+            sync (C3 Inc 2.5). When set, the producer's own relay_producer_skills rows are
+            reconciled to the batch (upsert + prune) INSIDE this same transaction.
+        author_name: That producer's server-derived display name, stored denormalized on the
+            per-producer rows (ignored when author_id is None).
 
     Why:
         The global skills-sync writes every project's slice together, and the whole point
@@ -868,6 +980,13 @@ def replace_all_skills(
         within a scoped caller's grants, so a contributor's batch can never delete skills for
         a project it has no access to (the "skills-batch trap"). Rolls back on any error so a
         partial batch never lands.
+
+        C3 Inc 2.5: when author_id is set, the SAME transaction also reconciles that producer's
+        relay_producer_skills (dual-write, storage now / display later). The producer prune is
+        ALWAYS bounded by `author_id = ?`, so even an unrestricted (admin) caller can only touch
+        its OWN per-producer rows — never another producer's. Done inline (not via
+        upsert_producer_skills, which commits) so the single trailing commit/rollback covers both
+        tables: a mid-batch failure leaves BOTH on their pre-batch state.
     """
     try:
         if prune:
@@ -892,6 +1011,32 @@ def replace_all_skills(
             else:
                 # An empty batch with an unrestricted prune clears every project's skills.
                 conn.execute("DELETE FROM relay_project_skills")
+            # C3 Inc 2.5: prune this producer's OWN per-producer rows the same way, ALWAYS
+            # bounded by author_id so it can never touch another producer's rows (the safety
+            # invariant even for an unrestricted admin caller). Mirrors the aggregate's three
+            # branches, each with an extra `author_id = ?`.
+            if author_id is not None:
+                if prune_scope is not None:
+                    producer_to_delete = [p for p in prune_scope if p not in slices]
+                    if producer_to_delete:
+                        placeholders = ",".join("?" for _ in producer_to_delete)
+                        conn.execute(
+                            f"DELETE FROM relay_producer_skills "
+                            f"WHERE author_id = ? AND project IN ({placeholders})",
+                            (author_id, *producer_to_delete),
+                        )
+                elif slices:
+                    placeholders = ",".join("?" for _ in slices)
+                    conn.execute(
+                        f"DELETE FROM relay_producer_skills "
+                        f"WHERE author_id = ? AND project NOT IN ({placeholders})",
+                        (author_id, *slices.keys()),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM relay_producer_skills WHERE author_id = ?",
+                        (author_id,),
+                    )
         for project, skills in slices.items():
             conn.execute(
                 """
@@ -903,6 +1048,21 @@ def replace_all_skills(
                 """,
                 (project, json.dumps(skills), updated_at),
             )
+        # C3 Inc 2.5: mirror each slice into the producer's own rows (dual-write) — inline (not
+        # upsert_producer_skills, which commits) so it shares this transaction's single commit.
+        if author_id is not None:
+            for project, skills in slices.items():
+                conn.execute(
+                    """
+                    INSERT INTO relay_producer_skills (project, author_id, author_name, skills, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(project, author_id) DO UPDATE SET
+                        author_name = excluded.author_name,
+                        skills = excluded.skills,
+                        updated_at = excluded.updated_at
+                    """,
+                    (project, author_id, author_name, json.dumps(skills), updated_at),
+                )
         conn.commit()
     except Exception:
         # Any failure mid-batch must leave the store on the pre-batch state, not a
@@ -1789,15 +1949,16 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> None:
         `revoke` sets active = 0 but keeps the row, so the user's `name` (UNIQUE) stays
         permanently occupied and can't be re-provisioned (KI-31). `delete` frees the name by
         removing the row, its `relay_user_projects` grants, and its LIVE per-producer state —
-        `relay_producer_checklists` and `relay_producer_disciplines` (C3 Inc 2.5). It deliberately
-        LEAVES `relay_reports` and `relay_discussion_items`: those are HISTORY, their `author_name`
-        is denormalized (renders after the user is gone) and their `author_id` is already dropped
-        from the wire — so a past report or reply keeps its recorded author. Live state goes;
-        history stays.
+        `relay_producer_checklists`, `relay_producer_disciplines`, and `relay_producer_skills`
+        (C3 Inc 2.5). It deliberately LEAVES `relay_reports` and `relay_discussion_items`: those are
+        HISTORY, their `author_name` is denormalized (renders after the user is gone) and their
+        `author_id` is already dropped from the wire — so a past report or reply keeps its recorded
+        author. Live state goes; history stays.
     """
     conn.execute("DELETE FROM relay_user_projects WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_producer_checklists WHERE author_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_producer_disciplines WHERE author_id = ?", (user_id,))
+    conn.execute("DELETE FROM relay_producer_skills WHERE author_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_users WHERE id = ?", (user_id,))
     conn.commit()
 

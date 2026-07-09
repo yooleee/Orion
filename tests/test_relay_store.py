@@ -406,25 +406,52 @@ def test_producer_checklists_are_keyed_per_producer_and_replace_in_place(tmp_pat
     a producer pushing again overwrites its own row without touching the other's.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # producer_checklists_for INNER JOINs relay_users (active only), so the producers must be
+    # real active users; add_user returns their autoincrement ids.
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    c_id = add_user(conn, "Teammate C", "vc", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
     upsert_producer_checklist(
-        conn, "demo", 7, "Teammate B", _items(("A", True)), "2026-06-25T00:00:00+00:00"
+        conn, "demo", b_id, "Teammate B", _items(("A", True)), "2026-06-25T00:00:00+00:00"
     )
     upsert_producer_checklist(
-        conn, "demo", 9, "Teammate C", _items(("B", False)), "2026-06-25T01:00:00+00:00"
+        conn, "demo", c_id, "Teammate C", _items(("B", False)), "2026-06-25T01:00:00+00:00"
     )
-    # Producer 7 re-pushes a new checklist — replaces its own row only.
+    # Producer B re-pushes a new checklist — replaces its own row only.
     upsert_producer_checklist(
-        conn, "demo", 7, "Teammate B", _items(("A2", False)), "2026-06-25T02:00:00+00:00"
+        conn, "demo", b_id, "Teammate B", _items(("A2", False)), "2026-06-25T02:00:00+00:00"
     )
 
     got = producer_checklists_for(conn, "demo")
     assert [(p["author_id"], p["author_name"]) for p in got] == [
-        (7, "Teammate B"),
-        (9, "Teammate C"),
+        (b_id, "Teammate B"),
+        (c_id, "Teammate C"),
     ]  # ordered by name; both present
     by_id = {p["author_id"]: p for p in got}
-    assert [i["text"] for i in by_id[7]["items"]] == ["A2"]  # 7's row replaced
-    assert [i["text"] for i in by_id[9]["items"]] == ["B"]  # 9's row untouched
+    assert [i["text"] for i in by_id[b_id]["items"]] == ["A2"]  # B's row replaced
+    assert [i["text"] for i in by_id[c_id]["items"]] == ["B"]  # C's row untouched
+
+
+def test_producer_checklists_excludes_revoked_producers(tmp_path):
+    """A revoked contributor's live checklist card disappears (current state, not history).
+
+    Why this matters: unlike a discussion author_name (a historical utterance that keeps its
+    author across revocation), a per-producer checklist is CURRENT state — a revoked contributor
+    is off the project, so their stale card must not show. We push two producers, revoke one, and
+    assert only the active producer's card remains.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    c_id = add_user(conn, "Teammate C", "vc", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_checklist(
+        conn, "demo", b_id, "Teammate B", _items(("A", True)), "2026-06-25T00:00:00+00:00"
+    )
+    upsert_producer_checklist(
+        conn, "demo", c_id, "Teammate C", _items(("B", False)), "2026-06-25T00:00:00+00:00"
+    )
+    revoke_user(conn, c_id)  # C leaves the project
+
+    got = producer_checklists_for(conn, "demo")
+    assert [p["author_name"] for p in got] == ["Teammate B"]  # revoked C's stale card is gone
 
 
 def test_producer_checklists_for_unknown_project_is_empty(tmp_path):

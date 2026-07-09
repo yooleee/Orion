@@ -492,22 +492,26 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
 
     Returns:
         A list of {"author_id", "author_name", "items"} dicts (items JSON-decoded), one per
-        identified producer that has pushed a checklist, ordered by author_name for stable card
-        positions. Empty when the project has no per-producer checklists (never pushed by an
+        ACTIVE identified producer that has pushed a checklist, ordered by author_name for stable
+        card positions. Empty when the project has no per-producer checklists (never pushed by an
         identified producer, e.g. legacy-only or older data).
 
     Why:
         Backs the project page's per-producer cards. Ordering by name keeps a card from jumping
         position when a producer re-pushes. Decoding items here (like get_checklist) hands the
-        serializer real dicts. author_name comes straight from the row (denormalized at write),
-        so the read needs no JOIN and survives a producer's revocation.
+        serializer real dicts. Unlike a discussion `author_name` (a historical utterance that must
+        keep its author across revocation), a per-producer checklist is CURRENT STATE — a revoked
+        contributor is off the project, so their card is stale and should not show. We therefore
+        INNER JOIN relay_users and keep only active producers; the row's denormalized author_name
+        is still what we display (re-stamped on each push, so it is current for an active producer).
     """
     rows = conn.execute(
         """
-        SELECT author_id, author_name, items
-        FROM relay_producer_checklists
-        WHERE project = ?
-        ORDER BY author_name
+        SELECT pc.author_id, pc.author_name, pc.items
+        FROM relay_producer_checklists pc
+        JOIN relay_users u ON u.id = pc.author_id
+        WHERE pc.project = ? AND u.active = 1
+        ORDER BY pc.author_name
         """,
         (project,),
     ).fetchall()

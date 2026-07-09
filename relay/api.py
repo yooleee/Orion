@@ -29,6 +29,7 @@ from .derive import (
     OVERDUE,
     bucket_counts,
     classify_item,
+    item_key,
     milestones,
     next_open_due,
     slipping_item_keys,
@@ -91,9 +92,11 @@ def _item_key(item: dict) -> str:
     Why:
         Slippage is keyed by item_key (the tracker's bare title survives a status change in
         the text); to mark a checklist item slipping we must resolve the same key the
-        observation history stored. One helper keeps that rule in lockstep with store.py.
+        observation history stored. Delegates to derive.item_key — the single source of the
+        rule, shared with record_observations, the slipping lookup, and the producer-
+        checklist merge — so identity can never drift between these paths.
     """
-    return item.get("key") or item["text"]
+    return item_key(item)
 
 
 def _deadline_state(due_iso: str | None, today: date) -> str | None:

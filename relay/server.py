@@ -49,6 +49,7 @@ from .store import (
     delete_user,
     disciplines_projects,
     discussion_items_for_project,
+    effective_checklist,
     get,
     get_checklist,
     get_disciplines,
@@ -921,8 +922,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # state). Validated above, so the items are the expected {text, done} shape.
             checklist = payload.get("checklist")
             if checklist is not None:
-                # The AGGREGATE current checklist is last-writer-wins across producers and
-                # drives the portfolio badge/progress — every push updates it, attributed or not.
+                # The AGGREGATE current checklist is last-writer-wins across producers; every
+                # push updates it, attributed or not. It drives the badge/progress for
+                # single-producer / anonymous projects and is the fallback under the effective
+                # merge (KI-30) once a project has ≥2 identified producers.
                 upsert_checklist(conn, payload["project"], checklist, received_at)
                 # C3 Inc 2: an IDENTIFIED producer ALSO keeps its OWN checklist (dual-write),
                 # so the project page can show one card per contributor. A legacy push has no
@@ -997,7 +1000,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # the current checklist and its newest observation never disagree by a second.
             received_at = _utc_now_iso()
             author_id, author_name = _author_of(principal)
-            # The AGGREGATE (last-writer-wins, drives the badge/progress) always updates.
+            # The AGGREGATE (last-writer-wins) always updates: it drives the badge/progress for
+            # single-producer / anonymous projects and is the effective-merge fallback (KI-30).
             upsert_checklist(
                 conn, payload["project"], payload["checklist"], received_at
             )
@@ -2283,8 +2287,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     rows = [r for r in rows if r["project"] in allowed]
                 # Enrich each row with its checklist items, which the deadline / segmented-bar
                 # / chip derivations need (the row carries counts, not the items themselves).
+                # effective_checklist (KI-30) merges per-producer copies at ≥2 producers, so the
+                # items here match the counts latest_report_per_project already computed from them.
                 entries = [
-                    {**r, "items": get_checklist(conn, r["project"])} for r in rows
+                    {**r, "items": effective_checklist(conn, r["project"])} for r in rows
                 ]
                 self._send_json(200, api.serialize_portfolio(entries, allowed, today))
                 return
@@ -2295,9 +2301,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": "not found"})
                     return
                 reports = history(conn, name)
-                checklist = get_checklist(conn, name)
+                checklist = effective_checklist(conn, name)
                 # A project with neither reports nor a checklist does not exist; 404 it
-                # (existence-hiding, same as an out-of-scope one above).
+                # (existence-hiding, same as an out-of-scope one above). effective_checklist
+                # preserves None (no checklist row) for this check even under the merge path.
                 if not reports and checklist is None:
                     self._send_json(404, {"error": "not found"})
                     return
@@ -2328,7 +2335,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     200,
                     api.serialize_report(
                         report=report,
-                        checklist=get_checklist(conn, report["project"]),
+                        checklist=effective_checklist(conn, report["project"]),
                         history=history(conn, report["project"]),
                         today=today,
                     ),
@@ -2346,7 +2353,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     {
                         "name": r["project"],
                         "kind": r["kind"],
-                        "items": get_checklist(conn, r["project"]),
+                        "items": effective_checklist(conn, r["project"]),
                         "observations": observed_history(conn, r["project"]),
                     }
                     for r in rows

@@ -26,7 +26,12 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from .derive import count_at_risk, milestones, slipping_item_keys
+from .derive import (
+    count_at_risk,
+    milestones,
+    slipping_item_keys,
+)
+from .derive import effective_checklist as _derive_effective_checklist
 
 # How long sqlite waits for a held write-lock before raising "database is locked".
 # The relay's server is threaded (CP6), so two pushes can arrive close together;
@@ -79,7 +84,10 @@ CREATE TABLE IF NOT EXISTS relay_project_checklists (
 -- aggregate above is last-writer-wins under multiple producers (it shows only whoever pushed
 -- most recently); this keeps each identified contributor's OWN current checklist so the
 -- dashboard can show one card per producer side by side. Written ALONGSIDE the aggregate (a
--- dual-write), never replacing it — the aggregate still drives the portfolio badge/progress.
+-- dual-write), never replacing it. As of C3 Inc 2.5 (KI-30) these per-producer rows drive the
+-- displayed badge/progress via the EFFECTIVE checklist (see derive.effective_checklist) once a
+-- project has ≥2 active producers; the aggregate is the 0–1-producer fallback (still the sole
+-- source for anonymous/single-producer projects).
 -- ONE row per (project, author_id), REPLACED on each of that producer's pushes. Only IDENTIFIED
 -- producers land here (author_id is NOT NULL); a legacy anonymous push writes the aggregate
 -- only. author_name is denormalized (server-derived, copied at write) so the card's label
@@ -465,9 +473,10 @@ def upsert_producer_checklist(
         The per-producer sibling of upsert_checklist: current state, one row per
         (project, author_id), REPLACED on each of that producer's pushes via
         ON CONFLICT(project, author_id). It is a DUAL-WRITE beside the aggregate, never a
-        replacement — the aggregate row still drives the portfolio badge/progress; this table
-        only feeds the per-producer cards. author_name is re-stamped on every push so a renamed
-        producer's card tracks the latest name.
+        replacement. These rows feed the per-producer cards AND, as of C3 Inc 2.5 (KI-30), the
+        effective-checklist merge that drives the badge/progress at ≥2 active producers (the
+        aggregate is the 0–1-producer fallback). author_name is re-stamped on every push so a
+        renamed producer's card tracks the latest name.
     """
     conn.execute(
         """
@@ -491,10 +500,12 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
         project: The project to fetch per-producer checklists for.
 
     Returns:
-        A list of {"author_id", "author_name", "items"} dicts (items JSON-decoded), one per
-        ACTIVE identified producer that has pushed a checklist, ordered by author_name for stable
-        card positions. Empty when the project has no per-producer checklists (never pushed by an
-        identified producer, e.g. legacy-only or older data).
+        A list of {"author_id", "author_name", "items", "updated_at"} dicts (items
+        JSON-decoded), one per ACTIVE identified producer that has pushed a checklist, ordered
+        by author_name for stable card positions. Empty when the project has no per-producer
+        checklists (never pushed by an identified producer, e.g. legacy-only or older data).
+        `updated_at` (this producer's push time) feeds the effective-checklist merge's
+        last-writer-per-item ordering (C3 Inc 2.5); the per-producer card consumer ignores it.
 
     Why:
         Backs the project page's per-producer cards. Ordering by name keeps a card from jumping
@@ -507,7 +518,7 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
     """
     rows = conn.execute(
         """
-        SELECT pc.author_id, pc.author_name, pc.items
+        SELECT pc.author_id, pc.author_name, pc.items, pc.updated_at
         FROM relay_producer_checklists pc
         JOIN relay_users u ON u.id = pc.author_id
         WHERE pc.project = ? AND u.active = 1
@@ -520,9 +531,37 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
             "author_id": row["author_id"],
             "author_name": row["author_name"],
             "items": json.loads(row["items"]),
+            "updated_at": row["updated_at"],
         }
         for row in rows
     ]
+
+
+def effective_checklist(conn: sqlite3.Connection, project: str) -> list | None:
+    """Return the checklist that should drive a project's displayed badge/progress.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to resolve the effective checklist for.
+
+    Returns:
+        The per-producer-merged item list when the project has ≥2 active identified
+        producers; otherwise the aggregate checklist UNCHANGED (a list, or None when the
+        project has no checklist row at all — the None is preserved for existence checks).
+
+    Why:
+        The single read-side entry point for KI-30 (C3 Inc 2.5, Unit 1.1). Every display
+        surface (portfolio badge, project page, report snapshot, scheduling) routes checklist
+        reads through here instead of get_checklist, so they can never disagree about the
+        merged numbers. The decode-then-derive split is the module's pattern: this thin
+        wrapper does the I/O (fetch aggregate + per-producer rows) and hands both to the pure
+        derive.effective_checklist, which owns the ≥2 gate and the merge. At 0–1 producers it
+        returns the aggregate byte-identically, so single-producer / anonymous deployments are
+        unchanged.
+    """
+    return _derive_effective_checklist(
+        get_checklist(conn, project), producer_checklists_for(conn, project)
+    )
 
 
 def upsert_disciplines(
@@ -1056,7 +1095,15 @@ def latest_report_per_project(
         checklist_done = checklist_total = checklist_at_risk = None
         nearest_milestone = None
         if items_json is not None:
-            items = json.loads(items_json)
+            # KI-30 (C3 Inc 2.5): the badge counts derive from the EFFECTIVE checklist, not
+            # the last-writer-wins aggregate. Reuse the aggregate we already decoded (avoid a
+            # redundant get_checklist) and merge in this project's per-producer copies — one
+            # producer_checklists_for query per project, matching the observed_history call
+            # below. At 0–1 producers the merge returns the aggregate unchanged.
+            aggregate_items = json.loads(items_json)
+            items = _derive_effective_checklist(
+                aggregate_items, producer_checklists_for(conn, row["project"])
+            )
             checklist_total = len(items)
             checklist_done = sum(1 for item in items if item.get("done"))
             # Forward-looking (E2 Inc 3): count overdue/due-soon items for the card's

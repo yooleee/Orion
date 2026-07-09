@@ -759,6 +759,66 @@ def test_two_contributors_get_separate_producer_checklists(tmp_path):
         assert by_name["Teammate C"]["progress"] == {"done": 0, "total": 1, "pct": 0}
 
 
+def test_effective_checklist_agrees_across_portfolio_project_and_scheduling(tmp_path):
+    """After two identified pushes, the portfolio badge, project stats, and scheduling all
+    reflect the SAME merged (done-OR) checklist — KI-30's fix end to end.
+
+    Scenario: B and C both track "Ship" and "Docs". B has Ship done / Docs open; C has Ship
+    open (with a long-overdue due date) / Docs done. The merged effective checklist OR-s done,
+    so BOTH items read done. We assert:
+      - the project page's stats.progress and the portfolio badge AGREE at 2/2 done (the
+        aggregate, last-writer C, would show only 1/2);
+      - scheduling shows no open "Ship" deadline for demo, even though C's aggregate copy left
+        it open and overdue — proving the timeline reads the effective view too, not the
+        last-writer aggregate. All three surfaces would disagree if any still read get_checklist.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "Teammate B", "b-key", role="contributor", projects=["demo"])
+        _provision_user(db, "Teammate C", "c-key", role="contributor", projects=["demo"])
+        _provision_user(db, "root", "admin-key", role="admin")
+
+        def push_checklist(token, items):
+            body = json.dumps({"project": "demo", "checklist": items}).encode("utf-8")
+            return _post(base_url, body, token=token, path="/checklist")
+
+        # B first, then C — so the aggregate (last-writer) ends up as C's copy (Ship OPEN).
+        assert push_checklist("b-key", [
+            {"text": "Ship", "done": True}, {"text": "Docs", "done": False},
+        ])[0] == 200
+        # A past due date so "Ship" is unambiguously overdue regardless of the real test clock.
+        assert push_checklist("c-key", [
+            {"text": "Ship", "done": False, "due_date": "2020-01-01"}, {"text": "Docs", "done": True},
+        ])[0] == 200
+
+        cookie = _login(base_url, "admin-key")
+
+        # (1) Project page: stats computed from the effective checklist → both items done.
+        code, body = _get(base_url, "/api/projects/demo", cookie=cookie)
+        assert code == 200
+        project_progress = json.loads(body)["stats"]["progress"]
+        assert project_progress == {"done": 2, "total": 2, "pct": 100}
+
+        # (2) Portfolio badge: precomputed counts also from the effective checklist → AGREES.
+        code, body = _get(base_url, "/api/portfolio", cookie=cookie)
+        assert code == 200
+        # demo has default kind "project", so it lands in the "projects" section.
+        demo_entry = next(e for e in json.loads(body)["projects"] if e["name"] == "demo")
+        assert demo_entry["progress"] == project_progress  # portfolio and project agree
+
+        # (3) Scheduling: the merged Ship is done, so it is off the timeline entirely — the
+        # aggregate's still-open, overdue Ship must NOT surface here.
+        code, body = _get(base_url, "/api/scheduling", cookie=cookie)
+        assert code == 200
+        buckets = json.loads(body)["buckets"]
+        demo_labels = [
+            row["label"]
+            for rows in buckets.values()
+            for row in rows
+            if row["source"]["name"] == "demo"
+        ]
+        assert "Ship" not in demo_labels  # done in the merged view → no open deadline
+
+
 def test_legacy_shared_token_still_ingests_by_default(tmp_path):
     """The shared ingest token keeps working (anonymously, unrestricted) while enabled.
 

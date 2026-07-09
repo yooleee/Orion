@@ -21,7 +21,10 @@ from relay.derive import (
     bucket_counts,
     classify_item,
     count_at_risk,
+    effective_checklist,
     is_slipping,
+    item_key,
+    merge_producer_checklists,
     milestones,
     next_open_due,
     slipping_item_keys,
@@ -395,3 +398,145 @@ def test_next_open_due_is_none_when_nothing_open_is_dated():
     assert next_open_due([_item(done=True, due_date="2026-06-20"), _item(text="x")]) is None
     assert next_open_due([]) is None
     assert next_open_due(None) is None
+
+
+# --- item_key(): the shared identity rule (C3 Inc 2.5) -------------------------------
+
+
+def test_item_key_prefers_key_then_falls_back_to_text():
+    """`key` wins when present/truthy; otherwise `text` — the one identity rule the merge,
+    the observation stream, and the serializers all share (they must never diverge)."""
+    assert item_key({"key": "app-1", "text": "Apply to Foo", "done": False}) == "app-1"
+    assert item_key({"text": "Write tests", "done": False}) == "Write tests"
+    # An empty-string key is falsy → falls through to text (matches `x.get("key") or x[...]`).
+    assert item_key({"key": "", "text": "Fallback", "done": False}) == "Fallback"
+
+
+# --- merge_producer_checklists() / effective_checklist(): the KI-30 fold --------------
+#
+# The merge is the correctness core of Unit 1.1: two machines each push their own copy of
+# the SAME base checklist, and the badge must show the union with done OR-ed so a stale
+# copy can never regress a done item. Each test below pins one settled rule.
+
+
+def _producer(items, updated_at):
+    """Build one producer's checklist copy as producer_checklists_for returns it.
+
+    Why: the merge only reads `items` and `updated_at`; author fields are irrelevant to the
+    fold, so the fixture omits them to keep each case focused on the merge behavior.
+    """
+    return {"items": items, "updated_at": updated_at}
+
+
+def test_merge_unions_distinct_items_in_first_seen_order():
+    """Items only one producer has still appear; order is first-seen across the fold.
+
+    Scenario: producer A (earlier push) tracks task-1; producer B (later push) tracks
+    task-2. The effective list is their union, A's item first (A folded first). This is why
+    a teammate's project-specific item is not dropped just because the other machine lacks it.
+    """
+    a = _producer([_item(text="task-1")], "2026-06-25T10:00:00Z")
+    b = _producer([_item(text="task-2")], "2026-06-26T10:00:00Z")
+    merged = merge_producer_checklists([a, b])
+    assert [item_key(i) for i in merged] == ["task-1", "task-2"]
+
+
+def test_merge_ors_done_across_producer_copies():
+    """One producer done + the other not → the merged item is done (the KI-30 fix).
+
+    Scenario: A marked "Ship" done; B's copy still shows it open. done = OR means the badge
+    counts it done — the whole point of the merge (an aggregate would show whoever pushed last).
+    """
+    a = _producer([_item(text="Ship", done=True)], "2026-06-25T10:00:00Z")
+    b = _producer([_item(text="Ship", done=False)], "2026-06-26T10:00:00Z")
+    (merged_item,) = merge_producer_checklists([a, b])
+    assert merged_item["done"] is True
+
+
+def test_merge_stale_not_done_copy_never_regresses_a_done_item():
+    """A LATER push that still shows the item open cannot flip a done item back open.
+
+    Scenario: A's cron pushed "done" at 10:00; B's stale cron pushes the same item "not done"
+    at 11:00 (a later updated_at). Latest-writer-wins would regress it — exactly KI-30's
+    flicker. done = OR keeps it done regardless of which copy pushed last.
+    """
+    a = _producer([_item(text="Ship", done=True)], "2026-06-26T10:00:00Z")
+    b_stale = _producer([_item(text="Ship", done=False)], "2026-06-26T11:00:00Z")
+    (merged_item,) = merge_producer_checklists([a, b_stale])
+    assert merged_item["done"] is True
+
+
+def test_merge_metadata_comes_from_the_most_recently_updated_copy():
+    """Non-done fields (text/due_date) come from the producer with the later updated_at.
+
+    Scenario: both track the same item (same key), but B re-dated it later. B's push is more
+    recent, so the merged item carries B's due_date — a genuine re-dating is honored, while
+    done stays OR-ed. The fold walks ascending by updated_at, so the last writer wins metadata.
+    """
+    a = _producer(
+        [{"key": "m1", "text": "Milestone", "done": False, "due_date": "2026-07-01"}],
+        "2026-06-25T10:00:00Z",
+    )
+    b = _producer(
+        [{"key": "m1", "text": "Milestone", "done": False, "due_date": "2026-07-15"}],
+        "2026-06-26T10:00:00Z",
+    )
+    (merged_item,) = merge_producer_checklists([a, b])
+    assert merged_item["due_date"] == "2026-07-15"  # B's later value
+
+
+def test_merge_metadata_precedence_is_by_timestamp_not_argument_order():
+    """Even if the later-updated producer is passed FIRST, its metadata still wins.
+
+    Why: the fold sorts by updated_at, so precedence is timestamp-driven and independent of
+    the order producer_checklists_for happened to return the rows (which is by name).
+    """
+    later = _producer(
+        [{"key": "m1", "text": "Milestone", "done": False, "due_date": "2026-07-15"}],
+        "2026-06-26T10:00:00Z",
+    )
+    earlier = _producer(
+        [{"key": "m1", "text": "Milestone", "done": False, "due_date": "2026-07-01"}],
+        "2026-06-25T10:00:00Z",
+    )
+    (merged_item,) = merge_producer_checklists([later, earlier])  # later passed first
+    assert merged_item["due_date"] == "2026-07-15"
+
+
+def test_effective_checklist_merges_only_at_two_or_more_producers():
+    """≥2 producers → merged; 0 or 1 → the aggregate list UNCHANGED (byte-identical fallback).
+
+    This gate is what keeps every current single-producer / anonymous deployment untouched:
+    with fewer than two identified producers there is nothing to merge, so the aggregate
+    (which those deployments still write) is returned exactly as-is.
+    """
+    aggregate = [_item(text="Ship", done=False)]
+    one = _producer([_item(text="Ship", done=True)], "2026-06-26T10:00:00Z")
+    # 1 producer: fallback returns the aggregate object unchanged (still shows not-done).
+    assert effective_checklist(aggregate, [one]) is aggregate
+    # 0 producers: same fallback.
+    assert effective_checklist(aggregate, []) is aggregate
+    # 2 producers: now the merge runs and OR-s done → the item reads done.
+    two = _producer([_item(text="Ship", done=False)], "2026-06-27T10:00:00Z")
+    assert effective_checklist(aggregate, [one, two])[0]["done"] is True
+
+
+def test_effective_checklist_preserves_none_aggregate_in_the_fallback():
+    """A checklist-less project (aggregate None) stays None under the <2 fallback.
+
+    Why this matters: the project route's existence-hiding 404 tests `checklist is None`, so
+    the fallback must not turn a missing checklist into [] (which would read as "exists").
+    """
+    assert effective_checklist(None, []) is None
+
+
+def test_merge_handles_empty_producer_items():
+    """A producer whose checklist is empty contributes nothing; the union is the other's.
+
+    Scenario: B enabled the checklist but has no items yet (a legitimate empty push). The
+    merge must not crash and must yield A's items unchanged.
+    """
+    a = _producer([_item(text="task-1")], "2026-06-25T10:00:00Z")
+    b_empty = _producer([], "2026-06-26T10:00:00Z")
+    merged = merge_producer_checklists([a, b_empty])
+    assert [item_key(i) for i in merged] == ["task-1"]

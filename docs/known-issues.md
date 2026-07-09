@@ -411,6 +411,28 @@ Deferred).
   schema change, since the per-producer rows already carry everything needed. Flagged now rather than left
   implicit.
 
+## KI-31 — A revoked user's name stays occupied, so it can't be re-provisioned (no hard-delete or rename)
+
+- **Detail:** `relay-user revoke <name>` sets `active = 0` and bumps `session_version` — an immediate,
+  stateless cutoff, which is the right revocation semantics. But it does **not** free the user's `name`,
+  which is `UNIQUE` in `relay_users`, and the admin API has **no hard-delete and no rename**. So the name
+  stays permanently held by the inactive row, and re-provisioning under it (`relay-user add <name> …`)
+  returns **409 "a user named '<name>' already exists"**.
+- **Why it matters:** two concrete workflows hit this. (1) The two-person-shared-base **dogfood's own
+  step 6** — "revoke `wsl` → re-provision" — cannot reuse `wsl`; you must pick a new name (during the
+  2026-07-09 live dogfood the Mac's producer had to become `macos` once `mac` was revoked and burned).
+  (2) **Real re-onboarding / key rotation**: a contributor whose key is compromised or lost, or a person
+  who leaves and later returns, cannot get their familiar handle back — today the only path is a new name.
+  Revoked rows also accumulate in the roster (minor clutter). Surfaced by the live-relay dogfood.
+- **Severity:** low (revocation itself is correct and immediate; a revoked key stays dead. This is a
+  re-provisioning ergonomics gap, not a security hole).
+- **Status:** Open. Two clean additive fixes, either or both: a **`relay-user rotate <name>`** that
+  re-mints a key for the *existing* row (needs no new name — arguably the more common need, and it would
+  also have avoided the dogfood's `mac`→`macos` churn); and/or a **`relay-user delete <name>`** hard-delete
+  distinct from revoke (frees the name; must decide what happens to that producer's attributed rows, whose
+  denormalized `author_name` already survives by design so history stays intact). Recorded, not fixed
+  mid-dogfood.
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

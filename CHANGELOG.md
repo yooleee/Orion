@@ -14,6 +14,53 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## C3 Increment 2 — two-person shared base: attributed producers on the ingest path (2026-07-08)
+
+Advances **C3** ("2 = contribute/write access") and closes the report-submitter half of **KI-17**.
+The read/discussion layer was already multi-party, but the **produce/ingest layer was
+single-producer by construction** (one shared identity-free ingest token, no author on reports,
+last-writer-wins checklists). This slice makes it multi-producer so two people working on different
+parts of the same project each see what the other is doing. Built unit by unit off
+`docs/two-person-shared-base-kickoff.md` (PRs #81–#84); auth design hardened by a Codex
+`/second-opinion`. New KI-30 records the remaining aggregate roll-up (last-writer-wins).
+
+### Added
+
+- **A push-only `contributor` role.** A producer identity that authenticates the machine ingest
+  endpoints with its own server-minted per-user key, scoped to its granted projects. Two role
+  allowlists make the boundary fail-closed both ways: a `contributor` key can never resolve an
+  interactive dashboard login, and a `viewer`/`supervisor` key can never push — one credential
+  never spans both auth worlds. `relay-user add --role contributor`.
+- **Server-derived producer identity on every Bearer endpoint** (`_resolve_bearer_principal`).
+  Identity comes from the key via the existing key-verifier machinery, never from config or a
+  request body. Reports are attributed (a **"pushed by <name>"** on the timeline and report page,
+  from new nullable `author_id`/`author_name` columns on `relay_reports`); CLI discussion replies
+  carry the producer's real name (`--as` is ignored for an identified producer, with a CLI note);
+  observations record the observing producer (`author_id` on `relay_observed_items`).
+- **Per-producer checklists.** A new `relay_producer_checklists` table (keyed by project + author),
+  dual-written beside the untouched aggregate, surfaced as one compact card per contributor on the
+  project page (shown only when two or more producers exist).
+- **`relay-serve --disable-legacy-ingest`** — the operator-driven cutover that retires the shared
+  ingest token once every producer has its own key.
+
+### Changed
+
+- **The legacy shared ingest token now pushes anonymously and logs each use.** It keeps working by
+  default (a machine credential must not silently expire), but its pushes carry no author, and every
+  use emits a log line so an operator can watch it go quiet before running `--disable-legacy-ingest`.
+- **One generic 401 for every Bearer auth failure**, and out-of-scope writes now return a **404
+  identical to a missing project** — now that named contributor keys exist, distinguishing failures
+  would help enumerate them.
+- **The store gained its first idempotent `ALTER`** (`_ensure_columns`, `PRAGMA table_info`-guarded),
+  so an already-deployed relay self-migrates the new report/observation author columns on open.
+
+### Notes
+
+- Skills/disciplines/meta and the **aggregate** checklist remain last-writer-wins under multiple
+  producers (**KI-30**, low severity, additively fixable). The Slack bot stays parked but is now
+  unblocked (its revival needs the per-user keys this slice added). 758 backend + 55 web tests green;
+  each unit verified eyes-on against a running relay serving the built SPA.
+
 ## KI-28 Stage 2 — comments retired, folded into the discussion model at parity (2026-07-07)
 
 Closes **KI-28**. The E2 Inc 5 discussion loop was the identity-first, two-way successor to C2

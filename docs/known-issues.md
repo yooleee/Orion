@@ -243,14 +243,17 @@ Deferred).
   (plus a config switch for optional anonymity) is a clean later add, not a rewrite. Surfaced from
   real dashboard feedback (2026-06-18) so it isn't lost.
 - **Severity:** low
-- **Status:** Partly addressed by C3 Increment 1 (2026-06-25). The multi-party **identity**
-  infrastructure now exists (viewers log in; a session carries an authenticated user), and the
-  **comment half is done**: a logged-in viewer's dashboard comment is now stamped with their
-  authenticated identity, not a self-asserted name, so a commenter cannot spoof someone else. What
-  remains is the **report-submitter** half — reports are still produced by the single local "me" per
-  machine, so the blob carries no `author`/`submitter`. That needs multi-user *submission* (a later
-  increment), at which point an `author` field plus a config switch for optional anonymity is a clean
-  additive step on the existing seam, not new infrastructure.
+- **Status:** **Report-submitter identity resolved by C3 Increment 2 (2026-07-08); optional
+  anonymity remains open.** The comment half was done in Increment 1 (a logged-in viewer's write is
+  stamped with their authenticated identity). Increment 2 (the two-person shared base) closed the
+  **report-submitter** half: a report pushed with a producer's own per-user `contributor` key is now
+  attributed — `relay_reports` carries a server-derived `author_id`/`author_name`, surfaced as "pushed
+  by <name>" on the dashboard. Identity is derived from the key, never self-asserted, so a producer
+  cannot spoof another. **Still open — the *configurable anonymity* switch:** attribution is currently
+  all-or-nothing by credential (an identified producer is always named; only the legacy shared-token
+  path is anonymous). KI-17's original point that some users would *prefer* anonymity by choice is not
+  yet a first-class per-report/per-project option. That remains a clean additive step (a config toggle
+  + an optional null-author path), tracked here rather than closed.
 
 ## KI-21 — Forward-store item identity is the title, so a renamed item is a new item
 
@@ -407,6 +410,32 @@ Deferred).
   progress, counts) from `producer_checklists_for` — e.g. a union/merge across producers — without a
   schema change, since the per-producer rows already carry everything needed. Flagged now rather than left
   implicit.
+
+## KI-31 — Contributor lifecycle management is incomplete: no scope-grant, key-rotation, or hard-delete/rename
+
+- **Detail:** the admin API (`relay-user`) is **add / list / revoke** only. Three real management
+  operations are missing: (1) **expand scope** — you cannot grant an existing contributor another project
+  (`add --project` only applies at creation), so a producer's project set is frozen once minted; (2)
+  **rotate a key** — you cannot re-mint a key for an existing user; (3) **hard-delete / rename** — `revoke`
+  sets `active = 0` (an immediate, stateless, correct cutoff) but does **not** free the user's `name`, which
+  is `UNIQUE`, so re-provisioning under it returns **409 "a user named '<name>' already exists"** — names
+  are effectively unique *and single-use*.
+- **Why it matters:** the live two-person dogfood (2026-07-09) hit all three. The `wsl` producer, once
+  revoked (step 6), can't be re-provisioned under `wsl`; the Mac's producer had to become `macos` after
+  `mac` was burned; and because `macos` was minted scoped to `orion` only, **there is no way to give it the
+  Mac's other three projects** (sar_hackathon, barebones-ai-village, applications) — which is exactly what
+  blocked the `--disable-legacy-ingest` cutover (a scoped key can't cover a multi-project machine, and
+  legacy can't be retired until it can). Real re-onboarding / compromised-key rotation hit the same walls.
+- **Severity:** low as a security matter (revocation is correct and immediate; a revoked key stays dead) —
+  but it is a genuine **operability** gap for any real multi-project, multi-machine deployment.
+- **Status:** Open. Near-term additive fixes: **`relay-user grant <name> --project <p>`** (expand scope),
+  **`relay-user rotate <name>`** (re-mint a key for the existing row — would have avoided the `mac`→`macos`
+  churn), and **`relay-user delete <name>`** (hard-delete that frees the name; the producer's attributed
+  rows keep their denormalized `author_name`, so history stays intact). **Larger direction (recorded, user-
+  flagged 2026-07-09):** the "unique + single-use name + one credential = one project-scoped key" model is
+  stretched thin — a future revamp may move to **proper key lifecycle and/or a more authentic login/identity
+  system** (accounts that can hold multiple scopes, rotate credentials, and be renamed) rather than
+  bare keys. A strategic juncture to weigh before the next multi-party increment, not built now.
 
 ## Resolved
 

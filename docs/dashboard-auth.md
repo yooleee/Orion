@@ -98,11 +98,19 @@ dies on its next request, with no session bookkeeping to clean up.
 
 ## Authorization: roles and per-project scope
 
-Two roles exist today. The `role` column is an open enum, so more (for example `contributor`,
-`guest`) are additive later.
+Four roles exist today. The `role` column is an open enum, so more (for example `guest`) are
+additive later. The first three are **interactive** (they log into the dashboard); the fourth
+is **push-only** (it authenticates the machine ingest path and cannot log in — see below).
 
 - **admin** sees every project and can provision and revoke users.
 - **viewer** is scoped to the projects an admin granted, listed in `relay_user_projects`.
+- **supervisor** is a scoped participant like a viewer, and may additionally post to a
+  project's discussion thread (E2 Inc 5).
+- **contributor** (C3 Increment 2) is a **push-only producer identity**: it authenticates the
+  machine ingest endpoints with its own key, scoped to its granted projects, but is deliberately
+  barred from logging into the dashboard — one credential never spans both auth worlds, so a
+  stolen push machine's `.env` cannot grant a human dashboard access. A person who both produces
+  and wants dashboard eyes gets a separate viewer/supervisor identity.
 
 The scope check runs on **every route**, not only the project index. A viewer who requests a
 project or report outside their scope receives a 404 that is byte-for-byte identical to a
@@ -117,10 +125,15 @@ Users are created and managed through a small admin API on the relay (`POST /api
 `GET /api/users`, `POST /api/users/revoke`), driven by the CLI:
 
 ```bash
-orion relay-user add alex --role viewer --project my-app   # prints a one-time access key
-orion relay-user list                                       # the roster (no key material)
-orion relay-user revoke alex                                # instant cutoff
+orion relay-user add alex --role viewer --project my-app       # a dashboard viewer
+orion relay-user add mac  --role contributor --project my-app  # a push-only producer (a machine)
+orion relay-user list                                          # the roster (no key material)
+orion relay-user revoke mac                                    # instant cutoff
 ```
+
+Each `add` prints a one-time access key. For a `contributor`, that key is what the producing
+machine puts in its own `.env` under `ORION_RELAY_TOKEN` (the same variable name the shared
+ingest token used), so no `orion.toml` change is needed — each machine simply carries its own key.
 
 Two security points matter here.
 
@@ -134,6 +147,32 @@ Two security points matter here.
 `relay-user` needs only a `[relay]` table in your `orion.toml` (an `admin_token_env_var` plus
 the `url`), not a list of local projects, so an admin who runs the relay but reports from
 elsewhere can still provision.
+
+## The push (ingest) path: producer identity and the legacy cutover
+
+The machine ingest endpoints (report push, checklist/skills/disciplines push, the CLI
+discussion pull/reply) authenticate with a **Bearer** token, not a login cookie. Two kinds of
+credential are accepted:
+
+- A **contributor's own key** (C3 Increment 2). The relay resolves it to that producer's
+  identity server-side, exactly as a login key resolves an interactive user. The producer may
+  push only to its granted projects — an out-of-scope push gets a 404 identical to a missing
+  project. Reports it pushes are attributed ("pushed by <name>"), its CLI discussion replies
+  carry its real name (any `--as` is ignored), and it keeps its own per-producer checklist.
+- The **legacy shared ingest token** (`ORION_RELAY_TOKEN` on the relay side). It still works for
+  backward compatibility, but its pushes are **anonymous** (no author is ever mapped to it — any
+  holder could impersonate a person). Every use logs a line so an operator can watch it go quiet
+  as producers migrate to their own keys.
+
+Every Bearer failure returns **one generic 401** (now that named contributor keys exist, a
+specific message would help an attacker enumerate them).
+
+**Retiring the shared token (the deliberate cutover).** Once every producer has its own
+contributor key, an operator disables the shared token by starting the relay with
+`relay-serve --disable-legacy-ingest`. From then on the shared token 401s and only named
+per-user keys can push. This is **operator-driven on purpose**: a machine credential must not
+silently expire (the failure mode would be a silently-401ing cron push, not a human at a login
+form), so the shared token keeps working until the operator flips the flag.
 
 ## The discussion write carries real identity
 

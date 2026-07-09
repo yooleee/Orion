@@ -126,11 +126,17 @@ delivery, not the dashboard. (A hosted/shareable dashboard is a later step.)
 
 ### 1. Add a relay token to `.env`
 
-The push is authenticated with a shared Bearer token. Generate one and add it:
+The push is authenticated with a Bearer token. For a single-developer, loopback setup, generate
+a shared token and add it:
 
 ```bash
 python -c "import secrets; print('ORION_RELAY_TOKEN=' + secrets.token_urlsafe(32))" >> .env
 ```
+
+> If **more than one machine or person** pushes into the same project, don't share one token:
+> provision each producer its own push-only `contributor` key (`orion relay-user add … --role
+> contributor`) and put that key in this same `ORION_RELAY_TOKEN` variable on each machine. Reports
+> then show who pushed them. See [`dashboard-auth.md`](dashboard-auth.md).
 
 ### 2. Enable `[relay]` in `orion.toml`
 

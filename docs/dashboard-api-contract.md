@@ -140,6 +140,11 @@ client-side.
 - Project facts: `at_risk` / `slipping` are counts (`checklist_at_risk` / `checklist_slipping`).
   `next_due` is the nearest open deadline (`derive.next_open_due`) with its state, or `null`. The SPA
   renders "△ N at risk", the deadline chip, or "✓ on track" when none.
+- **Producer-merged at ≥2 producers (C3 Inc 2.5).** `progress`, `at_risk`, `slipping`, and `next_due`
+  (and the project page's `stats`, milestones, scheduling, and report snapshot) are computed from the
+  **effective checklist** — a done-OR union across active producers' per-producer checklists — when a
+  project has **two or more** active identified producers; at 0–1 producers they come from the aggregate
+  row unchanged. **Wire shapes are identical** either way; only the numbers reflect the merge.
 - Tracker adds `segments` (the segmented bar, `derive.bucket_counts`: overdue / due_soon / remaining-open /
   done) and `at_risk_items` (every at-risk item, overdue-first then due_soon by date), each
   `{state, label, due_date}`. The SPA shows the first few chips and a "+N more".
@@ -190,12 +195,15 @@ Everything observed about one project. `404` when missing or out of scope.
   `producer_checklists_for`, `discussion_items_for_project`.
 - `producer_checklists` (C3 Inc 2) is each **identified** producer's own live checklist —
   `{ author_name, progress, items }` per producer, ordered by name, the `items` in the SAME per-item
-  shape as `checklist`. It is a dual-write beside the aggregate `checklist` (which stays last-writer-wins
-  and drives the portfolio badge/progress); a legacy shared-token push writes the aggregate ONLY, so it
-  leaves `producer_checklists` empty. `author_name` is server-derived and denormalized (survives
-  revocation); `author_id` is **not** on the wire. The dashboard renders one card per producer only when
-  there are **two or more** (a single producer's card would just duplicate the aggregate). Note: `items[].slipping`
-  reuses the project-level slipping set (true per-producer slippage is not derived).
+  shape as `checklist`. It is a dual-write beside the aggregate `checklist`. As of C3 Inc 2.5 the
+  displayed `checklist`/`stats` derive from the **effective checklist** (a done-OR merge of these
+  per-producer copies) at ≥2 producers, with the aggregate as the byte-identical <2-producer fallback; a
+  legacy shared-token push writes the aggregate ONLY, so it leaves `producer_checklists` empty.
+  `author_name` is server-derived and denormalized (survives revocation); `author_id` is **not** on the
+  wire. The dashboard renders one card per producer only when there are **two or more** (a single
+  producer's card would just duplicate the aggregate). Note (C3 Inc 2.5): each producer card's
+  `items[].slipping` now reflects **that producer's own** observation stream (partitioned by `author_id`);
+  the aggregate `checklist` rows, milestones, and scheduling use the project-wide union.
 - `reports[].author_name` (C3 Inc 2) is the producer who pushed the report — a server-derived display
   name, or `null` for a legacy (shared-token) push or a report predating attribution. The name is
   denormalized at write time so it survives the user's later revocation; the internal `author_id` is

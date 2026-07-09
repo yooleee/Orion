@@ -86,13 +86,18 @@ After the relay is up and reachable, create accounts from your local machine (th
 orion relay-user add alex --role viewer --project my-app       # a dashboard viewer
 orion relay-user add mac  --role contributor --project my-app  # a push-only producer (a machine)
 orion relay-user list
-orion relay-user revoke alex
+orion relay-user grant mac --project other-app                 # widen an existing user's scope
+orion relay-user rotate mac                                    # re-mint the key (old one dies)
+orion relay-user revoke alex                                   # cutoff (keeps the name)
+orion relay-user delete alex                                   # hard-delete (frees the name)
 ```
 
 Give each person their printed key over a secure channel. The key is shown once and cannot
 be retrieved later (only a verifier is stored). A `viewer` sees only the projects you grant;
 an `admin` sees everything and can provision; a `supervisor` is a scoped viewer that may also
-post to a project's discussion thread.
+post to a project's discussion thread. `grant` widens a user's scope later; `rotate` replaces a
+lost/compromised key; `revoke` cuts off but keeps the name; `delete` frees the name to reuse
+(past reports/replies keep their recorded author). Full detail: [`dashboard-auth.md`](dashboard-auth.md).
 
 **Multi-producer push (C3 Increment 2).** When more than one machine or person pushes into the
 same project, provision each producer a `contributor` (push-only) key and put it in that

@@ -59,6 +59,7 @@ from relay.store import (
     observed_history,
     open_relay_store,
     producer_disciplines_for,
+    producer_skills_for,
     revoke_user,
     skills_projects,
 )
@@ -916,6 +917,29 @@ def test_contributor_skills_batch_prunes_only_within_scope(tmp_path):
         try:
             assert get_skills(conn, "demo") == [_skill("new-demo")]  # reconciled
             assert get_skills(conn, "other") == [_skill("keep-me")]  # untouched by the prune
+        finally:
+            conn.close()
+
+
+def test_contributor_skills_batch_dual_writes_its_own_producer_rows(tmp_path):
+    """A contributor's skills-batch reconciles its OWN per-producer rows alongside the aggregate.
+
+    Why this matters: skills-sync (the batch) is the primary skills path, so a contributor's batch
+    must populate the per-producer table (C3 Inc 2.5) — attributed to that contributor and confined
+    to its own rows. Here "mac" batches "demo"; both the aggregate and mac's producer row reflect it.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        status, _ = _push_skills_batch(
+            base_url, {"demo": [_skill("new-demo")]}, token="contrib-key"
+        )
+        assert status == 200
+        conn = open_relay_store(db)
+        try:
+            assert get_skills(conn, "demo") == [_skill("new-demo")]  # aggregate
+            producer = producer_skills_for(conn, "demo")
+            assert [p["author_name"] for p in producer] == ["mac"]  # mac's own producer row
+            assert producer[0]["skills"] == [_skill("new-demo")]
         finally:
             conn.close()
 
@@ -2904,6 +2928,30 @@ def test_skills_push_upserts_without_a_report(tmp_path):
         conn = open_relay_store(db)
         assert get_skills(conn, "demo") == [_skill("Python backends", weight=3)]
         assert list_projects(conn) == []  # no report row was created
+
+
+def test_skills_push_dual_writes_for_identified_but_not_legacy(tmp_path):
+    """An identified /skills push writes BOTH the aggregate and the producer's row; legacy → aggregate only.
+
+    Why this matters: the per-project skills path must dual-write like disciplines (C3 Inc 2.5), so a
+    contributor's skills are attributed the moment they're pushed. A legacy anonymous push has no
+    identity, so it lands in the aggregate only. No display surface yet — inspect the store.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "Teammate B", "b-key", role="contributor", projects=["demo"])
+
+        assert _push_skills(base_url, "demo", [_skill("Python")], token="b-key")[0] == 200
+        conn = open_relay_store(db)
+        assert get_skills(conn, "demo") == [_skill("Python")]  # aggregate
+        producer = producer_skills_for(conn, "demo")
+        assert [p["author_name"] for p in producer] == ["Teammate B"]
+        assert producer[0]["skills"] == [_skill("Python")]
+        conn.close()
+
+        assert _push_skills(base_url, "legacy-proj", [_skill("Bash")], token=_TOKEN)[0] == 200
+        conn = open_relay_store(db)
+        assert get_skills(conn, "legacy-proj") == [_skill("Bash")]  # aggregate written
+        assert producer_skills_for(conn, "legacy-proj") == []  # no per-producer row
 
 
 def test_skills_push_malformed_is_400_and_stores_nothing(tmp_path):

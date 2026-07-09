@@ -25,6 +25,7 @@ from relay.store import (
     add_user,
     bump_session_version,
     discussion_items_for_project,
+    effective_checklist,
     get,
     get_checklist,
     get_disciplines,
@@ -462,6 +463,115 @@ def test_producer_checklists_for_unknown_project_is_empty(tmp_path):
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     assert producer_checklists_for(conn, "never-seen") == []
+
+
+def test_producer_checklists_for_carries_updated_at(tmp_path):
+    """Each producer row now surfaces its push time, which the effective-checklist merge needs.
+
+    Why this matters: the merge orders producers by updated_at for last-writer-per-item metadata
+    (C3 Inc 2.5). If the store dropped the column, the merge would have no timestamp to fold on.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_checklist(
+        conn, "demo", b_id, "Teammate B", _items(("A", True)), "2026-06-25T09:30:00+00:00"
+    )
+    (row,) = producer_checklists_for(conn, "demo")
+    assert row["updated_at"] == "2026-06-25T09:30:00+00:00"
+
+
+# --- effective_checklist(): the read-side entry point for KI-30 ----------------------
+
+
+def _add_producer_checklist(conn, project, name, verifier, items, updated_at):
+    """Add an active contributor and push their per-producer checklist in one step.
+
+    Why: every effective-checklist case needs ≥1 real active user (producer_checklists_for
+    INNER JOINs relay_users); this collapses the add_user + upsert_producer_checklist boilerplate
+    so each test reads as "these producers pushed these items". Returns the new user's id.
+    """
+    uid = add_user(conn, name, verifier, "contributor", [project], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_checklist(conn, project, uid, name, items, updated_at)
+    return uid
+
+
+def test_effective_checklist_ors_done_across_two_producers(tmp_path):
+    """With ≥2 active producers the badge reads the merged (done-OR) checklist, not the aggregate.
+
+    Scenario: the aggregate row (last-writer-wins) currently shows "Ship" NOT done, but producer
+    B pushed it done. The effective checklist OR-s across producers, so "Ship" reads done — this
+    is KI-30's fix at the store's read seam.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # Aggregate reflects whoever pushed last (here: not-done). It must be overridden by the merge.
+    upsert_checklist(conn, "demo", _items(("Ship", False)), "2026-06-26T11:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate B", "vb", _items(("Ship", True)), "2026-06-26T10:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate C", "vc", _items(("Ship", False)), "2026-06-26T11:00:00+00:00")
+
+    effective = effective_checklist(conn, "demo")
+    assert [(i["text"], i["done"]) for i in effective] == [("Ship", True)]
+
+
+def test_effective_checklist_single_producer_falls_back_to_aggregate(tmp_path):
+    """With only one active producer the aggregate is returned unchanged (byte-identical fallback).
+
+    Why this matters: a single-writer project must behave exactly as before this slice — no merge,
+    the aggregate the sole source. Here the aggregate shows not-done and the lone producer shows
+    done, and the fallback returns the aggregate (not-done).
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(conn, "demo", _items(("Ship", False)), "2026-06-26T11:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate B", "vb", _items(("Ship", True)), "2026-06-26T10:00:00+00:00")
+
+    assert effective_checklist(conn, "demo") == _items(("Ship", False))  # the aggregate, unchanged
+
+
+def test_effective_checklist_none_when_no_checklist_row(tmp_path):
+    """A project with no aggregate checklist row resolves to None (existence-hiding preserved).
+
+    Why this matters: the project route 404s on `checklist is None`; the effective wrapper must
+    not turn a missing checklist into [].
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert effective_checklist(conn, "never-seen") is None
+
+
+def test_effective_checklist_excludes_revoked_producer_from_the_merge(tmp_path):
+    """A revoked producer's stale copy drops out of the merge (only active producers count).
+
+    Scenario: A and B share "Ship"; revoked C carries a unique "Ghost" item. producer_checklists_for
+    excludes C, so the merge runs over A and B only — "Ghost" never appears in the effective list,
+    and a revoked producer's stale state can neither add phantom items nor sway done.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(conn, "demo", _items(("Ship", False)), "2026-06-26T12:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate A", "va", _items(("Ship", True)), "2026-06-26T10:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate B", "vb", _items(("Ship", False)), "2026-06-26T11:00:00+00:00")
+    c_id = _add_producer_checklist(conn, "demo", "Teammate C", "vc", _items(("Ghost", True)), "2026-06-26T12:00:00+00:00")
+    revoke_user(conn, c_id)
+
+    effective = effective_checklist(conn, "demo")
+    assert [i["text"] for i in effective] == ["Ship"]  # C's "Ghost" excluded; merge over A,B only
+    assert effective[0]["done"] is True  # A said done → OR-ed done
+
+
+def test_latest_report_per_project_badge_counts_reflect_the_merge(tmp_path):
+    """The portfolio badge's precomputed done count uses the effective checklist at ≥2 producers.
+
+    Scenario: two producers each track two items; between them all four distinct items are done
+    at least once (A: X done, Y open; B: X open, Y done). The merged checklist has both done, so
+    checklist_done == checklist_total == 2 — even though neither producer's own copy is fully done
+    and the aggregate (last-writer) would show only one done.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # Aggregate = B's push (last writer): X open, Y done → would show 1/2 done on its own.
+    upsert_checklist(conn, "demo", _items(("X", False), ("Y", True)), "2026-06-26T11:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate A", "va", _items(("X", True), ("Y", False)), "2026-06-26T10:00:00+00:00")
+    _add_producer_checklist(conn, "demo", "Teammate B", "vb", _items(("X", False), ("Y", True)), "2026-06-26T11:00:00+00:00")
+
+    row = {r["project"]: r for r in latest_report_per_project(conn)}["demo"]
+    assert row["checklist_total"] == 2
+    assert row["checklist_done"] == 2  # merged done-OR, not the aggregate's 1
 
 
 def test_latest_report_per_project_carries_checklist_counts(tmp_path):

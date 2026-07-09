@@ -347,3 +347,105 @@ def slipping_item_keys(observations: list[dict], today: date) -> set[str]:
     for obs in observations:
         by_key.setdefault(obs["item_key"], []).append(obs)
     return {key for key, history in by_key.items() if is_slipping(history, today)}
+
+
+# =============================================================================
+# Effective checklist (C3 Inc 2.5, Unit 1.1) — merge per-producer checklist copies
+# into the single displayed badge/progress. See docs/per-producer-consolidation-kickoff.md.
+# Pure, like the rest of this module: a deterministic fold over already-decoded item
+# dicts, no I/O. store.py fetches the aggregate + per-producer rows and calls in.
+# =============================================================================
+
+
+def item_key(item: dict) -> str:
+    """Return a checklist item's stable identity: its `key`, else its `text`.
+
+    Args:
+        item: A decoded checklist item dict — {"text", "done"[, "due_date"][, "key"]
+            [, "group"]}. `key` is optional; `text` is required.
+
+    Returns:
+        The item's `key` when present and truthy, else its `text` (str).
+
+    Why:
+        This is the ONE definition of item identity the whole codebase shares:
+        record_observations stamps it, the slipping lookup matches on it, and the
+        producer-checklist merge below unions on it. Hoisting it here (api.py's
+        `_item_key` now delegates) means a single source of truth — if the rule ever
+        changes, the observation stream and the merged badge can never drift apart.
+    """
+    return item.get("key") or item["text"]
+
+
+def merge_producer_checklists(producer_lists: list[dict]) -> list[dict]:
+    """Merge several producers' checklist copies into one "effective" item list.
+
+    Args:
+        producer_lists: One dict per active identified producer, each carrying that
+            producer's current checklist copy — {"items": list[dict], "updated_at": str,
+            ...}. `updated_at` is the row's ISO-8601 UTC push time; author fields (if
+            present) are ignored here. Items are decoded wire dicts.
+
+    Returns:
+        A single list of merged items. For each distinct item identity (item_key):
+        `done` is the OR across every producer's copy; all other fields (text, due_date,
+        group, status) come from the most-recently-updated producer that carries the
+        item (last-writer-per-item); items appear in first-seen order.
+
+    Why:
+        Both producers track the SAME base checklist, so any one producer's copy can
+        only be STALE, never authoritative. OR-ing `done` means a stale "not done" copy
+        can never regress a genuinely-done item (that is exactly KI-30's badge flicker),
+        while a reopened item self-heals as each producer re-pushes. Metadata is
+        last-writer-per-item because a rename/re-dating is a real edit, and the freshest
+        push reflects it. The fold walks producers ASCENDING by `updated_at` so the last
+        write to touch an item wins its metadata; `sorted` is stable, so equal
+        timestamps fall back to input order (producer_checklists_for's name order) —
+        fully deterministic.
+    """
+    # Ascending updated_at: the later a producer pushed, the more its metadata should
+    # win. Stable sort → equal timestamps keep the caller's (name-ordered) sequence.
+    ordered = sorted(producer_lists, key=lambda p: p["updated_at"])
+    # dict preserves first-insertion order; reassigning an existing key does NOT move it,
+    # so items keep the order in which they were first seen across the fold.
+    merged: dict[str, dict] = {}
+    for producer in ordered:
+        for item in producer["items"]:
+            key = item_key(item)
+            prior = merged.get(key)
+            # Take the (later) producer's full copy so its metadata wins wholesale...
+            new_item = dict(item)
+            if prior is not None:
+                # ...but `done` is the OR across all copies seen so far, so a stale
+                # "not done" can never flip a done item back open.
+                new_item["done"] = bool(prior.get("done")) or bool(item.get("done"))
+            merged[key] = new_item
+    return list(merged.values())
+
+
+def effective_checklist(
+    aggregate_items: list[dict] | None, producer_lists: list[dict]
+) -> list[dict] | None:
+    """Choose the checklist that drives the displayed badge/progress.
+
+    Args:
+        aggregate_items: The single-row aggregate checklist (get_checklist's return):
+            a list of items, or None when the project has no checklist row at all.
+        producer_lists: The active identified producers' checklist copies (already
+            revoked-filtered by producer_checklists_for), each {"items", "updated_at"}.
+
+    Returns:
+        The merged effective item list when ≥2 active identified producers exist;
+        otherwise the aggregate list UNCHANGED (including None passthrough).
+
+    Why:
+        The ≥2 gate mirrors the SPA's existing "show per-producer cards" threshold and
+        keeps every current single-producer / anonymous deployment BYTE-IDENTICAL: with
+        0–1 producers there is nothing to merge, so the aggregate (which anonymous
+        pushes still update) is returned as-is. Preserving None matters — the project
+        route's existence-hiding 404 tests `checklist is None`, so a genuinely
+        checklist-less project must stay None, not become [].
+    """
+    if len(producer_lists) >= 2:
+        return merge_producer_checklists(producer_lists)
+    return aggregate_items

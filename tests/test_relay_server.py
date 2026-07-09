@@ -58,6 +58,7 @@ from relay.store import (
     list_projects,
     observed_history,
     open_relay_store,
+    producer_disciplines_for,
     revoke_user,
     skills_projects,
 )
@@ -2769,6 +2770,34 @@ def test_disciplines_push_upserts_without_a_report(tmp_path):
         conn = open_relay_store(db)
         assert get_disciplines(conn, "demo") == [_disc("Local-first", scope="global")]
         assert list_projects(conn) == []  # no report row was created
+
+
+def test_disciplines_push_dual_writes_for_identified_but_not_legacy(tmp_path):
+    """An identified push writes BOTH the aggregate and the producer's own row; legacy → aggregate only.
+
+    Why this matters: the C3 Inc 2.5 storage-now-display-later promise, end to end. An identified
+    contributor's disciplines are dual-written (aggregate + per-producer) so provenance is captured
+    the moment it exists (it can't be backfilled); a legacy anonymous push has no identity, so it
+    lands in the aggregate only — never a per-producer row. There is no display surface yet, so we
+    inspect the store directly after each push.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "Teammate B", "b-key", role="contributor", projects=["demo"])
+
+        # Identified push (the contributor's own key) → aggregate AND that producer's row.
+        assert _push_disciplines(base_url, "demo", [_disc("Local-first")], token="b-key")[0] == 200
+        conn = open_relay_store(db)
+        assert get_disciplines(conn, "demo") == [_disc("Local-first")]  # aggregate
+        producer = producer_disciplines_for(conn, "demo")
+        assert [p["author_name"] for p in producer] == ["Teammate B"]
+        assert producer[0]["disciplines"] == [_disc("Local-first")]
+        conn.close()
+
+        # Legacy push (shared ingest token) on another project → aggregate only, no producer row.
+        assert _push_disciplines(base_url, "legacy-proj", [_disc("Observe")], token=_TOKEN)[0] == 200
+        conn = open_relay_store(db)
+        assert get_disciplines(conn, "legacy-proj") == [_disc("Observe")]  # aggregate written
+        assert producer_disciplines_for(conn, "legacy-proj") == []  # no per-producer row
 
 
 def test_disciplines_push_wrong_token_is_401(tmp_path):

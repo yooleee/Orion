@@ -156,6 +156,28 @@ CREATE TABLE IF NOT EXISTS relay_project_disciplines (
     updated_at  TEXT NOT NULL       -- ISO 8601 UTC, when the relay last received it
 );
 
+-- C3 Inc 2.5: a project's OBSERVED DISCIPLINES PER PRODUCER — the disciplines sibling of
+-- relay_producer_checklists. The aggregate above is last-writer-wins across producers (two
+-- machines syncing different portfolios flip the shared row back and forth, losing provenance
+-- that CANNOT be backfilled); this keeps each identified contributor's OWN observed principles.
+-- Written ALONGSIDE the aggregate (a dual-write), never replacing it — the aggregate still
+-- serves the dashboard's Disciplines section. STORAGE NOW, DISPLAY LATER: these rows are stored
+-- and read back by producer_disciplines_for (a seam), but no display surface consumes them yet;
+-- comb-level per-producer merge/display is deferred as a KI (merging two machines' independently
+-- canonicalized sets needs its own design). ONE row per (project, author_id), REPLACED on each
+-- of that producer's pushes. Only IDENTIFIED producers land here (author_id NOT NULL); a legacy
+-- anonymous push writes the aggregate only. author_name is denormalized (server-derived, copied
+-- at write) so it survives revocation. A brand-new "IF NOT EXISTS" table, so the already-deployed
+-- relay gains it with NO column migration.
+CREATE TABLE IF NOT EXISTS relay_producer_disciplines (
+    project     TEXT NOT NULL,      -- the project this producer's disciplines belong to
+    author_id   INTEGER NOT NULL,   -- the producing contributor's relay_users id (never NULL here)
+    author_name TEXT NOT NULL,      -- server-derived display name, denormalized (survives revocation)
+    disciplines TEXT NOT NULL,      -- JSON array of {title, why, scope, source} objects
+    updated_at  TEXT NOT NULL,      -- ISO 8601 UTC, when the relay last received this producer's push
+    PRIMARY KEY (project, author_id)
+);
+
 -- E2 Inc 4 (4c): a project's OBSERVED SKILLS — the competencies Orion DERIVED from the
 -- project's own activity (languages from tracked files, commit subjects, doc focus),
 -- the honest alternative to an authored resume. Like relay_project_disciplines this is
@@ -622,6 +644,93 @@ def get_disciplines(conn: sqlite3.Connection, project: str) -> list | None:
         (project,),
     ).fetchone()
     return json.loads(row["disciplines"]) if row is not None else None
+
+
+def upsert_producer_disciplines(
+    conn: sqlite3.Connection,
+    project: str,
+    author_id: int,
+    author_name: str,
+    disciplines: list,
+    updated_at: str,
+) -> None:
+    """Replace ONE identified producer's observed disciplines for a project (C3 Inc 2.5).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project this producer's disciplines belong to.
+        author_id: The producing contributor's relay_users id (never None — only identified
+            producers get a per-producer row; a legacy push writes the aggregate only).
+        author_name: That producer's server-derived display name, stored denormalized so the
+            row survives the user's later revocation.
+        disciplines: The producer's current disciplines as {"title", "why", "scope", "source"}
+            dicts (the validated shape the push carries). May be empty (an enabled-but-empty
+            push legitimately clears this producer's set).
+        updated_at: ISO 8601 UTC timestamp of when the relay received this producer's push.
+
+    Why:
+        The disciplines sibling of upsert_producer_checklist: current state, one row per
+        (project, author_id), REPLACED on each of that producer's pushes via
+        ON CONFLICT(project, author_id). It is a DUAL-WRITE beside the aggregate, never a
+        replacement — the aggregate row still serves the Disciplines section. STORAGE NOW,
+        DISPLAY LATER: no surface reads this yet (provenance can't be backfilled, so it must be
+        captured now). author_name is re-stamped on every push so it tracks a renamed producer.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_producer_disciplines (project, author_id, author_name, disciplines, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(project, author_id) DO UPDATE SET
+            author_name = excluded.author_name,
+            disciplines = excluded.disciplines,
+            updated_at = excluded.updated_at
+        """,
+        (project, author_id, author_name, json.dumps(disciplines), updated_at),
+    )
+    conn.commit()
+
+
+def producer_disciplines_for(conn: sqlite3.Connection, project: str) -> list[dict]:
+    """Return every producer's observed disciplines for a project, ordered by producer name.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to fetch per-producer disciplines for.
+
+    Returns:
+        A list of {"author_id", "author_name", "disciplines", "updated_at"} dicts (disciplines
+        JSON-decoded), one per ACTIVE identified producer that has pushed disciplines, ordered by
+        author_name. Empty when the project has no per-producer disciplines (legacy-only or never
+        pushed by an identified producer).
+
+    Why:
+        The read side of the per-producer disciplines store (C3 Inc 2.5). It is a SEAM — stored
+        and readable now, but no display surface consumes it yet (storage now, display later; the
+        comb-level per-producer merge is a deferred KI), the same posture Inc 2 took with the
+        observation author_id. Like producer_checklists_for, per-producer disciplines are CURRENT
+        STATE, so we INNER JOIN relay_users and keep only ACTIVE producers — a revoked contributor
+        is off the project and their stale set should not surface. Ordering by name gives stable
+        positions for whatever display later consumes it.
+    """
+    rows = conn.execute(
+        """
+        SELECT pd.author_id, pd.author_name, pd.disciplines, pd.updated_at
+        FROM relay_producer_disciplines pd
+        JOIN relay_users u ON u.id = pd.author_id
+        WHERE pd.project = ? AND u.active = 1
+        ORDER BY pd.author_name
+        """,
+        (project,),
+    ).fetchall()
+    return [
+        {
+            "author_id": row["author_id"],
+            "author_name": row["author_name"],
+            "disciplines": json.loads(row["disciplines"]),
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
 
 
 def disciplines_projects(conn: sqlite3.Connection) -> list[str]:
@@ -1667,7 +1776,7 @@ def rotate_key(conn: sqlite3.Connection, user_id: int, key_verifier: str) -> Non
 
 
 def delete_user(conn: sqlite3.Connection, user_id: int) -> None:
-    """Hard-delete a user: remove the row + its grants + its live per-producer checklists.
+    """Hard-delete a user: remove the row + its grants + its live per-producer state.
 
     Args:
         conn: An open relay-store connection.
@@ -1679,14 +1788,16 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> None:
     Why:
         `revoke` sets active = 0 but keeps the row, so the user's `name` (UNIQUE) stays
         permanently occupied and can't be re-provisioned (KI-31). `delete` frees the name by
-        removing the row, its `relay_user_projects` grants, and its `relay_producer_checklists`
-        rows (that producer's LIVE cards). It deliberately LEAVES `relay_reports` and
-        `relay_discussion_items`: those are HISTORY, their `author_name` is denormalized (renders
-        after the user is gone) and their `author_id` is already dropped from the wire — so a past
-        report or reply keeps its recorded author. Live state goes; history stays.
+        removing the row, its `relay_user_projects` grants, and its LIVE per-producer state —
+        `relay_producer_checklists` and `relay_producer_disciplines` (C3 Inc 2.5). It deliberately
+        LEAVES `relay_reports` and `relay_discussion_items`: those are HISTORY, their `author_name`
+        is denormalized (renders after the user is gone) and their `author_id` is already dropped
+        from the wire — so a past report or reply keeps its recorded author. Live state goes;
+        history stays.
     """
     conn.execute("DELETE FROM relay_user_projects WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_producer_checklists WHERE author_id = ?", (user_id,))
+    conn.execute("DELETE FROM relay_producer_disciplines WHERE author_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_users WHERE id = ?", (user_id,))
     conn.commit()
 

@@ -78,6 +78,7 @@ from .store import (
     upsert_checklist,
     upsert_producer_checklist,
     upsert_disciplines,
+    upsert_producer_disciplines,
     upsert_skills,
 )
 
@@ -1076,10 +1077,21 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "not found"})
                 return
 
-            # 5) Upsert this project's disciplines, stamped with the relay's receive clock.
-            upsert_disciplines(
-                conn, payload["project"], payload["disciplines"], _utc_now_iso()
-            )
+            # 5) Store this project's disciplines, stamped with the relay's receive clock.
+            received_at = _utc_now_iso()
+            author_id, author_name = _author_of(principal)
+            # The AGGREGATE (last-writer-wins) always updates: it serves the Disciplines section
+            # for single-producer / anonymous projects and is the fallback under the deferred
+            # per-producer merge (C3 Inc 2.5).
+            upsert_disciplines(conn, payload["project"], payload["disciplines"], received_at)
+            # C3 Inc 2.5: an IDENTIFIED producer ALSO keeps its OWN disciplines (dual-write;
+            # storage now, display later — provenance can't be backfilled). A legacy push has no
+            # id, so it lands in the aggregate only. Shares the report's receive clock.
+            if author_id is not None:
+                upsert_producer_disciplines(
+                    conn, payload["project"], author_id, author_name,
+                    payload["disciplines"], received_at,
+                )
         finally:
             conn.close()
         count = len(payload["disciplines"])

@@ -355,6 +355,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         reports=reports,
         checklist=checklist,
         observations=observations,
+        producer_checklists=[],
         discussions=discussions,
         today=_TODAY,
     )
@@ -421,6 +422,7 @@ def test_project_detail_emits_in_progress_state_and_passes_status_through():
         reports=[],
         checklist=checklist,
         observations=[],
+        producer_checklists=[],
         discussions=[],
         today=_TODAY,
     )
@@ -447,6 +449,7 @@ def test_project_detail_handles_no_checklist():
         reports=[],
         checklist=None,
         observations=[],
+        producer_checklists=[],
         discussions=[],
         today=_TODAY,
     )

@@ -22,6 +22,7 @@ import { STATUS_STYLES } from "../theme/status";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { MilestoneCard } from "../components/MilestoneCard";
 import { ChecklistRow } from "../components/ChecklistRow";
+import { ProgressBar } from "../components/ProgressBar";
 import { ReportTimeline } from "../components/ReportTimeline";
 import { DiscussionList } from "../components/DiscussionList";
 import { DiscussionComposer } from "../components/DiscussionComposer";
@@ -102,6 +103,36 @@ export function Project() {
               <div className="check-list">
                 {data.checklist.map((item, i) => (
                   <ChecklistRow key={item.key ?? `${item.text}-${i}`} item={item} tz={tz} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* C3 Inc 2: one card per contributor, shown only when 2+ producers exist — a
+              single producer's card would just duplicate the aggregate above. */}
+          {data.producer_checklists.length >= 2 && (
+            <section>
+              <div className="eyebrow block-label">By contributor</div>
+              <div className="producer-grid">
+                {data.producer_checklists.map((pc) => (
+                  <div className="producer-card" key={pc.author_name}>
+                    <div className="producer-head">
+                      <span className="producer-name">{pc.author_name}</span>
+                      <span className="producer-count">
+                        {pc.progress.done}/{pc.progress.total}
+                      </span>
+                    </div>
+                    <ProgressBar progress={pc.progress} />
+                    <div className="check-list">
+                      {pc.items.map((item, i) => (
+                        <ChecklistRow
+                          key={item.key ?? `${item.text}-${i}`}
+                          item={item}
+                          tz={tz}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             </section>

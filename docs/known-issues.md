@@ -390,6 +390,24 @@ Deferred).
   checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
   vocabulary until it is sourced. Flagged here rather than silently left.
 
+## KI-30 — Aggregate checklist (and its portfolio badge/progress) is last-writer-wins across producers (C3 Inc 2)
+
+- **Detail:** With the two-person shared base, several contributors can push a checklist for the same
+  project. Per-producer checklists are now kept and shown as separate cards (C3 Inc 2, Unit 1.4), but the
+  **aggregate** `relay_project_checklists` row — the one that feeds the portfolio card's badge, progress
+  bar, at-risk/slipping counts, and `stats` — is still a single row **overwritten on every push**. So the
+  portfolio-level numbers reflect only whichever producer pushed **most recently**, not a merged view.
+- **Why it matters:** a supervisor scanning the portfolio sees one project-level progress figure that can
+  flip as different contributors push, and it undercounts when producers own disjoint slices of the work.
+  It is a fidelity gap at the roll-up, not a correctness or security bug — the per-producer cards on the
+  project page show the true per-contributor state, and no data is lost (each producer's checklist is
+  stored separately).
+- **Severity:** low (roll-up fidelity only; the detailed per-producer truth is intact and on the wire).
+- **Status:** Open, deferred as an **additive** fix: a later change can derive the aggregate (badge,
+  progress, counts) from `producer_checklists_for` — e.g. a union/merge across producers — without a
+  schema change, since the per-producer rows already carry everything needed. Flagged now rather than left
+  implicit.
+
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

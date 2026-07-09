@@ -732,6 +732,43 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
     return {"summary": summary, "buckets": buckets}
 
 
+def _checklist_rows(items: list, today: date, slipping: set) -> list[dict]:
+    """Serialize checklist items into the dashboard's per-item row shape.
+
+    Args:
+        items: The checklist items (validated {"text", "done"[, ...]} dicts), in file order.
+        today: The reference date (display zone), for the per-item state derivation.
+        slipping: The project-wide set of slipping item keys (from slipping_item_keys).
+
+    Returns:
+        A list of row dicts {text, done, due_date, key, group, state, status, slipping}.
+
+    Why:
+        The aggregate checklist AND each per-producer checklist (C3 Inc 2) render the SAME row
+        shape, so building it lives in one place (DRY). `state` is self-contained per item;
+        `slipping` is a PROJECT-LEVEL signal (derived from the shared observation history), so a
+        producer's rows reuse the same set the aggregate uses — true per-producer slippage
+        (per-producer observation history) is out of scope here.
+    """
+    return [
+        {
+            "text": item["text"],
+            "done": bool(item.get("done")),
+            "due_date": item.get("due_date"),
+            "key": item.get("key"),
+            "group": item.get("group"),
+            "state": _item_state(item, today),
+            # The raw observed status (E2 Inc 4, gap 8): None for items without one. Shipped
+            # alongside the derived `state` so the tracker's circular indicator renders the
+            # in_progress/submitted treatment directly, and so future consumers get status as
+            # a first-class fact rather than re-deriving it from `state`.
+            "status": item.get("status"),
+            "slipping": _item_key(item) in slipping,
+        }
+        for item in items
+    ]
+
+
 def serialize_project(
     *,
     name: str,
@@ -739,6 +776,7 @@ def serialize_project(
     reports: list[dict],
     checklist: list | None,
     observations: list[dict],
+    producer_checklists: list[dict],
     discussions: list[dict],
     today: date,
 ) -> dict:
@@ -750,13 +788,17 @@ def serialize_project(
         reports: The project's reports newest-first (store.history).
         checklist: The live checklist items (store.get_checklist), or None.
         observations: The project's observed history (store.observed_history), for slippage.
+        producer_checklists: Each identified producer's own live checklist
+            (store.producer_checklists_for) — {"author_name", "items"} per producer, for the
+            per-producer cards (C3 Inc 2). Empty for a legacy-only / single-writer project.
         discussions: The project's discussion thread oldest-first
             (store.discussion_items_for_project) — the supervisor-interaction loop (E2 Inc 5).
             The single conversation surface since KI-28 Stage 2 retired per-report comments.
         today: The reference date (display zone).
 
     Returns:
-        The project-detail shape: stats, milestones, checklist, reports, discussions.
+        The project-detail shape: stats, milestones, checklist, producer_checklists, reports,
+        discussions.
 
     Why:
         One project page draws from four stores (reports, live checklist, observation
@@ -783,22 +825,20 @@ def serialize_project(
         )
         milestone_rows.append({**m, "slipping": group_slipping})
 
-    checklist_rows = [
+    checklist_rows = _checklist_rows(items, today, slipping)
+
+    # C3 Inc 2: one card per identified producer, each the same row shape as the aggregate.
+    # slipping is the shared project-level set (see _checklist_rows). Empty list ⇒ the SPA
+    # simply shows no per-producer section (single-writer / legacy projects render unchanged).
+    producer_checklist_rows = [
         {
-            "text": item["text"],
-            "done": bool(item.get("done")),
-            "due_date": item.get("due_date"),
-            "key": item.get("key"),
-            "group": item.get("group"),
-            "state": _item_state(item, today),
-            # The raw observed status (E2 Inc 4, gap 8): None for items without one. Shipped
-            # alongside the derived `state` so the tracker's circular indicator renders the
-            # in_progress/submitted treatment directly, and so future consumers get status as
-            # a first-class fact rather than re-deriving it from `state`.
-            "status": item.get("status"),
-            "slipping": _item_key(item) in slipping,
+            "author_name": pc["author_name"],
+            "progress": _progress(
+                sum(1 for item in pc["items"] if item.get("done")), len(pc["items"])
+            ),
+            "items": _checklist_rows(pc["items"], today, slipping),
         }
-        for item in items
+        for pc in producer_checklists
     ]
 
     # Per-project ordinal for each report (the timeline shows #N, not the gappy global id).
@@ -815,6 +855,7 @@ def serialize_project(
         },
         "milestones": milestone_rows,
         "checklist": checklist_rows,
+        "producer_checklists": producer_checklist_rows,
         "reports": [
             {
                 "id": r["id"],

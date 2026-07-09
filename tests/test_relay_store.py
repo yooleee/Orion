@@ -40,6 +40,7 @@ from relay.store import (
     list_users,
     observed_history,
     open_relay_store,
+    producer_checklists_for,
     projects_for_user,
     record_admin_audit,
     record_observations,
@@ -49,6 +50,7 @@ from relay.store import (
     skills_projects,
     update_last_login,
     upsert_checklist,
+    upsert_producer_checklist,
     upsert_disciplines,
     upsert_skills,
 )
@@ -394,6 +396,45 @@ def test_get_checklist_empty_list_is_distinct_from_none(tmp_path):
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     upsert_checklist(conn, "demo", [], "2026-06-25T00:00:00+00:00")
     assert get_checklist(conn, "demo") == []
+
+
+def test_producer_checklists_are_keyed_per_producer_and_replace_in_place(tmp_path):
+    """Two producers' checklists coexist; a producer's re-push replaces ONLY its own row.
+
+    Why this matters: the per-producer store is keyed (project, author_id), so two contributors
+    on the same project keep independent checklists (that is the whole point of the cards), and
+    a producer pushing again overwrites its own row without touching the other's.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_producer_checklist(
+        conn, "demo", 7, "Teammate B", _items(("A", True)), "2026-06-25T00:00:00+00:00"
+    )
+    upsert_producer_checklist(
+        conn, "demo", 9, "Teammate C", _items(("B", False)), "2026-06-25T01:00:00+00:00"
+    )
+    # Producer 7 re-pushes a new checklist — replaces its own row only.
+    upsert_producer_checklist(
+        conn, "demo", 7, "Teammate B", _items(("A2", False)), "2026-06-25T02:00:00+00:00"
+    )
+
+    got = producer_checklists_for(conn, "demo")
+    assert [(p["author_id"], p["author_name"]) for p in got] == [
+        (7, "Teammate B"),
+        (9, "Teammate C"),
+    ]  # ordered by name; both present
+    by_id = {p["author_id"]: p for p in got}
+    assert [i["text"] for i in by_id[7]["items"]] == ["A2"]  # 7's row replaced
+    assert [i["text"] for i in by_id[9]["items"]] == ["B"]  # 9's row untouched
+
+
+def test_producer_checklists_for_unknown_project_is_empty(tmp_path):
+    """A project with no per-producer checklists returns [] (legacy-only / never pushed).
+
+    Why this matters: a legacy-only or single-writer project has no per-producer rows, and the
+    serializer must get a clean empty list so the SPA simply omits the per-producer section.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert producer_checklists_for(conn, "never-seen") == []
 
 
 def test_latest_report_per_project_carries_checklist_counts(tmp_path):

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .derive import (
     count_at_risk,
+    item_key,
     milestones,
     slipping_item_keys,
 )
@@ -868,9 +869,10 @@ def record_observations(
             [, "key"]}), the same list upsert_checklist receives.
         observed_at: ISO 8601 UTC timestamp of when the relay received this push.
         author_id: The relay_users id of the producer whose push these observations came from,
-            or None for a legacy (anonymous) push. Stamped now because observation provenance
-            cannot be reconstructed later — a future per-producer slippage view needs it. Not
-            yet read on any path (C3 Inc 2, seam only).
+            or None for a legacy (anonymous) push. Stamped because observation provenance cannot
+            be reconstructed later; read since C3 Inc 2.5 by slipping_item_keys_by_author, which
+            partitions each item's stream by producer so interleaved pushes from two machines do
+            not corrupt the slippage signal.
 
     Why:
         Where relay_project_checklists keeps only CURRENT state (one upserted row), this is
@@ -881,13 +883,15 @@ def record_observations(
         `key` (the tracker's bare title) when present, else the item `text`. We fall back to
         text because tasks/table items carry no status in their text, so it is already
         stable; only the tracker's status-embedding application text needs the separate key.
+        The identity rule is derive.item_key — the single definition slippage and the
+        checklist merge also use, so a stamped observation matches its item on every path.
         done is stored as 0/1 since sqlite has no boolean. executemany keeps the whole push
         one statement + one commit.
     """
     rows = [
         (
             project,
-            item.get("key") or item["text"],
+            item_key(item),
             item.get("due_date"),
             1 if item.get("done") else 0,
             observed_at,
@@ -914,20 +918,22 @@ def observed_history(conn: sqlite3.Connection, project: str) -> list[dict]:
         project: The project whose observation history to read.
 
     Returns:
-        A list of {"item_key", "due_date", "done", "observed_at"} dicts, ordered by
-        observed_at then id (insertion order within a timestamp), oldest first. done is
-        decoded back to a bool. Empty when the project has no observations.
+        A list of {"item_key", "due_date", "done", "observed_at", "author_id"} dicts, ordered
+        by observed_at then id (insertion order within a timestamp), oldest first. done is
+        decoded back to a bool; author_id is the producer who recorded the row (None for a
+        legacy/anonymous push). Empty when the project has no observations.
 
     Why:
-        The read side of the projection — what slippage derivation (Unit 4) and the
-        "rebuild the current state from history" property are checked against. Ordering
-        oldest-first makes "the latest observation per item_key" a simple last-wins fold,
-        and lets a slippage check walk an item_key's due_date forward in time. Kept a plain
-        per-project read (no item_key filter yet) — that filter is the seam Unit 4 adds.
+        The read side of the projection — what slippage derivation and the "rebuild the current
+        state from history" property are checked against. Ordering oldest-first makes "the
+        latest observation per item_key" a simple last-wins fold, and lets a slippage check
+        walk an item_key's due_date forward in time. author_id is surfaced (C3 Inc 2.5) so
+        slipping_item_keys_by_author can partition each item's stream by producer before running
+        is_slipping — interleaved two-machine pushes otherwise corrupt the signal.
     """
     rows = conn.execute(
         """
-        SELECT item_key, due_date, done, observed_at
+        SELECT item_key, due_date, done, observed_at, author_id
         FROM relay_observed_items
         WHERE project = ?
         ORDER BY observed_at ASC, id ASC
@@ -940,6 +946,7 @@ def observed_history(conn: sqlite3.Connection, project: str) -> list[dict]:
             "due_date": row["due_date"],
             "done": bool(row["done"]),
             "observed_at": row["observed_at"],
+            "author_id": row["author_id"],
         }
         for row in rows
     ]

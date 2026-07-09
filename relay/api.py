@@ -33,6 +33,7 @@ from .derive import (
     milestones,
     next_open_due,
     slipping_item_keys,
+    slipping_item_keys_by_author,
 )
 
 # The display title / portfolio headline is the report body's first line. This extraction
@@ -741,7 +742,8 @@ def _checklist_rows(items: list, today: date, slipping: set) -> list[dict]:
     Args:
         items: The checklist items (validated {"text", "done"[, ...]} dicts), in file order.
         today: The reference date (display zone), for the per-item state derivation.
-        slipping: The project-wide set of slipping item keys (from slipping_item_keys).
+        slipping: The set of slipping item keys the CALLER supplies — the project-wide union
+            for the aggregate rows, or one producer's own stream for a producer card.
 
     Returns:
         A list of row dicts {text, done, due_date, key, group, state, status, slipping}.
@@ -749,9 +751,10 @@ def _checklist_rows(items: list, today: date, slipping: set) -> list[dict]:
     Why:
         The aggregate checklist AND each per-producer checklist (C3 Inc 2) render the SAME row
         shape, so building it lives in one place (DRY). `state` is self-contained per item;
-        `slipping` is a PROJECT-LEVEL signal (derived from the shared observation history), so a
-        producer's rows reuse the same set the aggregate uses — true per-producer slippage
-        (per-producer observation history) is out of scope here.
+        `slipping` is passed in, so this builder is agnostic to WHOSE slippage it marks. As of
+        C3 Inc 2.5 the caller hands the aggregate the project-wide union and each producer card
+        its own partitioned stream (slipping_item_keys_by_author), so a card marks only the
+        slippage its own machine's pushes recorded.
     """
     return [
         {
@@ -790,10 +793,12 @@ def serialize_project(
         kind: The project's kind ("project" | "tracker").
         reports: The project's reports newest-first (store.history).
         checklist: The live checklist items (store.get_checklist), or None.
-        observations: The project's observed history (store.observed_history), for slippage.
+        observations: The project's observed history (store.observed_history), each row carrying
+            its recording producer's author_id, for per-producer slippage (C3 Inc 2.5).
         producer_checklists: Each identified producer's own live checklist
-            (store.producer_checklists_for) — {"author_name", "items"} per producer, for the
-            per-producer cards (C3 Inc 2). Empty for a legacy-only / single-writer project.
+            (store.producer_checklists_for) — {"author_id", "author_name", "items", ...} per
+            producer, for the per-producer cards (C3 Inc 2). author_id keys each card's own
+            slippage stream but is not emitted. Empty for a legacy-only / single-writer project.
         discussions: The project's discussion thread oldest-first
             (store.discussion_items_for_project) — the supervisor-interaction loop (E2 Inc 5).
             The single conversation surface since KI-28 Stage 2 retired per-report comments.
@@ -812,7 +817,12 @@ def serialize_project(
         of keys) and applied to both the per-item rows and the milestone roll-ups so they
         always agree.
     """
-    slipping = slipping_item_keys(observations, today)
+    # Partition slippage by producer ONCE (C3 Inc 2.5): each producer card marks only its own
+    # stream's slippage, while the aggregate rows + milestone roll-ups use the project-wide
+    # union. Union it locally rather than calling slipping_item_keys again (same result, one
+    # partition instead of two).
+    slipping_by_author = slipping_item_keys_by_author(observations, today)
+    slipping = {key for keys in slipping_by_author.values() for key in keys}
     items = checklist or []
     done = sum(1 for item in items if item.get("done"))
 
@@ -831,15 +841,20 @@ def serialize_project(
     checklist_rows = _checklist_rows(items, today, slipping)
 
     # C3 Inc 2: one card per identified producer, each the same row shape as the aggregate.
-    # slipping is the shared project-level set (see _checklist_rows). Empty list ⇒ the SPA
-    # simply shows no per-producer section (single-writer / legacy projects render unchanged).
+    # C3 Inc 2.5: each card marks slipping from its OWN producer's stream
+    # (slipping_by_author.get(author_id)), not the project-wide union — so a deadline that
+    # only one machine let slip shows on that producer's card alone. author_id keys the lookup
+    # but is never emitted (the wire hides internal ids). Empty list ⇒ the SPA shows no
+    # per-producer section (single-writer / legacy projects render unchanged).
     producer_checklist_rows = [
         {
             "author_name": pc["author_name"],
             "progress": _progress(
                 sum(1 for item in pc["items"] if item.get("done")), len(pc["items"])
             ),
-            "items": _checklist_rows(pc["items"], today, slipping),
+            "items": _checklist_rows(
+                pc["items"], today, slipping_by_author.get(pc["author_id"], set())
+            ),
         }
         for pc in producer_checklists
     ]

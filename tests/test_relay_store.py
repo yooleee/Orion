@@ -1068,6 +1068,26 @@ def test_record_observations_accumulates_across_pushes(tmp_path):
     ]
 
 
+def test_observed_history_surfaces_author_id(tmp_path):
+    """observed_history now carries each row's recording producer (C3 Inc 2.5).
+
+    Why this matters: per-producer slippage partitions the stream by author_id, so the read
+    side must surface it. An attributed push carries the producer's id; a legacy (anonymous)
+    push carries None. Before this slice author_id was stamped but never read back out here.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    record_observations(
+        conn, "demo", [_obs("A", False, key="A")], "2026-06-25T00:00:00+00:00", author_id=7
+    )
+    record_observations(conn, "demo", [_obs("B", False, key="B")], "2026-06-26T00:00:00+00:00")
+
+    hist = observed_history(conn, "demo")
+
+    by_key = {h["item_key"]: h for h in hist}
+    assert by_key["A"]["author_id"] == 7  # attributed push
+    assert by_key["B"]["author_id"] is None  # legacy / anonymous push
+
+
 def test_observed_item_key_stable_across_a_status_change(tmp_path):
     """A tracker application keeps ONE item_key as its status (and text) changes.
 

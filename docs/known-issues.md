@@ -393,29 +393,53 @@ Deferred).
   checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
   vocabulary until it is sourced. Flagged here rather than silently left.
 
-## KI-30 — Aggregate checklist (and its portfolio badge/progress) is last-writer-wins across producers (C3 Inc 2)
+## KI-32 — Aggregate skills/disciplines are last-writer-wins across producers; comb-level per-producer merge + display deferred (C3 Inc 2.5)
 
-- **Detail:** With the two-person shared base, several contributors can push a checklist for the same
-  project. Per-producer checklists are now kept and shown as separate cards (C3 Inc 2, Unit 1.4), but the
-  **aggregate** `relay_project_checklists` row — the one that feeds the portfolio card's badge, progress
-  bar, at-risk/slipping counts, and `stats` — is still a single row **overwritten on every push**. So the
-  portfolio-level numbers reflect only whichever producer pushed **most recently**, not a merged view.
-- **Why it matters:** a supervisor scanning the portfolio sees one project-level progress figure that can
-  flip as different contributors push, and it undercounts when producers own disjoint slices of the work.
-  It is a fidelity gap at the roll-up, not a correctness or security bug — the per-producer cards on the
-  project page show the true per-contributor state, and no data is lost (each producer's checklist is
-  stored separately).
-- **Severity:** low (roll-up fidelity only; the detailed per-producer truth is intact and on the wire).
-- **Status:** Open, deferred as an **additive** fix: a later change can derive the aggregate (badge,
-  progress, counts) from `producer_checklists_for` — e.g. a union/merge across producers — without a
-  schema change, since the per-producer rows already carry everything needed. Flagged now rather than left
-  implicit.
+- **Detail:** C3 Inc 2.5 now **stores** per-producer disciplines and skills
+  (`relay_producer_disciplines`, `relay_producer_skills`, dual-written beside the aggregates on every
+  write path). But nothing **reads** them yet — the aggregate `relay_project_disciplines` /
+  `relay_project_skills` rows still drive the dashboard's Disciplines section and the skills comb, and
+  those aggregates remain a single row **overwritten on every push**. So under multiple producers the
+  skills/disciplines roll-ups still reflect only whoever pushed most recently.
+- **Why it matters:** the same roll-up fidelity gap KI-30 had (now fixed for checklists), still present
+  for skills/disciplines. It is not a data-loss bug: per-producer provenance is captured now precisely
+  because it **cannot be backfilled** (every push before this shipped would otherwise be lost). The
+  `producer_disciplines_for` / `producer_skills_for` read seams exist; only the merge/display is deferred.
+- **Severity:** low (provenance captured, roll-up fidelity only; per-producer rows are on the store).
+- **Status:** Open, deferred as **additive**. Why not now: merging two machines' **independently
+  canonicalized** skills batches would reintroduce the cross-project naming drift the skills-comb rework
+  (KI-26) fixed, so a comb-level per-producer merge needs its own design (a shared canonicalization pass),
+  not a mechanical union. A later unit derives display from the `producer_*_for` seams.
+
+## KI-33 — Per-producer slippage splits an item's history when a producer pushed anonymously then identified (C3 Inc 2.5)
+
+- **Detail:** C3 Inc 2.5 partitions each checklist item's observation stream by `author_id` before
+  running `is_slipping`, so two machines' interleaved pushes no longer corrupt the streak. A producer that
+  pushed some observations on the **legacy anonymous** token (`author_id` NULL) and later switched to its
+  **own** key has that item's history split across the `None` stream and its author stream.
+- **Why it matters:** each `is_slipping` arm (postponed / lingering) needs ≥2 observations **in the same
+  stream**, so a split history has *shorter* streams — which can only **miss** a real slip, never invent a
+  phantom one. The failure mode is conservative (a false negative on a since-migrated producer's older
+  history), and it self-heals as fresh identified pushes accumulate.
+- **Severity:** low (conservative; transient; only affects a producer that straddled the anonymous→keyed
+  cutover).
+- **Status:** By-design. The alternative — cross-attributing anonymous history to whoever later
+  identified — would break the unforgeable server-derived-attribution invariant. Left as-is.
 
 ## Resolved
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-30** — The aggregate checklist badge/progress (portfolio card, `stats`, at-risk/slipping counts,
+  scheduling, report snapshot) was **last-writer-wins across producers** — the portfolio numbers reflected
+  only whoever pushed most recently. **Resolved 2026-07-09** by the **"effective checklist"** merge: at ≥2
+  active identified producers the displayed numbers derive from a union across producers' per-producer
+  checklists (done = OR, so a stale "not done" copy can't regress a done item; metadata
+  last-writer-per-item), with the aggregate kept as a byte-identical fallback at 0–1 producers. Per-producer
+  slippage (partitioning observation streams by `author_id`) landed in the same slice. Skills/disciplines
+  roll-ups stay last-writer-wins → **KI-32**. See CHANGELOG → *"C3 Increment 2.5 — per-producer
+  consolidation"*.
 - **KI-31** — Contributor lifecycle management was incomplete: the admin API (`relay-user`) was
   `add`/`list`/`revoke` only — no way to expand a contributor's scope, rotate a key, or free a revoked
   (UNIQUE, single-use) name. Surfaced by the live two-person dogfood, where it blocked the

@@ -14,7 +14,59 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
-## Contributor lifecycle — grant/rotate/delete + legacy-ingest retired (2026-07-09)
+## C3 Increment 2.5 — per-producer consolidation (2026-07-09)
+
+Finishes the multi-producer **data** story Increment 2 started. Inc 2 made the produce/ingest layer
+multi-producer (attributed reports, per-producer checklist cards) but left three roll-ups
+last-writer-wins or single-producer: the aggregate checklist badge (**KI-30**), slippage, and
+skills/disciplines. This slice makes the multi-producer data *correct* before more producers arrive.
+**Additive-only** — two new `CREATE TABLE IF NOT EXISTS` tables, zero ALTERs, no auth-spine change; the
+aggregates stay dual-written as the fallback and the SPA is untouched (merged numbers arrive on the
+existing wire contract). Built strictly unit-by-unit off
+[`docs/per-producer-consolidation-kickoff.md`](docs/per-producer-consolidation-kickoff.md) (PRs #89–#93).
+
+### Fixed
+
+- **KI-30 — the aggregate checklist badge/progress was last-writer-wins across producers.** The portfolio
+  card, project `stats`, scheduling, and report snapshot now read an **effective checklist** merged across
+  active identified producers: at **≥2** producers the displayed items are the union of each producer's
+  per-producer checklist copy, with `done = OR` (a stale "not done" copy can never regress a genuinely-done
+  item — exactly KI-30's flicker) and non-done metadata taken **last-writer-per-item**; at **0–1** producers
+  the aggregate row is returned **byte-identically**, so every single-producer / anonymous deployment is
+  unchanged. One pure `derive.merge_producer_checklists` + `derive.effective_checklist` fold, wired through a
+  single `store.effective_checklist(conn, project)` helper swapped in at all four read surfaces so they can
+  never disagree. `derive.item_key` hoisted as the one identity rule (`api._item_key` and
+  `record_observations` delegate to it).
+- **Per-producer slippage — interleaved two-machine pushes corrupted the slippage signal.** `slipping_item_keys`
+  now partitions each item's observation stream by `author_id` before running the untouched `is_slipping`,
+  and unions per stream (`slipping_item_keys_by_author`). Two machines pushing the same item no longer
+  produce a false "postponed" (one machine's earlier date followed by the other's later date) or an inflated
+  "lingering" count. Producer cards mark slippage from **their own** stream; the aggregate rows, milestones,
+  scheduling, and the portfolio count use the union. Legacy all-`NULL`-author data collapses to one stream —
+  byte-identical to before.
+
+### Added
+
+- **`relay_producer_disciplines` and `relay_producer_skills`** — per-producer storage tables on the
+  `relay_producer_checklists` pattern (`(project, author_id)` PK, denormalized `author_name`, JSON payload,
+  `updated_at`), each with an `upsert_producer_*` writer and a `producer_*_for` active-join read helper.
+  **Dual-written** beside the untouched aggregates on every write path: disciplines on `/disciplines`; skills
+  on **both** the per-project `/skills` push **and** the primary `/skills-batch` sync — for the batch, the
+  producer rows are reconciled (upsert + prune) **inside `replace_all_skills`'s single transaction**, so a
+  crash rolls back both tables together and the producer prune is **always bounded by `author_id = ?`**
+  (never touches another producer's rows, even for an unrestricted admin caller). This is **storage now,
+  display later**: the read helpers exist but no display surface consumes them yet, because per-producer
+  provenance cannot be backfilled and must be captured the moment it exists (see **KI-32**).
+
+### Changed
+
+- `store.observed_history` now surfaces each row's `author_id` (the seam Inc 2 stamped but left unread);
+  `delete_user` hard-delete now drops all three live per-producer tables (checklists, disciplines, skills)
+  while leaving history (reports, discussion) intact.
+- Records **KI-32** (aggregate skills/disciplines stay last-writer-wins; comb-level per-producer merge +
+  display deferred — a naming-canonicalization design problem, not a mechanical union) and **KI-33** (a
+  producer that pushed anonymously then identified has its slippage history split across streams —
+  conservative: it can only miss a slip, never invent one).
 
 Closes **KI-31**. The live two-person dogfood showed the admin API was `add`/`list`/`revoke` only —
 you couldn't expand a contributor's scope, rotate a key, or free a revoked name — which stranded the

@@ -24,6 +24,7 @@ from relay.store import (
     add_discussion_item,
     add_user,
     bump_session_version,
+    delete_user,
     discussion_items_for_project,
     effective_checklist,
     get,
@@ -42,6 +43,7 @@ from relay.store import (
     observed_history,
     open_relay_store,
     producer_checklists_for,
+    producer_disciplines_for,
     projects_for_user,
     record_admin_audit,
     record_observations,
@@ -53,6 +55,7 @@ from relay.store import (
     upsert_checklist,
     upsert_producer_checklist,
     upsert_disciplines,
+    upsert_producer_disciplines,
     upsert_skills,
 )
 
@@ -1309,6 +1312,99 @@ def test_upsert_empty_disciplines_clears_to_empty_list(tmp_path):
     upsert_disciplines(conn, "demo", [_card("X")], "2026-06-27T10:00:00+00:00")
     upsert_disciplines(conn, "demo", [], "2026-06-27T11:00:00+00:00")
     assert get_disciplines(conn, "demo") == []
+
+
+# --- relay_producer_disciplines: per-producer disciplines (C3 Inc 2.5, Unit 1.3) ----
+# The four-test producer pattern (mirrors relay_producer_checklists): keyed coexistence +
+# replace-in-place, revoked-producer exclusion, unknown-project empty, updated_at carried —
+# plus hard-delete cleanup. This is the storage-now-display-later seam; nothing reads it yet.
+
+
+def test_producer_disciplines_are_keyed_per_producer_and_replace_in_place(tmp_path):
+    """Two producers' disciplines coexist; a producer's re-push replaces ONLY its own row.
+
+    Why this matters: the per-producer store is keyed (project, author_id), so two contributors
+    on the same project keep independent discipline sets, and a producer pushing again overwrites
+    its own row without touching the other's — the same guarantee producer_checklists gives.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    c_id = add_user(conn, "Teammate C", "vc", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_disciplines(
+        conn, "demo", b_id, "Teammate B", [_card("B-one")], "2026-06-25T00:00:00+00:00"
+    )
+    upsert_producer_disciplines(
+        conn, "demo", c_id, "Teammate C", [_card("C-one")], "2026-06-25T01:00:00+00:00"
+    )
+    # Producer B re-pushes a revised set — replaces its own row only.
+    upsert_producer_disciplines(
+        conn, "demo", b_id, "Teammate B", [_card("B-two")], "2026-06-25T02:00:00+00:00"
+    )
+
+    got = producer_disciplines_for(conn, "demo")
+    assert [(p["author_id"], p["author_name"]) for p in got] == [
+        (b_id, "Teammate B"),
+        (c_id, "Teammate C"),
+    ]  # ordered by name; both present
+    by_id = {p["author_id"]: p for p in got}
+    assert [d["title"] for d in by_id[b_id]["disciplines"]] == ["B-two"]  # B's row replaced
+    assert [d["title"] for d in by_id[c_id]["disciplines"]] == ["C-one"]  # C's row untouched
+
+
+def test_producer_disciplines_excludes_revoked_producers(tmp_path):
+    """A revoked contributor's per-producer disciplines drop out (current state, not history).
+
+    Why this matters: like the per-producer checklist, per-producer disciplines are CURRENT state
+    — a revoked contributor is off the project, so their stale set must not surface. The INNER
+    JOIN on active users enforces it. We push two, revoke one, and assert only the active remains.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    c_id = add_user(conn, "Teammate C", "vc", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_disciplines(conn, "demo", b_id, "Teammate B", [_card("B")], "2026-06-25T00:00:00+00:00")
+    upsert_producer_disciplines(conn, "demo", c_id, "Teammate C", [_card("C")], "2026-06-25T00:00:00+00:00")
+    revoke_user(conn, c_id)  # C leaves the project
+
+    got = producer_disciplines_for(conn, "demo")
+    assert [p["author_name"] for p in got] == ["Teammate B"]  # revoked C's stale set is gone
+
+
+def test_producer_disciplines_for_unknown_project_is_empty(tmp_path):
+    """A project with no per-producer disciplines returns [] (legacy-only / never pushed)."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert producer_disciplines_for(conn, "never-seen") == []
+
+
+def test_producer_disciplines_for_carries_updated_at(tmp_path):
+    """Each per-producer disciplines row surfaces its push time (parity with the checklist row)."""
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_disciplines(
+        conn, "demo", b_id, "Teammate B", [_card("B")], "2026-06-25T09:30:00+00:00"
+    )
+    (row,) = producer_disciplines_for(conn, "demo")
+    assert row["updated_at"] == "2026-06-25T09:30:00+00:00"
+
+
+def test_delete_user_removes_per_producer_disciplines(tmp_path):
+    """Hard-deleting a user removes their live per-producer disciplines (live state goes).
+
+    Why this matters: delete_user frees the name and drops LIVE per-producer state so nothing
+    stale lingers; per-producer disciplines are live state exactly like the checklist rows, so
+    they must be cleaned up too (the read helper's INNER JOIN would hide an orphan, but the row
+    should not survive a hard delete).
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    b_id = add_user(conn, "Teammate B", "vb", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    upsert_producer_disciplines(conn, "demo", b_id, "Teammate B", [_card("B")], "2026-06-25T00:00:00+00:00")
+    delete_user(conn, b_id)
+
+    # No row survives the hard delete (query the table directly — the user row is gone too, so
+    # producer_disciplines_for's JOIN would return [] regardless; assert the row itself is gone).
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS n FROM relay_producer_disciplines WHERE author_id = ?", (b_id,)
+    ).fetchone()["n"]
+    assert remaining == 0
 
 
 # --- relay_project_skills: observed-skills current state (E2 Inc 4 4c, the comb) ---

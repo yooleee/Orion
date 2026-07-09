@@ -1583,6 +1583,116 @@ def test_revoke_requires_admin_token(tmp_path):
         ).fetchone()[0] == 1
 
 
+def test_grant_widens_scope_so_a_contributor_can_push_the_new_project(tmp_path):
+    """POST /api/users/grant adds projects; the contributor can then push the new one (KI-31).
+
+    Why this matters: a contributor's scope was frozen at creation, stranding a multi-project
+    producer. We provision a contributor scoped to 'demo', confirm 'other' 404s, grant 'other',
+    then confirm the SAME key now pushes 'other' (201) and the response echoes the full new scope.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo"])
+        assert _post(base_url, _blob_for("other"), token="prod-key")[0] == 404  # out of scope
+
+        status, r = _admin_post(
+            base_url, "/api/users/grant", {"name": "prod", "projects": ["other"]}
+        )
+        assert status == 200
+        assert set(r["projects"]) == {"demo", "other"}  # full scope after the grant
+
+        assert _post(base_url, _blob_for("other"), token="prod-key")[0] == 201  # now in scope
+
+
+def test_grant_is_idempotent_and_requires_a_project(tmp_path):
+    """Re-granting a held project is a no-op; an empty project list is a 400."""
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo"])
+        status, r = _admin_post(
+            base_url, "/api/users/grant", {"name": "prod", "projects": ["demo"]}
+        )
+        assert status == 200 and set(r["projects"]) == {"demo"}  # idempotent
+        assert _admin_post(
+            base_url, "/api/users/grant", {"name": "prod", "projects": []}
+        )[0] == 400
+
+
+def test_rotate_kills_the_old_key_and_issues_a_working_new_one(tmp_path):
+    """POST /api/users/rotate re-mints an active user's key: old key dies, returned new key works.
+
+    Why this matters: KI-31 — replacing a compromised/lost key without churning identity or
+    grants. We confirm the old key pushes, rotate, then that the OLD key 401s and the NEW key pushes.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "old-key", role="contributor", projects=["demo"])
+        assert _post(base_url, _blob_for("demo"), token="old-key")[0] == 201  # old key works
+
+        status, r = _admin_post(base_url, "/api/users/rotate", {"name": "prod"})
+        assert status == 200
+        new_key = r["key"]
+        assert new_key and len(new_key) >= 40 and new_key != "old-key"
+
+        assert _post(base_url, _blob_for("demo"), token="old-key")[0] == 401  # old key dead
+        assert _post(base_url, _blob_for("demo"), token=new_key)[0] == 201  # new key works
+
+
+def test_rotate_a_revoked_user_is_409(tmp_path):
+    """Rotating a revoked user is refused 409 — revoke/rotate stay distinct (delete+add to revive).
+
+    Why this matters: rotate is a key-refresh for an ACTIVE user; reviving a revoked one is a
+    separate delete+add. A revoked rotate is a clean 409 rather than a silently-useless new key.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "k", role="contributor", projects=["demo"])
+        assert _admin_post(base_url, "/api/users/revoke", {"name": "prod"})[0] == 200
+        assert _admin_post(base_url, "/api/users/rotate", {"name": "prod"})[0] == 409
+
+
+def test_delete_frees_the_name_and_drops_the_card_but_keeps_report_history(tmp_path):
+    """POST /api/users/delete removes the user (name re-addable) + its live card, keeps report author.
+
+    Why this matters: KI-31 + the history/live-state split. A deleted producer's LIVE checklist
+    card goes and its name frees, but its past REPORT keeps its denormalized author_name. We push a
+    report + checklist as a contributor, delete it, then confirm all three.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo"])
+        _provision_user(db, "root", "admin-key", role="admin")  # reads via the cookie API
+        assert _post(base_url, _blob_for("demo"), token="prod-key")[0] == 201  # attributed report
+        checklist = json.dumps(
+            {"project": "demo", "checklist": [{"text": "x", "done": True}]}
+        ).encode("utf-8")
+        assert _post(base_url, checklist, token="prod-key", path="/checklist")[0] == 200
+
+        status, r = _admin_post(base_url, "/api/users/delete", {"name": "prod"})
+        assert status == 200 and r["deleted"] is True
+
+        # The name is free again — re-provisioning it now succeeds (was a 409 while revoked).
+        assert _admin_post(
+            base_url, "/api/users", {"name": "prod", "projects": ["demo"]}
+        )[0] == 201
+
+        cookie = _login(base_url, "admin-key")
+        detail = json.loads(_get(base_url, "/api/projects/demo", cookie=cookie)[1])
+        assert detail["producer_checklists"] == []  # the deleted producer's live card is gone
+        assert detail["reports"][0]["author_name"] == "prod"  # its report keeps the recorded name
+
+
+def test_grant_rotate_delete_404_unknown_and_require_admin_token(tmp_path):
+    """Each new verb 404s an unknown name and refuses the ingest token (admin-gated)."""
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        assert _admin_post(
+            base_url, "/api/users/grant", {"name": "ghost", "projects": ["demo"]}
+        )[0] == 404
+        assert _admin_post(base_url, "/api/users/rotate", {"name": "ghost"})[0] == 404
+        assert _admin_post(base_url, "/api/users/delete", {"name": "ghost"})[0] == 404
+        for path, obj in (
+            ("/api/users/grant", {"name": "x", "projects": ["demo"]}),
+            ("/api/users/rotate", {"name": "x"}),
+            ("/api/users/delete", {"name": "x"}),
+        ):
+            assert _admin_post(base_url, path, obj, token=_TOKEN)[0] == 401  # ingest token refused
+
+
 def test_admin_actions_write_audit_rows(tmp_path):
     """Create and revoke each append an admin-audit row (the accountability trail).
 

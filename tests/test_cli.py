@@ -1829,6 +1829,84 @@ def test_relay_user_revoke_unknown_user_is_clean_error(tmp_path, monkeypatch, ca
     assert "404" in capsys.readouterr().err
 
 
+def test_relay_user_grant_calls_client_and_prints_new_scope(tmp_path, monkeypatch, capsys):
+    """`relay-user grant <name> --project P` threads name+projects and prints the new scope."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_grant_projects",
+        lambda url, token, name, projects, **k: calls.append((url, token, name, projects))
+        or {"name": name, "projects": ["demo", "other"]},
+    )
+    code = cli.main(
+        ["relay-user", "grant", "alice", "--project", "other", "--config", str(toml)]
+    )
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "alice", ["other"])]
+    out = capsys.readouterr().out
+    assert "Granted" in out and "demo, other" in out
+
+
+def test_relay_user_grant_without_project_is_clean_error(tmp_path, monkeypatch, capsys):
+    """grant with no --project errors (exit 1) before any client call."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    called = []
+    monkeypatch.setattr(cli, "relay_grant_projects", lambda *a, **k: called.append(1))
+    code = cli.main(["relay-user", "grant", "alice", "--config", str(toml)])
+    assert code == 1 and called == []  # errored before calling the client
+    assert "project" in capsys.readouterr().err.lower()
+
+
+def test_relay_user_rotate_calls_client_and_prints_new_key_once(tmp_path, monkeypatch, capsys):
+    """`relay-user rotate <name>` calls the client and prints the new one-time key."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_rotate_key",
+        lambda url, token, name, **k: calls.append((url, token, name))
+        or {"name": name, "key": "NEWKEY-456"},
+    )
+    code = cli.main(["relay-user", "rotate", "alice", "--config", str(toml)])
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "alice")]
+    out = capsys.readouterr().out
+    assert "NEWKEY-456" in out and "once" in out.lower()
+
+
+def test_relay_user_delete_calls_client_and_confirms(tmp_path, monkeypatch, capsys):
+    """`relay-user delete <name>` threads the name and confirms the name is freed."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_delete_user",
+        lambda url, token, name, **k: calls.append((url, token, name))
+        or {"name": name, "deleted": True},
+    )
+    code = cli.main(["relay-user", "delete", "alice", "--config", str(toml)])
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "alice")]
+    assert "Deleted" in capsys.readouterr().out
+
+
 def test_relay_user_works_with_relay_only_config_no_projects(tmp_path, monkeypatch, capsys):
     """`relay-user` runs against a config that has ONLY a [relay] table (no projects).
 

@@ -65,6 +65,8 @@ from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
 from orion.delivery.relay import (
     create_user as relay_create_user,
+    delete_user as relay_delete_user,
+    grant_projects as relay_grant_projects,
     list_users as relay_list_users,
     post_discussion,
     pull_discussions,
@@ -74,6 +76,7 @@ from orion.delivery.relay import (
     push_skills,
     push_skills_batch,
     revoke_user as relay_revoke_user,
+    rotate_key as relay_rotate_key,
 )
 from orion.delivery.slack import send as slack_send
 from orion.extract import (
@@ -886,6 +889,47 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    ru_grant = relay_user_subs.add_parser(
+        "grant",
+        help="Grant an existing user access to one or more additional projects.",
+    )
+    ru_grant.add_argument("name", help="The user whose scope to widen (by name).")
+    ru_grant.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        dest="projects",
+        metavar="PROJECT",
+        help="A project to grant (repeatable: --project a --project b). At least one required.",
+    )
+    ru_grant.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_rotate = relay_user_subs.add_parser(
+        "rotate",
+        help="Re-mint an active user's access key (the old key + live sessions stop working).",
+    )
+    ru_rotate.add_argument("name", help="The user whose key to rotate (by name; must be active).")
+    ru_rotate.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_delete = relay_user_subs.add_parser(
+        "delete",
+        help="Hard-delete a user, freeing their name to be reused (revoke keeps the name).",
+    )
+    ru_delete.add_argument("name", help="The user to delete (by name).")
+    ru_delete.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "report":
         return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
@@ -989,6 +1033,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_relay_user_list(Path(args.config))
         if args.relay_user_command == "revoke":
             return cmd_relay_user_revoke(args.name, Path(args.config))
+        if args.relay_user_command == "grant":
+            return cmd_relay_user_grant(args.name, args.projects, Path(args.config))
+        if args.relay_user_command == "rotate":
+            return cmd_relay_user_rotate(args.name, Path(args.config))
+        if args.relay_user_command == "delete":
+            return cmd_relay_user_delete(args.name, Path(args.config))
     return 1  # Unreachable: subparsers are required.
 
 
@@ -3763,6 +3813,102 @@ def cmd_relay_user_revoke(name: str, config_path: Path) -> int:
     print(
         f"Revoked user {name!r}: their key is deactivated and any live session is "
         "logged out."
+    )
+    return 0
+
+
+def cmd_relay_user_grant(name: str, projects: list[str], config_path: Path) -> int:
+    """Grant an existing user access to more projects (`relay-user grant`).
+
+    Args:
+        name: The user whose scope to widen.
+        projects: Project names to grant (at least one required).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on no --project given, a config/secrets error, or a failed
+        request (e.g. an unknown name → the relay's 404).
+
+    Why:
+        A contributor's project set was frozen at creation, so a multi-project producer couldn't
+        be covered without re-provisioning (KI-31). This widens scope in place. It prints the FULL
+        scope the relay returns after the grant, so the operator sees the new coverage at a glance.
+    """
+    if not projects:
+        print(
+            "Error: grant needs at least one --project (e.g. --project my-app).",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_grant_projects(relay_url, admin_token, name, projects)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    scope = result.get("projects") or []
+    print(f"Granted {name!r} access to: {', '.join(projects)}.")
+    print(f"  Scope is now: {', '.join(scope) if scope else '(none)'}")
+    return 0
+
+
+def cmd_relay_user_rotate(name: str, config_path: Path) -> int:
+    """Re-mint an active user's access key (`relay-user rotate`).
+
+    Args:
+        name: The user whose key to rotate (must be active — a revoked user is a clean error
+            pointing at delete + add).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown name
+        → 404; revoked user → the relay's 409, surfaced as a clear message).
+
+    Why:
+        Lets an admin replace a compromised or lost key without churning the user's identity,
+        grants, or attributed history (KI-31). The relay swaps the verifier and force-logs-out
+        live sessions; the NEW key is shown once here, exactly like provisioning.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_rotate_key(relay_url, admin_token, name)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Rotated {name!r}'s key — the old key and any live session no longer work.")
+    print("  New access key (shown ONCE — copy it now; it cannot be retrieved later):")
+    print(f"    {result['key']}")
+    return 0
+
+
+def cmd_relay_user_delete(name: str, config_path: Path) -> int:
+    """Hard-delete a user, freeing their name to be reused (`relay-user delete`).
+
+    Args:
+        name: The user to delete.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown name
+        → 404).
+
+    Why:
+        `revoke` keeps the row, so the UNIQUE name stays occupied and can't be re-provisioned
+        (KI-31). `delete` removes the user + grants + live per-producer checklists and frees the
+        name, while their past reports/replies keep the author name already recorded on them.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_delete_user(relay_url, admin_token, name)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Deleted user {name!r}: the name is free to reuse. Their past reports and "
+        "discussion replies keep the author name already recorded on them."
     )
     return 0
 

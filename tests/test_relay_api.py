@@ -400,6 +400,57 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
     ]
 
 
+def test_project_detail_marks_slipping_per_producer_stream():
+    """Each producer card marks slippage from its OWN stream; aggregate + milestone use the union.
+
+    Why this matters: the C3 Inc 2.5 fix. Item X (grouped in "G") was postponed in producer 1's
+    observation stream but stayed steady in producer 2's. Producer 1's card must flag X slipping,
+    producer 2's must not, and the aggregate checklist row + milestone roll-up must flag it (the
+    project-wide union). This is what stops one machine's slip from smearing across every card
+    while still surfacing it at the project level.
+    """
+    checklist = [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]
+    # Producer 1 postponed todo-x (06-20 → 06-28) → slipping in stream 1; producer 2 kept it
+    # steady at 06-28 across two pushes → not slipping in stream 2.
+    observations = [
+        {"item_key": "todo-x", "due_date": "2026-06-20", "done": False,
+         "observed_at": "2026-06-22T00:00:00+00:00", "author_id": 1},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-26T00:00:00+00:00", "author_id": 1},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-22T00:00:00+00:00", "author_id": 2},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-26T00:00:00+00:00", "author_id": 2},
+    ]
+    producer_checklists = [
+        {"author_id": 1, "author_name": "Producer One",
+         "items": [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]},
+        {"author_id": 2, "author_name": "Producer Two",
+         "items": [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]},
+    ]
+    out = api.serialize_project(
+        name="orion",
+        kind="project",
+        reports=[],
+        checklist=checklist,
+        observations=observations,
+        producer_checklists=producer_checklists,
+        discussions=[],
+        today=_TODAY,
+    )
+
+    # Aggregate row + milestone use the union → X slipping.
+    assert out["checklist"][0]["slipping"] is True
+    assert next(m for m in out["milestones"] if m["group"] == "G")["slipping"] is True
+
+    # Each producer card marks slippage from its OWN stream only.
+    cards = {c["author_name"]: c for c in out["producer_checklists"]}
+    assert cards["Producer One"]["items"][0]["slipping"] is True  # postponed in stream 1
+    assert cards["Producer Two"]["items"][0]["slipping"] is False  # steady in stream 2
+    # The internal author_id is never emitted on a card.
+    assert "author_id" not in cards["Producer One"]
+
+
 def test_project_detail_emits_in_progress_state_and_passes_status_through():
     """A tracker item's structured status drives in_progress state + ships raw on the row (gap 8).
 

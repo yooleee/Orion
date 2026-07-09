@@ -28,6 +28,7 @@ from relay.derive import (
     milestones,
     next_open_due,
     slipping_item_keys,
+    slipping_item_keys_by_author,
     today_in_tz,
 )
 
@@ -148,9 +149,20 @@ def test_count_at_risk_handles_none_and_empty():
 # --- is_slipping() / slipping_item_keys(): the history signal (E2 Inc 3 Unit 4) ------
 
 
-def _o(due_date=None, done=False, at="2026-06-20T00:00:00+00:00", item_key="A"):
-    """Build one observation row (observed_history's shape)."""
-    return {"item_key": item_key, "due_date": due_date, "done": done, "observed_at": at}
+def _o(due_date=None, done=False, at="2026-06-20T00:00:00+00:00", item_key="A", author_id=None):
+    """Build one observation row (observed_history's shape).
+
+    author_id defaults to None so every existing single-stream test keeps exercising the
+    legacy "one anonymous stream" path (which must stay byte-identical); the per-producer
+    tests below pass it explicitly.
+    """
+    return {
+        "item_key": item_key,
+        "due_date": due_date,
+        "done": done,
+        "observed_at": at,
+        "author_id": author_id,
+    }
 
 
 def test_is_slipping_when_deadline_moved_later():
@@ -227,6 +239,92 @@ def test_slipping_item_keys_groups_history_by_key():
         _o("2026-07-09", item_key="A"),  # A's deadline moved later → slipping
         _o("2026-07-10", item_key="B"),  # B steady, future → not
     ]
+    assert slipping_item_keys(observations, _TODAY) == {"A"}
+
+
+# --- slipping_item_keys_by_author(): per-producer stream partition (C3 Inc 2.5) ------
+#
+# The corruption this fixes: is_slipping reads an item's deadline history as ONE ordered
+# stream, so two machines pushing the same item interleave into a stream neither produced.
+# Partitioning by author before running is_slipping is the fix.
+
+
+def test_by_author_fixes_a_false_postponement_from_interleaved_streams():
+    """Two producers, each with a STABLE (but different) deadline, must not look postponed.
+
+    Scenario: machine A always reports item X due 2026-07-01; machine B always reports the
+    SAME item due 2026-07-10. Their pushes interleave in the log as [07-01, 07-10, 07-01,
+    07-10]. Collapsed into one stream that reads as "deadline moved later" (07-01 → 07-10) — a
+    postponement NEITHER machine made. Partitioned by author, each stream is a flat line, so X
+    is slipping for no one. We assert both the per-author result AND that the OLD collapsed
+    view (dropping author_id) would have wrongly flagged it — pinning the bug being fixed.
+    """
+    observations = [
+        _o("2026-07-01", at="2026-06-20T00:00:00+00:00", item_key="X", author_id=1),
+        _o("2026-07-10", at="2026-06-21T00:00:00+00:00", item_key="X", author_id=2),
+        _o("2026-07-01", at="2026-06-22T00:00:00+00:00", item_key="X", author_id=1),
+        _o("2026-07-10", at="2026-06-23T00:00:00+00:00", item_key="X", author_id=2),
+    ]
+    # Partitioned: neither producer's own stream moved → X slips for no one.
+    assert slipping_item_keys_by_author(observations, _TODAY) == {}
+    assert slipping_item_keys(observations, _TODAY) == set()
+    # Sanity: the OLD collapsed behavior (ignore author_id → one stream) DID false-flag X.
+    collapsed = [{**o, "author_id": None} for o in observations]
+    assert slipping_item_keys(collapsed, _TODAY) == {"X"}
+
+
+def test_by_author_keeps_a_real_per_stream_postponement():
+    """A genuine postponement in one producer's stream is attributed to that producer only.
+
+    Scenario: machine A postpones item X (07-01 → 07-10); machine B keeps X steady. X is
+    slipping in A's stream, not B's — and appears in the global union. This is the signal the
+    partition must NOT lose while it drops the false positives above.
+    """
+    observations = [
+        _o("2026-07-01", at="2026-06-20T00:00:00+00:00", item_key="X", author_id=1),
+        _o("2026-07-10", at="2026-06-21T00:00:00+00:00", item_key="X", author_id=2),
+        _o("2026-07-10", at="2026-06-22T00:00:00+00:00", item_key="X", author_id=1),  # A moved it later
+        _o("2026-07-10", at="2026-06-23T00:00:00+00:00", item_key="X", author_id=2),  # B steady
+    ]
+    by_author = slipping_item_keys_by_author(observations, _TODAY)
+    assert by_author == {1: {"X"}}  # only producer 1's stream slipped
+    assert slipping_item_keys(observations, _TODAY) == {"X"}  # union still flags X
+
+
+def test_slipping_item_keys_is_the_union_of_the_per_author_sets():
+    """The global function equals the union over all producers' streams.
+
+    Scenario: producer 1 slips item A (postponed), producer 2 slips item B (postponed); nobody
+    slips C. The union is {A, B}, and each is attributed to its own producer's stream.
+    """
+    observations = [
+        _o("2026-07-01", at="2026-06-20T00:00:00+00:00", item_key="A", author_id=1),
+        _o("2026-07-10", at="2026-06-21T00:00:00+00:00", item_key="A", author_id=1),  # 1 postpones A
+        _o("2026-07-01", at="2026-06-20T00:00:00+00:00", item_key="B", author_id=2),
+        _o("2026-07-10", at="2026-06-21T00:00:00+00:00", item_key="B", author_id=2),  # 2 postpones B
+        _o("2026-07-10", at="2026-06-20T00:00:00+00:00", item_key="C", author_id=1),
+        _o("2026-07-10", at="2026-06-21T00:00:00+00:00", item_key="C", author_id=1),  # C steady
+    ]
+    by_author = slipping_item_keys_by_author(observations, _TODAY)
+    assert by_author == {1: {"A"}, 2: {"B"}}
+    assert slipping_item_keys(observations, _TODAY) == {"A", "B"}
+
+
+def test_null_author_rows_form_one_anonymous_stream():
+    """Legacy all-NULL-author data collapses to a single stream — byte-identical to before.
+
+    Why this matters: every project that existed before this slice has author_id NULL on every
+    row, so the partition must reproduce the old per-item grouping exactly (one None stream).
+    Here A is postponed, B steady → {None: {"A"}}, union {"A"} — the same answer the pre-2.5
+    slipping_item_keys returned.
+    """
+    observations = [
+        _o("2026-07-01", item_key="A"),  # author_id defaults to None
+        _o("2026-07-09", at="2026-06-21T00:00:00+00:00", item_key="A"),
+        _o("2026-07-10", item_key="B"),
+        _o("2026-07-10", at="2026-06-21T00:00:00+00:00", item_key="B"),
+    ]
+    assert slipping_item_keys_by_author(observations, _TODAY) == {None: {"A"}}
     assert slipping_item_keys(observations, _TODAY) == {"A"}
 
 

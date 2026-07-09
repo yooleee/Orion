@@ -324,29 +324,70 @@ def is_slipping(observations: list[dict], today: date) -> bool:
     return False
 
 
+def slipping_item_keys_by_author(
+    observations: list[dict], today: date
+) -> dict[str | None, set[str]]:
+    """Group a project's observation log into PER-PRODUCER slipping sets (C3 Inc 2.5).
+
+    Args:
+        observations: A project's observed_history (all items' rows interleaved, oldest
+            first), each carrying an "item_key" and an "author_id" (the producer whose push
+            recorded it, or None for a legacy/anonymous push).
+        today: The reference date (display zone).
+
+    Returns:
+        A dict mapping author_id -> the set of that producer's slipping item_keys. Only
+        authors with at least one slipping item appear (consumers use `.get(author, set())`);
+        legacy/anonymous rows accumulate under the None key.
+
+    Why:
+        is_slipping reads an item's deadline history as a single time-ordered stream, so two
+        machines pushing the SAME item interleave their observations into one corrupted stream
+        — machine A's earlier date followed by machine B's later date reads as a postponement
+        that neither producer actually made, and one-push-each rows inflate the "lingering"
+        arm. Partitioning by (author_id, item_key) BEFORE running the untouched is_slipping
+        keeps each producer's stream intact, so a streak reflects one machine's real history.
+        Every existing project has all-None author_id (the column predates any read), so it
+        collapses to a single None stream — identical to the pre-partition behavior.
+    """
+    by_stream: dict[tuple[str | None, str], list[dict]] = {}
+    for obs in observations:
+        # A NULL author forms its own "anonymous" stream (the None key), so legacy data
+        # (every row NULL) is one stream and reproduces the old collapsed result exactly.
+        stream_key = (obs.get("author_id"), obs["item_key"])
+        by_stream.setdefault(stream_key, []).append(obs)
+    result: dict[str | None, set[str]] = {}
+    for (author_id, item_key), history in by_stream.items():
+        if is_slipping(history, today):
+            result.setdefault(author_id, set()).add(item_key)
+    return result
+
+
 def slipping_item_keys(observations: list[dict], today: date) -> set[str]:
     """Return the set of item_keys that are slipping, from a project's FULL history.
 
     Args:
         observations: A project's observed_history (all items' rows interleaved, oldest
-            first), each carrying an "item_key".
+            first), each carrying an "item_key" (and an "author_id").
         today: The reference date (display zone).
 
     Returns:
-        The set of item_keys whose per-item history is_slipping() flags.
+        The union across all producers of each stream's slipping item_keys — the global
+        "is this item slipping for anyone" answer.
 
     Why:
-        Both surfaces need the same answer, so this is the single place that groups a
-        project's interleaved observation log by item_key and runs is_slipping over each
-        group. The per-item render checks membership; the portfolio badge counts the set —
-        so the indicator and the count can never disagree. Grouping preserves the oldest-
-        first order (observed_history already sorts), which is what the postponement check
-        relies on.
+        The project-wide surfaces (aggregate checklist rows, milestone roll-ups, scheduling,
+        the portfolio count) want one answer per item regardless of which producer's stream it
+        slipped in, so this is the UNION of the per-author partition (C3 Inc 2.5). It stays the
+        single source those surfaces share, so the per-item indicator and the count can never
+        disagree. Deriving it from slipping_item_keys_by_author (rather than a second grouping)
+        keeps the two definitions in lockstep.
     """
-    by_key: dict[str, list[dict]] = {}
-    for obs in observations:
-        by_key.setdefault(obs["item_key"], []).append(obs)
-    return {key for key, history in by_key.items() if is_slipping(history, today)}
+    return {
+        key
+        for keys in slipping_item_keys_by_author(observations, today).values()
+        for key in keys
+    }
 
 
 # =============================================================================

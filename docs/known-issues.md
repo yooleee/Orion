@@ -332,23 +332,6 @@ Deferred).
   seam (`{title, why, scope, source}`) already supports it. Tracked here so the approximation reads as
   intentional. Relates to [[KI-6]].
 
-## KI-25 — Skills comb omits the project/tracker glyph on evidence anchors (E2 Inc 4 4c)
-
-- **Detail:** A merged skill card anchors to the projects that evidence it (`projects: [names]`), but
-  the `/api/skills` wire carries only the project NAMES, not each project's `kind` ("project" vs
-  "tracker"). The relay's `get_project_kind` was deliberately NOT threaded into `serialize_skills`, so
-  the SPA cannot draw the `◇` project / `⊟` tracker glyph beside an anchor the way Scheduling and the
-  portfolio do.
-- **Why it matters:** in practice `skills = true` is only ever set on real software projects (the
-  applications tracker is a to-do list, not a coding-skills showcase), so every anchor is a project and
-  the distinction adds no signal today — carrying `kind` would have been dead data. The cost is only that
-  IF a tracker ever opts into the comb, its anchor would render identically to a project's.
-- **Severity:** low
-- **Status:** Open by-design for 4c (a deliberate simplicity call, not an oversight). Restoring the
-  distinction is additive: the server already has `get_project_kind`, so threading a `kind` per anchor
-  into `serialize_skills` + a glyph in `Skills.tsx` is a localized change with no store/wire migration.
-  Tracked here so the omission reads as intentional. Relates to the Scheduling source-tag glyphs.
-
 ## KI-26 — Skills comb is per-project + component-flavored, and the comb visual is approximate (E2 Inc 4 4c)
 
 - **Detail:** The shipped skills comb has three known limitations, surfaced on real data and to be
@@ -378,38 +361,28 @@ Deferred).
   Calibration-validated against a private resume oracle kept outside the repo. Residual: run-to-run name flicker (a more advanced
   persistent-identity "living skills" store is the proper long-term fix) and KI-27 (dead `tasks` signal).
   Relates to [[KI-25]] and the kickoff doc above.
+- **Historical note (2026-07-13):** the skills comb was **retired at parity** in the living-resume
+  retirement (Units 1-4) — the residual run-to-run flicker above would have needed a persistent-identity
+  "living skills" design, which was judged the least-aligned part of the product to invest in. This entry
+  is kept as a record of the rework that shipped; the feature it describes no longer exists. See CHANGELOG.
 
-## KI-27 — Skills `tasks` signal is declared but never sourced (E2 Inc 4 4c)
+## KI-32 — Aggregate disciplines are last-writer-wins across producers; per-producer merge + display deferred (C3 Inc 2.5)
 
-- **Detail:** `SKILL_SIGNALS` (producer) and `_VALID_SKILL_SIGNALS` (relay) both include `"tasks"`, and a
-  skill card may legitimately carry it, but the evidence bundle the model sees is built only from git
-  languages, commit subjects, and doc excerpts — it has **no task/checklist evidence**. So a skill can never
-  truthfully cite `tasks`; the kind is inert vocabulary.
-- **Why it matters:** observe-not-originate means a signal should reflect real evidence. A declared-but-unfed
-  signal is a small honesty gap (a model could attach `tasks` with nothing behind it) and a loose end the
-  rework noticed but deliberately scoped out.
-- **Severity:** low (the SPA simply shows whatever signals survive; no correctness or security impact).
-- **Status:** Open. Two clean fixes, both deferred to keep the rework surgical: **feed** the project's
-  checklist/task titles into the evidence bundle (making `tasks` real), or **drop** `"tasks"` from the signal
-  vocabulary until it is sourced. Flagged here rather than silently left.
-
-## KI-32 — Aggregate skills/disciplines are last-writer-wins across producers; comb-level per-producer merge + display deferred (C3 Inc 2.5)
-
-- **Detail:** C3 Inc 2.5 now **stores** per-producer disciplines and skills
-  (`relay_producer_disciplines`, `relay_producer_skills`, dual-written beside the aggregates on every
-  write path). But nothing **reads** them yet — the aggregate `relay_project_disciplines` /
-  `relay_project_skills` rows still drive the dashboard's Disciplines section and the skills comb, and
-  those aggregates remain a single row **overwritten on every push**. So under multiple producers the
-  skills/disciplines roll-ups still reflect only whoever pushed most recently.
+- **Detail:** C3 Inc 2.5 stores per-producer disciplines (`relay_producer_disciplines`, dual-written
+  beside the aggregate on every write path). But nothing **reads** them yet — the aggregate
+  `relay_project_disciplines` row still drives the dashboard's Disciplines section, and that aggregate is a
+  single row **overwritten on every push**. So under multiple producers the disciplines roll-up reflects
+  only whoever pushed most recently. (The skills half of this KI is **moot**: the skills comb was retired at
+  parity in the living-resume retirement, and `relay_producer_skills` was dropped — see the Resolved index.)
 - **Why it matters:** the same roll-up fidelity gap KI-30 had (now fixed for checklists), still present
-  for skills/disciplines. It is not a data-loss bug: per-producer provenance is captured now precisely
-  because it **cannot be backfilled** (every push before this shipped would otherwise be lost). The
-  `producer_disciplines_for` / `producer_skills_for` read seams exist; only the merge/display is deferred.
+  for disciplines. It is not a data-loss bug: per-producer provenance is captured now precisely because it
+  **cannot be backfilled** (every push before this shipped would otherwise be lost). The
+  `producer_disciplines_for` read seam exists; only the merge/display is deferred.
 - **Severity:** low (provenance captured, roll-up fidelity only; per-producer rows are on the store).
-- **Status:** Open, deferred as **additive**. Why not now: merging two machines' **independently
-  canonicalized** skills batches would reintroduce the cross-project naming drift the skills-comb rework
-  (KI-26) fixed, so a comb-level per-producer merge needs its own design (a shared canonicalization pass),
-  not a mechanical union. A later unit derives display from the `producer_*_for` seams.
+- **Status:** Open, deferred as **additive**. A later unit derives display from the `producer_disciplines_for`
+  seam. Note: Unit 5 of the living-resume retirement makes the aggregate's Global/project split cosmetic (it
+  renders all of a project's cards on the project page regardless of scope), which shrinks [[KI-24]] but does
+  not itself resolve the per-producer roll-up here.
 
 ## KI-33 — Per-producer slippage splits an item's history when a producer pushed anonymously then identified (C3 Inc 2.5)
 
@@ -431,6 +404,13 @@ Deferred).
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-25** — The skills comb omitted the project/tracker glyph on evidence anchors. **Retired (feature
+  removed) 2026-07-13** with the whole skills comb in the living-resume retirement (Units 1-4). No fix was
+  needed: the surface it described no longer exists. See CHANGELOG → *"Living-resume retirement — skills
+  comb removed"*.
+- **KI-27** — The skills `tasks` signal was declared in the vocabulary but never sourced from real
+  evidence. **Retired (feature removed) 2026-07-13** with the skills comb; the signal vocabulary is gone.
+  See CHANGELOG → *"Living-resume retirement — skills comb removed"*.
 - **KI-30** — The aggregate checklist badge/progress (portfolio card, `stats`, at-risk/slipping counts,
   scheduling, report snapshot) was **last-writer-wins across producers** — the portfolio numbers reflected
   only whoever pushed most recently. **Resolved 2026-07-09** by the **"effective checklist"** merge: at ≥2

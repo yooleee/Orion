@@ -116,6 +116,30 @@ default disk) that file is **wiped on every restart/redeploy** unless it lives o
 **mounted volume**. The Dockerfile writes it to `/data/orion-relay.sqlite3` and declares
 `/data` a volume — mount real storage there.
 
+### WAL-safe backups (before any schema surgery)
+
+The store runs in **WAL mode**, so recently-committed rows can still live in the sidecar
+`-wal` file, not yet folded into the main `.sqlite3`. A plain `cp` of the `.sqlite3` alone can
+therefore miss committed data — **do not back up a live relay with `cp`.** Take a
+*consistent* copy instead:
+
+- **From inside the container / on the volume** — use SQLite's online backup, which is
+  consistent under WAL:
+  ```bash
+  # via the sqlite3 CLI (atomic .backup):
+  sqlite3 /data/orion-relay.sqlite3 ".backup '/data/orion-relay.backup.sqlite3'"
+  ```
+- **Pull a copy to your machine** — on Fly, `fly ssh console` then the `.backup` above, or
+  `fly sftp get /data/orion-relay.sqlite3` (checkpoint first with
+  `sqlite3 … "PRAGMA wal_checkpoint(TRUNCATE);"` so the pulled file is complete).
+
+**Always take one before a destructive maintenance step** (a one-time migration or table
+drop). The repo's maintenance tools bake this in: both `relay.migrate_comments` and
+`relay.drop_retired_tables` default to a **dry-run**, and the drop tool takes its **own**
+`sqlite3.Connection.backup()` copy *before* it drops anything (`--drop` writes
+`<db>.before-skills-drop.bak` and refuses to overwrite an existing one). Keep an operator-side
+copy as well — belt and braces.
+
 ---
 
 ## Test the image locally first (smoke test)

@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS relay_project_disciplines (
 -- Written ALONGSIDE the aggregate (a dual-write), never replacing it — the aggregate still
 -- serves the dashboard's Disciplines section. STORAGE NOW, DISPLAY LATER: these rows are stored
 -- and read back by producer_disciplines_for (a seam), but no display surface consumes them yet;
--- comb-level per-producer merge/display is deferred as a KI (merging two machines' independently
+-- per-producer merge/display is deferred as a KI (merging two machines' independently
 -- canonicalized sets needs its own design). ONE row per (project, author_id), REPLACED on each
 -- of that producer's pushes. Only IDENTIFIED producers land here (author_id NOT NULL); a legacy
 -- anonymous push writes the aggregate only. author_name is denormalized (server-derived, copied
@@ -691,7 +691,7 @@ def producer_disciplines_for(conn: sqlite3.Connection, project: str) -> list[dic
     Why:
         The read side of the per-producer disciplines store (C3 Inc 2.5). It is a SEAM — stored
         and readable now, but no display surface consumes it yet (storage now, display later; the
-        comb-level per-producer merge is a deferred KI), the same posture Inc 2 took with the
+        per-producer merge is a deferred KI), the same posture Inc 2 took with the
         observation author_id. Like producer_checklists_for, per-producer disciplines are CURRENT
         STATE, so we INNER JOIN relay_users and keep only ACTIVE producers — a revoked contributor
         is off the project and their stale set should not surface. Ordering by name gives stable

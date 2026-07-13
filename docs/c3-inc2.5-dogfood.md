@@ -18,6 +18,13 @@ Assumptions: The relay is deployed on Fly as app "project-orion" with the DB on
 
 # C3 Inc 2.5 — two-machine dogfood runbook
 
+> **Historical record (annotated 2026-07-13).** This runbook is kept as a record of the C3 Inc 2.5
+> dogfood as it was run on 2026-07-12. **The skills half is now retired:** the living-resume retirement
+> removed the skills comb at parity, so `orion skills-sync` no longer exists, and the
+> `relay_project_skills` / `relay_producer_skills` tables were dropped. **Do not run the `skills-sync`
+> steps or the skills DB queries below** — they will fail. The disciplines and checklist/slippage steps
+> still apply. See `CHANGELOG.md` → *"Living-resume retirement — skills comb removed"*.
+
 ## What this proves, and what it can't
 
 Two of the four code units are **dashboard-visible**. The other two are **storage-only** by design (KI-32, "storage now, display later"), so they have no dashboard surface yet and are verified in the store.
@@ -114,6 +121,10 @@ On the `orion` project page:
 - **Pre-slice contrast:** interleaving two machines' pushes into one stream used to fabricate a "postponed" (one machine's earlier date followed by the other's later date) or inflate the lingering count. A stable, correctly-attributed count is the fix.
 
 ## Step 4 — per-producer skills and disciplines (1.3 / 1.4), DB-only
+
+> **Retired (2026-07-13):** the `skills-sync` commands and the `relay_producer_skills` query below no
+> longer work — the skills comb was removed and its tables dropped. Run only the `disciplines-push` lines
+> and the `relay_producer_disciplines` half. See the banner at the top of this doc.
 
 ```
 # Mac:

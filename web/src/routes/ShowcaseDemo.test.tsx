@@ -62,10 +62,6 @@ describe("ShowcaseDemo — fabricated, read-only, no network", () => {
   it("navigates tabs and into a report without leaving the demo or hitting the network", () => {
     renderDemo();
 
-    fireEvent.click(screen.getByRole("button", { name: "Skills" }));
-    // The skill name appears in both the comb tooth and its evidence card.
-    expect(screen.getAllByText("React & TypeScript").length).toBeGreaterThan(0);
-
     fireEvent.click(screen.getByRole("button", { name: "Disciplines" }));
     expect(screen.getByText("Small, reviewable changes")).toBeInTheDocument();
 

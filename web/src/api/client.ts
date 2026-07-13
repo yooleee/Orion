@@ -24,7 +24,6 @@ import type {
   ReportDetail,
   SchedulingData,
   ShowcaseData,
-  SkillsData,
 } from "./types";
 
 /** A failed API call. `status` lets callers branch (e.g. 401 → route to login). */
@@ -69,7 +68,6 @@ export const getReport = (id: number | string) =>
   apiFetch<ReportDetail>(`/api/reports/${encodeURIComponent(String(id))}`);
 export const getScheduling = () => apiFetch<SchedulingData>("/api/scheduling");
 export const getDisciplines = () => apiFetch<DisciplinesData>("/api/disciplines");
-export const getSkills = () => apiFetch<SkillsData>("/api/skills");
 // Public, no-login: 404s (ApiError.status === 404) when the relay's Showcase is disabled,
 // which the Showcase screen turns into a clean "not available" note.
 export const getShowcase = () => apiFetch<ShowcaseData>("/api/showcase");

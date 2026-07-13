@@ -21,7 +21,6 @@ import { Report } from "./routes/Report";
 import { Tracker } from "./routes/Tracker";
 import { Scheduling } from "./routes/Scheduling";
 import { Disciplines } from "./routes/Disciplines";
-import { Skills } from "./routes/Skills";
 import { Showcase } from "./routes/Showcase";
 import { ShowcaseDemo } from "./routes/ShowcaseDemo";
 import { NotFound, Todos } from "./routes/placeholders";
@@ -66,7 +65,6 @@ export function App() {
         <Route path="tracker/:name" element={<Tracker />} />
         <Route path="scheduling" element={<Scheduling />} />
         <Route path="disciplines" element={<Disciplines />} />
-        <Route path="skills" element={<Skills />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

@@ -5,8 +5,8 @@
 //                  Showcase drill-down. Every value here is INVENTED — there is no
 //                  real project, user, or activity behind it.
 // Role in project: Lets a no-login guest click into the Showcase and see how Orion
-//                  presents a monitored project (overview, to-dos, reports, disciplines,
-//                  skills) using the REAL dashboard components, fed by these fixtures.
+//                  presents a monitored project (overview, to-dos, reports, disciplines)
+//                  using the REAL dashboard components, fed by these fixtures.
 // Why fixtures (not a backend route): the Showcase is the one anonymous, internet-facing
 //                  surface. Serving the demo from static, typed frontend data means there
 //                  is NO anonymous backend path that can read real project data — a leak
@@ -26,7 +26,6 @@ import type {
   ReportDetail,
   Section,
   ShowcaseCard,
-  SkillsData,
 } from "../api/types";
 
 /** The demo project's route key and display name (kept in one place). */
@@ -233,19 +232,4 @@ export const DEMO_DISCIPLINES: DisciplinesData = {
     { title: "Tests before merge", why: "New behavior lands with a test that pins it, and the suite is green before anything merges.", source: "docs/testing.md" },
   ],
   projects: [{ name: DEMO_PROJECT_NAME, principles: DEMO_PROJECT_PRINCIPLES }],
-};
-
-// --- Skills (the comb) ------------------------------------------------------
-
-export const DEMO_SKILLS: SkillsData = {
-  scope: { unrestricted: true, projects: null },
-  categories: ["Backend", "Frontend", "Practices"],
-  skills: [
-    { name: "Python APIs", category: "Backend", depth: 3, projects: [DEMO_PROJECT_NAME], evidence: "Built the REST API and auth flow on a stdlib-first HTTP layer.", signals: ["git", "docs"] },
-    { name: "SQL & data modeling", category: "Backend", depth: 2, projects: [DEMO_PROJECT_NAME], evidence: "Designed the schema and migrations for entries, tags, and sessions.", signals: ["git"] },
-    { name: "React & TypeScript", category: "Frontend", depth: 3, projects: [DEMO_PROJECT_NAME], evidence: "Built the single-page app: routing, a typed API client, and themeable components.", signals: ["git", "docs"] },
-    { name: "Accessible UI", category: "Frontend", depth: 2, projects: [DEMO_PROJECT_NAME], evidence: "Keyboard-navigable controls and semantic status cues throughout the app.", signals: ["docs"] },
-    { name: "Testing discipline", category: "Practices", depth: 3, projects: [DEMO_PROJECT_NAME], evidence: "Unit and integration tests gate merges; behavior is pinned before refactors.", signals: ["git", "tasks"] },
-    { name: "Incremental delivery", category: "Practices", depth: 2, projects: [DEMO_PROJECT_NAME], evidence: "Work ships in small, reviewable slices with a clear changelog.", signals: ["git", "tasks"] },
-  ],
 };

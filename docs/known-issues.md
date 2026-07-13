@@ -405,7 +405,26 @@ Deferred).
 - **Status:** By-design. The alternative — cross-attributing anonymous history to whoever later
   identified — would break the unforgeable server-derived-attribution invariant. Left as-is.
 
-## Resolved
+## KI-34 — The project page is growing dense; section categorization may need a redesign (E2)
+
+- **Detail:** As the project page accretes sections (forward-look milestones, live checklist, per-contributor
+  cards, reports, discussion, and now the Unit-5 "Working agreements" band), the single two-column layout is
+  starting to feel bloated and under-categorized. The **live checklist in particular runs very long** — every
+  item in every milestone is listed flat, independent of the milestone cards directly above it. The
+  information is all correct; the *organization* is the concern.
+- **Possible direction (not committed):** make the "Forward look" milestone cards **expandable**, showing that
+  milestone's related checklist items nested inside the card, rather than a separate flat full-length checklist
+  below. That folds two sections into one and ties each item to its milestone. Other groupings are possible;
+  this is one candidate, not a settled design.
+- **Why it matters:** legibility to an outside reader is the whole point of the dashboard; a page that reads as
+  an undifferentiated wall of sections works against that. It is a **UX/information-architecture** concern, not
+  a correctness or security one.
+- **Severity:** low (cosmetic / IA; nothing is wrong or missing, only how it is grouped).
+- **Status:** Open, **deferred by decision (2026-07-13)** — noted now so it is not forgotten, but explicitly
+  **not** this-session work. The natural time to revisit is **when more of the project is built up** — the
+  cross-project shared knowledge base (stage 2) and the oracle (stage 3) will add their own surfaces, so a
+  layout/IA pass is best done **alongside or just before** those, rather than as a one-off now. A redesign
+  would touch the SPA shell + the project route, so it belongs in a deliberate slice with its own plan.
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

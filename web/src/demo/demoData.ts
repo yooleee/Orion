@@ -5,8 +5,8 @@
 //                  Showcase drill-down. Every value here is INVENTED — there is no
 //                  real project, user, or activity behind it.
 // Role in project: Lets a no-login guest click into the Showcase and see how Orion
-//                  presents a monitored project (overview, to-dos, reports, disciplines)
-//                  using the REAL dashboard components, fed by these fixtures.
+//                  presents a monitored project (overview, working agreements, reports,
+//                  discussion) using the REAL dashboard components, fed by these fixtures.
 // Why fixtures (not a backend route): the Showcase is the one anonymous, internet-facing
 //                  surface. Serving the demo from static, typed frontend data means there
 //                  is NO anonymous backend path that can read real project data — a leak
@@ -20,8 +20,6 @@
 // =============================================================================
 
 import type {
-  Discipline,
-  DisciplinesData,
   ProjectDetail,
   ReportDetail,
   Section,
@@ -112,6 +110,18 @@ export const DEMO_PROJECT: ProjectDetail = {
     { id: 1, author_name: "Reviewer", role: "supervisor", body: "How's the OAuth piece coming? Anything blocking the launch milestone?", created_at: "2026-06-26T09:00:00+00:00" },
     { id: 2, author_name: "Developer", role: "developer", body: "Token exchange works end to end — just polishing the callback error states, then it's done.", created_at: "2026-06-26T15:30:00+00:00" },
   ],
+  // Unit 5: the "Working agreements" section — all of the project's observed principles
+  // regardless of scope (project-specific + cross-project conventions), as the real project
+  // page now shows them. Sources vary per card; the freshness stamp names the last push.
+  disciplines: {
+    updated_at: "2026-06-27T17:00:00+00:00",
+    cards: [
+      { title: "Secrets never leave the machine", why: "API keys and tokens live in a gitignored .env and are redacted before anything is logged or sent.", source: "docs/security.md" },
+      { title: "Accessible by default", why: "Every interactive control is keyboard-reachable and labelled, and colour is never the only signal of state.", source: "docs/conventions.md" },
+      { title: "Small, reviewable changes", why: "Each change ships as a small pull request with a clear description, so review stays fast and the history reads as a story.", source: "CONTRIBUTING.md" },
+      { title: "Tests before merge", why: "New behavior lands with a test that pins it, and the suite is green before anything merges.", source: "docs/testing.md" },
+    ],
+  },
 };
 
 // --- Report details (one per timeline entry, nav linked) --------------------
@@ -217,19 +227,3 @@ export function demoReportById(id: number | string): ReportDetail | undefined {
   const n = Number(id);
   return DEMO_REPORTS.find((r) => r.id === n);
 }
-
-// --- Disciplines (observed-principles tab) ----------------------------------
-
-const DEMO_PROJECT_PRINCIPLES: Discipline[] = [
-  { title: "Secrets never leave the machine", why: "API keys and tokens live in a gitignored .env and are redacted before anything is logged or sent.", source: "docs/security.md" },
-  { title: "Accessible by default", why: "Every interactive control is keyboard-reachable and labelled, and colour is never the only signal of state.", source: "docs/conventions.md" },
-];
-
-export const DEMO_DISCIPLINES: DisciplinesData = {
-  scope: { unrestricted: true, projects: null },
-  global: [
-    { title: "Small, reviewable changes", why: "Each change ships as a small pull request with a clear description, so review stays fast and the history reads as a story.", source: "CONTRIBUTING.md" },
-    { title: "Tests before merge", why: "New behavior lands with a test that pins it, and the suite is green before anything merges.", source: "docs/testing.md" },
-  ],
-  projects: [{ name: DEMO_PROJECT_NAME, principles: DEMO_PROJECT_PRINCIPLES }],
-};

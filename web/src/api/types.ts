@@ -187,6 +187,24 @@ export interface ProducerChecklist {
   items: ChecklistItem[];
 }
 
+/** One observed principle card. `source` is the repo-relative doc it was observed in
+ *  (the "observed · <source>" footer); it is caller-stamped by the producer, never
+ *  model-chosen, so the claim is honest. The server drops the scope enum from the wire
+ *  card — on the project page every one of a project's cards renders regardless of scope. */
+export interface Discipline {
+  title: string;
+  why: string;
+  source: string;
+}
+
+/** A project's "Working agreements" (Unit 5): all of its observed discipline cards plus the
+ *  ISO timestamp the relay last received them (the section's "updated <date>" freshness
+ *  line). null on ProjectDetail when the project has never pushed disciplines. */
+export interface ProjectDisciplines {
+  cards: Discipline[];
+  updated_at: string;
+}
+
 export interface ProjectDetail {
   name: string;
   kind: ProjectKind;
@@ -197,6 +215,7 @@ export interface ProjectDetail {
   producer_checklists: ProducerChecklist[]; // C3 Inc 2: per-contributor checklists
   reports: ReportSummary[];
   discussions: DiscussionItem[];
+  disciplines: ProjectDisciplines | null; // Unit 5: "Working agreements" section, or null
 }
 
 // --- GET /api/reports/:id ---------------------------------------------------
@@ -281,32 +300,6 @@ export interface ScheduleSummary {
 export interface SchedulingData {
   summary: ScheduleSummary;
   buckets: ScheduleBuckets;
-}
-
-// --- GET /api/disciplines ---------------------------------------------------
-
-/** One observed principle card. `source` is the repo-relative doc it was observed in
- *  (the "observed · <source>" footer); it is caller-stamped by the producer, never
- *  model-chosen, so the claim is honest. The server drops the scope enum from the wire
- *  card — the Global vs project grouping already encodes it. */
-export interface Discipline {
-  title: string;
-  why: string;
-  source: string;
-}
-
-/** A project's group of project-specific principles, in the Disciplines section. */
-export interface DisciplineGroup {
-  name: string;
-  principles: Discipline[];
-}
-
-/** GET /api/disciplines: principles split into a Global group (across all projects) and
- *  per-project groups. `scope` is the same viewer-scope block the portfolio ships. */
-export interface DisciplinesData {
-  scope: Scope;
-  global: Discipline[];
-  projects: DisciplineGroup[];
 }
 
 // --- GET /api/showcase ------------------------------------------------------

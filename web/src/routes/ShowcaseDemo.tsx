@@ -4,8 +4,8 @@
 // Responsible for: The public, no-login "sample project" walkthrough reached from the
 //                  Showcase landing. A guest clicks the demo card and lands here, where
 //                  they can browse a fabricated project the way a real one looks in Orion:
-//                  Overview (stats, milestones, checklist, reports, discussion), each
-//                  report in full, plus the Disciplines view.
+//                  the Overview (stats, working agreements, milestones, checklist, reports,
+//                  discussion) and each report in full.
 // Role in project: The drill-down half of the public Showcase. Renders ENTIRELY from
 //                  web/src/demo/demoData.ts fixtures using the real dashboard components.
 //                  It makes NO API calls and all navigation is internal state, so it never
@@ -16,25 +16,19 @@
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  DEMO_DISCIPLINES,
-  DEMO_PROJECT,
-  demoReportById,
-} from "../demo/demoData";
-import { deadlineLabel, relativeTime } from "../lib/time";
+import { DEMO_PROJECT, demoReportById } from "../demo/demoData";
+import { deadlineLabel, formatDate, relativeTime } from "../lib/time";
 import { STATUS_STYLES } from "../theme/status";
 import { MilestoneCard } from "../components/MilestoneCard";
 import { ChecklistRow } from "../components/ChecklistRow";
+import { DisciplineCard } from "../components/DisciplineCard";
 import { DiscussionList } from "../components/DiscussionList";
 import { ReportBody } from "../components/ReportBody";
 import { ContextRail } from "../components/ContextRail";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
-import { DisciplinesView } from "./Disciplines";
 
 // A fixed display timezone for the demo's relative-date labels (no logged-in user here).
 const DEMO_TZ = "UTC";
-
-type DemoTab = "overview" | "disciplines";
 
 /** The Overview body: header stats + forward-look milestones + checklist + reports +
  *  the (read-only) discussion thread — the same composition as a real project page,
@@ -75,6 +69,22 @@ function DemoOverview({ onOpenReport }: { onOpenReport: (id: number) => void }) 
 
       <div className="detail-grid">
         <div className="detail-left">
+          {/* Unit 5: the same "Working agreements" section the real project page shows,
+              leading the left column (the standalone Disciplines tab retired). */}
+          {data.disciplines && data.disciplines.cards.length > 0 && (
+            <section>
+              <div className="eyebrow block-label">Working agreements</div>
+              <div className="disc-freshness">
+                Observed in your docs · updated {formatDate(data.disciplines.updated_at, DEMO_TZ)}
+              </div>
+              <div className="disc-grid">
+                {data.disciplines.cards.map((card, i) => (
+                  <DisciplineCard key={`${card.title}-${i}`} card={card} />
+                ))}
+              </div>
+            </section>
+          )}
+
           {data.milestones.length > 0 && (
             <section>
               <div className="eyebrow block-label">Forward look</div>
@@ -189,21 +199,18 @@ function DemoReport({
 /**
  * The public Showcase demo walkthrough.
  *
- * Returns: a full-bleed page (its own top bar, like the Showcase landing) with tabbed
- *   navigation over a fabricated project, rendered from fixtures.
+ * Returns: a full-bleed page (its own top bar, like the Showcase landing) over a fabricated
+ *   project, rendered from fixtures — the overview, or a single report in full.
  *
  * Why: lets a guest experience the real dashboard UI on a sample project without any login
- *   and without any backend access to real data.
+ *   and without any backend access to real data. Since the standalone Disciplines tab retired
+ *   (Unit 5 — its cards now live in the overview's "Working agreements" section), the demo is
+ *   the single overview surface, so a tab bar would be a one-item bar; a report drill-down is
+ *   plain open/close state.
  */
 export function ShowcaseDemo() {
-  const [tab, setTab] = useState<DemoTab>("overview");
-  // When set, the Overview tab shows that report in full instead of the project body.
+  // When set, show that report in full instead of the project overview.
   const [reportId, setReportId] = useState<number | null>(null);
-
-  const tabs: Array<{ key: DemoTab; label: string }> = [
-    { key: "overview", label: "Overview" },
-    { key: "disciplines", label: "Disciplines" },
-  ];
 
   return (
     <div className="showcase-screen" data-testid="showcase-demo">
@@ -227,34 +234,15 @@ export function ShowcaseDemo() {
           a monitored project. Read-only.
         </p>
 
-        <nav className="demo-tabs" aria-label="Sample project sections">
-          {tabs.map((t) => (
-            <button
-              type="button"
-              key={t.key}
-              className={`demo-tab${tab === t.key ? " demo-tab-active" : ""}`}
-              aria-current={tab === t.key ? "page" : undefined}
-              onClick={() => {
-                setTab(t.key);
-                setReportId(null);
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-
-        {tab === "overview" &&
-          (reportId !== null ? (
-            <DemoReport
-              reportId={reportId}
-              onBack={() => setReportId(null)}
-              onOpenReport={(id) => setReportId(id)}
-            />
-          ) : (
-            <DemoOverview onOpenReport={(id) => setReportId(id)} />
-          ))}
-        {tab === "disciplines" && <DisciplinesView data={DEMO_DISCIPLINES} />}
+        {reportId !== null ? (
+          <DemoReport
+            reportId={reportId}
+            onBack={() => setReportId(null)}
+            onOpenReport={(id) => setReportId(id)}
+          />
+        ) : (
+          <DemoOverview onOpenReport={(id) => setReportId(id)} />
+        )}
       </main>
     </div>
   );

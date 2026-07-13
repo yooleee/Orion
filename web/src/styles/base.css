@@ -1569,31 +1569,6 @@ h3 {
   margin: 0 0 18px;
 }
 
-/* The demo's section tabs (Overview / Disciplines). */
-.demo-tabs {
-  display: flex;
-  gap: 6px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 24px;
-}
-.demo-tab {
-  padding: 9px 14px;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--tmid);
-  font-size: 13.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.demo-tab:hover {
-  color: var(--thi);
-}
-.demo-tab-active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
 /* A demo report entry is a <button> (internal nav, not a route Link), so reset the
    button chrome to match the real ReportTimeline's link rows. */
 .demo-report-entry {
@@ -1808,24 +1783,21 @@ h3 {
 }
 
 /* =============================================================================
-   Disciplines & directions (slice 4b)
-   A Global group + per-project groups, each a section header (title + rule + a
-   right-aligned mono aside) over a 2-column grid of principle cards. Each card is
-   a bold title, a "why" paragraph, and a top-bordered "observed · <source>" footer.
-   Measurements from design/README "Disciplines & directions" + desktop-06.
+   Working agreements — observed principle cards (slice 4b; reframed in Unit 5)
+   A 2-column grid of principle cards on the project page's "Working agreements"
+   section, under a small "Observed in your docs · updated <date>" freshness line.
+   Each card is a bold title, a "why" paragraph, and a top-bordered
+   "observed · <source>" footer. Card measurements from design/README + desktop-06.
    ============================================================================= */
 
-.disc-section {
-  margin-top: 30px;
-}
-/* The right-aligned mono label in a section header ("across all projects" /
-   "project-specific"). Sits after the flex-filling rule, so it hugs the right edge. */
-.section-aside {
+/* The muted freshness line under the section header. Mono + faint, matching the
+   card footer's provenance treatment so the two read as one honesty signal. */
+.disc-freshness {
   font-family: var(--font-mono);
   font-size: 10.5px;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
   color: var(--tfaint);
-  white-space: nowrap;
+  margin-bottom: 14px;
 }
 
 .disc-grid {

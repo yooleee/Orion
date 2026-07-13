@@ -41,6 +41,41 @@ export function relativeTime(iso: string, now: number = Date.now()): string {
 }
 
 /**
+ * Format an ISO timestamp as a short absolute date ("Jun 27, 2026") in a display zone.
+ *
+ * Args:
+ *   iso: an ISO 8601 timestamp (the relay's UTC string).
+ *   tz: the IANA display timezone the date is rendered in (so the calendar day matches the
+ *     zone the relay classifies everything else in).
+ *
+ * Returns: a short "Mon D, YYYY" label. Falls back to "" on an unparseable input (the caller
+ * then renders nothing rather than "Invalid Date").
+ *
+ * Why: the "Working agreements" freshness stamp (Unit 5) wants a stable, non-drifting
+ * provenance date ("updated Jun 27, 2026"), unlike the relative "Nd ago" the timeline uses —
+ * a principle set changes rarely, so an absolute date reads truer than "3mo ago".
+ */
+export function formatDate(iso: string, tz: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(then);
+  } catch {
+    // Unknown zone → fall back to the host's local zone (still a valid short date).
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(then);
+  }
+}
+
+/**
  * Return today's calendar date (YYYY-MM-DD) in the given IANA timezone.
  *
  * Why: deadlines are date-only and judged against the relay's display zone. en-CA gives

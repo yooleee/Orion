@@ -53,11 +53,11 @@ from relay.store import (
     discussion_items_for_project,
     get,
     get_checklist,
-    get_disciplines,
     list_projects,
     observed_history,
     open_relay_store,
     producer_disciplines_for,
+    project_disciplines,
     revoke_user,
 )
 
@@ -2690,9 +2690,11 @@ def test_api_discussion_post_empty_body_is_400(tmp_path):
         assert discussion_items_for_project(conn, "demo") == []
 
 
-# --- POST /disciplines + GET /api/disciplines (E2 Inc 4 slice 4b) ----------------
+# --- POST /disciplines + the project page's "Working agreements" (Unit 5) --------
 # /disciplines upserts a project's observed principles WITHOUT a report (like
-# /checklist); /api/disciplines serves them split into Global + per-project groups.
+# /checklist); a pushed set then surfaces on GET /api/projects/:name as the
+# "disciplines" field the project page's "Working agreements" section renders. The
+# standalone GET /api/disciplines cross-project view retired in Unit 5.
 
 
 def _disc(title, why="why", scope="project", source="CLAUDE.md"):
@@ -2718,7 +2720,7 @@ def test_disciplines_push_upserts_without_a_report(tmp_path):
         assert json.loads(body) == {"updated": "demo", "disciplines": 1}
 
         conn = open_relay_store(db)
-        assert get_disciplines(conn, "demo") == [_disc("Local-first", scope="global")]
+        assert project_disciplines(conn, "demo")["cards"] == [_disc("Local-first", scope="global")]
         assert list_projects(conn) == []  # no report row was created
 
 
@@ -2737,7 +2739,7 @@ def test_disciplines_push_dual_writes_for_identified_but_not_legacy(tmp_path):
         # Identified push (the contributor's own key) → aggregate AND that producer's row.
         assert _push_disciplines(base_url, "demo", [_disc("Local-first")], token="b-key")[0] == 200
         conn = open_relay_store(db)
-        assert get_disciplines(conn, "demo") == [_disc("Local-first")]  # aggregate
+        assert project_disciplines(conn, "demo")["cards"] == [_disc("Local-first")]  # aggregate
         producer = producer_disciplines_for(conn, "demo")
         assert [p["author_name"] for p in producer] == ["Teammate B"]
         assert producer[0]["disciplines"] == [_disc("Local-first")]
@@ -2746,7 +2748,7 @@ def test_disciplines_push_dual_writes_for_identified_but_not_legacy(tmp_path):
         # Legacy push (shared ingest token) on another project → aggregate only, no producer row.
         assert _push_disciplines(base_url, "legacy-proj", [_disc("Observe")], token=_TOKEN)[0] == 200
         conn = open_relay_store(db)
-        assert get_disciplines(conn, "legacy-proj") == [_disc("Observe")]  # aggregate written
+        assert project_disciplines(conn, "legacy-proj")["cards"] == [_disc("Observe")]  # aggregate written
         assert producer_disciplines_for(conn, "legacy-proj") == []  # no per-producer row
 
 
@@ -2760,7 +2762,7 @@ def test_disciplines_push_wrong_token_is_401(tmp_path):
         status, _ = _push_disciplines(base_url, "demo", [_disc("X")], token="wrong")
         assert status == 401
         conn = open_relay_store(db)
-        assert get_disciplines(conn, "demo") is None
+        assert project_disciplines(conn, "demo") is None
 
 
 def test_disciplines_push_malformed_is_400_and_stores_nothing(tmp_path):
@@ -2776,43 +2778,35 @@ def test_disciplines_push_malformed_is_400_and_stores_nothing(tmp_path):
         assert status == 400
         assert "disciplines" in json.loads(resp)["error"]
         conn = open_relay_store(db)
-        assert get_disciplines(conn, "demo") is None
+        assert project_disciplines(conn, "demo") is None
 
 
-def test_api_disciplines_returns_global_and_project_groups(tmp_path):
-    """GET /api/disciplines serves the stored cards split into Global + per-project.
+def test_pushed_disciplines_surface_on_the_project_page(tmp_path):
+    """A pushed discipline set appears on GET /api/projects/:name as the "disciplines" field.
 
-    Why this matters: this is the end-to-end read the SPA renders — a pushed global card
-    lands in `global`, a project card under its project group.
+    Why this matters: this is the Unit 5 end-to-end read the "Working agreements" section
+    renders. Every card shows regardless of the model's scope (global + project alike), the
+    scope enum is dropped from the wire card, and the freshness stamp rides along. The
+    project must also have a report to exist (a disciplines-only project 404s — the
+    standalone cross-project view that once showed those retired with this slice).
     """
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "root", "admin-key", role="admin")  # reads via the cookie SPA API
+        assert _post(base_url, _blob_for("demo"), token=_TOKEN)[0] == 201  # project now exists
         _push_disciplines(
             base_url,
-            "orion",
+            "demo",
             [_disc("Local-first", scope="global"), _disc("Observe", scope="project")],
         )
-        status, out = _get_json(base_url, "/api/disciplines")
-        assert status == 200
-        assert [c["title"] for c in out["global"]] == ["Local-first"]
-        assert out["projects"] == [
-            {"name": "orion", "principles": [{"title": "Observe", "why": "why", "source": "CLAUDE.md"}]}
+
+        cookie = _login(base_url, "admin-key")
+        code, body = _get(base_url, "/api/projects/demo", cookie=cookie)
+        assert code == 200
+        disciplines = json.loads(body)["disciplines"]
+        # Both cards present, scope dropped; the section renders them all regardless of scope.
+        assert disciplines["cards"] == [
+            {"title": "Local-first", "why": "why", "source": "CLAUDE.md"},
+            {"title": "Observe", "why": "why", "source": "CLAUDE.md"},
         ]
-
-
-def test_api_disciplines_is_scoped_for_a_viewer(tmp_path):
-    """A scoped viewer never sees an out-of-scope project's disciplines — even a global one.
-
-    Why this matters: scope-filter-FIRST is the leak guard. A global principle declared
-    only in a project the viewer can't see must not surface, since even its presence (and
-    source path) would leak that project's existence.
-    """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _push_disciplines(base_url, "granted", [_disc("Mine", scope="project")])
-        _push_disciplines(base_url, "secret", [_disc("Hidden global", scope="global")])
-        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["granted"])
-
-        status, out = _get_json(base_url, "/api/disciplines", cookie=_login(base_url, "mum-key"))
-        assert status == 200
-        # The out-of-scope project's global never appears, and only 'granted' is a group.
-        assert out["global"] == []
-        assert [g["name"] for g in out["projects"]] == ["granted"]
+        # The freshness stamp is a non-empty ISO timestamp (the relay's receive time).
+        assert disciplines["updated_at"]

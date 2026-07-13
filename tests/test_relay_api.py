@@ -357,6 +357,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         observations=observations,
         producer_checklists=[],
         discussions=discussions,
+        disciplines=None,
         today=_TODAY,
     )
     assert out["name"] == "orion" and out["kind"] == "project"
@@ -436,6 +437,7 @@ def test_project_detail_marks_slipping_per_producer_stream():
         observations=observations,
         producer_checklists=producer_checklists,
         discussions=[],
+        disciplines=None,
         today=_TODAY,
     )
 
@@ -475,6 +477,7 @@ def test_project_detail_emits_in_progress_state_and_passes_status_through():
         observations=[],
         producer_checklists=[],
         discussions=[],
+        disciplines=None,
         today=_TODAY,
     )
     by_text = {r["text"]: r for r in out["checklist"]}
@@ -502,6 +505,7 @@ def test_project_detail_handles_no_checklist():
         observations=[],
         producer_checklists=[],
         discussions=[],
+        disciplines=None,
         today=_TODAY,
     )
     assert out["stats"]["progress"] == {"done": 0, "total": 0, "pct": None}
@@ -691,134 +695,74 @@ def test_scheduling_empty_when_nothing_open_and_dated():
     assert out["summary"] == {"overdue": 0, "due_this_week": 0, "slipping": 0}
 
 
-# --- serialize_disciplines: Global vs per-project split (E2 Inc 4 4b) ------------
+# --- serialize_project: "Working agreements" disciplines (Unit 5) ----------------
 
 
 def _disc(title, why="why", scope="project", source="CLAUDE.md"):
-    """Build one stored discipline dict (the shape get_disciplines returns)."""
+    """Build one stored discipline dict (the {title, why, scope, source} push shape)."""
     return {"title": title, "why": why, "scope": scope, "source": source}
 
 
-def test_disciplines_card_shape_drops_scope():
-    """Each emitted card is exactly {title, why, source} — scope is consumed by grouping.
+def _project(disciplines):
+    """Serialize a minimal project carrying only the given disciplines value.
 
-    Why this matters: the Global vs project section already encodes scope, so the wire
-    card carries only what the SPA renders (title, why, observed-source).
+    Args:
+        disciplines: the store.project_disciplines result ({"cards", "updated_at"} or None).
+
+    Why: the disciplines wiring is the only thing under test here, so everything else is
+    empty — keeps the assertions about the "disciplines" field alone.
     """
-    out = api.serialize_disciplines(
-        [{"name": "orion", "disciplines": [_disc("Sectioned", why="distinct sections", source="CLAUDE.md")]}],
-        allowed=None,
+    return api.serialize_project(
+        name="orion",
+        kind="project",
+        reports=[],
+        checklist=None,
+        observations=[],
+        producer_checklists=[],
+        discussions=[],
+        disciplines=disciplines,
+        today=_TODAY,
     )
-    assert out["projects"][0]["principles"] == [
-        {"title": "Sectioned", "why": "distinct sections", "source": "CLAUDE.md"}
-    ]
 
 
-def test_disciplines_split_global_from_project():
-    """Global-scope cards go to `global`; project-scope cards group under their project.
+def test_project_disciplines_emit_cards_and_freshness_dropping_scope():
+    """The project carries its discipline cards (scope dropped) plus the freshness stamp.
 
-    Why this matters: the design shows a Global section then per-project sections — the
-    serializer must bucket by scope so the SPA renders two kinds of group correctly.
+    Why this matters: the "Working agreements" section renders every one of a project's
+    cards regardless of the model's global/project scope, and shows an "updated <date>"
+    line — so serialize_project must emit {cards: [{title, why, source}], updated_at}.
     """
-    out = api.serialize_disciplines(
-        [
-            {
-                "name": "orion",
-                "disciplines": [
-                    _disc("Local-first", scope="global", source="CLAUDE.md"),
-                    _disc("Observe, not originate", scope="project", source="design/README.md"),
-                ],
-            }
-        ],
-        allowed=None,
-    )
-    assert [c["title"] for c in out["global"]] == ["Local-first"]
-    assert out["projects"] == [
+    out = _project(
         {
-            "name": "orion",
-            "principles": [
-                {"title": "Observe, not originate", "why": "why", "source": "design/README.md"}
+            "cards": [
+                _disc("Local-first", scope="global", source="CLAUDE.md"),
+                _disc("Observe, not originate", scope="project", source="design/README.md"),
             ],
+            "updated_at": "2026-06-27T10:00:00+00:00",
         }
-    ]
-
-
-def test_disciplines_dedupes_globals_with_deterministic_source():
-    """A global title stated in two projects dedupes to one card, source picked stably.
-
-    Why this matters: a global convention can appear in several projects' docs. We dedupe
-    by normalized title and pick the source from the lexicographically-first (project,
-    source) so the footer never flickers with ingest order. Here 'alpha' wins over 'zeta'.
-    """
-    out = api.serialize_disciplines(
-        [
-            {"name": "zeta", "disciplines": [_disc("Untrusted text is inert", scope="global", source="zeta/sec.md")]},
-            {"name": "alpha", "disciplines": [_disc("untrusted text is inert", scope="global", source="alpha/sec.md")]},
-        ],
-        allowed=None,
     )
-    # One card despite the case-different titles; source comes from project 'alpha'.
-    assert len(out["global"]) == 1
-    assert out["global"][0]["source"] == "alpha/sec.md"
-
-
-def test_disciplines_sorts_globals_by_title_and_projects_by_name():
-    """Globals sort by title; project groups sort by name; cards within a group by title.
-
-    Why this matters: a stable 2-column grid needs deterministic ordering, so a re-render
-    (or a re-extraction in a different order) never reshuffles the cards.
-    """
-    out = api.serialize_disciplines(
-        [
-            {
-                "name": "beta",
-                "disciplines": [
-                    _disc("Zed principle", scope="project"),
-                    _disc("Able principle", scope="project"),
-                ],
-            },
-            {
-                "name": "alpha",
-                "disciplines": [
-                    _disc("Second global", scope="global"),
-                    _disc("First global", scope="global"),
-                    _disc("Alpha-only", scope="project"),  # so alpha forms a project group
-                ],
-            },
+    assert out["disciplines"] == {
+        "cards": [
+            {"title": "Local-first", "why": "why", "source": "CLAUDE.md"},
+            {"title": "Observe, not originate", "why": "why", "source": "design/README.md"},
         ],
-        allowed=None,
-    )
-    assert [c["title"] for c in out["global"]] == ["First global", "Second global"]
-    assert [g["name"] for g in out["projects"]] == ["alpha", "beta"]
-    beta = next(g for g in out["projects"] if g["name"] == "beta")
-    assert [c["title"] for c in beta["principles"]] == ["Able principle", "Zed principle"]
+        "updated_at": "2026-06-27T10:00:00+00:00",
+    }
 
 
-def test_disciplines_omits_projects_with_no_project_scope_cards():
-    """A project with only global cards (or none) produces no per-project group.
+def test_project_disciplines_null_when_absent():
+    """A project that never pushed disciplines (None) serializes to a null field.
 
-    Why this matters: an empty section would be visual noise. A project contributes a
-    group only when it has project-scope cards; its global cards still merge into Global.
+    Why this matters: null lets the SPA omit the section entirely rather than render an
+    empty "Working agreements" heading.
     """
-    out = api.serialize_disciplines(
-        [
-            {"name": "orion", "disciplines": [_disc("Only global", scope="global")]},
-            {"name": "other", "disciplines": None},  # never pushed
-        ],
-        allowed=None,
-    )
-    assert [c["title"] for c in out["global"]] == ["Only global"]
-    assert out["projects"] == []  # neither project has project-scope cards
+    assert _project(None)["disciplines"] is None
 
 
-def test_disciplines_scope_block_reports_viewer_scope():
-    """The scope block reflects unrestricted vs a scoped viewer, like serialize_portfolio.
+def test_project_disciplines_null_when_empty_cleared_set():
+    """A cleared set (empty cards) also serializes to null — no empty section is shown.
 
-    Why this matters: the SPA reads scope from the same response; an admin/open relay is
-    unrestricted, a scoped viewer lists its granted projects.
+    Why this matters: a doc that once stated principles but no longer does clears to [];
+    like the never-pushed case, that should hide the section, not show an empty one.
     """
-    unrestricted = api.serialize_disciplines([], allowed=None)
-    assert unrestricted["scope"] == {"unrestricted": True, "projects": None}
-
-    scoped = api.serialize_disciplines([], allowed={"orion", "applications"})
-    assert scoped["scope"] == {"unrestricted": False, "projects": ["applications", "orion"]}
+    assert _project({"cards": [], "updated_at": "2026-06-27T10:00:00+00:00"})["disciplines"] is None

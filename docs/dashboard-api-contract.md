@@ -186,13 +186,21 @@ Everything observed about one project. `404` when missing or out of scope.
       "created_at": "2026-06-26T09:00:00+00:00" },
     { "id": 2, "author_name": "Teammate B", "role": "developer", "body": "Landed.",
       "created_at": "2026-06-26T12:00:00+00:00" }
-  ]
+  ],
+  "disciplines": {
+    "cards": [
+      { "title": "Observe & reframe, never originate",
+        "why": "Plans and tasks are written in their own places; Orion reads and reframes them.",
+        "source": "CLAUDE.md" }
+    ],
+    "updated_at": "2026-06-27T10:00:00+00:00"
+  }
 }
 ```
 
 - Source: `history` (reports + count + nav), `get_checklist`, `observed_history` ->
   `slipping_item_keys`, `derive.milestones`, `classify_item` per item,
-  `producer_checklists_for`, `discussion_items_for_project`.
+  `producer_checklists_for`, `discussion_items_for_project`, `project_disciplines`.
 - `producer_checklists` (C3 Inc 2) is each **identified** producer's own live checklist —
   `{ author_name, progress, items }` per producer, ordered by name, the `items` in the SAME per-item
   shape as `checklist`. It is a dual-write beside the aggregate `checklist`. As of C3 Inc 2.5 the
@@ -214,6 +222,15 @@ Everything observed about one project. `404` when missing or out of scope.
   Each item carries a **real** `role` (`supervisor | developer`; `orion` reserved, unused) and a
   server-derived `author_name`. The internal `author_id` is **not** on the wire. Written via
   `POST /api/discussions/:project/items` (below).
+- `disciplines` (Unit 5) is the project's **"Working agreements"** — the working principles Orion
+  **observed** in this project's docs, or `null` when it never pushed any (an empty/cleared set also
+  serializes to `null`, so the SPA simply omits the section). `cards[]` is `{title, why, source}` — the
+  bold title, the "why" paragraph, and the repo-relative doc the `observed · <source>` footer cites;
+  `updated_at` is the ISO time the relay last received them (the section's "updated `<date>`" line). **All**
+  of the project's cards are emitted regardless of the model's `global`/`project` scope (the scope enum is
+  consumed server-side and dropped from the wire card). `source` is **caller-stamped** by the producer,
+  never model-chosen, so `observed · <source>` is literally true. Fed by `POST /disciplines` (below); the
+  standalone cross-project `GET /api/disciplines` view retired in Unit 5.
 - `stats.next_due` is the soonest open deadline across the checklist (`derive.next_open_due` + its state),
   or `null`. `milestones[].slipping` is `true` when any open item in the group is in the slipping set.
 - `checklist[].state` is `done | overdue | due_soon | in_progress | not_started`: `done` when done, else
@@ -307,48 +324,7 @@ grouped into three time buckets, plus a summary. Scope-filtered identically to `
   `get_checklist` + `observed_history` per project → `api.serialize_scheduling`. Pure read-only
   re-aggregation — no new derivation, no producer/wire/store change.
 
-### `GET /api/disciplines`
-
-The **Disciplines & directions** section (E2 Inc 4 slice 4b): the working principles Orion **observed**
-in the user's own docs, split into a **Global** group (conventions across all projects) and per-project
-groups. Scope-filtered like `/api/portfolio`. Each card is `{title, why, source}` — a bold title, a
-"why" paragraph, and the repo-relative doc the `observed · <source>` footer cites.
-
-```json
-{
-  "scope": { "unrestricted": false, "projects": ["orion"] },
-  "global": [
-    { "title": "Untrusted text is inert",
-      "why": "Commit messages and task names are always rendered as plain text — a hard security rule.",
-      "source": "design/README.md" }
-  ],
-  "projects": [
-    { "name": "orion",
-      "principles": [
-        { "title": "Observe & reframe, never originate",
-          "why": "Plans and tasks are written in their own places; Orion reads and reframes them.",
-          "source": "CLAUDE.md" }
-      ] }
-  ]
-}
-```
-
-- **`global`** are the `scope == "global"` cards across all in-scope projects, **deduped by normalized
-  title** (a global convention may be stated in several projects' docs), the source picked
-  deterministically (the lexicographically-first `(project, source)`), sorted by title.
-- **`projects`** are `scope == "project"` cards grouped under their project, projects sorted by name and
-  cards by title. A project with no project-scope cards is **omitted** (no empty group).
-- **`scope`** is the same `{unrestricted, projects}` block `/api/portfolio` ships. **Scope-filtered FIRST:**
-  a global principle declared only in an out-of-scope project never reaches a scoped viewer (its presence
-  and source path would leak that project's existence) — existence-hiding, like the other routes.
-- **Honest extraction.** `source` is **caller-stamped** by the producer collector (the repo-relative doc),
-  never model-chosen, so `observed · <source>` is literally true. The `scope` enum is consumed by the
-  grouping and dropped from the wire card.
-- Source: `disciplines_projects` (enumerate projects that have pushed disciplines — NOT
-  `latest_report_per_project`, so a disciplines-only project is not missed) + `get_disciplines` per
-  in-scope project → `api.serialize_disciplines`.
-
-#### `POST /disciplines` (producer push — machine, not the SPA)
+### `POST /disciplines` (producer push — machine, not the SPA)
 
 A producer-side machine push (Bearer ingest token, like `POST /checklist` and `/ingest`) that sets a
 project's observed disciplines as **current state** (full-state upsert, no report). Body
@@ -357,7 +333,8 @@ must be strings (non-empty title) and `scope` one of `global | project`. Returns
 "disciplines": <count>}`. An empty list clears the project's prior set. The producer reads the project's
 own docs **unmodified** and reframes their stated principles via an **opt-in, cache-gated** LLM step
 (`orion disciplines-push`); the docs are redacted before the model and the output redacted again before
-the push. Stored in `relay_project_disciplines` (one row per project, replaced on each push).
+the push. Stored in `relay_project_disciplines` (one row per project, replaced on each push) and read back
+on `GET /api/projects/:name` as the `disciplines` field (the project page's "Working agreements" section).
 
 ### `GET /api/showcase`
 

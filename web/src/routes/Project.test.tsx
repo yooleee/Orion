@@ -3,7 +3,8 @@
 // -----------------------------------------------------------------------------
 // Responsible for: Pinning the C3 Inc 2 per-producer checklist section — one card per
 //                  contributor when there are two or more, and NO section for a single
-//                  producer (whose card would just duplicate the aggregate) or none.
+//                  producer (whose card would just duplicate the aggregate) or none — and
+//                  the Unit 5 "Working agreements" section (cards + freshness, absent when null).
 // Approach: mock the API client; provide the shell's outlet context (me) via a Route +
 //           Outlet wrapper (Project reads useOutletContext); assert with findByText/queryByText.
 // =============================================================================
@@ -13,7 +14,13 @@ import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { Project } from "./Project";
 import { getProject } from "../api/client";
-import type { ChecklistItem, Me, ProducerChecklist, ProjectDetail } from "../api/types";
+import type {
+  ChecklistItem,
+  Me,
+  ProducerChecklist,
+  ProjectDetail,
+  ProjectDisciplines,
+} from "../api/types";
 import type { ShellContext } from "../components/Shell";
 
 vi.mock("../api/client", async () => {
@@ -55,7 +62,10 @@ function producer(name: string, items: ChecklistItem[]): ProducerChecklist {
   };
 }
 
-function detail(producers: ProducerChecklist[]): ProjectDetail {
+function detail(
+  producers: ProducerChecklist[],
+  disciplines: ProjectDisciplines | null = null,
+): ProjectDetail {
   return {
     name: "demo",
     kind: "project",
@@ -66,6 +76,7 @@ function detail(producers: ProducerChecklist[]): ProjectDetail {
     producer_checklists: producers,
     reports: [],
     discussions: [],
+    disciplines,
   };
 }
 
@@ -116,5 +127,40 @@ describe("Project — per-producer checklists", () => {
 
     expect(await screen.findByRole("heading", { name: "demo" })).toBeInTheDocument();
     expect(screen.queryByText("By contributor")).toBeNull();
+  });
+});
+
+// Unit 5: the "Working agreements" section renders a project's discipline cards (all of
+// them, regardless of scope) plus a freshness stamp, and is absent when the project has
+// none — the null case a project that never pushed disciplines returns.
+describe("Project — Working agreements", () => {
+  it("renders the section with each card, its source footer, and the freshness date", async () => {
+    mockGet.mockResolvedValue(
+      detail([], {
+        updated_at: "2026-06-27T17:00:00+00:00",
+        cards: [
+          { title: "Secrets stay local", why: "Redacted before anything leaves.", source: "docs/security.md" },
+          { title: "Tests before merge", why: "Green suite gates the merge.", source: "docs/testing.md" },
+        ],
+      }),
+    );
+    renderProject();
+
+    expect(await screen.findByText("Working agreements")).toBeInTheDocument();
+    expect(screen.getByText("Secrets stay local")).toBeInTheDocument();
+    expect(screen.getByText("Tests before merge")).toBeInTheDocument();
+    // The per-card footer still names each card's own source doc.
+    expect(screen.getByText("observed · docs/security.md")).toBeInTheDocument();
+    // The section-level freshness stamp shows the push date (ME's tz is Los Angeles, so the
+    // 17:00 UTC push is still Jun 27 locally).
+    expect(screen.getByText(/updated Jun 27, 2026/)).toBeInTheDocument();
+  });
+
+  it("renders no section when the project has no disciplines (null)", async () => {
+    mockGet.mockResolvedValue(detail([], null));
+    renderProject();
+
+    expect(await screen.findByRole("heading", { name: "demo" })).toBeInTheDocument();
+    expect(screen.queryByText("Working agreements")).toBeNull();
   });
 });

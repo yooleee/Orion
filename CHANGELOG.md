@@ -14,6 +14,46 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Living-resume retirement — disciplines reframed as "Working agreements" (2026-07-13)
+
+Completes the living-resume retirement (Unit 5, one PR). The **Disciplines** feature is **kept** — source-backed
+project principles are durable context that helps a supervisor interpret progress — but its presentation moves
+from a standalone top-level tab (which read as a monitoring surface) to a **"Working agreements" section on each
+project page**, beside milestones/checklist/discussion. Internal names stay `disciplines`; only the user-facing
+label and placement change. Built off
+[`docs/living-resume-retirement-kickoff.md`](docs/living-resume-retirement-kickoff.md).
+
+### Added
+
+- **"Working agreements" on the project page.** A project's discipline cards now render at the top of the
+  project page's left column, showing **all** of that project's cards regardless of the model's global/project
+  scope, under an "Observed in your docs · updated `<date>`" freshness stamp (the relay's last-received time),
+  each card keeping its `observed · <source>` footer. Served by a new `disciplines` field on
+  `GET /api/projects/:name` (`{cards, updated_at}`, or `null` when a project has none — an empty/cleared set
+  also serializes to `null`, so the section is simply omitted). The card renderer was lifted to a shared
+  `DisciplineCard` component so the project page and the public demo share one renderer.
+
+### Changed
+
+- **The demo's Disciplines tab folds into the demo project page.** `/showcase/demo` loses its standalone
+  Disciplines tab (leaving a single overview surface, so the tab bar is gone); the sample project's principles
+  now show in its "Working agreements" section, like a real project.
+
+### Removed
+
+- **The standalone Disciplines surface, at parity.** Gone: the `/disciplines` SPA route + `Disciplines.tsx`,
+  the nav link, `getDisciplines`, the `DisciplineGroup`/`DisciplinesData` types, and the cross-project
+  `GET /api/disciplines` endpoint with its `serialize_disciplines` serializer + `disciplines_projects`/
+  `get_disciplines` readers (replaced by a single `project_disciplines` reader). **`POST /disciplines`, the
+  producer push, and the per-producer store are untouched** (KI-32's seam intact).
+
+### Fixed
+
+- **KI-24** (LLM-judged disciplines) shrinks: the **scope** arm is now cosmetic — the project page renders all
+  of a project's cards regardless of the model's global/project split, so an approximate split no longer gates
+  what is shown (the scope enum is dropped from the wire card). Selection/count and title-dedupe remain
+  model-judged. **KI-32** is unchanged (the section still reads the last-writer-wins aggregate row).
+
 ## Living-resume retirement — skills comb removed (2026-07-13)
 
 Retires the **skills comb** at parity across every surface (SPA → producer → relay → live tables). Through a

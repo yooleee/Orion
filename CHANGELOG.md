@@ -14,6 +14,44 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Living-resume retirement — skills comb removed (2026-07-13)
+
+Retires the **skills comb** at parity across every surface (SPA → producer → relay → live tables). Through a
+developer/PM lens the comb described the *developer*, not the *work's progress* — the one dashboard section a
+supervisor never acts on — and it carried the heaviest machinery in the app (a global two-pass Sonnet
+extraction, atomic batch reconciliation) plus five open KIs. A cross-model second opinion (Codex, GPT 5.6
+Sol, run from a clean worktree with no decision docs visible) independently corroborated the diagnosis. The
+sibling **Disciplines** feature is deliberately **kept** — it is durable project context that helps a
+supervisor interpret progress — and is reframed as a project-page "Working agreements" section in the next
+unit. Built strictly unit-by-unit off
+[`docs/living-resume-retirement-kickoff.md`](docs/living-resume-retirement-kickoff.md) (PRs #95–#97 + the
+drop-tool PR).
+
+### Removed
+
+- **The skills comb, at parity.** Gone from the SPA (`Skills` route, `skillsComb` lib, the nav link,
+  `getSkills`, the `Skill`/`SkillsData` types, the comb CSS, the demo's Skills tab), the producer
+  (`collectors/skills.py`, the `skills-push`/`skills-sync` commands, `push_skills`/`push_skills_batch`, the
+  `skills` config flag, the skills half of `extract.py`), and the relay (the `POST /skills` + `/skills-batch`
+  endpoints, `GET /api/skills`, `serialize_skills`, and both skills tables). A backup-first, idempotent
+  maintenance tool (`relay.drop_retired_tables`, a literal two-table allowlist) drops the live
+  `relay_project_skills` + `relay_producer_skills` tables — they are rebuildable projections, so there was
+  nothing to migrate, only to remove.
+- **Honesty notes.** C3 Inc 2.5 unit 1.4 (`relay_producer_skills`, per-producer skills storage, shipped
+  2026-07-12) is retired **essentially unused** — sunk cost, stated plainly. The comb is retired at the
+  **personal-resume framing**; a team-capability view (expertise location) may return at a later company-wide
+  stage as its own design. No code is kept for it — git history preserves the implementation, and KI-32 had
+  already concluded a per-producer merge needs a from-scratch canonicalization design. The public
+  `/showcase/demo` loses its Skills tab; the showcase landing + `GET /api/showcase` never carried skills.
+
+### Fixed
+
+- **KI-25** (skills comb omitted the project/tracker glyph) and **KI-27** (the `tasks` skill signal was
+  declared but never sourced) are **retired with the feature** — the surfaces they described no longer exist.
+  **KI-32** narrows to its disciplines-only remainder (the skills half is moot; `relay_producer_skills`
+  dropped). **KI-26**'s residual run-to-run name flicker — whose only real fix was a persistent-identity
+  "living skills" design — was a primary driver of the removal decision rather than a thing to build.
+
 ## C3 Increment 2.5 — per-producer consolidation (2026-07-09)
 
 Finishes the multi-producer **data** story Increment 2 started. Inc 2 made the produce/ingest layer

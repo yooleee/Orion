@@ -43,9 +43,6 @@ from orion.collectors.tasks import ChecklistItem, TasksError
 from orion.collectors.tasks import collect as collect_tasks
 from orion.collectors.tasks import snapshot as snapshot_tasks
 from orion.collectors.disciplines import snapshot as snapshot_disciplines
-from orion.collectors.skills import SkillProject
-from orion.collectors.skills import snapshot as snapshot_skills
-from orion.collectors.skills import sync as sync_skills
 from orion.collectors.tracker import TrackerError
 from orion.collectors.tracker import collect as collect_tracker
 from orion.collectors.tracker import snapshot as snapshot_tracker
@@ -73,21 +70,15 @@ from orion.delivery.relay import (
     push as relay_push,
     push_checklist,
     push_disciplines,
-    push_skills,
-    push_skills_batch,
     revoke_user as relay_revoke_user,
     rotate_key as relay_rotate_key,
 )
 from orion.delivery.slack import send as slack_send
 from orion.extract import (
-    SKILLS_EXTRACTION_MODEL,
     AnthropicDisciplineExtractor,
-    AnthropicSkillExtractor,
     Discipline,
     DisciplineExtractor,
     ExtractError,
-    Skill,
-    SkillExtractor,
 )
 from orion.hooks import SUPPORTED_HOOKS, build_hook_script, resolve_hooks_dir
 from orion.merge import merge_sections
@@ -298,35 +289,6 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         default=default_config,
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
-
-    skills_parser = subparsers.add_parser(
-        "skills-push",
-        help="DEPRECATED: per-project skills push (use skills-sync for the global comb).",
-    )
-    skills_parser.add_argument(
-        "project",
-        help="Project name as defined in orion.toml (must set `skills = true`).",
-    )
-    skills_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
-
-    skills_sync_parser = subparsers.add_parser(
-        "skills-sync",
-        help="Observe ALL skills-enabled projects together and push one global skills comb.",
-    )
-    skills_sync_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
-    skills_sync_parser.add_argument(
-        "--allow-empty",
-        action="store_true",
-        help="Permit a sync that clears every project's skills (the relay otherwise refuses).",
     )
 
     intake_parser = subparsers.add_parser(
@@ -942,10 +904,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "disciplines-push":
         return cmd_disciplines_push(args.project, Path(args.config))
 
-    if args.command == "skills-push":
-        return cmd_skills_push(args.project, Path(args.config))
-    if args.command == "skills-sync":
-        return cmd_skills_sync(Path(args.config), allow_empty=args.allow_empty)
     if args.command == "install-hook":
         return cmd_install_hook(
             args.project, Path(args.config), args.hook, args.print_only, args.force
@@ -1819,252 +1777,6 @@ def cmd_disciplines_push(project_name: str, config_path: Path) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     print(f"Pushed disciplines for {project.name!r} ({len(payload)} card(s)).")
-    return 0
-
-
-def _redacted_skills(
-    project: ProjectConfig,
-    extractor: SkillExtractor,
-    conn: sqlite3.Connection,
-) -> tuple[list[Skill], int]:
-    """Snapshot a project's skills and redact each card's text (the privacy net).
-
-    Args:
-        project: The project to read (its repo + discipline_docs are the evidence).
-        extractor: The configured SkillExtractor (called only on changed evidence).
-        conn: An open state connection, used for the extraction cache.
-
-    Returns:
-        A (items, hits) pair: the redacted Skill list (a card whose name is ENTIRELY a
-        secret — empty after redaction — is dropped to avoid a blank tooth), and the
-        count of secrets scrubbed across the cards.
-
-    Why:
-        Mirrors _redacted_disciplines: the dedicated skills push applies the SAME
-        redaction net to the observed text before it leaves the machine. The evidence
-        bundle was already redacted BEFORE the model (in the collector); this is the
-        second pass on the model's OUTPUT (defense in depth). The cache_get/cache_set
-        closures bind the collector's storage to this project's "skills" namespace.
-    """
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    raw = snapshot_skills(
-        project.repo_path,
-        project.discipline_docs,
-        extractor,
-        cache_get=lambda key: get_cache(conn, project.name, "skills", key),
-        cache_set=lambda key, content_hash, value: set_cache(
-            conn, project.name, "skills", key, content_hash, value, now
-        ),
-    )
-    return _redact_skills(raw)
-
-
-def _redact_skills(raw: Sequence[Skill]) -> tuple[list[Skill], int]:
-    """Apply the redaction net to extracted skill cards before they leave the machine.
-
-    Args:
-        raw: The Skills as extracted (the model's output).
-
-    Returns:
-        A (items, hits) pair: the redacted Skill list (a card whose name is ENTIRELY a
-        secret — empty after redaction — is dropped to avoid a blank tooth), and the count
-        of secrets scrubbed across the cards.
-
-    Why:
-        Both the per-project push (_redacted_skills) and the global sync (cmd_skills_sync)
-        apply the SAME second redaction pass to the model's OUTPUT (defense in depth, on
-        top of the collector's redaction of the model INPUT), so the net lives in one place
-        (DRY).
-    """
-    items: list[Skill] = []
-    hits = 0
-    for s in raw:
-        scrub_name = redact(s.name)
-        scrub_evidence = redact(s.evidence)
-        hits += scrub_name.hit_count + scrub_evidence.hit_count
-        safe_name = scrub_name.text.strip()
-        if not safe_name:
-            # The whole name was a secret — drop the card rather than show a blank tooth.
-            continue
-        # category is a short grouping label (not author free-text, but model output),
-        # run through redact as a net; its hits ride into the count harmlessly.
-        scrub_category = redact(s.category)
-        hits += scrub_category.hit_count
-        items.append(
-            Skill(
-                name=safe_name,
-                category=scrub_category.text.strip() or s.category.strip(),
-                evidence=scrub_evidence.text.strip(),
-                weight=s.weight,
-                signals=s.signals,
-            )
-        )
-    return items, hits
-
-
-def _skills_payload(
-    project: ProjectConfig,
-    extractor: SkillExtractor,
-    conn: sqlite3.Connection,
-) -> list[dict]:
-    """The project's redacted skills as the wire payload (list of dicts).
-
-    Why:
-        Mirrors _disciplines_payload: derive the exact {name, category, evidence,
-        weight, signals} shape push_skills sends, in one place, over _redacted_skills.
-    """
-    items, _hits = _redacted_skills(project, extractor, conn)
-    return [s.as_dict() for s in items]
-
-
-def cmd_skills_push(project_name: str, config_path: Path) -> int:
-    """Extract a project's skills from its observed activity and push them to the relay.
-
-    Args:
-        project_name: The project whose skills to push.
-        config_path: Path to orion.toml.
-
-    Returns:
-        Process exit code: 0 on success, 1 on a setup or delivery error.
-
-    Why:
-        The dedicated skills push (E2 Inc 4 slice 4c — the "skills comb"): it sets ONLY
-        the project's observed competencies on the dashboard — no report — exactly as
-        disciplines-push sets its principles. It gathers the project's own observed
-        evidence (git languages + recent commit subjects, plus any discipline_docs for
-        focus), reframes it into skill cards via the configured (opt-in) LLM extractor
-        (cache-gated, so the model runs only when the evidence changes), redacts, and
-        pushes. It requires `skills = true` and an enabled [relay]. An extraction failure
-        aborts WITHOUT pushing, so the project's prior relay skills are left intact rather
-        than clobbered by an empty full-state push.
-    """
-    try:
-        config = load_config(config_path)
-        load_secrets(config_path)
-        project = get_project(config, project_name)
-        relay_cfg = config.relay
-        if not relay_cfg.enabled:
-            raise ConfigError(
-                f"skills-push needs an enabled [relay] in {config_path} — it pushes the "
-                f"skills to the dashboard relay."
-            )
-        if not project.skills:
-            raise ConfigError(
-                f"Project {project.name!r} does not enable `skills`. Set `skills = true` "
-                f"to observe and push its skills comb."
-            )
-        token = get_required(relay_cfg.token_env_var)
-        # Building the extractor reads ANTHROPIC_API_KEY (anthropic provider) and rejects
-        # the local provider — both surface here as a clear setup error.
-        extractor = _build_skill_extractor(config.summarizer, get_required)
-    except (ConfigError, SecretsError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    conn = open_state(config.state_db)
-    try:
-        payload = _skills_payload(project, extractor, conn)
-        push_skills(relay_cfg.url, project.name, payload, token)
-    except ExtractError as exc:
-        # An extraction failure must NOT push an empty set (which would clear the stored
-        # skills). Abort with a clear error and leave the relay's prior skills intact.
-        print(f"Error: skill extraction failed, not pushing: {exc}", file=sys.stderr)
-        return 1
-    except DeliveryError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    print(f"Pushed skills for {project.name!r} ({len(payload)} skill(s)).")
-    return 0
-
-
-def cmd_skills_sync(config_path: Path, *, allow_empty: bool = False) -> int:
-    """Observe ALL skills-enabled projects together and push one global skill set.
-
-    Args:
-        config_path: Path to orion.toml.
-        allow_empty: Pass the relay's allow_empty flag, permitting a batch that clears
-            every project's skills (the relay otherwise refuses to wipe a populated comb).
-
-    Returns:
-        Process exit code: 0 on success, 1 on a setup, extraction, or delivery error.
-
-    Why:
-        The GLOBAL skills front door (the two-pass rework, superseding the per-project
-        `skills-push`). It gathers every `skills = true` project's observed evidence,
-        runs pass 1 (one deduplicated, resume-grade vocabulary across the whole portfolio)
-        and pass 2 (per-project attribution, blind to other projects), redacts the output,
-        and writes every project's slice in ONE atomic relay batch. A single global view is
-        what collapses the cross-project near-duplicates the per-project push could not.
-        Any extraction failure aborts the WHOLE run without pushing, so a partial or
-        truncated result never clobbers the relay's stored skills.
-    """
-    try:
-        config = load_config(config_path)
-        load_secrets(config_path)
-        relay_cfg = config.relay
-        if not relay_cfg.enabled:
-            raise ConfigError(
-                f"skills-sync needs an enabled [relay] in {config_path} — it pushes the "
-                f"skills comb to the dashboard relay."
-            )
-        projects = [p for p in config.projects.values() if p.skills]
-        if not projects:
-            raise ConfigError(
-                f"No project in {config_path} sets `skills = true`. Enable `skills` on at "
-                f"least one project to build the skills comb."
-            )
-        token = get_required(relay_cfg.token_env_var)
-        # Building the extractor reads ANTHROPIC_API_KEY and rejects the local provider —
-        # both surface here as a clear setup error.
-        extractor = _build_skill_extractor(config.summarizer, get_required)
-    except (ConfigError, SecretsError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    conn = open_state(config.state_db)
-    try:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        skill_projects = [
-            SkillProject(
-                name=p.name,
-                repo_path=p.repo_path,
-                doc_paths=tuple(p.discipline_docs),
-            )
-            for p in projects
-        ]
-        # The sync cache seam carries a cache_id (a project name, or the portfolio
-        # sentinel) so one sync can cache both the global vocabulary and each project's
-        # attribution under the shared "skills" namespace.
-        results = sync_skills(
-            skill_projects,
-            extractor,
-            cache_get=lambda cache_id, key: get_cache(conn, cache_id, "skills", key),
-            cache_set=lambda cache_id, key, content_hash, value: set_cache(
-                conn, cache_id, "skills", key, content_hash, value, now
-            ),
-        )
-        # Apply the redaction net to each project's cards (defense in depth on the model
-        # OUTPUT) and build the {project: [cards]} batch.
-        slices: dict[str, list] = {}
-        total = 0
-        for name, skills in results.items():
-            items, _hits = _redact_skills(skills)
-            slices[name] = [s.as_dict() for s in items]
-            total += len(items)
-        push_skills_batch(
-            relay_cfg.url, slices, token, allow_empty=allow_empty
-        )
-    except ExtractError as exc:
-        # A failure anywhere in the two passes must NOT push (which could clobber the
-        # stored skills with a partial set). Abort and leave the relay's prior skills intact.
-        print(f"Error: skill extraction failed, not pushing: {exc}", file=sys.stderr)
-        return 1
-    except DeliveryError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        conn.close()
-    print(f"Synced skills for {len(slices)} project(s) ({total} skill(s) total).")
     return 0
 
 
@@ -4212,43 +3924,6 @@ def _build_extractor(cfg: SummarizerConfig, secret_getter) -> DisciplineExtracto
     raise ConfigError(f"Unknown summarizer provider {cfg.provider!r}.")
 
 
-def _build_skill_extractor(cfg: SummarizerConfig, secret_getter) -> SkillExtractor:
-    """Construct the configured skills extractor backend (E2 Inc 4 slice 4c).
-
-    Args:
-        cfg: The global SummarizerConfig — the extractor reuses the same PROVIDER (and API
-            key) as the summarizer, so there is no separate config surface. It does NOT
-            reuse the summarizer's MODEL: skills extraction steps up to
-            SKILLS_EXTRACTION_MODEL (Sonnet) for this step only.
-        secret_getter: A callable mapping an env-var NAME to its value (the module's
-            get_required). Injected so secret READING stays in the CLI.
-
-    Returns:
-        A SkillExtractor for the configured provider.
-
-    Why:
-        Mirrors _build_extractor (disciplines): skills extraction needs reliable
-        structured (JSON) output, which local models do not consistently produce, so the
-        local backend is deferred with a clear, actionable error. Unlike disciplines, the
-        skills GLOBAL two-pass (portfolio-wide dedup + resume-grading + per-project
-        attribution) is harder than a per-project reframe, so it pins SKILLS_EXTRACTION_MODEL
-        (Sonnet) rather than the Haiku summarizer default — the project's "step to Sonnet
-        only for that step" rule.
-    """
-    if cfg.provider == "anthropic":
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=secret_getter("ANTHROPIC_API_KEY"))
-        return AnthropicSkillExtractor(client, SKILLS_EXTRACTION_MODEL)
-    if cfg.provider == "local":
-        raise ConfigError(
-            "The skills comb needs the Anthropic summarizer provider — structured "
-            "extraction is not supported on the local provider yet. Set [summarizer] "
-            "provider = \"anthropic\", or unset `skills` for this project."
-        )
-    raise ConfigError(f"Unknown summarizer provider {cfg.provider!r}.")
-
-
 def _summarizer_key_env(cfg: SummarizerConfig) -> str | None:
     """Return the .env variable name the configured summarizer needs, or None.
 
@@ -4360,7 +4035,7 @@ def _preview_and_confirm(
 # Make `python -m orion.cli ...` behave like the `orion` console script and `python -m orion`.
 # Without this guard that invocation merely IMPORTS the module and exits 0 WITHOUT running
 # main() — a silent no-op. That footgun masked a real failure once: `python -m orion.cli
-# skills-push <p>` returned exit 0 while pushing nothing, so the live dashboard stayed empty.
+# <cmd>` returned exit 0 while pushing nothing, so the live dashboard stayed empty.
 # Forwarding main()'s exit code here means every reasonable invocation actually runs.
 if __name__ == "__main__":
     sys.exit(main())

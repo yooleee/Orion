@@ -29,7 +29,6 @@ from relay.store import (
     effective_checklist,
     get,
     get_checklist,
-    get_disciplines,
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
@@ -43,6 +42,7 @@ from relay.store import (
     open_relay_store,
     producer_checklists_for,
     producer_disciplines_for,
+    project_disciplines,
     projects_for_user,
     record_admin_audit,
     record_observations,
@@ -1264,38 +1264,44 @@ def _card(title, why="why", scope="project", source="CLAUDE.md"):
     return {"title": title, "why": why, "scope": scope, "source": source}
 
 
-def test_get_disciplines_none_until_pushed(tmp_path):
-    """get_disciplines returns None for a project that never pushed any.
+def test_project_disciplines_none_until_pushed(tmp_path):
+    """project_disciplines returns None for a project that never pushed any.
 
-    Why this matters: None (no row) must be distinct from [] (pushed, none) so the
-    serializer can skip a never-pushed project rather than show an empty group.
+    Why this matters: None (no row) must be distinct from an empty card list (pushed,
+    none) so the serializer can skip a never-pushed project rather than show a section.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
-    assert get_disciplines(conn, "demo") is None
+    assert project_disciplines(conn, "demo") is None
 
 
-def test_upsert_disciplines_round_trips(tmp_path):
-    """An upserted discipline set is read back as the same list of dicts.
+def test_project_disciplines_round_trips_cards_and_updated_at(tmp_path):
+    """An upserted discipline set is read back as the same cards plus its freshness stamp.
 
-    Why this matters: the dashboard renders these cards verbatim, so the JSON must
-    round-trip faithfully (title/why/scope/source preserved).
+    Why this matters: the project page renders these cards verbatim and shows the push
+    date, so both the JSON (title/why/scope/source) and updated_at must round-trip.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     cards = [_card("Local-first", scope="global", source="CLAUDE.md")]
     upsert_disciplines(conn, "demo", cards, "2026-06-27T10:00:00+00:00")
-    assert get_disciplines(conn, "demo") == cards
+    assert project_disciplines(conn, "demo") == {
+        "cards": cards,
+        "updated_at": "2026-06-27T10:00:00+00:00",
+    }
 
 
 def test_upsert_disciplines_replaces_prior_set(tmp_path):
     """A second push REPLACES the project's disciplines (current state, not append).
 
     Why this matters: disciplines are current state like the checklist — re-extracting a
-    revised doc must overwrite the prior cards, not accumulate them.
+    revised doc must overwrite the prior cards, not accumulate them, and re-stamp updated_at.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     upsert_disciplines(conn, "demo", [_card("Old")], "2026-06-27T10:00:00+00:00")
     upsert_disciplines(conn, "demo", [_card("New")], "2026-06-27T11:00:00+00:00")
-    assert get_disciplines(conn, "demo") == [_card("New")]
+    assert project_disciplines(conn, "demo") == {
+        "cards": [_card("New")],
+        "updated_at": "2026-06-27T11:00:00+00:00",
+    }
 
 
 def test_upsert_empty_disciplines_clears_to_empty_list(tmp_path):
@@ -1307,7 +1313,7 @@ def test_upsert_empty_disciplines_clears_to_empty_list(tmp_path):
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     upsert_disciplines(conn, "demo", [_card("X")], "2026-06-27T10:00:00+00:00")
     upsert_disciplines(conn, "demo", [], "2026-06-27T11:00:00+00:00")
-    assert get_disciplines(conn, "demo") == []
+    assert project_disciplines(conn, "demo")["cards"] == []
 
 
 # --- relay_producer_disciplines: per-producer disciplines (C3 Inc 2.5, Unit 1.3) ----

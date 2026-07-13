@@ -316,7 +316,11 @@ Deferred).
 - **Detail:** The Disciplines collector (4b) reframes a doc's stated principles into cards via a Haiku
   step, which leaves three properties model-dependent rather than deterministic: (a) **scope** — each card
   is classified `global` vs `project` by the model, so the Global/project split is approximate (a
-  cross-cutting principle may land under a project, or vice versa); (b) **selection/count** — which
+  cross-cutting principle may land under a project, or vice versa). **As of Unit 5 (2026-07-13) this arm is
+  cosmetic:** the "Working agreements" section on the project page renders **all** of a project's cards
+  regardless of scope, so an approximate split no longer gates whether a card is shown (the scope enum is
+  dropped from the wire card entirely); only a possible future scope *badge* would surface it. (b)
+  **selection/count** — which
   principles are extracted (and how many) depends on the doc and the prompt, so it is not stable across
   model or prompt versions, and a dense doc can yield many cards (a visual spec yields styling trivia,
   which is why `discipline_docs` should point at instruction docs, not `design/`); (c) **global dedupe is
@@ -327,10 +331,11 @@ Deferred).
   invents, and the collector stamps `source`), but the *organization* of the cards is a model judgment.
   An outside reader sees a faithful-but-approximate grouping, not a guaranteed-canonical one.
 - **Severity:** low
-- **Status:** Open by-design for 4b (stage-appropriate). A later move to deterministic scope-by-source
-  (e.g. a global doc-set vs per-project docs) or a richer dedupe is additive — the wire/store/serializer
-  seam (`{title, why, scope, source}`) already supports it. Tracked here so the approximation reads as
-  intentional. Relates to [[KI-6]].
+- **Status:** Open by-design for 4b (stage-appropriate), **shrunk by Unit 5 (2026-07-13)** — the scope arm
+  (a) is now cosmetic (all cards render on the project page regardless of scope), leaving only
+  selection/count (b) and title-dedupe (c) as model-judged. A later move to deterministic scope-by-source
+  or a richer dedupe is additive — the store still keeps `scope` on `{title, why, scope, source}`, so a
+  future scope badge is additive. Tracked here so the approximation reads as intentional. Relates to [[KI-6]].
 
 ## KI-26 — Skills comb is per-project + component-flavored, and the comb visual is approximate (E2 Inc 4 4c)
 
@@ -380,9 +385,10 @@ Deferred).
   `producer_disciplines_for` read seam exists; only the merge/display is deferred.
 - **Severity:** low (provenance captured, roll-up fidelity only; per-producer rows are on the store).
 - **Status:** Open, deferred as **additive**. A later unit derives display from the `producer_disciplines_for`
-  seam. Note: Unit 5 of the living-resume retirement makes the aggregate's Global/project split cosmetic (it
-  renders all of a project's cards on the project page regardless of scope), which shrinks [[KI-24]] but does
-  not itself resolve the per-producer roll-up here.
+  seam. Note: Unit 5 of the living-resume retirement (shipped 2026-07-13) moved disciplines onto the project
+  page's "Working agreements" section and made the aggregate's Global/project split cosmetic (all of a
+  project's cards render regardless of scope), which shrank [[KI-24]]. It did **not** resolve the
+  per-producer roll-up here — the section still reads the last-writer-wins aggregate row.
 
 ## KI-33 — Per-producer slippage splits an item's history when a producer pushed anonymously then identified (C3 Inc 2.5)
 

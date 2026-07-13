@@ -17,11 +17,12 @@ import type { ShellContext } from "../components/Shell";
 import type { DiscussionItem } from "../api/types";
 import { ApiError, getProject } from "../api/client";
 import { useApiData } from "../lib/useApiData";
-import { deadlineLabel } from "../lib/time";
+import { deadlineLabel, formatDate } from "../lib/time";
 import { STATUS_STYLES } from "../theme/status";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { MilestoneCard } from "../components/MilestoneCard";
 import { ChecklistRow } from "../components/ChecklistRow";
+import { DisciplineCard } from "../components/DisciplineCard";
 import { ProgressBar } from "../components/ProgressBar";
 import { ReportTimeline } from "../components/ReportTimeline";
 import { DiscussionList } from "../components/DiscussionList";
@@ -86,6 +87,23 @@ export function Project() {
 
       <div className="detail-grid">
         <div className="detail-left">
+          {/* Unit 5: durable project principles observed in the docs, leading the left column
+              as context before the progress detail. Every card shows regardless of the
+              model's global/project scope; the per-card footer names the source doc. */}
+          {data.disciplines && data.disciplines.cards.length > 0 && (
+            <section>
+              <div className="eyebrow block-label">Working agreements</div>
+              <div className="disc-freshness">
+                Observed in your docs · updated {formatDate(data.disciplines.updated_at, tz)}
+              </div>
+              <div className="disc-grid">
+                {data.disciplines.cards.map((card, i) => (
+                  <DisciplineCard key={`${card.title}-${i}`} card={card} />
+                ))}
+              </div>
+            </section>
+          )}
+
           {data.milestones.length > 0 && (
             <section>
               <div className="eyebrow block-label">Forward look</div>

@@ -16,7 +16,6 @@ export interface NavActive {
   projects: boolean;
   todos: boolean;
   scheduling: boolean;
-  disciplines: boolean;
 }
 
 /**
@@ -38,6 +37,5 @@ export function navActive(path: string): NavActive {
       path === "/" || path.startsWith("/project/") || path.startsWith("/report/"),
     todos: path === "/todos" || path.startsWith("/tracker/"),
     scheduling: path === "/scheduling",
-    disciplines: path === "/disciplines",
   };
 }

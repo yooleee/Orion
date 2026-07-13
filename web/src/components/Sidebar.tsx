@@ -6,8 +6,8 @@
 //                  account card with logout.
 // Role in project: The persistent navigation half of the shell. Active highlighting is
 //                  route-driven (Projects is "active" across home/project/report). The
-//                  not-yet-built sections (Scheduling/Disciplines/Connections) appear as
-//                  NEW-pill stubs so the IA is visible before those slices land.
+//                  not-yet-built sections (Scheduling/Connections) appear as NEW-pill stubs
+//                  so the IA is visible before those slices land.
 // Security: project/tracker names come from the API (untrusted) and are rendered as
 //           React text children — inert by construction (never dangerouslySetInnerHTML).
 //           A guarantee-test pins this.
@@ -57,10 +57,6 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
         )}
         <Link to="/scheduling" className={`nav-item${active.scheduling ? " active" : ""}`}>
           <span>Scheduling</span>
-          <span className="pill-new">NEW</span>
-        </Link>
-        <Link to="/disciplines" className={`nav-item${active.disciplines ? " active" : ""}`}>
-          <span>Disciplines</span>
           <span className="pill-new">NEW</span>
         </Link>
       </div>

@@ -606,29 +606,35 @@ def upsert_disciplines(
     conn.commit()
 
 
-def get_disciplines(conn: sqlite3.Connection, project: str) -> list | None:
-    """Return a project's observed disciplines, or None if it has none.
+def project_disciplines(conn: sqlite3.Connection, project: str) -> dict | None:
+    """Return a project's observed disciplines with their freshness stamp, or None.
 
     Args:
         conn: An open relay-store connection.
         project: The project to fetch disciplines for.
 
     Returns:
-        The disciplines as a list of {"title", "why", "scope", "source"} dicts (decoded
-        from JSON), or None when the project has no disciplines row. None (no row) is
-        deliberately distinct from [] (a row with an empty list) so a caller can tell
-        "never pushed disciplines" from "pushed, but none observed".
+        {"cards": list, "updated_at": str} where `cards` is the stored disciplines (a list
+        of {"title", "why", "scope", "source"} dicts decoded from JSON) and `updated_at` is
+        the ISO 8601 UTC time the relay last received them. None when the project has no
+        disciplines row. None (no row) is deliberately distinct from a {"cards": []} result
+        (a row with an empty list) so a caller can tell "never pushed" from "pushed, none
+        observed".
 
     Why:
-        Backs the dashboard's Disciplines section. Decoding the JSON here (like
-        get_checklist) hands the serializer real dicts, not a raw string. Returning None
-        for a project that never pushed lets the serializer simply skip it.
+        Backs the project page's "Working agreements" section (Unit 5): the section shows a
+        project's discipline cards plus a "updated <date>" freshness line, so the reader
+        needs BOTH the cards and updated_at. Reading both columns in one query (rather than
+        a separate cards read + updated_at read) keeps it a single PK lookup. Decoding the
+        JSON here (like get_checklist) hands the serializer real dicts, not a raw string.
     """
     row = conn.execute(
-        "SELECT disciplines FROM relay_project_disciplines WHERE project = ?",
+        "SELECT disciplines, updated_at FROM relay_project_disciplines WHERE project = ?",
         (project,),
     ).fetchone()
-    return json.loads(row["disciplines"]) if row is not None else None
+    if row is None:
+        return None
+    return {"cards": json.loads(row["disciplines"]), "updated_at": row["updated_at"]}
 
 
 def upsert_producer_disciplines(
@@ -716,29 +722,6 @@ def producer_disciplines_for(conn: sqlite3.Connection, project: str) -> list[dic
         }
         for row in rows
     ]
-
-
-def disciplines_projects(conn: sqlite3.Connection) -> list[str]:
-    """Return the names of every project that has pushed disciplines, sorted.
-
-    Args:
-        conn: An open relay-store connection.
-
-    Returns:
-        A sorted list of project names that have a disciplines row. Empty when none.
-
-    Why:
-        The Disciplines section enumerates exactly the projects that have disciplines —
-        NOT latest_report_per_project, which only knows projects with a report or a live
-        checklist and would miss a disciplines-only project. A dedicated enumeration keeps
-        the section correct and independent of the report/checklist surfaces.
-    """
-    rows = conn.execute(
-        "SELECT project FROM relay_project_disciplines ORDER BY project"
-    ).fetchall()
-    return [row["project"] for row in rows]
-
-
 
 
 def set_project_kind(conn: sqlite3.Connection, project: str, kind: str) -> None:

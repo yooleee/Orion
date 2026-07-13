@@ -47,12 +47,10 @@ from .store import (
     add_discussion_item,
     add_user,
     delete_user,
-    disciplines_projects,
     discussion_items_for_project,
     effective_checklist,
     get,
     get_checklist,
-    get_disciplines,
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
@@ -65,6 +63,7 @@ from .store import (
     observed_history,
     open_relay_store,
     producer_checklists_for,
+    project_disciplines,
     projects_for_user,
     record_admin_audit,
     record_observations,
@@ -451,8 +450,9 @@ def _validate_disciplines_request(payload: object) -> str | None:
         The disciplines push is an untrusted inbound surface like /ingest and /checklist,
         so it validates shape BEFORE storing. `disciplines` is REQUIRED (the request exists
         to set it) and each card must carry a non-empty string `title`, string `why` and
-        `source`, and a known `scope` — the exact shape serialize_disciplines reads. An
-        empty list is valid (it legitimately clears the project's prior set).
+        `source`, and a known `scope` — the {title, why, scope, source} card shape the store
+        keeps and the project page's "Working agreements" section renders. An empty list is
+        valid (it legitimately clears the project's prior set).
     """
     if not isinstance(payload, dict):
         return "payload must be a JSON object"
@@ -638,7 +638,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 "/api/me",
                 "/api/portfolio",
                 "/api/scheduling",
-                "/api/disciplines",
                 "/api/showcase",
             )
             or path.startswith("/api/projects/")
@@ -2070,6 +2069,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         observations=observed_history(conn, name),
                         producer_checklists=producer_checklists_for(conn, name),
                         discussions=discussion_items_for_project(conn, name),
+                        disciplines=project_disciplines(conn, name),
                         today=today,
                     ),
                 )
@@ -2111,23 +2111,6 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     for r in rows
                 ]
                 self._send_json(200, api.serialize_scheduling(projects, today))
-                return
-
-            if path == "/api/disciplines":
-                # Observed-principles view: enumerate exactly the projects that have pushed
-                # disciplines (NOT latest_report_per_project, which would miss a
-                # disciplines-only project), SCOPE-FILTER FIRST, then fetch each in-scope
-                # project's stored set. Filtering before the merge is what stops a global
-                # principle declared only in an out-of-scope project from leaking to a scoped
-                # viewer (existence-hiding, like the other routes).
-                names = disciplines_projects(conn)
-                if allowed is not None:
-                    names = [n for n in names if n in allowed]
-                projects = [
-                    {"name": name, "disciplines": get_disciplines(conn, name)}
-                    for name in names
-                ]
-                self._send_json(200, api.serialize_disciplines(projects, allowed))
                 return
 
             # No SPA route matched (the do_GET prefix check is broader than the exact set).

@@ -4,8 +4,8 @@
 // Responsible for: Pinning the public demo walkthrough's two load-bearing properties —
 //                  (1) it renders the fabricated sample project entirely from fixtures and
 //                  makes NO network call (the security guarantee: no backend access, so no
-//                  real data can leak), and (2) tab + report navigation stays inside the
-//                  demo (never enters an authed route) and the surface is read-only.
+//                  real data can leak), and (2) report navigation stays inside the demo
+//                  (never enters an authed route) and the surface is read-only.
 // Approach: replace globalThis.fetch with a spy and assert it is never called across a
 //           full click-through; render under ThemeProvider + MemoryRouter (the top bar's
 //           theme switcher + "← Showcase" link need both).
@@ -48,6 +48,11 @@ describe("ShowcaseDemo — fabricated, read-only, no network", () => {
     expect(screen.getByRole("heading", { name: "sample-app", level: 1 })).toBeInTheDocument();
     expect(screen.getByText("Google OAuth login")).toBeInTheDocument();
 
+    // The "Working agreements" section (Unit 5) now lives on the overview itself — its cards
+    // render straight from the fixtures, no separate tab.
+    expect(screen.getByText("Working agreements")).toBeInTheDocument();
+    expect(screen.getByText("Small, reviewable changes")).toBeInTheDocument();
+
     // The discussion thread shows fabricated items but NO composer (read-only for a guest).
     expect(
       screen.getByText("How's the OAuth piece coming? Anything blocking the launch milestone?"),
@@ -59,16 +64,16 @@ describe("ShowcaseDemo — fabricated, read-only, no network", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("navigates tabs and into a report without leaving the demo or hitting the network", () => {
+  it("navigates into a report and back without leaving the demo or hitting the network", () => {
     renderDemo();
 
-    fireEvent.click(screen.getByRole("button", { name: "Disciplines" }));
-    expect(screen.getByText("Small, reviewable changes")).toBeInTheDocument();
-
-    // Back to Overview, then open the newest report and confirm its detail renders.
-    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    // Open the newest report and confirm its detail renders.
     fireEvent.click(screen.getByText("OAuth underway; search shipped"));
     expect(screen.getByText(/Progress report #3/)).toBeInTheDocument();
+
+    // Back to the overview restores the project body.
+    fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+    expect(screen.getByRole("heading", { name: "sample-app", level: 1 })).toBeInTheDocument();
 
     expect(fetchMock).not.toHaveBeenCalled();
   });

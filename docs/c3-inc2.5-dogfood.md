@@ -84,7 +84,7 @@ print("per-producer tables:", sorted(t))
 PY
 ```
 
-Expect `['relay_producer_checklists', 'relay_producer_disciplines', 'relay_producer_skills']`. Also skim `fly logs -a project-orion` around the restart. There should be no "no such column" or ALTER error, because there is no ALTER.
+Expect `['relay_producer_checklists', 'relay_producer_disciplines', 'relay_producer_skills']` **at the time of this dogfood (2026-07-12)**. **Since 2026-07-13** the skills comb was retired and `relay_producer_skills` was dropped, so a run today expects only `['relay_producer_checklists', 'relay_producer_disciplines']` (see the banner at the top of this doc). Also skim `fly logs -a project-orion` around the restart. There should be no "no such column" or ALTER error, because there is no ALTER.
 
 ## Step 2 — effective checklist (1.1), dashboard-visible
 

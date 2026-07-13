@@ -159,7 +159,7 @@ elsewhere can still provision.
 
 ## The push (ingest) path: producer identity and the legacy cutover
 
-The machine ingest endpoints (report push, checklist/skills/disciplines push, the CLI
+The machine ingest endpoints (report push, checklist/disciplines push, the CLI
 discussion pull/reply) authenticate with a **Bearer** token, not a login cookie. Two kinds of
 credential are accepted:
 

@@ -5,7 +5,7 @@
 //                  Showcase landing. A guest clicks the demo card and lands here, where
 //                  they can browse a fabricated project the way a real one looks in Orion:
 //                  Overview (stats, milestones, checklist, reports, discussion), each
-//                  report in full, plus the Disciplines and Skills views.
+//                  report in full, plus the Disciplines view.
 // Role in project: The drill-down half of the public Showcase. Renders ENTIRELY from
 //                  web/src/demo/demoData.ts fixtures using the real dashboard components.
 //                  It makes NO API calls and all navigation is internal state, so it never
@@ -19,7 +19,6 @@ import { Link } from "react-router-dom";
 import {
   DEMO_DISCIPLINES,
   DEMO_PROJECT,
-  DEMO_SKILLS,
   demoReportById,
 } from "../demo/demoData";
 import { deadlineLabel, relativeTime } from "../lib/time";
@@ -31,12 +30,11 @@ import { ReportBody } from "../components/ReportBody";
 import { ContextRail } from "../components/ContextRail";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { DisciplinesView } from "./Disciplines";
-import { SkillsView } from "./Skills";
 
 // A fixed display timezone for the demo's relative-date labels (no logged-in user here).
 const DEMO_TZ = "UTC";
 
-type DemoTab = "overview" | "disciplines" | "skills";
+type DemoTab = "overview" | "disciplines";
 
 /** The Overview body: header stats + forward-look milestones + checklist + reports +
  *  the (read-only) discussion thread — the same composition as a real project page,
@@ -205,7 +203,6 @@ export function ShowcaseDemo() {
   const tabs: Array<{ key: DemoTab; label: string }> = [
     { key: "overview", label: "Overview" },
     { key: "disciplines", label: "Disciplines" },
-    { key: "skills", label: "Skills" },
   ];
 
   return (
@@ -258,7 +255,6 @@ export function ShowcaseDemo() {
             <DemoOverview onOpenReport={(id) => setReportId(id)} />
           ))}
         {tab === "disciplines" && <DisciplinesView data={DEMO_DISCIPLINES} />}
-        {tab === "skills" && <SkillsView data={DEMO_SKILLS} />}
       </main>
     </div>
   );

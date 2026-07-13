@@ -378,7 +378,7 @@ h3 {
   text-align: center;
   line-height: 1.5;
 }
-/* An inline config token in running prose (e.g. `skills = true`) — same size as the
+/* An inline config token in running prose (e.g. `checklist = true`) — same size as the
    surrounding text (no oversized browser-default <code>), just the mono face. */
 .mono-inline {
   font-family: var(--font-mono);
@@ -1569,7 +1569,7 @@ h3 {
   margin: 0 0 18px;
 }
 
-/* The demo's section tabs (Overview / Disciplines / Skills). */
+/* The demo's section tabs (Overview / Disciplines). */
 .demo-tabs {
   display: flex;
   gap: 6px;
@@ -1868,145 +1868,6 @@ h3 {
 
 @media (max-width: 768px) {
   .disc-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* --- Skills comb (E2 Inc 4 slice 4c; 4c-rework CP2: true comb-shaped-skills form) ---
-   The Comb Method form: a horizontal SPINE (the breadth bar across the top, your broad
-   knowledge spanning areas) with TEETH HANGING DOWN from it, each tooth's LENGTH encoding
-   that skill's derived depth. Uneven lengths are the honest "broken comb" — depth varies.
-   Per category: a labelled segment of teeth descending from the spine, then a grid of
-   evidence cards. Tooth lengths are set inline from the depth; the accent fill + spine
-   re-theme via tokens, so all three themes work from one rule. */
-.skill-section {
-  margin-top: 30px;
-}
-
-/* The comb BAND: one horizontal row of category segments, so the whole thing reads as a
-   single segmented comb (one breadth spine with teeth hanging down) rather than isolated
-   per-category charts. Segments align at the TOP (flex-start) so their spines form one
-   continuous top line; many categories wrap to new rows, each row carrying the spine. */
-.comb-band {
-  display: flex;
-  flex-wrap: wrap; /* many categories wrap to new rows so all stay visible (not one scroll) */
-  align-items: flex-start;
-  column-gap: 30px; /* a wide gap visually separates one category's teeth from the next */
-  row-gap: 30px;
-  margin: 8px 0 36px;
-  padding: 20px 20px 22px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow-x: auto;
-}
-/* One category's teeth + its caption. The caption sits ABOVE the spine (a label over that
-   stretch of the breadth bar); the teeth hang down from the spine below it. */
-.comb-cluster {
-  display: flex;
-  flex-direction: column;
-  flex: 0 0 auto;
-}
-.comb-cluster-label {
-  margin-bottom: 9px;
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--tfaint);
-}
-
-/* The comb: each column is one skill — a fixed-height track holding a TOP-anchored bar
-   that hangs down from the spine, with the skill name beneath. The TOP border is this
-   segment's stretch of the spine (the breadth bar the teeth descend from). */
-.comb {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  padding-top: 0;
-  border-top: 2px solid var(--accent);
-}
-.comb-col {
-  flex: 0 0 auto;
-  width: 66px; /* fixed tooth column; narrow enough that a wide category fits a row */
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-/* Fixed-height track so every tooth hangs from the same spine line regardless of its
-   length; the bar is TOP-anchored and its length comes from the depth (inline style). */
-.comb-bar-track {
-  height: 132px;
-  display: flex;
-  align-items: flex-start;
-  width: 100%;
-  justify-content: center;
-}
-.comb-bar {
-  width: 30px;
-  max-width: 70%;
-  background: var(--accent);
-  /* Rounded at the hanging (bottom) end; the top meets the spine flush. */
-  border-radius: 0 0 6px 6px;
-  transition: background 0.25s;
-}
-.comb-name {
-  margin-top: 9px;
-  font-size: 11px;
-  line-height: 1.3;
-  text-align: center;
-  color: var(--tmid);
-}
-
-/* Evidence cards: the honest provenance behind each tooth — same card shape as the
-   disciplines cards but its own classes so the comb section stays self-contained. */
-.skill-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-.skill-card {
-  display: flex;
-  flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  padding: 18px 20px;
-}
-.skill-card-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--thi);
-  margin-bottom: 9px;
-}
-.skill-card-why {
-  font-size: 13.5px;
-  line-height: 1.5;
-  color: var(--tlow);
-  margin: 0 0 16px;
-}
-/* Footer pinned to the card bottom so cards of different lengths align their
-   "observed · <projects>" line on a shared top border. The signals sit to the right. */
-.skill-card-foot {
-  margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-  color: var(--tfaint);
-}
-.skill-card-signals {
-  color: var(--accent);
-  white-space: nowrap;
-}
-
-@media (max-width: 768px) {
-  .skill-grid {
     grid-template-columns: 1fr;
   }
 }

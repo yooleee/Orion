@@ -63,10 +63,6 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
           <span>Disciplines</span>
           <span className="pill-new">NEW</span>
         </Link>
-        <Link to="/skills" className={`nav-item${active.skills ? " active" : ""}`}>
-          <span>Skills</span>
-          <span className="pill-new">NEW</span>
-        </Link>
       </div>
 
       {/* PROJECTS list */}

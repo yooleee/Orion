@@ -152,14 +152,6 @@ collectors = ["git"]
 #   collectors = ["git", "disciplines"]
 # discipline_docs = ["CLAUDE.md", "docs/decisions.md"]
 
-# The "skills comb" (E2 Inc 4 4c) surfaces the kinds of work and skills your projects
-# DEMONSTRATE, read from real activity (git languages + commit subjects, plus any
-# discipline_docs for topical focus) and reframed into a comb by a cache-gated Haiku step —
-# a "partial living resume" that is observed, never authored. A boolean opt-in (like
-# `checklist`), so no new file to name; the relay merges each project's skills across the
-# portfolio. Push with `orion skills-push <project>`. Uncomment to enable:
-# skills = true
-
 # Named recipients of this project's reports. Listed explicitly (not an implicit
 # "me") so a shared multi-supervisor service can be added later without a rewrite.
 # A recipient names a DESTINATION (a channel + its webhook): several people watching

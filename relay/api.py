@@ -651,12 +651,20 @@ def serialize_project(
     # here from the same checklist + slipping set.
     milestone_rows = []
     for m in milestones(checklist, today, resolved_due_soon_days):
-        group_slipping = any(
-            _item_key(item) in slipping
+        # This group's OPEN items that are slipping (a deadline that moved later, or one
+        # lingering open past due). Counted once: the boolean `slipping` is just "any of
+        # these", and Unit 5 surfaces the exact count beside it. Deriving both from one
+        # comprehension keeps them from ever disagreeing (DRY).
+        group_slipping_count = sum(
+            1
             for item in items
-            if item.get("group") == m["group"] and not item.get("done")
+            if item.get("group") == m["group"]
+            and not item.get("done")
+            and _item_key(item) in slipping
         )
-        milestone_rows.append({**m, "slipping": group_slipping})
+        milestone_rows.append(
+            {**m, "slipping": group_slipping_count > 0, "slipping_count": group_slipping_count}
+        )
 
     checklist_rows = _checklist_rows(items, today, slipping, resolved_due_soon_days)
 

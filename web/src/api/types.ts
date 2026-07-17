@@ -136,6 +136,9 @@ export interface Milestone {
   at_risk: number;
   nearest_due: string | null;
   slipping: boolean;
+  // How many of this group's OPEN items are slipping (E1.2 Unit 5). The card shows the
+  // count only when >1 ("2 slipped"); `slipping` alone still drives the 0/1 rendering.
+  slipping_count: number;
 }
 
 export interface ChecklistItem {

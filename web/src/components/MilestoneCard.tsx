@@ -20,7 +20,15 @@ import { deadlineLabel, deadlineState } from "../lib/time";
  */
 function milestoneSignals(m: Milestone, tz: string): Array<{ state: Status; label: string }> {
   const sigs: Array<{ state: Status; label: string }> = [];
-  if (m.slipping) sigs.push({ state: "slipping", label: "slipped" });
+  // E1.2 Unit 5: surface the count only when more than one item slips ("2 slipped"). A
+  // single slip stays the bare "slipped" label (and zero shows no slip signal at all), so
+  // the common cases render exactly as before and only a multi-slip group gains the number.
+  if (m.slipping) {
+    sigs.push({
+      state: "slipping",
+      label: m.slipping_count > 1 ? `${m.slipping_count} slipped` : "slipped",
+    });
+  }
   if (m.at_risk > 0) sigs.push({ state: "at_risk", label: "at risk" });
   if (sigs.length === 0) {
     if (m.nearest_due) {

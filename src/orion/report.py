@@ -48,6 +48,11 @@ class ReportBlob:
             OPTIONAL: None means "omit from the wire entirely" (a producer without the
             feature), while an empty tuple means "checklist enabled, but no items" (a
             meaningful state that should clear any stale live checklist on the relay).
+        due_soon_days: The project's configured "due soon" window in days, or None to
+            omit it (the relay then applies its 7-day default). Rides the ingest blob
+            so the relay can flag checklist items as due-soon per this project's
+            preference; None ⇒ the key is omitted from the wire (back-compatible),
+            exactly like `checklist`.
 
     Why:
         Bundling everything needed to send AND to advance state into one frozen
@@ -70,6 +75,9 @@ class ReportBlob:
     # blob stays valid; None vs () carries the "feature off" vs "enabled but empty"
     # distinction documented above.
     checklist: tuple[ChecklistItem, ...] | None = None
+    # Optional per-project "due soon" window (days). Defaulted None so existing callers
+    # and stored blobs stay valid; None ⇒ omitted from the wire (relay uses its default).
+    due_soon_days: int | None = None
 
 
 def build_report(
@@ -79,6 +87,7 @@ def build_report(
     generated_at: str,
     sections: tuple[tuple[str, str], ...] = (),
     checklist: tuple[ChecklistItem, ...] | None = None,
+    due_soon_days: int | None = None,
 ) -> ReportBlob:
     """Assemble a ReportBlob from a project and a finished body.
 
@@ -93,6 +102,8 @@ def build_report(
         checklist: The project's current checklist (already redacted), or None when
             the project has no checklist enabled. Defaulted so existing call sites
             are unchanged.
+        due_soon_days: The project's configured "due soon" window in days, or None to
+            omit it (relay default). Defaulted so existing call sites are unchanged.
 
     Returns:
         A populated ReportBlob.
@@ -115,6 +126,7 @@ def build_report(
         orion_version=__version__,
         sections=sections,
         checklist=checklist,
+        due_soon_days=due_soon_days,
     )
 
 
@@ -162,6 +174,11 @@ def serialize_blob(blob: ReportBlob) -> str:
     # object (see serialize_checklist_item) so the done-state reads explicitly.
     if blob.checklist is not None:
         payload["checklist"] = [serialize_checklist_item(item) for item in blob.checklist]
+    # Optional field: emit `due_soon_days` ONLY when the producer configured one. None ⇒
+    # omit the key entirely, so the wire bytes are unchanged for a project that doesn't
+    # set it and a receiver predating the field is unaffected (same rule as `checklist`).
+    if blob.due_soon_days is not None:
+        payload["due_soon_days"] = blob.due_soon_days
     # sort_keys → byte-stable output for a given blob; the seam needs a predictable
     # wire format more than it needs human-friendly field order.
     return json.dumps(payload, sort_keys=True)

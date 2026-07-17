@@ -620,6 +620,49 @@ def test_relay_push_fires_once_on_success(tmp_path, env_and_mocks):
     assert '"demo"' in blob_json  # the serialized portable blob, not a chat payload
 
 
+def test_relay_push_blob_carries_configured_due_soon_days(tmp_path, env_and_mocks):
+    """A report run threads the project's `due_soon_days` into the pushed ingest blob.
+
+    Why this matters: this is carrier 1 of 2 for the due-soon window (the ingest blob;
+    the /checklist push is carrier 2). It pins that `_run_report` builds the blob with
+    the config value, so the relay receives it on the report path too. A project without
+    the setting omits the key (wire stays back-compatible).
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    repo = _make_repo(tmp_path)
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git"]
+        due_soon_days = 21
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+    blob_json, _url, _token = pushes[0]
+    assert json.loads(blob_json)["due_soon_days"] == 21
+
+
 def test_relay_disabled_is_a_no_op(tmp_path, env_and_mocks):
     """With the relay disabled (no table), no push happens and the report still sends.
 
@@ -737,19 +780,20 @@ def test_relay_push_carries_redacted_live_checklist(tmp_path, env_and_mocks):
 
 
 def _capture_checklist_pushes(mp):
-    """Monkeypatch cli.push_checklist to record (url, project, checklist, token, kind) calls.
+    """Record (url, project, checklist, token, kind, due_soon_days) push_checklist calls.
 
     Why: the command/watch loop call push_checklist as their only outbound effect; an
-    in-memory recorder lets each test assert on the exact payload without any network. `kind`
-    (E2 Inc 4) is keyword-only on push_checklist and rides every call, so the recorder
-    captures it too — letting a test assert the project/tracker flag propagates to the wire.
+    in-memory recorder lets each test assert on the exact payload without any network. Both
+    keyword-only extras ride every call, so the recorder captures them too: `kind` (E2 Inc
+    4, project/tracker) and `due_soon_days` (E1.2, the per-project due-soon window, None
+    when unset) — letting a test assert each propagates to the wire.
     """
     pushes = []
     mp.setattr(
         cli,
         "push_checklist",
-        lambda url, project, checklist, token, *, kind="project": pushes.append(
-            (url, project, checklist, token, kind)
+        lambda url, project, checklist, token, *, kind="project", due_soon_days=None: pushes.append(
+            (url, project, checklist, token, kind, due_soon_days)
         ),
     )
     return pushes
@@ -810,17 +854,63 @@ def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_moc
     assert code == 0
     assert len(pushes) == 1
 
-    url, project, checklist, token, kind = pushes[0]
+    url, project, checklist, token, kind, due_soon_days = pushes[0]
     assert url == "https://relay.test/ingest"  # the client derives /checklist from it
     assert project == "demo"
     assert token == "relay-secret"
     assert kind == "project"  # default kind rides the push
+    assert due_soon_days is None  # not configured → omitted from the push
     assert checklist[0] == {"text": "Wire the relay", "done": True}
     assert checklist[1] == {"text": "Render the dashboard", "done": False}
     # The secret-bearing item is present (open) but scrubbed — the privacy net holds on
     # this lane too (shared _redacted_checklist).
     assert checklist[2]["done"] is False
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
+
+
+def test_checklist_push_carries_configured_due_soon_days(tmp_path, env_and_mocks):
+    """A project's `due_soon_days` rides the /checklist push (E1.2 Unit 3, carrier 2).
+
+    Why this matters: the due-soon window reaches the relay on BOTH checklist carriers;
+    this pins the dedicated-push carrier. A project that sets `due_soon_days = 14` must
+    pass 14 through push_checklist (the relay then flags due-soon items at 14 days), while
+    the default-None case is covered by test_checklist_push_one_shot.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    # A checklist project that also sets the due-soon window.
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tasks"]
+        tasks_file = "TODO.md"
+        checklist = true
+        due_soon_days = 14
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+    _url, _project, _checklist, _token, _kind, due_soon_days = pushes[0]
+    assert due_soon_days == 14  # the configured window rides the push
 
 
 def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
@@ -874,7 +964,7 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
     assert code == 0
     assert len(pushes) == 1
 
-    _url, project, checklist, _token, _kind = pushes[0]
+    _url, project, checklist, _token, _kind, _due_soon = pushes[0]
     assert project == "apps"
     # The application item carries its status in the text and is done (Submitted); it also
     # emits the bare title as the stable forward-store `key` (Unit 3), the "Applications"
@@ -937,7 +1027,7 @@ def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_an
     code = cli.main(["checklist-push", "apps", "--config", str(toml)])
     assert code == 0
 
-    _url, _project, checklist, _token, _kind = pushes[0]
+    _url, _project, checklist, _token, _kind, _due_soon = pushes[0]
     assert checklist[0] == {
         "text": "Claude Corps Fellow (job) - In progress",
         "done": False,

@@ -1617,6 +1617,78 @@ def test_invalid_cadence_raises(tmp_path):
         load_config(path)
 
 
+# --- due_soon_days: dashboard "due soon" window (E1.2 Unit 3) ---------------------
+
+
+def _due_soon_config(tmp_path, line):
+    """Write a minimal config whose [projects.demo] carries `line` (or nothing).
+
+    Args:
+        tmp_path: pytest temp dir.
+        line: a raw TOML line to place under the project (e.g. 'due_soon_days = 14'),
+            or "" to omit it.
+
+    Why:
+        The due_soon_days cases vary only one line; a tiny local writer keeps each test
+        to that line instead of restating the whole stanza (DRY).
+    """
+    return _write(
+        tmp_path,
+        f"""
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        {line}
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+
+
+def test_due_soon_days_defaults_to_none(tmp_path):
+    """An omitted `due_soon_days` resolves to None — the relay applies its default.
+
+    Why this matters: the knob is opt-in and omit-when-unset, so an existing config must
+    load unchanged and send nothing extra on the wire.
+    """
+    assert get_project(load_config(_due_soon_config(tmp_path, "")), "demo").due_soon_days is None
+
+
+def test_due_soon_days_valid_loads(tmp_path):
+    """A valid in-range int loads onto ProjectConfig.due_soon_days.
+
+    Why this matters: this is the value the producer rides to the relay on both checklist
+    carriers, so an in-range int must survive load intact.
+    """
+    cfg = _due_soon_config(tmp_path, "due_soon_days = 14")
+    assert get_project(load_config(cfg), "demo").due_soon_days == 14
+
+
+def test_due_soon_days_out_of_range_raises(tmp_path):
+    """0 and 366 are both rejected as out of the 1..365 range.
+
+    Why this matters: a nonsensical window (0 days, or a >1-year typo like 3650) would
+    silently distort the dashboard's at-risk view; catching it at load points at the key.
+    """
+    for bad in ("due_soon_days = 0", "due_soon_days = 366"):
+        with pytest.raises(ConfigError, match="out-of-range due_soon_days"):
+            load_config(_due_soon_config(tmp_path, bad))
+
+
+def test_due_soon_days_non_int_raises(tmp_path):
+    """A non-int (string) or a bool is rejected, not silently coerced.
+
+    Why this matters: TOML `due_soon_days = "14"` or `= true` must fail clearly. bool is
+    the subtle case — it is a subclass of int in Python, so `true` would otherwise slip
+    through as 1; the validator rejects it first (the same strictness as auto_send).
+    """
+    for bad in ('due_soon_days = "14"', "due_soon_days = true"):
+        with pytest.raises(ConfigError, match="invalid due_soon_days"):
+            load_config(_due_soon_config(tmp_path, bad))
+
+
 # --- disciplines collector: discipline_docs parsing (E2 Inc 4 slice 4b) ----------
 
 

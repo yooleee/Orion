@@ -14,6 +14,57 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Forward look & scheduling — cadence, `--due`, per-project due-soon window, milestone slip count (E1.2, 2026-07-17)
+
+The first **E1.2** slice: a set of forward-looking, real-use features built strictly unit-by-unit (five
+units, one PR each), off [`docs/forward-look-scheduling-kickoff.md`](docs/forward-look-scheduling-kickoff.md).
+It is the **stateless subset KI-13 carved out of the deferred B5 scheduling *layer*** — enough to make
+unattended, mixed-cadence use practical without an always-on Orion process (the *layer* itself stays
+gate-deferred). Before merge the whole slice went through a **cross-model second-opinion review (Codex)**,
+which caught a stale-state bug and a semantic coupling among other things; all four findings were fixed
+(see **Fixed**).
+
+### Added
+
+- **Per-project `cadence` (`"daily"` / `"weekly"`).** An optional config field validated like `share_level`;
+  an absent key means "always due", so existing configs are unchanged. Purely local — it is never sent to
+  the relay.
+- **`report --all --due`.** Reports only the projects **due** under their cadence, skipping any reported
+  within the interval, so one daily scheduler entry (`report --all --due --yes`) serves projects on mixed
+  cadences. Due-ness reads the existing `report_history` (`MAX(sent_at)`) — **no new schema**. Skipped
+  projects are counted in the `--all` tally (the numbers reconcile) and the run still exits 0; the filter
+  runs **before, and never bypasses,** the preview/auto_send gate. Closes **KI-13**.
+- **Per-project `due_soon_days` (int, 1–365).** How many days ahead a checklist item's due date is flagged
+  "due soon" on the dashboard. It rides **both** checklist carriers (the ingest blob and the `/checklist`
+  push), omitted from the wire when unset, and is persisted relay-side in `relay_project_meta` (an additive
+  column beside `kind`). The relay classifies each project's checklist items against its own window, falling
+  back to the 7-day default when unset.
+- **Milestone slipping count.** The relay's project serializer carries `slipping_count` beside the existing
+  boolean; a milestone card shows "N slipped" when **more than one** open item slips (a single slip keeps the
+  bare "slipped", zero shows no slip signal).
+
+### Changed
+
+- **`docs/scheduling.md`** gains a "mixed cadences from a single entry" section documenting the `--due`
+  workflow and the interval semantics.
+
+### Fixed
+
+- **`due_soon_days` set→unset now restores the default (review finding ①).** Once set, removing the knob from
+  config left a stale value stuck on the relay (contradicting "omit ⇒ default 7"). The `/checklist` push is
+  now the **authoritative carrier** — it clears the stored horizon when absent — while the `/ingest` blob
+  stays **set-only**, so an `intake` push (which legitimately omits checklist config) never clobbers it.
+  Recorded as **KI-35** (last-writer-wins / authoritative-carrier caveat).
+- **Cadence intervals tightened (review finding ②).** The slack was too generous: `weekly = 6d` made a daily
+  scheduler deliver a "weekly" project every six days. Now `daily 23h` / `weekly 6d23h` — ~1h of DST + jitter
+  tolerance without shortening the cadence, so a weekly project sends on day 7, not day 6.
+- **`_is_due` hardened against bad timestamps (review finding ③).** A malformed or future `report_history`
+  timestamp now makes a project "due" (the conservative choice) instead of crashing the `--all` run or
+  silently suppressing the project.
+- **The Scheduling timeline is decoupled from the custom horizon (review finding ④).** Its "this week" bucket
+  is a fixed 7-day calendar week again; a large `due_soon_days` widens the project/portfolio at-risk
+  classification but no longer drags month-out items into a bucket labelled "this week".
+
 ## Living-resume retirement — disciplines reframed as "Working agreements" (2026-07-13)
 
 Completes the living-resume retirement (Unit 5, one PR). The **Disciplines** feature is **kept** — source-backed

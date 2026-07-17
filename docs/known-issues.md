@@ -458,6 +458,12 @@ Deferred).
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-13** — Cadence-aware `report --all --due` filter (a per-project schedule + last-report-time gating,
+  the stateless subset carved out of the deferred B5 layer). **Resolved 2026-07-17** in the E1.2 slice:
+  `report --all --due` reads each project's `cadence` config against `report_history`'s `MAX(sent_at)` (no
+  new schema) and reports only what's due; the B5 *layer* stays gate-deferred (its strongest motivation,
+  mixed cadences from one entry, is now served). The full resolution note is kept in place above (with the
+  B5-gate stance). See CHANGELOG → *"Forward look & scheduling (E1.2)"*.
 - **KI-25** — The skills comb omitted the project/tracker glyph on evidence anchors. **Retired (feature
   removed) 2026-07-13** with the whole skills comb in the living-resume retirement (Units 1-4). No fix was
   needed: the surface it described no longer exists. See CHANGELOG → *"Living-resume retirement — skills

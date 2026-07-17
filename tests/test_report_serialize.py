@@ -16,7 +16,7 @@ from orion.collectors.tasks import ChecklistItem
 from orion.report import ReportBlob, serialize_blob
 
 
-def _blob(sections=(), checklist=None):
+def _blob(sections=(), checklist=None, due_soon_days=None):
     """A fully-populated ReportBlob for serialization tests.
 
     Args:
@@ -24,6 +24,8 @@ def _blob(sections=(), checklist=None):
             test can opt into either the empty- or populated-sections case.
         checklist: The optional live checklist (tuple of ChecklistItem) or None.
             Defaults to None so the field is absent unless a test opts in.
+        due_soon_days: The optional "due soon" window (int) or None. Defaults to None
+            so the field is absent from the wire unless a test opts in.
 
     Why:
         Centralizes blob construction so each test varies only what it is checking
@@ -39,6 +41,7 @@ def _blob(sections=(), checklist=None):
         orion_version=__version__,
         sections=sections,
         checklist=checklist,
+        due_soon_days=due_soon_days,
     )
 
 
@@ -106,6 +109,31 @@ def test_serialize_blob_omits_checklist_when_none():
     parsed = json.loads(serialize_blob(_blob(checklist=None)))
 
     assert "checklist" not in parsed
+
+
+def test_serialize_blob_emits_due_soon_days_when_set():
+    """A blob carrying due_soon_days emits the int on the wire.
+
+    Why this matters: this is the ingest-blob carrier for the per-project "due soon"
+    window (E1.2 Unit 3). The relay reads it to flag due-soon items, so it must cross
+    the seam as a plain int under the agreed `due_soon_days` key.
+    """
+    parsed = json.loads(serialize_blob(_blob(due_soon_days=14)))
+
+    assert parsed["due_soon_days"] == 14
+
+
+def test_serialize_blob_omits_due_soon_days_when_none():
+    """A blob with no due_soon_days omits the key entirely (back-compat).
+
+    Why this matters: the field is OPTIONAL and omit-when-unset — a project that
+    doesn't set it must produce byte-identical wire output to before the field
+    existed, so a receiver predating it (and the validator's optional handling) see
+    exactly the old shape. Same rule as `checklist`.
+    """
+    parsed = json.loads(serialize_blob(_blob(due_soon_days=None)))
+
+    assert "due_soon_days" not in parsed
 
 
 def test_serialize_blob_emits_checklist_as_text_done_objects():

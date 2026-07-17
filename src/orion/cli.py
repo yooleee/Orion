@@ -1397,6 +1397,9 @@ def _run_report(
             generated_at,
             sections=tuple(full_pairs),
             checklist=checklist,
+            # Carrier 1 of 2 for the due-soon window: the ingest blob. None when the
+            # project doesn't set it, which omits the key from the wire (relay default).
+            due_soon_days=project.due_soon_days,
         )
 
         # --- Group recipients into audiences and compose one filtered message
@@ -1647,7 +1650,10 @@ def _watch_tick(
     payload = _checklist_payload(project)
     if payload == last_pushed:
         return last_pushed, False
-    push_checklist(relay_cfg.url, project.name, payload, token, kind=project.kind)
+    push_checklist(
+        relay_cfg.url, project.name, payload, token,
+        kind=project.kind, due_soon_days=project.due_soon_days,
+    )
     return payload, True
 
 
@@ -1757,7 +1763,10 @@ def cmd_checklist_push(
     # (unlike the watch loop, which retries), so the user sees a non-zero exit.
     try:
         payload = _checklist_payload(project)
-        push_checklist(relay_cfg.url, project.name, payload, token, kind=project.kind)
+        push_checklist(
+            relay_cfg.url, project.name, payload, token,
+            kind=project.kind, due_soon_days=project.due_soon_days,
+        )
     except DeliveryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

@@ -132,6 +132,12 @@ share_level = "high_level"
 # default). Purely local — it is never sent anywhere.
 # cadence = "weekly"
 
+# How many days ahead a checklist item's due date is flagged "due soon" on the
+# dashboard. Applies only when `checklist` is enabled and items carry due dates.
+# A whole number of days, 1–365. Omit to use the dashboard's default (7 days).
+# Unlike `cadence`, this IS sent to the relay (it rides the checklist push).
+# due_soon_days = 14
+
 # Which signals are collected — each independently toggleable here. Supported:
 #   "git"         — raw git activity (summarized by Claude on the raw lane)
 #   "tasks"       — newly-completed items from a Markdown checklist (structured, no LLM)

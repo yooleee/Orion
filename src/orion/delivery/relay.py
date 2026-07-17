@@ -103,6 +103,7 @@ def push_checklist(
     token: str,
     *,
     kind: str = "project",
+    due_soon_days: int | None = None,
     timeout: float = 10.0,
 ) -> None:
     """POST a project's current checklist to a relay's /checklist endpoint.
@@ -119,6 +120,10 @@ def push_checklist(
             the checklist push so the relay can split the home into projects vs. trackers.
             The checklist push is the natural carrier — a tracker is checklist-only, so it
             always pushes here, while report-only projects default to "project" relay-side.
+        due_soon_days: The project's configured "due soon" window in days, or None to
+            omit it (the relay then applies its default). E1.2: rides this push (the
+            second of the two checklist carriers) so the relay flags due-soon items per
+            this project's preference. None ⇒ the key is omitted from the payload.
         timeout: Seconds to wait for the request before failing.
 
     Returns:
@@ -136,9 +141,13 @@ def push_checklist(
         report it and carry on.
     """
     endpoint = urllib.parse.urljoin(relay_url, "/checklist")
-    data = json.dumps(
-        {"project": project, "checklist": checklist, "kind": kind}
-    ).encode("utf-8")
+    payload = {"project": project, "checklist": checklist, "kind": kind}
+    # Optional field: include `due_soon_days` ONLY when configured. None ⇒ omit the key,
+    # so a project without it sends byte-identical payloads to before (back-compatible),
+    # mirroring the omit-when-None rule serialize_blob applies on the ingest carrier.
+    if due_soon_days is not None:
+        payload["due_soon_days"] = due_soon_days
+    data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
         data=data,

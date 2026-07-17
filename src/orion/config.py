@@ -80,6 +80,14 @@ DEFAULT_PROJECT_KIND = "project"
 # Unit 1 stays pure config. An open enum so an hours-granularity knob stays additive later.
 CADENCES = ("daily", "weekly")
 
+# E1.2: bounds for the optional per-project `due_soon_days` knob — how many days ahead a
+# checklist item's due date is flagged "due soon" on the dashboard. OPTIONAL (absent ⇒
+# the relay's 7-day default). 1 is the tightest useful window; 365 caps it at a year so a
+# typo like 3650 is caught at load rather than silently flattening the at-risk view. Kept
+# as named constants so the validation and its error message share one source of truth.
+DUE_SOON_DAYS_MIN = 1
+DUE_SOON_DAYS_MAX = 365
+
 DEFAULT_STATE_DB = "orion.sqlite3"
 
 # The display time zone for human-facing timestamps in delivered messages (KI-20).
@@ -176,6 +184,11 @@ class ProjectConfig:
             between unattended reports for `report --all --due`; None (the default, and
             what an absent key resolves to) means the project is always due. Purely
             local — it is never sent to the relay.
+        due_soon_days: How many days ahead a checklist item's due date counts as
+            "due soon" on the dashboard, or None to use the relay's default (7). An
+            int in 1..365 when set. Unlike `cadence`, this one IS sent to the relay —
+            it rides both checklist carriers (the ingest blob and the /checklist
+            push), omitted from the wire entirely when None (back-compatible).
         discipline_docs: The instruction/design/decision docs the "disciplines"
             collector reads (absolute paths), or () when that collector is not enabled.
             Resolved absolute at load time. Unlike the single-file collectors this is a
@@ -205,6 +218,7 @@ class ProjectConfig:
     checklist: bool = False
     kind: str = DEFAULT_PROJECT_KIND
     cadence: str | None = None
+    due_soon_days: int | None = None
     discipline_docs: tuple[Path, ...] = ()
 
 
@@ -931,6 +945,24 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
             f"Expected one of {CADENCES}, or omit the key for always-due."
         )
 
+    # due_soon_days is OPTIONAL (absent ⇒ None ⇒ the relay's 7-day default). When set it
+    # must be an int in 1..365. `isinstance(x, bool)` is rejected FIRST because bool is a
+    # subclass of int in Python, so `due_soon_days = true` would otherwise slip through as
+    # 1 — the same strictness auto_send applies. Validated here so a bad value fails at
+    # load with a fixable message rather than riding the wire to the relay.
+    due_soon_days = body.get("due_soon_days")
+    if due_soon_days is not None:
+        if isinstance(due_soon_days, bool) or not isinstance(due_soon_days, int):
+            raise ConfigError(
+                f"{where} has invalid due_soon_days={due_soon_days!r}. "
+                f"Expected a whole number of days."
+            )
+        if not (DUE_SOON_DAYS_MIN <= due_soon_days <= DUE_SOON_DAYS_MAX):
+            raise ConfigError(
+                f"{where} has out-of-range due_soon_days={due_soon_days!r}. "
+                f"Expected {DUE_SOON_DAYS_MIN}..{DUE_SOON_DAYS_MAX}, or omit for the default."
+            )
+
     # Recipients are parsed AFTER collectors are validated so each recipient's
     # `signals` filter can default to (and be validated against) the project's
     # actual collector set — see _parse_recipients.
@@ -970,6 +1002,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         checklist=checklist,
         kind=kind,
         cadence=cadence,
+        due_soon_days=due_soon_days,
         discipline_docs=discipline_docs,
     )
 

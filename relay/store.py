@@ -27,6 +27,7 @@ from datetime import date
 from pathlib import Path
 
 from .derive import (
+    DUE_SOON_DAYS,
     count_at_risk,
     item_key,
     milestones,
@@ -305,6 +306,13 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     # slippage — provenance must be captured at write time (it cannot be backfilled).
     "relay_reports": [("author_id", "INTEGER"), ("author_name", "TEXT")],
     "relay_observed_items": [("author_id", "INTEGER")],
+    # E1.2 (forward-look): a per-project "due soon" horizon, overriding the module default
+    # (derive.DUE_SOON_DAYS = 7) when the user sets it in orion.toml. NULLABLE with no
+    # default (omit-when-unset): an absent value reads as NULL, which get_due_soon_days maps
+    # to None so the classifier falls back to the 7-day default byte-identically. Added here
+    # (not in _SCHEMA) so an already-deployed relay gains the column via one cheap ALTER —
+    # relay_project_meta first shipped with only `kind`.
+    "relay_project_meta": [("due_soon_days", "INTEGER")],
 }
 
 
@@ -775,6 +783,65 @@ def get_project_kind(conn: sqlite3.Connection, project: str) -> str:
     return row["kind"] if row is not None else "project"
 
 
+def set_due_soon_days(
+    conn: sqlite3.Connection, project: str, due_soon_days: int | None
+) -> None:
+    """Record (or CLEAR) a project's "due soon" horizon (days), upserting the meta row (E1.2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the horizon belongs to.
+        due_soon_days: The per-project due-soon window in days (validated by the server to
+            be an int in 1..365), or None to CLEAR it back to unset. None writes SQL NULL,
+            which get_due_soon_days reads back as None and the serializers resolve to the
+            7-day default — so clearing genuinely restores the default (not a stale value).
+
+    Why:
+        The due-soon horizon is a per-project knob (from the user's orion.toml) that rides
+        each checklist push — the forward-look sibling of `kind`. Like set_project_kind this is
+        CURRENT STATE (last-writer-wins across producers), so ON CONFLICT(project) DO UPDATE
+        makes it a single idempotent upsert. Passing None writes NULL so a producer that stops
+        setting the knob resets to the default rather than leaving a stale horizon behind (the
+        set→unset round-trip). It touches ONLY the due_soon_days column: a bare INSERT lets
+        `kind` take its schema default ("project") for a project that has never pushed a kind,
+        and the DO UPDATE leaves any existing kind untouched — the two knobs share the meta row
+        but are written independently, so setting one never clobbers the other.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_meta (project, due_soon_days)
+        VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET due_soon_days = excluded.due_soon_days
+        """,
+        (project, due_soon_days),
+    )
+    conn.commit()
+
+
+def get_due_soon_days(conn: sqlite3.Connection, project: str) -> int | None:
+    """Return a project's "due soon" horizon in days, or None when it has none set (E1.2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to look up.
+
+    Returns:
+        The stored due_soon_days (int), or None when the project has no meta row OR the row
+        predates the column (NULL) — the omit-when-unset case.
+
+    Why:
+        None is the deliberate "unset" signal, distinct from any real value: the caller maps
+        it to derive.DUE_SOON_DAYS (7) so a project that never set the knob keeps today's
+        default behavior byte-identically. Kept a separate one-column lookup beside
+        get_project_kind; the portfolio query reads the column via its existing LEFT JOIN
+        instead, to stay one round-trip.
+    """
+    row = conn.execute(
+        "SELECT due_soon_days FROM relay_project_meta WHERE project = ?", (project,)
+    ).fetchone()
+    return row["due_soon_days"] if row is not None else None
+
+
 def record_observations(
     conn: sqlite3.Connection,
     project: str,
@@ -987,7 +1054,11 @@ def latest_report_per_project(
                pc.updated_at  AS checklist_updated_at,
                -- E2 Inc 4: the project/tracker split. COALESCE so an absent meta row (a
                -- report-only project, or a pre-flag push) reads as a plain "project".
-               COALESCE(pm.kind, 'project') AS kind
+               COALESCE(pm.kind, 'project') AS kind,
+               -- E1.2 (forward-look): the per-project due-soon horizon, NULL when unset. Read
+               -- via the SAME meta LEFT JOIN as kind (one round-trip). NOT coalesced here —
+               -- NULL is surfaced as-is so the Python side maps it to the DUE_SOON_DAYS default.
+               pm.due_soon_days AS due_soon_days
         FROM projects p
         -- LEFT JOIN the latest report: NULL for a checklist-only project. The correlated
         -- subquery picks the exact row history() calls newest (generated_at DESC, id
@@ -1023,6 +1094,12 @@ def latest_report_per_project(
         items_json = row["checklist_items"]
         checklist_done = checklist_total = checklist_at_risk = None
         nearest_milestone = None
+        # E1.2: the project's due-soon horizon drives count_at_risk / _nearest_milestone below.
+        # NULL (unset, or a pre-column row) → the module default, so an un-configured project
+        # counts at-risk exactly as before. Resolved once per row and reused by both derivations.
+        due_soon_days = (
+            row["due_soon_days"] if row["due_soon_days"] is not None else DUE_SOON_DAYS
+        )
         if items_json is not None:
             # KI-30 (C3 Inc 2.5): the badge counts derive from the EFFECTIVE checklist, not
             # the last-writer-wins aggregate. Reuse the aggregate we already decoded (avoid a
@@ -1041,11 +1118,11 @@ def latest_report_per_project(
             # logic lives in the pure derive module so the badge and the per-item render
             # agree on what "at risk" means.
             if today is not None:
-                checklist_at_risk = count_at_risk(items, today)
+                checklist_at_risk = count_at_risk(items, today, due_soon_days)
                 # The portfolio "next milestone" hint (Unit 5): the milestone group whose
                 # nearest OPEN deadline comes soonest, from the same decoded items. None when
                 # the project has no grouped+dated milestone (the card omits the line).
-                nearest_milestone = _nearest_milestone(items, today)
+                nearest_milestone = _nearest_milestone(items, today, due_soon_days)
         # Forward-looking slippage (E2 Inc 3 Unit 4): count items slipping per the OBSERVED
         # HISTORY (a deadline that moved later, or one lingering open past due). This reads
         # the append-only observation log, NOT the current checklist row, so it is computed
@@ -1060,6 +1137,10 @@ def latest_report_per_project(
             {
                 "project": row["project"],
                 "kind": row["kind"],
+                # E1.2: the raw per-project horizon (None when unset), carried so the portfolio
+                # and scheduling serializers reuse the SAME value this row's at-risk count used,
+                # without a second meta lookup. The serializer maps None → the default.
+                "due_soon_days": row["due_soon_days"],
                 "report_count": row["report_count"],
                 "latest_generated_at": row["latest_generated_at"],
                 "latest_report_id": row["latest_report_id"],
@@ -1075,12 +1156,16 @@ def latest_report_per_project(
     return result
 
 
-def _nearest_milestone(items: list, today: date) -> dict | None:
+def _nearest_milestone(
+    items: list, today: date, due_soon_days: int = DUE_SOON_DAYS
+) -> dict | None:
     """Return the milestone group whose nearest open deadline comes soonest, or None.
 
     Args:
         items: A project's live checklist items (decoded wire dicts).
         today: The reference date (display zone), forwarded to the milestone derivation.
+        due_soon_days: The project's due-soon horizon, forwarded to milestones() so a
+            milestone's at-risk roll-up uses the same window as the rest of the card.
 
     Returns:
         {"group": str, "nearest_due": str} for the milestone with the EARLIEST nearest_due
@@ -1094,7 +1179,9 @@ def _nearest_milestone(items: list, today: date) -> dict | None:
         strings sort chronologically, so a min over nearest_due is correct. None when nothing
         is both grouped and dated, which the renderer reads as "omit the hint".
     """
-    dated = [m for m in milestones(items, today) if m["nearest_due"] is not None]
+    dated = [
+        m for m in milestones(items, today, due_soon_days) if m["nearest_due"] is not None
+    ]
     if not dated:
         return None
     soonest = min(dated, key=lambda m: m["nearest_due"])

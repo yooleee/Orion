@@ -183,13 +183,17 @@ def next_open_due(checklist: list[dict] | None) -> str | None:
     return _nearest_open_due(checklist or [])
 
 
-def milestones(checklist: list[dict] | None, today: date) -> list[dict]:
+def milestones(
+    checklist: list[dict] | None, today: date, due_soon_days: int = DUE_SOON_DAYS
+) -> list[dict]:
     """Roll the live checklist up into per-group milestones.
 
     Args:
         checklist: The live checklist items ({"text", "done"[, "due_date"][, "group"]}),
             or None.
         today: The reference date (display zone), forwarded to count_at_risk.
+        due_soon_days: The "due soon" horizon (inclusive), forwarded to count_at_risk so a
+            group's at-risk roll-up uses the SAME per-project horizon as the per-item render.
 
     Returns:
         One dict per milestone group, in FIRST-SEEN order:
@@ -228,7 +232,7 @@ def milestones(checklist: list[dict] | None, today: date) -> list[dict]:
         done = sum(1 for item in items if item.get("done"))
         # Reuse the at-risk rule (overdue ∪ due-soon, open items only) so a milestone's
         # roll-up can never disagree with the per-item treatment or the card's at-risk badge.
-        at_risk = count_at_risk(items, today)
+        at_risk = count_at_risk(items, today, due_soon_days)
         result.append(
             {
                 "group": group,

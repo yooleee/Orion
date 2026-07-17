@@ -438,6 +438,23 @@ Deferred).
   layout/IA pass is best done **alongside or just before** those, rather than as a one-off now. A redesign
   would touch the SPA shell + the project route, so it belongs in a deliberate slice with its own plan.
 
+## KI-35 — Per-project `due_soon_days` is last-writer-wins; the /checklist push is authoritative (E1.2)
+
+- **Detail:** The relay stores a project's `due_soon_days` horizon in `relay_project_meta` (sibling of
+  `kind`). The **/checklist push is the authoritative carrier**: it writes the value when present and
+  **clears it to NULL when absent** (so removing the config restores the 7-day default — the set→unset
+  round-trip). The **/ingest blob path is set-only** (writes when present, never clears), because /ingest
+  also carries `intake` blobs, which legitimately omit checklist config and must not wipe the horizon.
+- **Why it matters:** two consequences follow, both currently benign. **(1)** It is **last-writer-wins
+  across producers** (exactly like `kind`): in a future multi-machine setup, a producer whose config does
+  not set `due_soon_days` would clear a value another producer set, on its next /checklist push. **(2)** A
+  checklist-enabled project that sets the horizon, later removes it, and thereafter pushes **only reports**
+  (never /checklist) would keep the stale value, since only /checklist clears. Both are edge cases in the
+  current single-producer, checklist-pushing deployment.
+- **Severity:** low (single-producer today; the authoritative-carrier split keeps the common path correct).
+- **Status:** By-design (revisit with the per-producer/multi-machine model, alongside KI-32's
+  last-writer-wins concern; a per-producer horizon merge would arrive with that work if ever needed).
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 

@@ -26,6 +26,7 @@ from datetime import date
 from zoneinfo import ZoneInfo
 
 from .derive import (
+    DUE_SOON_DAYS,
     OVERDUE,
     bucket_counts,
     classify_item,
@@ -35,6 +36,26 @@ from .derive import (
     slipping_item_keys,
     slipping_item_keys_by_author,
 )
+
+
+def _resolve_due_soon_days(value: int | None) -> int:
+    """Map a project's stored due-soon horizon (int, or None when unset) to a concrete int.
+
+    Args:
+        value: A project's persisted due_soon_days (store.get_due_soon_days), or None when the
+            project never set the knob (omit-when-unset).
+
+    Returns:
+        The stored horizon, or derive.DUE_SOON_DAYS (7) when it is None.
+
+    Why:
+        The pure derive functions take a concrete int horizon, so the None → default mapping
+        must happen at the serializer boundary, ONCE per project. Factoring it here (rather than
+        inlining the same ternary at every entry point) keeps the "unset means 7 days" rule in
+        one place, so the portfolio, project, report, and scheduling surfaces can never disagree
+        about what an un-configured project's window is.
+    """
+    return value if value is not None else DUE_SOON_DAYS
 
 # The display title / portfolio headline is the report body's first line. This extraction
 # moved here when render.py retired (E2 Inc 4, KI-23) — the SPA is now the only front-end,
@@ -100,12 +121,16 @@ def _item_key(item: dict) -> str:
     return item_key(item)
 
 
-def _deadline_state(due_iso: str | None, today: date) -> str | None:
+def _deadline_state(
+    due_iso: str | None, today: date, due_soon_days: int = DUE_SOON_DAYS
+) -> str | None:
     """Classify a deadline date as overdue / due_soon / upcoming, or None when absent.
 
     Args:
         due_iso: An ISO "YYYY-MM-DD" deadline string, or None.
         today: The reference date (display zone).
+        due_soon_days: The project's due-soon horizon (inclusive), forwarded to classify_item
+            so "due_soon" vs. "upcoming" splits at the project's window, not always 7 days.
 
     Returns:
         "overdue" / "due_soon" from the shared classify_item rule, "upcoming" for a dated
@@ -121,16 +146,19 @@ def _deadline_state(due_iso: str | None, today: date) -> str | None:
     if not due_iso:
         return None
     # A synthetic OPEN item so classify_item applies its overdue/due_soon rule to the date.
-    state = classify_item({"due_date": due_iso, "done": False}, today)
+    state = classify_item({"due_date": due_iso, "done": False}, today, due_soon_days)
     return state if state is not None else _UPCOMING
 
 
-def _next_due(checklist: list | None, today: date) -> dict | None:
+def _next_due(
+    checklist: list | None, today: date, due_soon_days: int = DUE_SOON_DAYS
+) -> dict | None:
     """Build the {"due_date","state"} for a checklist's nearest open deadline, or None.
 
     Args:
         checklist: A project's live checklist items (or None).
         today: The reference date (display zone).
+        due_soon_days: The project's due-soon horizon, forwarded to the state classification.
 
     Returns:
         {"due_date": <iso>, "state": <overdue|due_soon|upcoming>} for the soonest open
@@ -144,15 +172,17 @@ def _next_due(checklist: list | None, today: date) -> dict | None:
     due = next_open_due(checklist)
     if due is None:
         return None
-    return {"due_date": due, "state": _deadline_state(due, today)}
+    return {"due_date": due, "state": _deadline_state(due, today, due_soon_days)}
 
 
-def _item_state(item: dict, today: date) -> str:
+def _item_state(item: dict, today: date, due_soon_days: int = DUE_SOON_DAYS) -> str:
     """Resolve one checklist item's per-row state (4a vocabulary).
 
     Args:
         item: A checklist wire dict.
         today: The reference date (display zone).
+        due_soon_days: The project's due-soon horizon, forwarded to classify_item so a row's
+            "due_soon" state uses the same window as the at-risk count and the deadline chip.
 
     Returns:
         "done" when finished; else "overdue" / "due_soon" from classify_item; else
@@ -170,7 +200,7 @@ def _item_state(item: dict, today: date) -> str:
     """
     if item.get("done"):
         return "done"
-    state = classify_item(item, today)
+    state = classify_item(item, today, due_soon_days)
     if state is not None:
         return state
     if item.get("status") == "in_progress":
@@ -245,12 +275,16 @@ def serialize_me(
     }
 
 
-def _at_risk_items(checklist: list | None, today: date) -> list[dict]:
+def _at_risk_items(
+    checklist: list | None, today: date, due_soon_days: int = DUE_SOON_DAYS
+) -> list[dict]:
     """List a checklist's at-risk items as forward-signal chips, most urgent first.
 
     Args:
         checklist: A project's live checklist items (or None).
         today: The reference date (display zone).
+        due_soon_days: The project's due-soon horizon, forwarded to classify_item so the chip
+            set matches the project's window (and the at-risk count) rather than a fixed 7 days.
 
     Returns:
         One {"state","label","due_date"} dict per OPEN at-risk item (overdue or due_soon),
@@ -266,7 +300,7 @@ def _at_risk_items(checklist: list | None, today: date) -> list[dict]:
     """
     chips = []
     for item in checklist or []:
-        state = classify_item(item, today)
+        state = classify_item(item, today, due_soon_days)
         if state is None:
             continue
         chips.append(
@@ -297,13 +331,17 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
     """
     done = row["checklist_done"] or 0
     total = row["checklist_total"] or 0
+    # E1.2: this project's due-soon horizon (None ⇒ 7-day default). The store already applied
+    # it to row["checklist_at_risk"]; we re-apply the SAME value to the item-level derivations
+    # below (next_due, segments, chips) so the badge and the detail agree on the window.
+    due_soon_days = _resolve_due_soon_days(row.get("due_soon_days"))
     entry = {
         "name": row["project"],
         "kind": row["kind"],
         "progress": _progress(done, total),
         "at_risk": row["checklist_at_risk"] or 0,
         "slipping": row["checklist_slipping"] or 0,
-        "next_due": _next_due(items, today),
+        "next_due": _next_due(items, today, due_soon_days),
         # Last activity: a report's time when there is one, else the checklist's receive
         # clock — the same fallback the old portfolio card used.
         "updated_at": row["latest_generated_at"] or row["checklist_updated_at"],
@@ -311,8 +349,8 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
     if row["kind"] == "tracker":
         # A general checklist: the segmented bar + the chip list, plus an item count.
         entry["item_count"] = total
-        entry["segments"] = bucket_counts(items, today)
-        entry["at_risk_items"] = _at_risk_items(items, today)
+        entry["segments"] = bucket_counts(items, today, due_soon_days)
+        entry["at_risk_items"] = _at_risk_items(items, today, due_soon_days)
     else:
         # A software project: the one-line headline from the latest report + its id.
         entry["headline"] = _headline(row["latest_body"]) if row["latest_body"] else ""
@@ -470,10 +508,16 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
     for proj in projects:
         items = proj.get("items") or []
         slipping = slipping_item_keys(proj.get("observations") or [], today)
+        # E1.2: the Scheduling timeline uses the FIXED default week (_deadline_state's default
+        # DUE_SOON_DAYS), NOT a project's custom due_soon_days. "this_week" is a calendar
+        # concept — a shared cross-project timeline — so a project raising its at-risk horizon
+        # to 30 days must not drag month-out items into a bucket labelled "this week". The
+        # per-project horizon still drives the project/portfolio at-risk classification; it
+        # just does not redefine this timeline's buckets.
         for item in items:
             if item.get("done"):
                 continue  # finished — off the timeline
-            state = _deadline_state(item.get("due_date"), today)
+            state = _deadline_state(item.get("due_date"), today)  # fixed default week
             if state is None:
                 continue  # open but undated — no place on a timeline
             is_slipping = _item_key(item) in slipping
@@ -495,7 +539,9 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
     return {"summary": summary, "buckets": buckets}
 
 
-def _checklist_rows(items: list, today: date, slipping: set) -> list[dict]:
+def _checklist_rows(
+    items: list, today: date, slipping: set, due_soon_days: int = DUE_SOON_DAYS
+) -> list[dict]:
     """Serialize checklist items into the dashboard's per-item row shape.
 
     Args:
@@ -503,6 +549,9 @@ def _checklist_rows(items: list, today: date, slipping: set) -> list[dict]:
         today: The reference date (display zone), for the per-item state derivation.
         slipping: The set of slipping item keys the CALLER supplies — the project-wide union
             for the aggregate rows, or one producer's own stream for a producer card.
+        due_soon_days: The project's due-soon horizon, forwarded to each row's state derivation
+            so a row's "due_soon" matches the project window (aggregate and per-producer cards
+            share the project's single horizon).
 
     Returns:
         A list of row dicts {text, done, due_date, key, group, state, status, slipping}.
@@ -522,7 +571,7 @@ def _checklist_rows(items: list, today: date, slipping: set) -> list[dict]:
             "due_date": item.get("due_date"),
             "key": item.get("key"),
             "group": item.get("group"),
-            "state": _item_state(item, today),
+            "state": _item_state(item, today, due_soon_days),
             # The raw observed status (E2 Inc 4, gap 8): None for items without one. Shipped
             # alongside the derived `state` so the tracker's circular indicator renders the
             # in_progress/submitted treatment directly, and so future consumers get status as
@@ -545,6 +594,7 @@ def serialize_project(
     discussions: list[dict],
     disciplines: dict | None,
     today: date,
+    due_soon_days: int | None = None,
 ) -> dict:
     """Serialize one project's full detail (/api/projects/:name).
 
@@ -566,6 +616,9 @@ def serialize_project(
             (store.project_disciplines) — {"cards", "updated_at"} — or None when the project
             has never pushed disciplines. Backs the "Working agreements" section (Unit 5).
         today: The reference date (display zone).
+        due_soon_days: The project's due-soon horizon (store.get_due_soon_days), or None when
+            unset ⇒ the 7-day default. Applied to the milestones, the checklist rows (aggregate
+            AND per-producer), and the next-due state, so the whole page uses one window.
 
     Returns:
         The project-detail shape: stats, milestones, checklist, producer_checklists, reports,
@@ -588,12 +641,16 @@ def serialize_project(
     slipping = {key for keys in slipping_by_author.values() for key in keys}
     items = checklist or []
     done = sum(1 for item in items if item.get("done"))
+    # E1.2: resolve the project's due-soon window ONCE (None ⇒ default) and thread it into
+    # every deadline derivation below so the milestones, per-item rows, and next-due state all
+    # classify against the same horizon the portfolio at-risk badge used.
+    resolved_due_soon_days = _resolve_due_soon_days(due_soon_days)
 
     # Per-milestone slipping: a group slips when any of its OPEN items is in the slipping
     # set. milestones() returns group summaries without item keys, so we resolve membership
     # here from the same checklist + slipping set.
     milestone_rows = []
-    for m in milestones(checklist, today):
+    for m in milestones(checklist, today, resolved_due_soon_days):
         group_slipping = any(
             _item_key(item) in slipping
             for item in items
@@ -601,7 +658,7 @@ def serialize_project(
         )
         milestone_rows.append({**m, "slipping": group_slipping})
 
-    checklist_rows = _checklist_rows(items, today, slipping)
+    checklist_rows = _checklist_rows(items, today, slipping, resolved_due_soon_days)
 
     # C3 Inc 2: one card per identified producer, each the same row shape as the aggregate.
     # C3 Inc 2.5: each card marks slipping from its OWN producer's stream
@@ -616,7 +673,8 @@ def serialize_project(
                 sum(1 for item in pc["items"] if item.get("done")), len(pc["items"])
             ),
             "items": _checklist_rows(
-                pc["items"], today, slipping_by_author.get(pc["author_id"], set())
+                pc["items"], today, slipping_by_author.get(pc["author_id"], set()),
+                resolved_due_soon_days,
             ),
         }
         for pc in producer_checklists
@@ -631,7 +689,7 @@ def serialize_project(
         "description": None,  # contract gap 5: no project description field stored yet
         "stats": {
             "progress": _progress(done, len(items)),
-            "next_due": _next_due(checklist, today),
+            "next_due": _next_due(checklist, today, resolved_due_soon_days),
             "reports_count": len(reports),
         },
         "milestones": milestone_rows,
@@ -760,6 +818,7 @@ def serialize_report(
     checklist: list | None,
     history: list[dict],
     today: date,
+    due_soon_days: int | None = None,
 ) -> dict:
     """Serialize one report in full (/api/reports/:id).
 
@@ -769,6 +828,9 @@ def serialize_report(
             snapshot, or None.
         history: The project's reports newest-first (store.history), for prev/next nav.
         today: The reference date (display zone), for the snapshot rows' states.
+        due_soon_days: The report's project horizon (store.get_due_soon_days), or None ⇒ the
+            7-day default. Applied to the checklist snapshot rows so their due-ness matches the
+            project page's window.
 
     Returns:
         The report-detail shape: body + sections, metadata, participants, checklist
@@ -783,6 +845,8 @@ def serialize_report(
     """
     snapshot_items = checklist or []
     snapshot_done = sum(1 for item in snapshot_items if item.get("done"))
+    # E1.2: the project's due-soon window (None ⇒ default) for the snapshot rows' states.
+    resolved_due_soon_days = _resolve_due_soon_days(due_soon_days)
     numbers = _report_numbers(history)
     return {
         "id": report["id"],
@@ -811,7 +875,7 @@ def serialize_report(
                 {
                     "text": item["text"],
                     "done": bool(item.get("done")),
-                    "state": _item_state(item, today),
+                    "state": _item_state(item, today, resolved_due_soon_days),
                     "due_date": item.get("due_date"),
                 }
                 for item in snapshot_items

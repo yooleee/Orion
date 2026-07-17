@@ -513,6 +513,41 @@ def test_project_detail_handles_no_checklist():
     assert out["milestones"] == [] and out["checklist"] == []
 
 
+def test_project_detail_due_soon_days_widens_item_state_and_next_due():
+    """A per-project due_soon_days widens the checklist row state + next_due (E1.2).
+
+    Why this matters: the same 10-day-out open item must read due_soon under a 14-day horizon
+    but upcoming (not at-risk) under the default 7-day window. This pins that serialize_project
+    threads the horizon into BOTH the per-item state and the header's next_due, and that
+    omitting it (None) preserves the 7-day default byte-for-byte.
+    """
+    # _TODAY is 2026-06-26; +10 days is 2026-07-06 — inside 14 days, beyond 7.
+    checklist = [_item("Ship it", due_date="2026-07-06")]
+
+    def project(due_soon_days):
+        return api.serialize_project(
+            name="apps",
+            kind="tracker",
+            reports=[],
+            checklist=checklist,
+            observations=[],
+            producer_checklists=[],
+            discussions=[],
+            disciplines=None,
+            today=_TODAY,
+            due_soon_days=due_soon_days,
+        )
+
+    wide = project(14)
+    assert wide["checklist"][0]["state"] == "due_soon"
+    assert wide["stats"]["next_due"] == {"due_date": "2026-07-06", "state": "due_soon"}
+
+    # No horizon set (None) ⇒ the 7-day default: the item is open but NOT yet due_soon.
+    default = project(None)
+    assert default["checklist"][0]["state"] == "not_started"
+    assert default["stats"]["next_due"] == {"due_date": "2026-07-06", "state": "upcoming"}
+
+
 # --- serialize_report: body + rail + nav -------------------------------------
 
 

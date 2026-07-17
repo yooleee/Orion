@@ -71,6 +71,15 @@ CHECKLIST_COLLECTORS = ("tasks", "tracker")
 PROJECT_KINDS = ("project", "tracker")
 DEFAULT_PROJECT_KIND = "project"
 
+# E1.2: the per-project report CADENCE presets — the minimum spacing between unattended
+# reports, consumed by `report --all --due` (Unit 2) to skip a project that reported too
+# recently. OPTIONAL: unlike share_level/kind, the field has NO default preset — an absent
+# key means "no cadence set", which `--due` treats as always due (backward compatible).
+# Validated against this tuple only when present, mirroring SHARE_LEVELS. The preset →
+# minimum-interval mapping (with DST/jitter slack) lives with the consumer, not here, so
+# Unit 1 stays pure config. An open enum so an hours-granularity knob stays additive later.
+CADENCES = ("daily", "weekly")
+
 DEFAULT_STATE_DB = "orion.sqlite3"
 
 # The display time zone for human-facing timestamps in delivered messages (KI-20).
@@ -163,6 +172,10 @@ class ProjectConfig:
             that is what resolves the file the checklist is read from.
         kind: One of PROJECT_KINDS ("project" | "tracker"). Splits the dashboard home
             into real software projects vs. general trackers. Defaults to "project".
+        cadence: One of CADENCES ("daily" | "weekly") or None. The minimum spacing
+            between unattended reports for `report --all --due`; None (the default, and
+            what an absent key resolves to) means the project is always due. Purely
+            local — it is never sent to the relay.
         discipline_docs: The instruction/design/decision docs the "disciplines"
             collector reads (absolute paths), or () when that collector is not enabled.
             Resolved absolute at load time. Unlike the single-file collectors this is a
@@ -191,6 +204,7 @@ class ProjectConfig:
     auto_send: bool = False
     checklist: bool = False
     kind: str = DEFAULT_PROJECT_KIND
+    cadence: str | None = None
     discipline_docs: tuple[Path, ...] = ()
 
 
@@ -905,6 +919,18 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
             f"is surfaced from its live checklist, so set `checklist = true` too."
         )
 
+    # cadence is OPTIONAL and has no default preset — an absent key stays None, which
+    # `report --all --due` (Unit 2) treats as "always due". So we validate ONLY when the
+    # key is present, mirroring share_level/kind's "must be a known value" check. A typo
+    # (e.g. cadence = "weekley") is caught here with a fixable message rather than silently
+    # becoming an unrecognized cadence downstream.
+    cadence = body.get("cadence")
+    if cadence is not None and cadence not in CADENCES:
+        raise ConfigError(
+            f"{where} has invalid cadence={cadence!r}. "
+            f"Expected one of {CADENCES}, or omit the key for always-due."
+        )
+
     # Recipients are parsed AFTER collectors are validated so each recipient's
     # `signals` filter can default to (and be validated against) the project's
     # actual collector set — see _parse_recipients.
@@ -943,6 +969,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         auto_send=auto_send,
         checklist=checklist,
         kind=kind,
+        cadence=cadence,
         discipline_docs=discipline_docs,
     )
 

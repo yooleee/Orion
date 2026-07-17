@@ -125,6 +125,13 @@ share_level = "high_level"
 # See docs/scheduling.md for the per-OS scheduler setup.
 # auto_send = false
 
+# Report cadence — the minimum spacing between unattended reports. Used only by
+# `orion report --all --due`, which skips a project that already reported within
+# its cadence, so one scheduler entry can serve projects on mixed cadences. Presets:
+# "daily" or "weekly". Omit the key entirely for a project that is always due (the
+# default). Purely local — it is never sent anywhere.
+# cadence = "weekly"
+
 # Which signals are collected — each independently toggleable here. Supported:
 #   "git"         — raw git activity (summarized by Claude on the raw lane)
 #   "tasks"       — newly-completed items from a Markdown checklist (structured, no LLM)

@@ -868,11 +868,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 record_observations(
                     conn, payload["project"], checklist, received_at, author_id
                 )
-            # E1.2 (forward-look): record the project's due-soon horizon when the push carries
-            # one. A PROJECT-level knob, independent of whether a checklist rides THIS push, so
-            # it is persisted OUTSIDE the checklist block. Omit-when-unset: absent ⇒ leave any
-            # prior horizon untouched (an old producer, or the knob not configured); present ⇒
-            # last-writer-wins, exactly like `kind`. Validated above to be an int in 1..365.
+            # E1.2 (forward-look): a report blob may also carry the due-soon horizon. Here we
+            # only SET it when present, NEVER clear on absence — because /ingest also receives
+            # `intake` blobs, which legitimately omit checklist config; clearing on their
+            # absence would wipe a horizon the /checklist carrier set. The /checklist push (the
+            # dedicated, always-consistent carrier) owns clearing; this path is a set-only
+            # convenience so a report push keeps the horizon fresh. Validated to be 1..365.
             if payload.get("due_soon_days") is not None:
                 set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
         finally:
@@ -955,12 +956,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # projects from trackers. Optional on the wire — absent ⇒ "project" (the safe
             # default, and what a producer predating the flag means). Its own meta row.
             set_project_kind(conn, payload["project"], payload.get("kind") or "project")
-            # E1.2 (forward-look): record the project's due-soon horizon when present. Unlike
-            # `kind` (which defaults to "project" and is always written), due_soon_days is
-            # omit-when-unset: absent ⇒ leave any prior value untouched; present ⇒ last-writer-
-            # wins. Validated above to be an int in 1..365. Shares the meta row with `kind`.
-            if payload.get("due_soon_days") is not None:
-                set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
+            # E1.2 (forward-look): the /checklist push is the AUTHORITATIVE carrier for the
+            # due-soon horizon — a configured producer sends it on every checklist push, and an
+            # unconfigured one never does. So we write it UNCONDITIONALLY: present ⇒ set the
+            # value; absent ⇒ pass None, which clears the column to NULL so an unset project
+            # resolves to the 7-day default. This is what fixes the set→unset staleness: without
+            # the clear, removing the config would leave the last value stuck forever. Shares
+            # the meta row with `kind`. (last-writer-wins across producers, like `kind`.)
+            set_due_soon_days(conn, payload["project"], payload.get("due_soon_days"))
         finally:
             conn.close()
         count = len(payload["checklist"])
@@ -2179,9 +2182,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         "kind": r["kind"],
                         "items": effective_checklist(conn, r["project"]),
                         "observations": observed_history(conn, r["project"]),
-                        # E1.2: carry each project's due-soon horizon (None ⇒ default) so the
-                        # time-bucketing classifies deadlines against the per-project window.
-                        "due_soon_days": r["due_soon_days"],
+                        # E1.2: the Scheduling timeline deliberately does NOT take a per-project
+                        # due_soon_days — its "this_week" bucket is a fixed calendar week (see
+                        # serialize_scheduling), so the custom horizon is not passed here.
                     }
                     for r in rows
                 ]

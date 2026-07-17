@@ -1294,6 +1294,21 @@ def test_set_due_soon_days_roundtrips_and_last_writer_wins(tmp_path):
     assert get_due_soon_days(conn, "apps") == 30
 
 
+def test_set_due_soon_days_none_clears_back_to_default(tmp_path):
+    """Passing None writes NULL, so get returns None again — the set→unset round-trip.
+
+    Why this matters: this is the store half of the fix for a stale horizon. Once set to 30,
+    a producer that stops configuring the knob passes None, which must CLEAR the column (NULL)
+    so get_due_soon_days reads None again and the serializers resolve it to the 7-day default —
+    not leave 30 stuck forever.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_due_soon_days(conn, "apps", 30)
+    assert get_due_soon_days(conn, "apps") == 30
+    set_due_soon_days(conn, "apps", None)  # producer stopped setting it
+    assert get_due_soon_days(conn, "apps") is None  # cleared → resolves to the default
+
+
 def test_due_soon_days_and_kind_share_the_row_without_clobbering(tmp_path):
     """due_soon_days and kind are written independently on the shared meta row.
 

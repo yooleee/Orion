@@ -480,10 +480,9 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
 
     Args:
         projects: Scope-FILTERED per-project data, each a dict with "name", "kind",
-            "items" (that project's checklist, or None), "observations" (its
-            observed_history, for slippage), and "due_soon_days" (its horizon, or None ⇒
-            the 7-day default). The server fetches + filters before calling, mirroring
-            serialize_portfolio.
+            "items" (that project's checklist, or None), and "observations" (its
+            observed_history, for slippage). The server fetches + filters before calling,
+            mirroring serialize_portfolio.
         today: The reference date (display zone).
 
     Returns:
@@ -509,13 +508,16 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
     for proj in projects:
         items = proj.get("items") or []
         slipping = slipping_item_keys(proj.get("observations") or [], today)
-        # E1.2: each project's own horizon (None ⇒ default) buckets its deadlines, so a
-        # 10-day item lands in "this week" for a 14-day project but "later" for a default one.
-        due_soon_days = _resolve_due_soon_days(proj.get("due_soon_days"))
+        # E1.2: the Scheduling timeline uses the FIXED default week (_deadline_state's default
+        # DUE_SOON_DAYS), NOT a project's custom due_soon_days. "this_week" is a calendar
+        # concept — a shared cross-project timeline — so a project raising its at-risk horizon
+        # to 30 days must not drag month-out items into a bucket labelled "this week". The
+        # per-project horizon still drives the project/portfolio at-risk classification; it
+        # just does not redefine this timeline's buckets.
         for item in items:
             if item.get("done"):
                 continue  # finished — off the timeline
-            state = _deadline_state(item.get("due_date"), today, due_soon_days)
+            state = _deadline_state(item.get("due_date"), today)  # fixed default week
             if state is None:
                 continue  # open but undated — no place on a timeline
             is_slipping = _item_key(item) in slipping

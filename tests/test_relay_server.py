@@ -598,6 +598,40 @@ def test_checklist_push_without_due_soon_days_stores_null(tmp_path):
         assert get_due_soon_days(open_relay_store(db), "demo") is None
 
 
+def test_checklist_push_clears_due_soon_days_when_dropped(tmp_path):
+    """Setting due_soon_days then pushing WITHOUT it clears the horizon back to the default.
+
+    Why this matters: this is the fix for the stale-horizon bug — the /checklist push is the
+    authoritative carrier, so it must not only set the value but also CLEAR it when a producer
+    stops configuring it. Set 14, then push a plain checklist (config removed): the relay must
+    reset to NULL (→ 7-day default), not leave 14 stuck. Without the clear, the dashboard would
+    keep classifying against a horizon the user already removed.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, _checklist_body_with_due_soon(due_soon_days=14), path="/checklist")[0] == 200
+        assert get_due_soon_days(open_relay_store(db), "demo") == 14
+        # The user removes due_soon_days from config; the next push omits it → cleared.
+        assert _post(base_url, _checklist_body_with_due_soon(), path="/checklist")[0] == 200
+        assert get_due_soon_days(open_relay_store(db), "demo") is None
+
+
+def test_ingest_blob_without_due_soon_days_does_not_clear_it(tmp_path):
+    """A report/intake blob (/ingest) that omits due_soon_days must NOT clear a set horizon.
+
+    Why this matters: only the /checklist push clears on absence. /ingest also receives
+    `intake` blobs, which legitimately omit checklist config — clearing on their absence would
+    wipe a horizon the checklist carrier set. So /ingest is SET-ONLY: a /checklist push sets 14,
+    then a plain report blob (which carries no due_soon_days) must leave it at 14, not reset it.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        # /checklist sets the horizon for "demo".
+        assert _post(base_url, _checklist_body_with_due_soon(due_soon_days=14), path="/checklist")[0] == 200
+        assert get_due_soon_days(open_relay_store(db), "demo") == 14
+        # A real report blob for "demo" carries NO due_soon_days; ingesting it must not clear it.
+        assert _post(base_url, _real_blob_json().encode("utf-8"))[0] == 201
+        assert get_due_soon_days(open_relay_store(db), "demo") == 14  # preserved, not clobbered
+
+
 @pytest.mark.parametrize("bad_value", [0, 366, "14", True, 3.5])
 def test_checklist_push_rejects_invalid_due_soon_days(tmp_path, bad_value):
     """An out-of-range / non-int due_soon_days is a clean 400 and stores nothing.
@@ -646,13 +680,15 @@ def test_ingest_blob_rejects_invalid_due_soon_days(tmp_path):
         assert list_projects(open_relay_store(db)) == []  # no report row created
 
 
-def test_due_soon_days_widens_classification_end_to_end(tmp_path):
-    """An item due in 10 days is due_soon under a 14-day horizon, not under the 7-day default.
+def test_due_soon_days_widens_at_risk_but_not_the_scheduling_week(tmp_path):
+    """A custom horizon widens the AT-RISK classification, but NOT the scheduling timeline week.
 
-    Why this matters: this is the whole point of the knob. Two projects hold the SAME
-    10-day-out open item; one sets due_soon_days=14, the other sets nothing. Through the read
-    API the configured project must show the item as at-risk / in the "this week" scheduling
-    bucket, while the default project must NOT — the 7-day behavior held byte-for-byte.
+    Why this matters: the knob's job is to widen at-risk/due-soon on the project + portfolio
+    surfaces (10 <= 14 → at risk for a 14-day project, 10 > 7 → not for a default one). But the
+    cross-project Scheduling timeline's "this_week" bucket is a fixed CALENDAR week: raising one
+    project's horizon to 14 days must NOT drag its 10-day-out item into a bucket labelled "this
+    week" (a shared timeline can't mean different spans per project). Both concerns exercised on
+    the SAME 10-day-out item so the split is unambiguous.
     """
     today = today_in_tz(_RELAY_TZ)
     ten_days_out = (today + timedelta(days=10)).isoformat()
@@ -663,15 +699,15 @@ def test_due_soon_days_widens_classification_end_to_end(tmp_path):
         assert _post(base_url, _checklist_body_with_due_soon("narrow", item), path="/checklist")[0] == 200
 
         # The default _running_relay is ungated (no view_token / users), so /api reads are open.
-        # (1) Portfolio at-risk: 10 <= 14 for wide → 1 at risk; 10 > 7 for narrow → 0.
+        # (1) Portfolio at-risk DOES honour the horizon: 10 <= 14 for wide → 1; 10 > 7 for narrow → 0.
         code, body = _get(base_url, "/api/portfolio")
         assert code == 200
         projects = {e["name"]: e for e in json.loads(body)["projects"]}
         assert projects["wide"]["at_risk"] == 1
         assert projects["narrow"]["at_risk"] == 0
 
-        # (2) Scheduling buckets: the wide item lands in "this_week" (due_soon), the narrow
-        # one in "later" (upcoming) — the same deadline, bucketed by each project's window.
+        # (2) Scheduling buckets do NOT: the fixed 7-day week puts BOTH 10-day-out items in
+        # "later" (10 > 7), so the custom horizon never redefines "this week".
         code, body = _get(base_url, "/api/scheduling")
         assert code == 200
         buckets = json.loads(body)["buckets"]
@@ -682,8 +718,9 @@ def test_due_soon_days_widens_classification_end_to_end(tmp_path):
                     return name
             return None
 
-        assert bucket_of("wide") == "this_week"
+        assert bucket_of("wide") == "later"    # NOT widened into "this_week"
         assert bucket_of("narrow") == "later"
+        assert json.loads(body)["summary"]["due_this_week"] == 0
 
 
 def test_wrong_token_is_401_generic_and_stores_nothing(tmp_path):

@@ -783,20 +783,26 @@ def get_project_kind(conn: sqlite3.Connection, project: str) -> str:
     return row["kind"] if row is not None else "project"
 
 
-def set_due_soon_days(conn: sqlite3.Connection, project: str, due_soon_days: int) -> None:
-    """Record a project's "due soon" horizon (days), upserting the meta row (E1.2).
+def set_due_soon_days(
+    conn: sqlite3.Connection, project: str, due_soon_days: int | None
+) -> None:
+    """Record (or CLEAR) a project's "due soon" horizon (days), upserting the meta row (E1.2).
 
     Args:
         conn: An open relay-store connection.
         project: The project the horizon belongs to.
-        due_soon_days: The per-project due-soon window in days, already validated by the
-            server to be an int in 1..365.
+        due_soon_days: The per-project due-soon window in days (validated by the server to
+            be an int in 1..365), or None to CLEAR it back to unset. None writes SQL NULL,
+            which get_due_soon_days reads back as None and the serializers resolve to the
+            7-day default — so clearing genuinely restores the default (not a stale value).
 
     Why:
         The due-soon horizon is a per-project knob (from the user's orion.toml) that rides
-        each push — the forward-look sibling of `kind`. Like set_project_kind this is CURRENT
-        STATE (last-writer-wins across producers), so ON CONFLICT(project) DO UPDATE makes it a
-        single idempotent upsert. It touches ONLY the due_soon_days column: a bare INSERT lets
+        each checklist push — the forward-look sibling of `kind`. Like set_project_kind this is
+        CURRENT STATE (last-writer-wins across producers), so ON CONFLICT(project) DO UPDATE
+        makes it a single idempotent upsert. Passing None writes NULL so a producer that stops
+        setting the knob resets to the default rather than leaving a stale horizon behind (the
+        set→unset round-trip). It touches ONLY the due_soon_days column: a bare INSERT lets
         `kind` take its schema default ("project") for a project that has never pushed a kind,
         and the DO UPDATE leaves any existing kind untouched — the two knobs share the meta row
         but are written independently, so setting one never clobbers the other.

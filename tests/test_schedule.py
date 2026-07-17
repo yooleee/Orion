@@ -378,7 +378,7 @@ def test_is_due_never_reported_is_due(tmp_path):
 
 
 def test_not_due_within_daily_interval(tmp_path):
-    """daily cadence, reported 2h ago → NOT due (inside the 20h min interval).
+    """daily cadence, reported 2h ago → NOT due (inside the 23h min interval).
 
     Why this matters: this is the whole point — a project reported very recently is
     skipped so a scheduled --all --due doesn't re-report it every run.
@@ -389,34 +389,70 @@ def test_not_due_within_daily_interval(tmp_path):
     assert cli._is_due(_bare_project("demo", "daily"), conn, now) is False
 
 
-def test_due_after_daily_interval_with_slack(tmp_path):
-    """daily cadence, reported 21h ago → due (past the 20h slack-adjusted interval).
+def test_due_after_daily_interval(tmp_path):
+    """daily cadence, reported 24h ago → due (past the 23h interval).
 
-    Why this matters: the interval is 20h, not a strict 24h, so a scheduler firing a
-    little early (or a DST shift) still lets an essentially-daily report through
-    instead of skipping a day.
+    Why this matters: the interval is 23h (a full day minus ~1h DST/jitter slack), so a
+    daily scheduler firing once a day always lets the next daily report through, without
+    the interval being so loose it shortens the cadence. 22h would still be too soon (a
+    sub-daily rerun is skipped); 24h is due.
     """
     now = datetime.now(timezone.utc)
     conn = open_state(tmp_path / "state.sqlite3")
-    _seed_last_report(conn, "demo", now - timedelta(hours=21))
-    assert cli._is_due(_bare_project("demo", "daily"), conn, now) is True
+    _seed_last_report(conn, "demo", now - timedelta(hours=22))
+    assert cli._is_due(_bare_project("demo", "daily"), conn, now) is False  # 22h < 23h
+    conn2 = open_state(tmp_path / "later.sqlite3")
+    _seed_last_report(conn2, "demo", now - timedelta(hours=24))
+    assert cli._is_due(_bare_project("demo", "daily"), conn2, now) is True  # 24h ≥ 23h
 
 
 def test_weekly_interval_boundary(tmp_path):
-    """weekly cadence: 5 days ago → not due; 6.5 days ago → due.
+    """weekly cadence: 6 days ago → not due; 7 days ago → due.
 
-    Why this matters: pins the weekly preset's slack-adjusted interval (6d, not a
-    strict 7d) on both sides of the boundary in one test.
+    Why this matters: pins the weekly preset's interval at 6d23h — tight enough that a
+    daily scheduler delivers a "weekly" project on day 7, NOT day 6 (which a looser 6d
+    interval would cause, drifting it faster than weekly). Checked on both sides.
     """
     now = datetime.now(timezone.utc)
     # Separate state dbs per direction: get_last_report_time is MAX(sent_at), so a
     # single db can't hold two different "last report" times — the max would win.
     inside = open_state(tmp_path / "inside.sqlite3")
-    _seed_last_report(inside, "demo", now - timedelta(days=5))          # inside 6d
+    _seed_last_report(inside, "demo", now - timedelta(days=6))   # 6d < 6d23h → day-6 skip
     assert cli._is_due(_bare_project("demo", "weekly"), inside, now) is False
     past = open_state(tmp_path / "past.sqlite3")
-    _seed_last_report(past, "demo", now - timedelta(days=6, hours=12))  # past 6d
+    _seed_last_report(past, "demo", now - timedelta(days=7))     # 7d ≥ 6d23h → day-7 send
     assert cli._is_due(_bare_project("demo", "weekly"), past, now) is True
+
+
+def test_is_due_treats_malformed_timestamp_as_due(tmp_path):
+    """A garbage last-report timestamp makes the project due, not a crash.
+
+    Why this matters: _is_due runs in the --all loop AHEAD of _run_report's per-project
+    fail-soft, so an unparseable history row (external tampering, a format change) must
+    not abort the whole run. Reporting the project is the conservative fallback — a report
+    is safer than silently going quiet on a bad row.
+    """
+    now = datetime.now(timezone.utc)
+    conn = open_state(tmp_path / "state.sqlite3")
+    # Seed a row whose sent_at is not valid ISO 8601 (simulates a corrupted/legacy row).
+    _seed_last_report(conn, "demo", now)  # a normal row first...
+    conn.execute("UPDATE report_history SET sent_at = ? WHERE project = ?", ("not-a-date", "demo"))
+    conn.commit()
+    assert cli._is_due(_bare_project("demo", "daily"), conn, now) is True
+
+
+def test_is_due_treats_future_timestamp_as_due(tmp_path):
+    """A last-report time AHEAD of now makes the project due, not suppressed.
+
+    Why this matters: a clock correction or imported state can leave a future timestamp;
+    a naive `now - last >= interval` would go negative and wrongly suppress the project
+    until that future time plus its cadence. Treating "last reported in the future" as due
+    keeps a skewed clock from silently muting a project.
+    """
+    now = datetime.now(timezone.utc)
+    conn = open_state(tmp_path / "state.sqlite3")
+    _seed_last_report(conn, "demo", now + timedelta(days=3))  # reported "in the future"
+    assert cli._is_due(_bare_project("demo", "daily"), conn, now) is True
 
 
 def test_all_due_reports_only_the_stale_project(tmp_path, env_and_mocks, capsys):
@@ -440,8 +476,8 @@ def test_all_due_reports_only_the_stale_project(tmp_path, env_and_mocks, capsys)
     # Pre-seed the last-report times into the SAME state db the run will open.
     now = datetime.now(timezone.utc)
     conn = open_state(tmp_path / "state.sqlite3")
-    _seed_last_report(conn, "fresh", now - timedelta(hours=2))   # inside 20h → skip
-    _seed_last_report(conn, "stale", now - timedelta(days=2))    # past 20h → due
+    _seed_last_report(conn, "fresh", now - timedelta(hours=2))   # inside 23h → skip
+    _seed_last_report(conn, "stale", now - timedelta(days=2))    # past 23h → due
     conn.close()
 
     _input_must_not_be_called(mp)  # auto_send + --yes: no preview for the due one

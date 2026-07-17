@@ -131,13 +131,15 @@ STATUS_FAILED = "FAILED"                       # a real failure (alert-worthy)
 STATUS_NOT_DUE = "NOT_DUE"                      # --due: reported within its cadence
 
 # E1.2: minimum spacing between unattended reports per `cadence` preset (config.py's
-# CADENCES), consumed by `report --all --due`. Each value is the nominal period MINUS
-# slack (daily 24h → 20h, weekly 7d → 6d) so a scheduler firing a little early, or a DST
-# shift, never skips a run that is essentially due. Compared in UTC against the stored
-# report_history timestamps — deliberately no calendar-day or local-midnight math.
+# CADENCES), consumed by `report --all --due`. Each value is the nominal period minus a
+# SMALL slack (daily 24h → 23h, weekly 7d → 6d23h) — just enough to absorb a DST shift
+# (≤1h) and a scheduler firing slightly early, WITHOUT shortening the cadence. The slack
+# is deliberately ~1h, not a full day: a larger margin (e.g. 6d) would let a daily
+# scheduler deliver a "weekly" project every 6 days, drifting it faster than weekly.
+# Compared in UTC against the stored report_history timestamps — no calendar/local math.
 _CADENCE_MIN_INTERVAL = {
-    "daily": timedelta(hours=20),
-    "weekly": timedelta(days=6),
+    "daily": timedelta(hours=23),
+    "weekly": timedelta(days=6, hours=23),
 }
 
 
@@ -1171,11 +1173,24 @@ def _is_due(project: ProjectConfig, conn: sqlite3.Connection, now: datetime) -> 
         return True
 
     # Stored timestamps are tz-aware UTC ISO (cli writes datetime.now(timezone.utc).
-    # isoformat()). Parse and, as a defensive guard against any legacy naive row,
-    # attach UTC so the subtraction below is always tz-aware minus tz-aware.
-    last_dt = datetime.fromisoformat(last)
+    # isoformat()). Defensive parse: a malformed row (external tampering, or a future
+    # format change) must NOT crash the whole --all run here, ahead of _run_report's
+    # per-project fail-soft — so treat "can't tell when we last reported" as DUE (report
+    # it, the conservative choice) rather than raising.
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    # Guard against a legacy naive row: attach UTC so the subtraction is tz-aware both sides.
     if last_dt.tzinfo is None:
         last_dt = last_dt.replace(tzinfo=timezone.utc)
+
+    # A timestamp AHEAD of now (a clock correction, or imported state) would make the
+    # elapsed interval negative and wrongly suppress the project until that future time
+    # plus its cadence. Treat "last reported in the future" as due too — same conservative
+    # default as an unparseable row: better to report than to silently go quiet.
+    if last_dt > now:
+        return True
 
     return (now - last_dt) >= _CADENCE_MIN_INTERVAL[project.cadence]
 

@@ -52,8 +52,9 @@ two options:
   `--due` reports only the projects actually due under their cadence and skips the rest, so the
   daily job quietly does nothing for a weekly project until its interval has elapsed. A project
   with **no** `cadence` set is always due (so `--due` is a no-op for it). The interval carries a
-  little slack (daily fires after ~20h, weekly after ~6d) so a scheduler firing slightly early,
-  or a DST shift, never skips a run. Skipped-as-not-due is a routine outcome: the run still
+  small slack (daily fires after 23h, weekly after 6d23h) — just enough to absorb a DST shift
+  or a scheduler firing slightly early, without shortening the cadence, so a daily job delivers
+  a weekly project on day 7, not day 6. Skipped-as-not-due is a routine outcome: the run still
   exits 0.
 
 > **Before you schedule anything:** run the command once by hand in a terminal and confirm it

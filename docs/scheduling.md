@@ -34,6 +34,29 @@ python -m orion report --all --yes
   digest. The run **exits non-zero only on a real failure**, so the scheduler alerts on genuine
   problems, not on routine "nothing to send" runs.
 
+### Mixed cadences from a single entry (`--due`)
+
+If different projects should report on different cadences (one daily, another weekly), you have
+two options:
+
+- **One scheduler entry per cadence group** — a daily entry that runs `--all --yes` over a
+  daily-only config, a weekly entry over a weekly-only config. Fully OS-delegated, no Orion
+  state involved.
+- **One entry plus `--due`** — set `cadence = "daily"` or `cadence = "weekly"` per project (see
+  `orion.toml.example`), schedule a single **daily** entry, and add `--due`:
+
+  ```
+  python -m orion report --all --due --yes
+  ```
+
+  `--due` reports only the projects actually due under their cadence and skips the rest, so the
+  daily job quietly does nothing for a weekly project until its interval has elapsed. A project
+  with **no** `cadence` set is always due (so `--due` is a no-op for it). The interval carries a
+  small slack (daily fires after 23h, weekly after 6d23h) — just enough to absorb a DST shift
+  or a scheduler firing slightly early, without shortening the cadence, so a daily job delivers
+  a weekly project on day 7, not day 6. Skipped-as-not-due is a routine outcome: the run still
+  exits 0.
+
 > **Before you schedule anything:** run the command once by hand in a terminal and confirm it
 > delivers what you expect. Set `auto_send = true` only on the projects you actually want sent
 > unattended, and prefer `share_level = "high_level"` for them (no code diff leaves the machine).

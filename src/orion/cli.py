@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -128,6 +128,19 @@ STATUS_NO_ACTIVITY = "NO_ACTIVITY"            # nothing new since last report
 STATUS_SKIPPED_NOT_OPTED = "SKIPPED_NOT_OPTED"  # --yes but auto_send not enabled
 STATUS_ABORTED = "ABORTED"                     # human declined at the preview
 STATUS_FAILED = "FAILED"                       # a real failure (alert-worthy)
+STATUS_NOT_DUE = "NOT_DUE"                      # --due: reported within its cadence
+
+# E1.2: minimum spacing between unattended reports per `cadence` preset (config.py's
+# CADENCES), consumed by `report --all --due`. Each value is the nominal period minus a
+# SMALL slack (daily 24h → 23h, weekly 7d → 6d23h) — just enough to absorb a DST shift
+# (≤1h) and a scheduler firing slightly early, WITHOUT shortening the cadence. The slack
+# is deliberately ~1h, not a full day: a larger margin (e.g. 6d) would let a daily
+# scheduler deliver a "weekly" project every 6 days, drifting it faster than weekly.
+# Compared in UTC against the stored report_history timestamps — no calendar/local math.
+_CADENCE_MIN_INTERVAL = {
+    "daily": timedelta(hours=23),
+    "weekly": timedelta(days=6, hours=23),
+}
 
 
 def _reconfigure_stream_utf8(stream) -> None:
@@ -247,6 +260,16 @@ def main(argv: list[str] | None = None) -> int:
             "Non-interactive: skip the preview for projects with auto_send=true "
             "(for unattended/scheduled runs). Projects without auto_send are "
             "skipped, never sent. Without --yes, every run previews as usual."
+        ),
+    )
+    report_parser.add_argument(
+        "--due",
+        action="store_true",
+        help=(
+            "With --all only: report just the projects DUE under their `cadence` "
+            "(skip any reported within their interval). Projects with no cadence "
+            "set are always due. Lets one scheduled `--all --due --yes` serve "
+            "projects on mixed cadences from a single entry."
         ),
     )
 
@@ -894,7 +917,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "report":
-        return cmd_report(args.project, Path(args.config), args.yes, args.all_projects)
+        return cmd_report(
+            args.project, Path(args.config), args.yes, args.all_projects, args.due
+        )
     if args.command == "intake":
         return cmd_intake(args.project, Path(args.config), args.message, args.yes)
     if args.command == "checklist-push":
@@ -1005,6 +1030,7 @@ def cmd_report(
     config_path: Path,
     assume_yes: bool,
     all_projects: bool,
+    due_only: bool = False,
 ) -> int:
     """Set up shared state, then run the report pipeline for one or all projects.
 
@@ -1015,12 +1041,17 @@ def cmd_report(
             through to _run_report, which combines it with each project's
             auto_send to decide whether the human preview is bypassed.
         all_projects: True for `--all` (report on every configured project).
+        due_only: True for `--due` — report only projects due under their cadence
+            (see _is_due), marking the rest STATUS_NOT_DUE. Requires all_projects
+            (a usage error otherwise); defaults False so single-project runs and
+            the plain `--all` path are unchanged.
 
     Returns:
-        Exit code: 2 for a usage error (neither or both of project / --all); 1 if
-        ANY project genuinely FAILED; otherwise 0. No-activity, skipped, and
-        human-aborted projects are all clean exit 0 — so a scheduler alerts only
-        on a real failure, not on the routine "nothing to send" cases.
+        Exit code: 2 for a usage error (neither or both of project / --all, or
+        --due without --all); 1 if ANY project genuinely FAILED; otherwise 0.
+        No-activity, skipped, not-due, and human-aborted projects are all clean
+        exit 0 — so a scheduler alerts only on a real failure, not on the routine
+        "nothing to send" cases.
 
     Why:
         Setup (config/secrets/state) is split from the per-project pipeline: those
@@ -1045,6 +1076,15 @@ def cmd_report(
             file=sys.stderr,
         )
         return 2
+    # --due is a filter over the --all set; on a single named project it has no
+    # meaning (you asked for that one explicitly), so reject the combination rather
+    # than silently ignoring the flag.
+    if due_only and not all_projects:
+        print(
+            "Error: --due only applies with --all (it filters the all-projects set).",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         config = load_config(config_path)
@@ -1064,15 +1104,28 @@ def cmd_report(
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    # Single "now" for the whole run so every project's due check compares against
+    # the same instant (a long run can't drift a borderline project across its edge).
+    now = datetime.now(timezone.utc)
+
     # Fail-soft loop: _run_report catches its own per-project errors and returns
-    # STATUS_FAILED, so one bad project never stops the rest of an --all run.
-    statuses = [
-        _run_report(
-            project, conn, assume_yes, config.summarizer, config.relay,
-            config.display_timezone,
+    # STATUS_FAILED, so one bad project never stops the rest of an --all run. When
+    # --due is set, a project reported within its cadence is skipped BEFORE any
+    # collection/LLM/preview work and recorded STATUS_NOT_DUE — so it still counts in
+    # the tally (numbers reconcile) but does nothing. The skip runs ahead of the
+    # auto_send/preview gate and never alters it for the projects that DO run.
+    statuses = []
+    for project in projects:
+        if due_only and not _is_due(project, conn, now):
+            print(f"[{project.name}] not due yet (cadence={project.cadence}); skipping.")
+            statuses.append(STATUS_NOT_DUE)
+            continue
+        statuses.append(
+            _run_report(
+                project, conn, assume_yes, config.summarizer, config.relay,
+                config.display_timezone,
+            )
         )
-        for project in projects
-    ]
 
     if all_projects:
         _print_all_summary(statuses)
@@ -1080,6 +1133,66 @@ def cmd_report(
     # Only a real FAILED is a non-zero exit; NO_ACTIVITY / SKIPPED / ABORTED are
     # all routine, intended outcomes that should not look like an error to cron.
     return 1 if any(status == STATUS_FAILED for status in statuses) else 0
+
+
+def _is_due(project: ProjectConfig, conn: sqlite3.Connection, now: datetime) -> bool:
+    """Whether a project is due for a report under its `cadence`, at instant `now`.
+
+    Args:
+        project: The project whose cadence gates the decision. `project.cadence` is
+            one of config.CADENCES ("daily" | "weekly") or None.
+        conn: An open state connection, to read the last delivered report time.
+        now: The current instant as a timezone-aware UTC datetime (one value shared
+            across the whole --all run, passed in rather than read here so the
+            decision is deterministic and unit-testable).
+
+    Returns:
+        True if the project should be reported now, False if it reported within its
+        cadence interval and should be skipped.
+
+    Why:
+        This is the whole of `--due`'s decision, kept in one small pure-ish function
+        so the CLI loop stays readable and the edges are testable. Two cases are
+        always due: no cadence set (the feature is opt-in — an un-cadenced project
+        behaves exactly like plain --all), and never reported (no history row yet,
+        so there is nothing to be "too soon" after). Otherwise we compare in UTC
+        against report_history's stored timestamp using the slack-adjusted interval
+        (_CADENCE_MIN_INTERVAL) — no calendar or local-midnight math, so scheduler
+        jitter and DST can't wrongly skip a run.
+    """
+    # Opt-in: a project with no cadence is always due, so --due degrades to plain
+    # --all for it. This is what keeps every existing config working unchanged.
+    if project.cadence is None:
+        return True
+
+    last = get_last_report_time(conn, project.name)
+    # Never delivered (or never any activity to deliver) → nothing to be too-soon
+    # after, so it is due. It will still exit NO_ACTIVITY cheaply if there's nothing
+    # new, before any LLM call.
+    if last is None:
+        return True
+
+    # Stored timestamps are tz-aware UTC ISO (cli writes datetime.now(timezone.utc).
+    # isoformat()). Defensive parse: a malformed row (external tampering, or a future
+    # format change) must NOT crash the whole --all run here, ahead of _run_report's
+    # per-project fail-soft — so treat "can't tell when we last reported" as DUE (report
+    # it, the conservative choice) rather than raising.
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    # Guard against a legacy naive row: attach UTC so the subtraction is tz-aware both sides.
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+
+    # A timestamp AHEAD of now (a clock correction, or imported state) would make the
+    # elapsed interval negative and wrongly suppress the project until that future time
+    # plus its cadence. Treat "last reported in the future" as due too — same conservative
+    # default as an unparseable row: better to report than to silently go quiet.
+    if last_dt > now:
+        return True
+
+    return (now - last_dt) >= _CADENCE_MIN_INTERVAL[project.cadence]
 
 
 def _print_all_summary(statuses: list[str]) -> None:
@@ -1104,6 +1217,7 @@ def _print_all_summary(statuses: list[str]) -> None:
         STATUS_SKIPPED_NOT_OPTED: 0,
         STATUS_ABORTED: 0,
         STATUS_FAILED: 0,
+        STATUS_NOT_DUE: 0,
     }
     for status in statuses:
         counts[status] += 1
@@ -1113,6 +1227,7 @@ def _print_all_summary(statuses: list[str]) -> None:
         f"{counts[STATUS_SENT]} sent, "
         f"{counts[STATUS_NO_ACTIVITY]} no activity, "
         f"{counts[STATUS_SKIPPED_NOT_OPTED]} skipped, "
+        f"{counts[STATUS_NOT_DUE]} not due, "
         f"{counts[STATUS_ABORTED]} aborted, "
         f"{counts[STATUS_FAILED]} failed."
     )

@@ -183,8 +183,20 @@ Deferred).
   due-dates/at-risk; see "Horizon-C direction settled" in `plans/orion-plan.md`
   and the strategy doc) lands at the *same* "cadence needs Orion's own state" threshold — so it most
   naturally arrives **with** this scheduling layer and the Horizon-C stateful process, not separately.
-- **Status:** Deferred → Horizon C (gate evaluated 2026-06-17; build when per-project cadence or
-  activity-gating is actually wanted, most likely alongside the Horizon-C listener).
+- **Status:** **RESOLVED (E1.2 Unit 2, 2026-07-17).** `report --all --due` now reads each
+  project's optional `cadence` config field (`config.py`, validated like `share_level` / `kind`)
+  plus the last-report time — `MAX(sent_at)` over `report_history`, **no new schema**, exactly as
+  the implementation note above prescribed — and reports only the projects due now. The rest are
+  marked `NOT_DUE`, counted in the `--all` tally (numbers reconcile), and skipped before any
+  collection or LLM call. Interval carries slack (daily ~20h, weekly ~6d) and is compared in UTC,
+  so scheduler jitter / DST never skips a run. One daily entry with `--all --due --yes` now serves
+  mixed cadences (see `docs/scheduling.md`).
+- **B5 scheduling-*layer* stance (unchanged by this):** `--due` is precisely the *stateless* subset
+  carved out of B5 — it needs only the already-existing `report_history`, no always-on process.
+  What remains of B5 (activity-gating, quiet hours, per-recipient cadence, an in-process scheduler)
+  still fails the 2026-06-17 gate, and shipping `--due` *removes* the strongest remaining motivation
+  for a built-in scheduling layer (mixed cadences from one entry). Re-evaluate that layer only if an
+  always-on Orion-side process (e.g. the Horizon-C listener) actually appears.
 
 ## KI-14 — `install-hook` installs one standalone hook per project; no chaining
 

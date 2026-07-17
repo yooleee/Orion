@@ -29,6 +29,7 @@ from relay.store import (
     effective_checklist,
     get,
     get_checklist,
+    get_due_soon_days,
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
@@ -47,6 +48,7 @@ from relay.store import (
     record_admin_audit,
     record_observations,
     revoke_user,
+    set_due_soon_days,
     set_project_kind,
     update_last_login,
     upsert_checklist,
@@ -1254,6 +1256,87 @@ def test_latest_report_per_project_carries_kind(tmp_path):
     rows = {r["project"]: r for r in latest_report_per_project(conn, today=date(2026, 6, 26))}
     assert rows["orion"]["kind"] == "project"
     assert rows["apps"]["kind"] == "tracker"
+
+
+# --- E1.2 (forward-look): per-project due_soon_days (relay_project_meta) ------------
+# set_due_soon_days upserts the (nullable) horizon column, get_due_soon_days returns None
+# when unset, and the portfolio at-risk count classifies against the per-project window.
+
+
+def _dated_item(text, due_date, done=False):
+    """Build one checklist item carrying a deadline (the store's wire shape)."""
+    return {"text": text, "due_date": due_date, "done": done}
+
+
+def test_get_due_soon_days_is_none_until_set(tmp_path):
+    """A project with no horizon set reads as None — the omit-when-unset signal.
+
+    Why this matters: None is what tells the classifier to fall back to the 7-day default,
+    so a project that never configured the knob must read None, not 7 or an error. It must
+    also be distinct from any real value so back-compat is unambiguous.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert get_due_soon_days(conn, "demo") is None
+
+
+def test_set_due_soon_days_roundtrips_and_last_writer_wins(tmp_path):
+    """set_due_soon_days stores the horizon and a later push overwrites it (one row).
+
+    Why this matters: the horizon is CURRENT STATE that rides every push; two producers (or
+    two edits) must resolve last-writer-wins, exactly like kind — the newest config value
+    always wins, never accumulates.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_due_soon_days(conn, "apps", 14)
+    assert get_due_soon_days(conn, "apps") == 14
+    # A later push with a different value overwrites the same row (last writer wins).
+    set_due_soon_days(conn, "apps", 30)
+    assert get_due_soon_days(conn, "apps") == 30
+
+
+def test_due_soon_days_and_kind_share_the_row_without_clobbering(tmp_path):
+    """due_soon_days and kind are written independently on the shared meta row.
+
+    Why this matters: the two knobs live in one relay_project_meta row but arrive/​persist
+    separately. Setting one must not reset the other — a bare due_soon_days upsert must leave
+    kind at its prior value (and vice versa), or a checklist push carrying only one field
+    would silently wipe the other.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # Set kind first, then set the horizon: kind must survive the second, unrelated upsert.
+    set_project_kind(conn, "apps", "tracker")
+    set_due_soon_days(conn, "apps", 14)
+    assert get_project_kind(conn, "apps") == "tracker"
+    assert get_due_soon_days(conn, "apps") == 14
+    # And the reverse: a horizon-only project defaults kind to "project" (schema default),
+    # and a later kind push must not disturb the stored horizon.
+    set_due_soon_days(conn, "only-horizon", 20)
+    assert get_project_kind(conn, "only-horizon") == "project"
+    set_project_kind(conn, "only-horizon", "tracker")
+    assert get_due_soon_days(conn, "only-horizon") == 20
+
+
+def test_latest_report_per_project_at_risk_honors_due_soon_days(tmp_path):
+    """The portfolio at-risk count classifies against the project's due_soon_days.
+
+    Why this matters: an item due in 10 days is at-risk under a 14-day horizon but NOT under
+    the 7-day default. The portfolio badge must reflect the per-project window so it agrees
+    with the per-item render, and an un-configured project must keep the 7-day behavior.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    today = date(2026, 6, 26)
+    ten_days_out = "2026-07-06"  # today + 10 days
+    # Two trackers with the SAME 10-day-out open item; only one sets a 14-day horizon.
+    upsert_checklist(conn, "wide", [_dated_item("Ship", ten_days_out)], "2026-06-26T00:00:00+00:00")
+    set_due_soon_days(conn, "wide", 14)
+    upsert_checklist(conn, "default", [_dated_item("Ship", ten_days_out)], "2026-06-26T00:00:00+00:00")
+
+    rows = {r["project"]: r for r in latest_report_per_project(conn, today=today)}
+    # 10 <= 14 → at risk for the wide project; 10 > 7 → not at risk for the default one.
+    assert rows["wide"]["checklist_at_risk"] == 1
+    assert rows["wide"]["due_soon_days"] == 14
+    assert rows["default"]["checklist_at_risk"] == 0
+    assert rows["default"]["due_soon_days"] is None
 
 
 # --- relay_project_disciplines: observed-principles current state (E2 Inc 4 4b) ----

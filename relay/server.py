@@ -51,6 +51,7 @@ from .store import (
     effective_checklist,
     get,
     get_checklist,
+    get_due_soon_days,
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
@@ -69,6 +70,7 @@ from .store import (
     record_observations,
     revoke_user,
     rotate_key,
+    set_due_soon_days,
     set_project_kind,
     update_last_login,
     upsert_checklist,
@@ -397,6 +399,43 @@ def _checklist_items_error(checklist: object) -> str | None:
 # the wire's valid set is restated here, the same way _BUSY_TIMEOUT_SECONDS is duplicated.
 _VALID_PROJECT_KINDS = ("project", "tracker")
 
+# E1.2 (forward-look): the inclusive range a per-project `due_soon_days` may fall in. 1 day
+# (a same-day-only horizon) up to 365 (a year); anything outside is a config typo, not a
+# meaningful window, so the inbound boundary rejects it. Restated relay-local, like the set above.
+_MIN_DUE_SOON_DAYS = 1
+_MAX_DUE_SOON_DAYS = 365
+
+
+def _due_soon_days_error(value: object) -> str | None:
+    """Validate an OPTIONAL `due_soon_days` field, or None when it is absent/valid (E1.2).
+
+    Args:
+        value: The payload's `due_soon_days` (any type, or None when the key is absent —
+            payload.get returns None either way, which is the omit-when-unset case).
+
+    Returns:
+        None when the field is absent OR a valid int in 1..365; otherwise a short
+        human-readable 400 reason.
+
+    Why:
+        The knob rides BOTH carriers (the ingest blob and the /checklist push), so validating
+        it in one shared helper keeps the two boundaries from ever diverging (DRY). It is
+        omit-when-unset, so an absent value (None) is accepted — the store simply leaves the
+        project's prior horizon untouched. bool is explicitly rejected even though it is an int
+        subclass in Python: True/False is never a meaningful day count, and letting it through
+        would store 1/0 (and 0 is out of range anyway).
+    """
+    if value is None:
+        return None  # omit-when-unset: absent is valid, means "use the default"
+    if not isinstance(value, int) or isinstance(value, bool):
+        return "field 'due_soon_days' must be an integer"
+    if not (_MIN_DUE_SOON_DAYS <= value <= _MAX_DUE_SOON_DAYS):
+        return (
+            f"field 'due_soon_days' must be between "
+            f"{_MIN_DUE_SOON_DAYS} and {_MAX_DUE_SOON_DAYS}"
+        )
+    return None
+
 
 def _validate_checklist_request(payload: object) -> str | None:
     """Check a parsed payload against the checklist-push contract (POST /checklist).
@@ -427,6 +466,10 @@ def _validate_checklist_request(payload: object) -> str | None:
     kind = payload.get("kind")
     if kind is not None and kind not in _VALID_PROJECT_KINDS:
         return f"field 'kind' must be one of {_VALID_PROJECT_KINDS}"
+    # E1.2: `due_soon_days` is OPTIONAL here too (omit-when-unset), validated only when present.
+    due_soon_error = _due_soon_days_error(payload.get("due_soon_days"))
+    if due_soon_error is not None:
+        return due_soon_error
     return None
 
 
@@ -528,6 +571,14 @@ def _validate_blob(payload: object) -> str | None:
         items_error = _checklist_items_error(checklist)
         if items_error is not None:
             return items_error
+
+    # E1.2 (forward-look): `due_soon_days` is an OPTIONAL project-level knob that also rides the
+    # blob (omit-when-unset). Validated via the shared helper WHEN PRESENT, exactly like the
+    # /checklist carrier — an out-of-range or non-int value is a clean 400 here, never a later
+    # crash in the store or a bad horizon in the classifier. An absent value is simply left off.
+    due_soon_error = _due_soon_days_error(payload.get("due_soon_days"))
+    if due_soon_error is not None:
+        return due_soon_error
 
     return None
 
@@ -817,6 +868,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 record_observations(
                     conn, payload["project"], checklist, received_at, author_id
                 )
+            # E1.2 (forward-look): record the project's due-soon horizon when the push carries
+            # one. A PROJECT-level knob, independent of whether a checklist rides THIS push, so
+            # it is persisted OUTSIDE the checklist block. Omit-when-unset: absent ⇒ leave any
+            # prior horizon untouched (an old producer, or the knob not configured); present ⇒
+            # last-writer-wins, exactly like `kind`. Validated above to be an int in 1..365.
+            if payload.get("due_soon_days") is not None:
+                set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
         finally:
             conn.close()
         print(
@@ -897,6 +955,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # projects from trackers. Optional on the wire — absent ⇒ "project" (the safe
             # default, and what a producer predating the flag means). Its own meta row.
             set_project_kind(conn, payload["project"], payload.get("kind") or "project")
+            # E1.2 (forward-look): record the project's due-soon horizon when present. Unlike
+            # `kind` (which defaults to "project" and is always written), due_soon_days is
+            # omit-when-unset: absent ⇒ leave any prior value untouched; present ⇒ last-writer-
+            # wins. Validated above to be an int in 1..365. Shares the meta row with `kind`.
+            if payload.get("due_soon_days") is not None:
+                set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
         finally:
             conn.close()
         count = len(payload["checklist"])
@@ -2071,6 +2135,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         discussions=discussion_items_for_project(conn, name),
                         disciplines=project_disciplines(conn, name),
                         today=today,
+                        # E1.2: the project's due-soon horizon (None ⇒ the serializer uses the
+                        # 7-day default), so the checklist rows, milestones, and next-due state
+                        # classify against the same window the portfolio at-risk count used.
+                        due_soon_days=get_due_soon_days(conn, name),
                     ),
                 )
                 return
@@ -2090,6 +2158,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         checklist=effective_checklist(conn, report["project"]),
                         history=history(conn, report["project"]),
                         today=today,
+                        # E1.2: the report's project horizon, so the checklist SNAPSHOT rows
+                        # classify due-ness with the same window as the project page (None ⇒
+                        # the 7-day default).
+                        due_soon_days=get_due_soon_days(conn, report["project"]),
                     ),
                 )
                 return
@@ -2107,6 +2179,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         "kind": r["kind"],
                         "items": effective_checklist(conn, r["project"]),
                         "observations": observed_history(conn, r["project"]),
+                        # E1.2: carry each project's due-soon horizon (None ⇒ default) so the
+                        # time-bucketing classifies deadlines against the per-project window.
+                        "due_soon_days": r["due_soon_days"],
                     }
                     for r in rows
                 ]

@@ -62,6 +62,7 @@ export const DEMO_PROJECT: ProjectDetail = {
       at_risk: 1,
       nearest_due: "2026-07-03",
       slipping: false,
+      slipping_count: 0,
     },
     {
       group: "Core features",
@@ -70,6 +71,7 @@ export const DEMO_PROJECT: ProjectDetail = {
       at_risk: 1,
       nearest_due: "2026-07-05",
       slipping: false,
+      slipping_count: 0,
     },
     {
       group: "Polish & launch",
@@ -78,6 +80,7 @@ export const DEMO_PROJECT: ProjectDetail = {
       at_risk: 0,
       nearest_due: "2026-08-15",
       slipping: false,
+      slipping_count: 0,
     },
   ],
   checklist: [

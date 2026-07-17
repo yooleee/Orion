@@ -371,6 +371,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
     g = next(m for m in out["milestones"] if m["group"] == "G")
     assert g["done"] == 1 and g["total"] == 2
     assert g["slipping"] is True
+    assert g["slipping_count"] == 1  # exactly one open item (todo-x) slips
 
     # The checklist rows carry per-item state + slipping membership.
     by_text = {r["text"]: r for r in out["checklist"]}
@@ -399,6 +400,45 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         {"id": 2, "author_name": "orion-cli", "role": "developer", "body": "Landed.",
          "created_at": "2026-06-26T12:00:00+00:00"},
     ]
+
+
+def test_project_detail_milestone_slipping_count_counts_open_slips():
+    """A milestone group with 2 slipping open items reports slipping_count == 2 (E1.2 Unit 5).
+
+    Why this matters: the boolean `slipping` only says "at least one"; the count is what lets
+    the card show "2 slipped" for a multi-slip group. Only OPEN, slipping items count — a
+    steady item in the same group is excluded — so the number matches what the per-item rows
+    show as slipping. The single-slip case (count 1) is pinned in the test above.
+    """
+    checklist = [
+        _item("Task X", due_date="2026-06-28", key="todo-x", group="G"),  # slips (below)
+        _item("Task Y", due_date="2026-06-30", key="todo-y", group="G"),  # slips (below)
+        _item("Steady", due_date="2026-07-05", key="todo-z", group="G"),  # never slips
+    ]
+    # X and Y each had their deadline pushed LATER across two observations → both slipping.
+    # Z was observed once and never moved → not slipping. (Deadline-moved-later is today-
+    # independent, so the count is robust to _TODAY.)
+    observations = [
+        {"item_key": "todo-x", "due_date": "2026-06-20", "done": False, "observed_at": "2026-06-22T00:00:00+00:00"},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False, "observed_at": "2026-06-26T00:00:00+00:00"},
+        {"item_key": "todo-y", "due_date": "2026-06-24", "done": False, "observed_at": "2026-06-22T00:00:00+00:00"},
+        {"item_key": "todo-y", "due_date": "2026-06-30", "done": False, "observed_at": "2026-06-26T00:00:00+00:00"},
+        {"item_key": "todo-z", "due_date": "2026-07-05", "done": False, "observed_at": "2026-06-26T00:00:00+00:00"},
+    ]
+    out = api.serialize_project(
+        name="orion",
+        kind="project",
+        reports=[],
+        checklist=checklist,
+        observations=observations,
+        producer_checklists=[],
+        discussions=[],
+        disciplines=None,
+        today=_TODAY,
+    )
+    g = next(m for m in out["milestones"] if m["group"] == "G")
+    assert g["slipping"] is True
+    assert g["slipping_count"] == 2  # X and Y slip; the steady Z does not
 
 
 def test_project_detail_marks_slipping_per_producer_stream():

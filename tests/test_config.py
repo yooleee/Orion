@@ -1548,6 +1548,75 @@ def test_tracker_without_checklist_raises(tmp_path):
         load_config(path)
 
 
+# --- cadence: report-cadence field (E1.2 Unit 1) ---------------------------------
+
+
+def test_cadence_defaults_to_none(tmp_path):
+    """An omitted `cadence` resolves to None — the project is always due.
+
+    Why this matters: cadence is opt-in with no default preset, so an existing config
+    that never heard of it must load unchanged and stay always-due under `--due`.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    assert get_project(load_config(path), "demo").cadence is None
+
+
+def test_cadence_weekly_loads(tmp_path):
+    """A valid preset (`cadence = "weekly"`) loads onto ProjectConfig.cadence.
+
+    Why this matters: this is the seam Unit 2's `report --all --due` reads to space out a
+    project's unattended reports, so the string must survive load intact.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        cadence = "weekly"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    assert get_project(load_config(path), "demo").cadence == "weekly"
+
+
+def test_invalid_cadence_raises(tmp_path):
+    """An unknown cadence value is a clear ConfigError, not a silent bad cadence.
+
+    Why this matters: a typo (cadence = "weekley") would otherwise sail through and make a
+    project silently never/always due; catching it at load points at the exact key.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        cadence = "weekley"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="invalid cadence"):
+        load_config(path)
+
+
 # --- disciplines collector: discipline_docs parsing (E2 Inc 4 slice 4b) ----------
 
 

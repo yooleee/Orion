@@ -462,6 +462,33 @@ Deferred).
   (items + `kind` + `due_soon_days`), which keeps consequence (2) mitigated: a config-only horizon
   change still triggers a push.
 
+## KI-36 — Reports sent before a relay grant never land on the dashboard (backfill path added)
+
+- **Detail:** When a project's reports are sent (via `report`/`intake`) while the pushing key
+  is **not yet scoped** for that project, relay ingest returns 404 and the fail-soft
+  `_relay_push` drops it — the report reaches Discord/Slack but never lands in the relay's
+  append-only `relay_reports` history. Concretely hit by `instruction-debugger` (added to
+  `orion.toml` and reported, granted on the relay only later). The **recovery path now exists**:
+  `orion relay-backfill <project> --generated-at <iso> [--body-file <f>]` pushes the exact
+  report content (which the user still has in Slack/Discord) onto the relay — relay-only and
+  chat-silent, at the original timestamp — reusing the report path's two-pass redaction and the
+  `/ingest` transport. One report per invocation (a batch / `--from-history` replay is a recorded
+  follow-on). Idempotence is the preview/confirm gate: the history is append-only, so a re-run
+  would add a duplicate row; `--yes` skips the preview for a knowing re-push.
+- **Why it matters:** the dashboard is meant to be the durable record of a project's progress; a
+  scoping gap at onboarding silently drops history from it. Backfill *recovers* already-sent
+  reports, but does not *prevent* the gap.
+- **Still open (the forward-fix):** nothing scopes a new project into the relay at `add-project`
+  time — a project must be granted separately (`relay-user grant`). A follow-on could **prompt to
+  scope a project into the relay during `add-project`** (opt-in, to preserve preview-before-send
+  and avoid coupling the config writer to the admin token). This is a distinct SCOPING concern
+  from the ingest push, and ties into the multi-producer / auth-revamp pass (see KI-35's
+  forward-note): scheduled multi-producer scoping + last-writer semantics get reworked there.
+- **Severity:** low–medium (recovery exists; the forward-fix is a convenience, and the gap only
+  bites at onboarding, before a grant).
+- **Status:** Partially addressed — the `relay-backfill` recovery command shipped in this slice;
+  the `add-project` scope-prompt forward-fix stays **Open** (revisit with the auth-revamp pass).
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 

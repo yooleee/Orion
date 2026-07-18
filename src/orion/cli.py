@@ -375,6 +375,40 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    backfill_parser = subparsers.add_parser(
+        "relay-backfill",
+        help="Push an already-sent report onto the relay dashboard (relay-only, no chat) — for reports sent before the relay was scoped in.",
+    )
+    backfill_parser.add_argument("project", help="Project name as defined in orion.toml.")
+    backfill_parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    backfill_parser.add_argument(
+        "--generated-at",
+        required=True,
+        help=(
+            "ISO 8601 timestamp of when the report was ORIGINALLY sent (read it off the "
+            "delivered Slack/Discord message). Sets the card's time on the dashboard; a "
+            "naive value is treated as UTC."
+        ),
+    )
+    backfill_parser.add_argument(
+        "--body-file",
+        default=None,
+        help="Path to a file holding the exact report body. If omitted, the body is read from stdin.",
+    )
+    backfill_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=(
+            "Skip the preview/confirm and push (the content was already delivered once). "
+            "Redaction still runs; without --yes the preview shows as usual."
+        ),
+    )
+
     hook_parser = subparsers.add_parser(
         "install-hook",
         help="Install a git hook that auto-reports a project on commit/push.",
@@ -956,6 +990,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "intake":
         return cmd_intake(args.project, Path(args.config), args.message, args.yes)
+    if args.command == "relay-backfill":
+        return cmd_relay_backfill(
+            args.project,
+            Path(args.config),
+            Path(args.body_file) if args.body_file is not None else None,
+            args.generated_at,
+            args.yes,
+        )
     if args.command == "checklist-push":
         return cmd_checklist_push(
             args.project, Path(args.config), args.watch, args.interval,
@@ -2310,6 +2352,176 @@ def cmd_intake(
         # collectors, no LLM), so only config/secrets setup errors are expected.
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _confirm_backfill(
+    project: str, relay_url: str, generated_at: str, body: str, redaction_hits: int
+) -> bool:
+    """Preview a relay-backfill push and ask the user to confirm.
+
+    Args:
+        project: The project the report belongs to.
+        relay_url: The relay the blob will be POSTed to.
+        generated_at: The normalized ISO 8601 UTC timestamp the card will carry.
+        body: The REDACTED body that will be pushed (the exact bytes).
+        redaction_hits: How many potential secrets were scrubbed from the body.
+
+    Returns:
+        True only if the user explicitly confirms (y/yes); False otherwise (a bare
+        Enter, EOF, or anything else does not push — fail closed).
+
+    Why:
+        Preview-before-send, adapted for the relay-only lane: the chat-framed
+        _preview_and_confirm renders a ComposedMessage for a channel, which a
+        backfill has no notion of (it never composes or delivers to a recipient). So
+        this shows exactly what will reach the relay — project, target, timestamp,
+        and the redacted body — and defaults to NO. It doubles as the idempotence
+        guard: the relay's report history is append-only, so a re-run would add a
+        duplicate row; the human confirming each push is what prevents that.
+    """
+    bar = "=" * 60
+    print(bar)
+    print("PREVIEW — backfill to the relay dashboard (NOT pushed yet)")
+    print(bar)
+    print(f"project:      {project}")
+    print(f"relay:        {relay_url}")
+    print(f"generated_at: {generated_at}")
+    print("-" * 60)
+    print(body)
+    print(bar)
+    if redaction_hits > 0:
+        print(f"⚠  {redaction_hits} potential secret(s) were redacted from this report.")
+    try:
+        answer = input("Push this report to the relay? [y/N] ")
+    except EOFError:
+        # No interactive input available -> treat as "no" (fail closed).
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def cmd_relay_backfill(
+    project_name: str,
+    config_path: Path,
+    body_file: Path | None,
+    generated_at: str,
+    assume_yes: bool,
+) -> int:
+    """Push an already-sent report's content onto the relay dashboard (relay-only, chat-silent).
+
+    Args:
+        project_name: The project the report belongs to.
+        config_path: Path to orion.toml.
+        body_file: A file holding the exact report body, or None to read it from stdin.
+        generated_at: ISO 8601 timestamp of when the report was ORIGINALLY sent (the
+            user reads it off the delivered message). A naive value is treated as UTC.
+        assume_yes: True to skip the preview/confirm (the content was already delivered
+            once, so a knowing re-push is sufficient); redaction still runs.
+
+    Returns:
+        Exit code: 2 for a malformed --generated-at; 1 on a setup error, an empty
+        body, an unreadable --body-file, or a relay push failure; 0 on a successful
+        push or a user-declined preview.
+
+    Why:
+        Reports sent to a project BEFORE its relay grant landed never reached the
+        dashboard — ingest 404'd and the fail-soft _relay_push dropped them (KI-36).
+        This is the one-time recovery path: it takes the exact report content (which
+        the user still has in Slack/Discord) and pushes it onto the relay's
+        append-only history, at the original timestamp, WITHOUT re-delivering to any
+        chat recipient (that is the whole difference from `intake`, which always sends
+        to chat too). It reuses the report path's two-pass redaction, build_report,
+        and the relay transport; sections=() so the relay renders `body` as one
+        untitled section, exactly like an intake push. lane=structured because no LLM
+        runs here — the supplied body is pushed verbatim. Deliberately one report per
+        invocation: it sidesteps any multi-report delimiter parsing and mirrors
+        intake's single-body idiom (a batch/history-replay mode is a recorded
+        follow-on). Unlike the report path's fail-soft relay push, a failure here is
+        fatal — landing the report on the relay IS the point.
+    """
+    try:
+        config = load_config(config_path)
+        project = get_project(config, project_name)
+        load_secrets(config_path)
+        relay_cfg = config.relay
+        if not relay_cfg.enabled:
+            raise ConfigError(
+                f"relay-backfill needs an enabled [relay] in {config_path} — it pushes "
+                f"the report to the dashboard relay."
+            )
+        token = get_required(relay_cfg.token_env_var)
+    except (ConfigError, SecretsError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    # Validate + normalize the original send time up front (before reading the body):
+    # a malformed timestamp is a usage error the caller must fix. Normalize to tz-aware
+    # UTC ISO so the relay orders the card correctly (a naive value is assumed UTC).
+    try:
+        dt = datetime.fromisoformat(generated_at)
+    except ValueError:
+        print(
+            f"Error: --generated-at must be an ISO 8601 timestamp "
+            f"(e.g. 2026-07-17T09:15:54+00:00), got {generated_at!r}.",
+            file=sys.stderr,
+        )
+        return 2
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    generated_at_norm = dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    # The body comes from --body-file, or from stdin when that is omitted.
+    if body_file is not None:
+        try:
+            body_text = body_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Error: could not read --body-file {body_file}: {exc}", file=sys.stderr)
+            return 1
+    else:
+        body_text = sys.stdin.read()
+    if not body_text.strip():
+        print("Refusing to backfill an empty report.", file=sys.stderr)
+        return 1
+
+    # Two redaction passes, mirroring the report/intake path — a historical report body
+    # can carry a secret (a token pasted into a report) just as a live one can. This is
+    # the non-negotiable net; only the human PREVIEW is relaxable, never redaction.
+    pass1 = redact(body_text)
+    pass2 = redact(pass1.text)
+    safe_body = pass2.text
+    redaction_hits = pass1.hit_count + pass2.hit_count
+    if not safe_body.strip():
+        print(
+            "Refusing to backfill: the report is empty after redaction.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # sections=() → the relay renders `body` as one untitled section (intake-style).
+    # participants/share_level/orion_version come from build_report (current config —
+    # approximate for a historical report, which is acceptable for a recovery push).
+    blob = build_report(project, safe_body, LANE_STRUCTURED, generated_at_norm)
+
+    if assume_yes:
+        print(f"Backfilling {project.name!r} to the relay (preview skipped: --yes).")
+    elif not _confirm_backfill(
+        project.name, relay_cfg.url, generated_at_norm, safe_body, redaction_hits
+    ):
+        print("Aborted. Nothing was pushed.")
+        return 0
+
+    # Relay-only, chat-silent: NO compose, NO channel delivery. Unlike the report
+    # path's fail-soft _relay_push, a failure here is fatal (exit 1) — the whole point
+    # is to land the report on the dashboard, so the user must see if it didn't.
+    try:
+        relay_push(serialize_blob(blob), relay_cfg.url, token)
+    except DeliveryError as exc:
+        print(f"Error: relay push failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Backfilled 1 report for {project.name!r} to the relay "
+        f"(generated_at={generated_at_norm})."
+    )
+    return 0
 
 
 def cmd_install_hook(

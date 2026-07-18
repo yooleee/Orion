@@ -1490,6 +1490,219 @@ def test_relay_error_is_non_fatal(tmp_path, env_and_mocks):
     assert env_and_mocks["sent"] == []
 
 
+# --- relay-backfill (push already-sent reports onto the relay, chat-silent) -----------
+#
+# relay-backfill lands an already-sent report on the relay's append-only history WITHOUT
+# re-delivering to any chat recipient (the whole difference from `intake`). These drive it
+# end to end with cli.relay_push captured (no network), asserting the pushed blob, that
+# redaction ran, and — critically — that NO chat send happens.
+
+_BACKFILL_TS = "2026-07-17T09:15:54+00:00"
+
+
+def _backfill_config(tmp_path):
+    """A relay-enabled `demo` project (reuses the shared relay-config + repo helpers)."""
+    return _write_relay_config(tmp_path, _make_repo(tmp_path))
+
+
+def test_relay_backfill_pushes_blob_chat_silent(tmp_path, env_and_mocks):
+    """`relay-backfill --yes` pushes the report blob to the relay and sends NO chat message.
+
+    Why this matters: this is the whole point vs `intake` — the report lands on the
+    dashboard's history at its original timestamp, but no Discord/Slack message goes out
+    (the reports were already delivered once). We assert the pushed blob's fields and that
+    the chat sender was never called.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    body = tmp_path / "report1.md"
+    body.write_text("Shipped the login flow and fixed two bugs.\n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 0
+    assert len(pushes) == 1
+    blob_json, url, token = pushes[0]
+    assert url == "https://relay.test/ingest"
+    assert token == "relay-secret"
+    blob = json.loads(blob_json)
+    assert blob["project"] == "demo"
+    assert blob["body"].startswith("Shipped the login flow")
+    assert blob["generated_at"] == "2026-07-17T09:15:54+00:00"
+    assert blob["participants"] == ["Alex"]         # from the project's recipients
+    assert blob["lane"] == "structured"             # no LLM runs in a backfill
+    assert blob["sections"] == []                   # renders as one untitled section (intake-style)
+    # Chat-silent: the report was already delivered — backfill must NOT re-send it.
+    assert env_and_mocks["sent"] == []
+
+
+def test_relay_backfill_redacts_body(tmp_path, env_and_mocks):
+    """A secret in the supplied body is scrubbed before it reaches the relay.
+
+    Why this matters: a historical report body can carry a secret (a token pasted into a
+    report) just like a live one — redaction is the non-negotiable net on this lane too,
+    even though the human preview is skippable with --yes.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    body = tmp_path / "r.md"
+    body.write_text("Rotated the key AKIAIOSFODNN7EXAMPLE today.\n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 0
+    assert "AKIAIOSFODNN7EXAMPLE" not in json.loads(pushes[0][0])["body"]
+
+
+def test_relay_backfill_normalizes_naive_timestamp(tmp_path, env_and_mocks):
+    """A naive --generated-at is treated as UTC and normalized to a tz-aware ISO string.
+
+    Why this matters: the relay orders cards by generated_at; a naive timestamp must not
+    reach the wire ambiguously. We pass a naive value and assert the blob carries +00:00.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    body = tmp_path / "r.md"
+    body.write_text("Body.\n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", "2026-07-17T09:15:54",
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 0
+    assert json.loads(pushes[0][0])["generated_at"] == "2026-07-17T09:15:54+00:00"
+
+
+def test_relay_backfill_bad_timestamp_is_usage_error(tmp_path, env_and_mocks):
+    """A malformed --generated-at is a usage error (exit 2), nothing pushed.
+
+    Why this matters: the timestamp is required and must be valid ISO 8601; a typo should
+    fail fast and clearly rather than push a report with a wrong/absent time.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    body = tmp_path / "r.md"
+    body.write_text("Body.\n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", "last tuesday",
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 2
+    assert pushes == []
+
+
+def test_relay_backfill_empty_body_refused(tmp_path, env_and_mocks):
+    """A whitespace-only body is refused (exit 1), nothing pushed."""
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    body = tmp_path / "r.md"
+    body.write_text("   \n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 1
+    assert pushes == []
+
+
+def test_relay_backfill_requires_enabled_relay(tmp_path, env_and_mocks):
+    """With the relay disabled, backfill errors (exit 1) — it has nowhere to push."""
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    body = tmp_path / "r.md"
+    body.write_text("Body.\n", encoding="utf-8")
+    toml = _write_relay_config(tmp_path, _make_repo(tmp_path), enabled=False)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 1
+    assert pushes == []
+
+
+def test_relay_backfill_preview_abort_pushes_nothing(tmp_path, env_and_mocks):
+    """Without --yes, declining the preview aborts cleanly (exit 0) and pushes nothing.
+
+    Why this matters: preview-before-send is the default guard (and the idempotence guard,
+    since the relay history is append-only). A 'no' at the prompt must push nothing.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    _answer(mp, "n")  # decline the confirm
+    body = tmp_path / "r.md"
+    body.write_text("Body.\n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "--body-file", str(body), "--config", str(toml),
+    ])
+    assert code == 0
+    assert pushes == []
+
+
+def test_relay_backfill_push_failure_exits_1(tmp_path, env_and_mocks):
+    """A relay push failure is fatal (exit 1) — unlike the report path's fail-soft push.
+
+    Why this matters: landing the report on the dashboard IS the point of backfill, so a
+    down/rejected relay must surface as a non-zero exit, not a swallowed warning.
+    """
+    from orion.delivery import DeliveryError
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    mp.setattr(
+        cli, "relay_push",
+        lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
+    )
+    body = tmp_path / "r.md"
+    body.write_text("Body.\n", encoding="utf-8")
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "--body-file", str(body), "--yes", "--config", str(toml),
+    ])
+    assert code == 1
+
+
+def test_relay_backfill_reads_body_from_stdin(tmp_path, env_and_mocks):
+    """With no --body-file, the body is read from stdin (a shell pipe / paste)."""
+    import io
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    mp.setattr("sys.stdin", io.StringIO("Piped report body.\n"))
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS, "--yes",
+        "--config", str(toml),
+    ])
+    assert code == 0
+    assert json.loads(pushes[0][0])["body"].startswith("Piped report body")
+
+
 # --- relay-serve CLI adapter (C1, CP8) ----------------------------------------
 #
 # These pin the `orion relay-serve` command's argument plumbing and its secret

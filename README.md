@@ -366,6 +366,14 @@ python -m orion report --all --yes
 Redaction is unchanged on this path: both passes still run, so unattended delivery relaxes no
 secret-scrubbing — it only skips the *human* preview, for opted-in projects.
 
+**Refreshing tracker dashboards on a schedule.** A companion command,
+`python -m orion checklist-push --all --due`, pushes each checklist-enabled project's current
+checklist to the relay dashboard on its `cadence` — **relay-only, with no `auto_send` gate** (the
+checklist is your own to-do file, no LLM step), and **change-gated** so an unchanged card is not
+re-pushed. Under the cautious default where no project sets `auto_send`, this is the *primary*
+scheduled line (the report entry above would send nothing). Details, and the dual-action overlap
+when a project both reports and has a checklist, are in [`docs/scheduling.md`](docs/scheduling.md).
+
 Per-OS setup (cron / systemd timer / launchd / Task Scheduler), the **WSL2 caveat** (cron inside
 WSL2 fires only while a WSL session is open — for reliable scheduling on Windows, prefer the
 **native Task Scheduler** path, which Orion documents), and the minimal-environment gotchas (use

@@ -95,6 +95,7 @@ from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_cache,
     get_discussion_watermark,
+    get_last_checklist_push,
     get_last_report_time,
     get_marker,
     open_state,
@@ -131,6 +132,15 @@ STATUS_SKIPPED_NOT_OPTED = "SKIPPED_NOT_OPTED"  # --yes but auto_send not enable
 STATUS_ABORTED = "ABORTED"                     # human declined at the preview
 STATUS_FAILED = "FAILED"                       # a real failure (alert-worthy)
 STATUS_NOT_DUE = "NOT_DUE"                      # --due: reported within its cadence
+
+# Per-project outcomes for `checklist-push --all` (E1.3). A separate small set from the
+# report STATUS_* above because the checklist lane's categories differ: there is no
+# LLM/preview gate (so no ABORTED / SKIPPED_NOT_OPTED), but there IS a content change-gate
+# (NO_CHANGE) and a "project has no checklist to push" skip (NO_CHECKLIST). NOT_DUE and
+# FAILED are shared in spirit; reused directly. Kept as strings for the same reason.
+STATUS_PUSHED = "PUSHED"                        # checklist pushed to the relay
+STATUS_NO_CHANGE = "NO_CHANGE"                  # --due: content identical to last push
+STATUS_NO_CHECKLIST = "NO_CHECKLIST"            # project has no checklist/source to push
 
 # E1.2: minimum spacing between unattended reports per `cadence` preset (config.py's
 # CADENCES), consumed by `report --all --due`. Each value is the nominal period minus a
@@ -277,10 +287,21 @@ def main(argv: list[str] | None = None) -> int:
 
     checklist_parser = subparsers.add_parser(
         "checklist-push",
-        help="Push a project's current checklist to the relay (no report); --watch for live updates.",
+        help="Push a project's current checklist to the relay (no report); --all for every project, --watch for live updates.",
+    )
+    # project is optional because --all pushes every checklist-enabled project. main
+    # validates that EXACTLY ONE of {project, --all} is given (same XOR as `report`).
+    checklist_parser.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        help="Project name as defined in orion.toml (omit when using --all; must enable `checklist`).",
     )
     checklist_parser.add_argument(
-        "project", help="Project name as defined in orion.toml (must enable `checklist`)."
+        "--all",
+        dest="all_projects",
+        action="store_true",
+        help="Push every checklist-enabled project in the config (for scheduled --all --due runs).",
     )
     checklist_parser.add_argument(
         "--config",
@@ -288,11 +309,22 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
     checklist_parser.add_argument(
+        "--due",
+        action="store_true",
+        help=(
+            "With --all only: push just the projects DUE under their `cadence` (skip any "
+            "pushed within their interval), and skip a due project whose content is "
+            "unchanged since its last push. Projects with no cadence are always due. Lets "
+            "one scheduled `--all --due` entry keep every tracker card fresh."
+        ),
+    )
+    checklist_parser.add_argument(
         "--watch",
         action="store_true",
         help=(
-            "Run a foreground loop that polls the tasks_file and pushes the checklist "
-            "whenever it changes, until Ctrl-C (near-real-time edit tracking)."
+            "Single-project only: run a foreground loop that polls the tasks_file and "
+            "pushes the checklist whenever it changes, until Ctrl-C (near-real-time edit "
+            "tracking). Cannot combine with --all/--due."
         ),
     )
     checklist_parser.add_argument(
@@ -926,7 +958,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_intake(args.project, Path(args.config), args.message, args.yes)
     if args.command == "checklist-push":
         return cmd_checklist_push(
-            args.project, Path(args.config), args.watch, args.interval
+            args.project, Path(args.config), args.watch, args.interval,
+            args.all_projects, args.due,
         )
     if args.command == "disciplines-push":
         return cmd_disciplines_push(args.project, Path(args.config))
@@ -1137,8 +1170,63 @@ def cmd_report(
     return 1 if any(status == STATUS_FAILED for status in statuses) else 0
 
 
+def _is_due_at(cadence: str | None, last_iso: str | None, now: datetime) -> bool:
+    """Whether a cadence-gated action is due at `now`, given when it last ran.
+
+    Args:
+        cadence: One of config.CADENCES ("daily" | "weekly") or None (no cadence).
+        last_iso: ISO 8601 UTC timestamp of the last run of this action for this
+            project, or None if it has never run. The caller supplies it from the
+            relevant per-action source (report_history for reports,
+            checklist_push_history for checklist pushes) — this function is agnostic
+            to which.
+        now: The current instant as a timezone-aware UTC datetime, passed in (not read
+            here) so the decision is deterministic and unit-testable.
+
+    Returns:
+        True if the action is due now, False if it ran within its cadence interval.
+
+    Why:
+        The whole of `--due`'s per-project decision, factored out of _is_due so BOTH
+        `report --due` and `checklist-push --due` consume one implementation of the
+        slack-adjusted interval (_CADENCE_MIN_INTERVAL) — each caller supplies its own
+        last-run source (E1.3). Two cases are always due: no cadence (opt-in — behaves
+        like plain --all), and never run (nothing to be "too soon" after). Otherwise we
+        compare in UTC using the min interval — no calendar/local-midnight math, so
+        scheduler jitter and DST can't wrongly skip a run. Malformed and future
+        timestamps both fall through to "due" (the conservative choice: better to act
+        than to silently go quiet on a bad/skewed row), never a crash.
+    """
+    # Opt-in: no cadence → always due, so --due degrades to plain --all for this action.
+    if cadence is None:
+        return True
+    # Never run → nothing to be too-soon after, so it is due.
+    if last_iso is None:
+        return True
+
+    # Stored timestamps are tz-aware UTC ISO. Defensive parse: a malformed row (external
+    # tampering, or a format change) must NOT crash the caller's --all loop — treat
+    # "can't tell when it last ran" as DUE rather than raising.
+    try:
+        last_dt = datetime.fromisoformat(last_iso)
+    except ValueError:
+        return True
+    # Guard against a legacy naive row: attach UTC so the subtraction is tz-aware both sides.
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+
+    # A timestamp AHEAD of now (a clock correction, or imported state) would make the
+    # elapsed interval negative and wrongly suppress the action until that future time
+    # plus its cadence. Treat "last ran in the future" as due too — same conservative
+    # default as an unparseable row.
+    if last_dt > now:
+        return True
+
+    return (now - last_dt) >= _CADENCE_MIN_INTERVAL[cadence]
+
+
 def _is_due(project: ProjectConfig, conn: sqlite3.Connection, now: datetime) -> bool:
-    """Whether a project is due for a report under its `cadence`, at instant `now`.
+    """Whether a project is due for a REPORT under its `cadence`, at instant `now`.
 
     Args:
         project: The project whose cadence gates the decision. `project.cadence` is
@@ -1153,48 +1241,15 @@ def _is_due(project: ProjectConfig, conn: sqlite3.Connection, now: datetime) -> 
         cadence interval and should be skipped.
 
     Why:
-        This is the whole of `--due`'s decision, kept in one small pure-ish function
-        so the CLI loop stays readable and the edges are testable. Two cases are
-        always due: no cadence set (the feature is opt-in — an un-cadenced project
-        behaves exactly like plain --all), and never reported (no history row yet,
-        so there is nothing to be "too soon" after). Otherwise we compare in UTC
-        against report_history's stored timestamp using the slack-adjusted interval
-        (_CADENCE_MIN_INTERVAL) — no calendar or local-midnight math, so scheduler
-        jitter and DST can't wrongly skip a run.
+        The report-lane binding of the shared cadence decision (_is_due_at): its
+        last-run source is report_history (get_last_report_time). We keep the
+        no-cadence short-circuit here so an un-cadenced project skips the DB read
+        entirely, exactly as before this was factored — report's behavior is unchanged.
     """
-    # Opt-in: a project with no cadence is always due, so --due degrades to plain
-    # --all for it. This is what keeps every existing config working unchanged.
+    # Short-circuit before any DB read: an un-cadenced project is always due (opt-in).
     if project.cadence is None:
         return True
-
-    last = get_last_report_time(conn, project.name)
-    # Never delivered (or never any activity to deliver) → nothing to be too-soon
-    # after, so it is due. It will still exit NO_ACTIVITY cheaply if there's nothing
-    # new, before any LLM call.
-    if last is None:
-        return True
-
-    # Stored timestamps are tz-aware UTC ISO (cli writes datetime.now(timezone.utc).
-    # isoformat()). Defensive parse: a malformed row (external tampering, or a future
-    # format change) must NOT crash the whole --all run here, ahead of _run_report's
-    # per-project fail-soft — so treat "can't tell when we last reported" as DUE (report
-    # it, the conservative choice) rather than raising.
-    try:
-        last_dt = datetime.fromisoformat(last)
-    except ValueError:
-        return True
-    # Guard against a legacy naive row: attach UTC so the subtraction is tz-aware both sides.
-    if last_dt.tzinfo is None:
-        last_dt = last_dt.replace(tzinfo=timezone.utc)
-
-    # A timestamp AHEAD of now (a clock correction, or imported state) would make the
-    # elapsed interval negative and wrongly suppress the project until that future time
-    # plus its cadence. Treat "last reported in the future" as due too — same conservative
-    # default as an unparseable row: better to report than to silently go quiet.
-    if last_dt > now:
-        return True
-
-    return (now - last_dt) >= _CADENCE_MIN_INTERVAL[project.cadence]
+    return _is_due_at(project.cadence, get_last_report_time(conn, project.name), now)
 
 
 def _print_all_summary(statuses: list[str]) -> None:
@@ -1763,63 +1818,241 @@ def _watch_checklist(
         return 0
 
 
-def cmd_checklist_push(
-    project_name: str, config_path: Path, watch: bool, interval: float
-) -> int:
-    """Push a project's current checklist to the relay (one-shot, or a --watch loop).
+def _push_checklist_all(
+    projects: list[ProjectConfig],
+    relay_cfg: RelayConfig,
+    token: str,
+    conn: sqlite3.Connection,
+    now: datetime,
+    due_only: bool,
+) -> list[str]:
+    """Push every checklist-enabled project once, fail-soft, returning per-project statuses.
 
     Args:
-        project_name: The project whose checklist to push.
+        projects: The full project list to sweep (config.projects.values()).
+        relay_cfg: The relay config (push target).
+        token: The relay ingest Bearer token.
+        conn: An open state connection (last-push history is read here and advanced on push).
+        now: The single run instant (tz-aware UTC), shared across the sweep so a long run
+            can't drift a borderline project across its cadence edge, and used as the
+            recorded pushed_at.
+        due_only: When True, apply the cadence filter AND the content change-gate; when
+            False (`--all` without `--due`), push every eligible project unconditionally.
+
+    Returns:
+        One STATUS_* value per project, in order — so the caller can print a tally and set
+        the exit code.
+
+    Why:
+        The `--all` sweep, mirroring cmd_report's fail-soft loop shape: one project's relay
+        failure is reported and the loop continues (exit 1 only on a genuine FAILED). It
+        reuses the single-project path's payload/redaction/hash/record pieces per project.
+        The change-gate (under --due only) is the honesty guard: since the relay stamps
+        updated_at on every push, an unattended run must not re-push unchanged content and
+        make an untouched card look freshly updated — cadence gates WHEN to check, the hash
+        gates WHETHER to push. Manual `--all` (no --due) is explicit intent, so it pushes
+        unconditionally.
+    """
+    statuses: list[str] = []
+    for project in projects:
+        # A project with no checklist to push is skipped, not an error: --all is a sweep,
+        # not a per-project assertion that each one is pushable (mirrors the report loop
+        # skipping a non-opted project).
+        if not project.checklist or not _checklist_source_files(project):
+            print(f"[{project.name}] no checklist to push; skipping.")
+            statuses.append(STATUS_NO_CHECKLIST)
+            continue
+
+        # --due filters on cadence BEFORE any file read: a project pushed within its
+        # interval is skipped without touching its tasks_file. `last` is reused below for
+        # the change-gate, so we read it once here.
+        last = get_last_checklist_push(conn, project.name)
+        if due_only and not _is_due_at(
+            project.cadence, last[0] if last is not None else None, now
+        ):
+            print(f"[{project.name}] not due yet (cadence={project.cadence}); skipping.")
+            statuses.append(STATUS_NOT_DUE)
+            continue
+
+        # Build the exact wire payload (redaction runs inside _checklist_payload) and hash
+        # it — needed both to change-gate under --due and to record after a push.
+        payload = _checklist_payload(project)
+        content_hash = _checklist_content_hash(
+            payload, project.kind, project.due_soon_days
+        )
+
+        # Change-gate (ONLY under --due): skip a due project whose content is identical to
+        # its last push, so an unattended run never re-stamps the relay's updated_at for an
+        # untouched card. This is why "no cadence = always due" stays harmless (Decision 3):
+        # a no-cadence project is always due, but pushes only when its content changed.
+        if due_only and last is not None and last[1] == content_hash:
+            print(f"[{project.name}] no change since last push; skipping.")
+            statuses.append(STATUS_NO_CHANGE)
+            continue
+
+        try:
+            push_checklist(
+                relay_cfg.url, project.name, payload, token,
+                kind=project.kind, due_soon_days=project.due_soon_days,
+            )
+            # Record only after a successful push (mirrors the single-project path): a
+            # DeliveryError skips this, so a failed push leaves no history row.
+            record_checklist_push(conn, project.name, content_hash, now.isoformat())
+            print(f"[{project.name}] pushed checklist ({len(payload)} item(s)).")
+            statuses.append(STATUS_PUSHED)
+        except DeliveryError as exc:
+            # Fail-soft: one project's relay failure is reported and the sweep continues.
+            print(f"[{project.name}] push failed: {exc}", file=sys.stderr)
+            statuses.append(STATUS_FAILED)
+    return statuses
+
+
+def _print_checklist_push_summary(statuses: list[str]) -> None:
+    """Print a one-line tally of per-project outcomes after a `checklist-push --all` run.
+
+    Args:
+        statuses: One STATUS_* value per project, in the order they ran.
+
+    Returns:
+        None. Prints a single summary line to stdout.
+
+    Why:
+        An --all sweep can touch many projects; a human (or a cron log) needs a single
+        glance to see what happened. Every category is shown so the numbers reconcile to
+        the project count — the analogue of report's _print_all_summary, with the
+        checklist lane's categories (no LLM/preview gate, but a change-gate).
+    """
+    counts = {
+        STATUS_PUSHED: 0,
+        STATUS_NO_CHANGE: 0,
+        STATUS_NOT_DUE: 0,
+        STATUS_NO_CHECKLIST: 0,
+        STATUS_FAILED: 0,
+    }
+    for status in statuses:
+        counts[status] += 1
+
+    print(
+        f"\n{len(statuses)} project(s): "
+        f"{counts[STATUS_PUSHED]} pushed, "
+        f"{counts[STATUS_NO_CHANGE]} unchanged, "
+        f"{counts[STATUS_NOT_DUE]} not due, "
+        f"{counts[STATUS_NO_CHECKLIST]} no checklist, "
+        f"{counts[STATUS_FAILED]} failed."
+    )
+
+
+def cmd_checklist_push(
+    project_name: str | None,
+    config_path: Path,
+    watch: bool,
+    interval: float,
+    all_projects: bool = False,
+    due_only: bool = False,
+) -> int:
+    """Push a project's current checklist to the relay (single project, --all, or --watch).
+
+    Args:
+        project_name: The project whose checklist to push, or None when --all is used.
         config_path: Path to orion.toml.
         watch: When True, run a foreground poll loop that pushes on every change to the
             project's checklist source until interrupted; when False, push once and exit.
+            Single-project only (rejected with --all/--due).
         interval: Seconds between polls in --watch mode.
+        all_projects: True for `--all` (push every checklist-enabled project in config).
+        due_only: True for `--due` — with --all only, push just the projects DUE under
+            their `cadence` and skip a due project whose content is unchanged since its
+            last push (the scheduled-run surface). Defaults False so manual pushes are
+            unconditional.
 
     Returns:
-        Process exit code: 0 on success / clean stop, 1 on a setup or delivery error.
+        Process exit code: 2 for a usage error (neither/both of project & --all, --due
+        without --all, or --watch with --all/--due); 1 on a setup error or a single-project
+        delivery failure, OR if any project in an --all sweep genuinely FAILED; else 0.
+        Not-due / no-change / no-checklist skips are all clean exit 0 (routine outcomes a
+        scheduler should not alert on).
 
     Why:
-        The dedicated checklist-only push (E2 Inc 2 follow-up): it updates ONLY the
-        project's live checklist on the dashboard — no report — so a checklist edit can
-        reach the dashboard in near-real-time. It reuses the report path's redaction
-        (_redacted_checklist) and the relay's ingest token, and requires the project to
-        have `checklist` enabled (with a tasks_file or tracker_file) and an enabled
-        [relay].
+        The dedicated checklist-only push: it updates ONLY the live checklist on the
+        dashboard — no report — reusing the report path's redaction (_redacted_checklist)
+        and the relay's ingest token. E1.3 adds `--all [--due]` so one scheduled entry can
+        keep every tracker card fresh on its own cadence, change-gated for honesty. The
+        single-project and --watch paths are unchanged.
     """
+    # Validate the flag combination up front (argparse can't express these), mirroring
+    # cmd_report's XOR handling — a clear message and exit 2 for each misuse.
+    if all_projects and project_name is not None:
+        print("Error: give either a project name or --all, not both.", file=sys.stderr)
+        return 2
+    if not all_projects and project_name is None:
+        print(
+            "Error: give a project name, or --all to push every checklist.",
+            file=sys.stderr,
+        )
+        return 2
+    if due_only and not all_projects:
+        print(
+            "Error: --due only applies with --all (it filters the all-projects set).",
+            file=sys.stderr,
+        )
+        return 2
+    if watch and (all_projects or due_only):
+        print(
+            "Error: --watch is single-project; it cannot combine with --all or --due.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         config = load_config(config_path)
         load_secrets(config_path)
-        project = get_project(config, project_name)
         relay_cfg = config.relay
         if not relay_cfg.enabled:
             raise ConfigError(
                 f"checklist-push needs an enabled [relay] in {config_path} — it pushes "
                 f"the checklist to the dashboard relay."
             )
-        if not project.checklist:
-            raise ConfigError(
-                f"Project {project.name!r} does not enable `checklist`. Set "
-                f"`checklist = true` (with a 'tasks' or 'tracker' collector) to push "
-                f"its checklist."
-            )
-        if not _checklist_source_files(project):
-            raise ConfigError(
-                f"Project {project.name!r} has no tasks_file or tracker_file to read a "
-                f"checklist from."
-            )
         token = get_required(relay_cfg.token_env_var)
         # Open the state store so each successful push is logged (E1.3): the scheduled
         # `--due` path reads this history to gate on cadence and content change.
         conn = open_state(config.state_db)
+        if all_projects:
+            projects = list(config.projects.values())
+        else:
+            project = get_project(config, project_name)
+            # Single-project preconditions stay HARD errors: the user named this one, so
+            # "it has no checklist" is a mistake to surface, not a silent skip (unlike the
+            # --all sweep, where a non-checklist project is simply passed over).
+            if not project.checklist:
+                raise ConfigError(
+                    f"Project {project.name!r} does not enable `checklist`. Set "
+                    f"`checklist = true` (with a 'tasks' or 'tracker' collector) to push "
+                    f"its checklist."
+                )
+            if not _checklist_source_files(project):
+                raise ConfigError(
+                    f"Project {project.name!r} has no tasks_file or tracker_file to read a "
+                    f"checklist from."
+                )
     except (ConfigError, SecretsError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    if all_projects:
+        # Single "now" for the whole sweep so every due check compares against the same
+        # instant (a long run can't drift a borderline project across its cadence edge).
+        now = datetime.now(timezone.utc)
+        statuses = _push_checklist_all(projects, relay_cfg, token, conn, now, due_only)
+        _print_checklist_push_summary(statuses)
+        # Only a genuine FAILED is a non-zero exit; NOT_DUE / NO_CHANGE / NO_CHECKLIST are
+        # routine outcomes a scheduler should not alert on.
+        return 1 if any(status == STATUS_FAILED for status in statuses) else 0
+
     if watch:
         return _watch_checklist(project, relay_cfg, token, interval, conn)
 
-    # One-shot: push the current checklist once. A delivery failure is fatal here
-    # (unlike the watch loop, which retries), so the user sees a non-zero exit.
+    # One-shot single project: push the current checklist once. A delivery failure is fatal
+    # here (unlike the watch loop, which retries), so the user sees a non-zero exit.
     try:
         payload = _checklist_payload(project)
         push_checklist(

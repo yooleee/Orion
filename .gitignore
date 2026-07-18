@@ -69,6 +69,7 @@ docs/forward-look-scheduling-kickoff.md
 docs/scheduled-checklist-push-kickoff.md
 docs/relay-backfill-kickoff.md
 docs/auth-revamp-planning-brief.md
+docs/claudemd-refresh-audit-kickoff.md
 
 # Scheduler run logs (launchd/cron StandardOut/Err targets — see docs/scheduling.md)
 /orion-*.log

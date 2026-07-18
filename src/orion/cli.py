@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -97,6 +98,7 @@ from orion.state import (
     get_last_report_time,
     get_marker,
     open_state,
+    record_checklist_push,
     record_report,
     set_cache,
     set_discussion_watermark,
@@ -1623,6 +1625,40 @@ def _checklist_payload(project: ProjectConfig) -> list[dict]:
     return [serialize_checklist_item(item) for item in items]
 
 
+def _checklist_content_hash(
+    payload: list[dict], kind: str, due_soon_days: int | None
+) -> str:
+    """Hash the exact checklist wire payload a push would send, for change detection.
+
+    Args:
+        payload: The redacted checklist items in wire shape (from _checklist_payload)
+            — the list order is meaningful and preserved.
+        kind: The project's kind ("project" | "tracker"), which rides the push.
+        due_soon_days: The project's configured due-soon window, or None. Included even
+            when None (as JSON null) so a config-only horizon change still changes the
+            hash — that is what keeps a scheduled push refreshing the relay's due-soon
+            flag (the KI-35 case-2 mitigation) under change-gating.
+
+    Returns:
+        A hex sha256 of the canonicalized {checklist, kind, due_soon_days} payload.
+
+    Why:
+        `checklist-push --all --due` (Unit 2) must skip a scheduled push whose content
+        has not changed, so it can never make an untouched card look freshly updated
+        (the relay stamps updated_at on every push). This hashes the exact WIRE payload
+        push_checklist transmits — not the raw tasks_file — so a change that alters the
+        wire form (e.g. due_soon_days) counts, and a raw-file edit that redaction erases
+        does not spuriously re-push. sort_keys canonicalizes dict key order (item list
+        order is left intact) so JSON key ordering can never fake or hide a change.
+    """
+    canonical = json.dumps(
+        {"checklist": payload, "kind": kind, "due_soon_days": due_soon_days},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _watch_tick(
     project: ProjectConfig, relay_cfg: RelayConfig, token: str, last_pushed: list | None
 ) -> tuple[list[dict], bool]:
@@ -1658,7 +1694,11 @@ def _watch_tick(
 
 
 def _watch_checklist(
-    project: ProjectConfig, relay_cfg: RelayConfig, token: str, interval: float
+    project: ProjectConfig,
+    relay_cfg: RelayConfig,
+    token: str,
+    interval: float,
+    conn: sqlite3.Connection,
 ) -> int:
     """Poll the project's checklist source and push the checklist whenever it changes.
 
@@ -1667,6 +1707,9 @@ def _watch_checklist(
         relay_cfg: The relay config (push target).
         token: The relay ingest Bearer token.
         interval: Seconds between polls.
+        conn: An open state connection. Each on-change push is recorded in
+            checklist_push_history (E1.3) so a later scheduled `--due` run knows when
+            this project last pushed and with what content.
 
     Returns:
         0 on a clean Ctrl-C stop.
@@ -1692,6 +1735,19 @@ def _watch_checklist(
             try:
                 last_pushed, pushed = _watch_tick(project, relay_cfg, token, last_pushed)
                 if pushed:
+                    # Record the push right after it landed (mirrors record_report's
+                    # placement): a tick that pushed nothing records nothing. Recompute
+                    # the hash from the just-pushed payload — one cheap sha256 — so
+                    # _watch_tick stays a pure push-transport helper with no state/time
+                    # dependency of its own.
+                    record_checklist_push(
+                        conn,
+                        project.name,
+                        _checklist_content_hash(
+                            last_pushed, project.kind, project.due_soon_days
+                        ),
+                        datetime.now(timezone.utc).isoformat(),
+                    )
                     print(
                         f"Pushed checklist for {project.name!r} "
                         f"({len(last_pushed)} item(s)).",
@@ -1752,12 +1808,15 @@ def cmd_checklist_push(
                 f"checklist from."
             )
         token = get_required(relay_cfg.token_env_var)
+        # Open the state store so each successful push is logged (E1.3): the scheduled
+        # `--due` path reads this history to gate on cadence and content change.
+        conn = open_state(config.state_db)
     except (ConfigError, SecretsError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     if watch:
-        return _watch_checklist(project, relay_cfg, token, interval)
+        return _watch_checklist(project, relay_cfg, token, interval, conn)
 
     # One-shot: push the current checklist once. A delivery failure is fatal here
     # (unlike the watch loop, which retries), so the user sees a non-zero exit.
@@ -1766,6 +1825,14 @@ def cmd_checklist_push(
         push_checklist(
             relay_cfg.url, project.name, payload, token,
             kind=project.kind, due_soon_days=project.due_soon_days,
+        )
+        # Record only after the push succeeded (mirrors record_report): a DeliveryError
+        # below skips this, so a failed push leaves no history row and is retried later.
+        record_checklist_push(
+            conn,
+            project.name,
+            _checklist_content_hash(payload, project.kind, project.due_soon_days),
+            datetime.now(timezone.utc).isoformat(),
         )
     except DeliveryError as exc:
         print(f"Error: {exc}", file=sys.stderr)

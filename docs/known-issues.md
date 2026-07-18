@@ -454,6 +454,13 @@ Deferred).
 - **Severity:** low (single-producer today; the authoritative-carrier split keeps the common path correct).
 - **Status:** By-design (revisit with the per-producer/multi-machine model, alongside KI-32's
   last-writer-wins concern; a per-producer horizon merge would arrive with that work if ever needed).
+  **Forward-note (2026-07-17, E1.3 planning):** the scheduled checklist-push slice (E1.3) automates the
+  authoritative `/checklist` carrier — fine while single-producer, but it means consequence (1) above
+  turns **periodic and silent** the moment a second producer (human, or an agent under the
+  agents-as-contributors idea) schedules pushes to a shared project. Revisit this KI as part of the
+  auth-revamp / multi-producer pass **before** that happens. E1.3's change-gate hashes the wire payload
+  (items + `kind` + `due_soon_days`), which keeps consequence (2) mitigated: a config-only horizon
+  change still triggers a push.
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

@@ -455,6 +455,26 @@ def test_is_due_treats_future_timestamp_as_due(tmp_path):
     assert cli._is_due(_bare_project("demo", "daily"), conn, now) is True
 
 
+def test_is_due_at_is_source_agnostic():
+    """_is_due_at decides purely from (cadence, last_iso, now) — the shared cadence core.
+
+    Why this matters: after E1.3's refactor, `report --due` and `checklist-push --due` both
+    consume this one helper, each passing its own last-run timestamp (report_history vs
+    checklist_push_history). Pinning the pure contract here guards the extraction directly:
+    no cadence and no last-run are always due; a run inside the interval is not due; a run
+    past it is due; malformed and future timestamps fall through to due (never a crash).
+    """
+    now = datetime.now(timezone.utc)
+    assert cli._is_due_at(None, now.isoformat(), now) is True                 # no cadence
+    assert cli._is_due_at("daily", None, now) is True                        # never run
+    assert cli._is_due_at("daily", (now - timedelta(hours=2)).isoformat(), now) is False
+    assert cli._is_due_at("daily", (now - timedelta(hours=24)).isoformat(), now) is True
+    assert cli._is_due_at("daily", "not-a-date", now) is True                # malformed → due
+    assert cli._is_due_at(
+        "daily", (now + timedelta(days=3)).isoformat(), now
+    ) is True  # future → due
+
+
 def test_all_due_reports_only_the_stale_project(tmp_path, env_and_mocks, capsys):
     """`--all --due --yes` skips a fresh project and reports the stale one; tally reconciles.
 

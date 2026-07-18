@@ -948,6 +948,282 @@ def test_checklist_content_hash_sensitive_to_due_soon_days(tmp_path):
     assert base == cli._checklist_content_hash(payload, "project", None)
 
 
+# --- E1.3 Unit 2: `checklist-push --all [--due]` (the scheduled sweep) ----------------
+#
+# The --all sweep pushes every checklist-enabled project fail-soft; --due filters on
+# cadence and change-gates so an unattended run never re-stamps an untouched card. These
+# drive the command end to end with push_checklist captured (no network), asserting on the
+# NUMBER of relay pushes (the change-gate's whole point is "no relay call when unchanged").
+
+
+def _checklist_all_config(tmp_path, *, cadence=None, due_soon_days=None, tasks_file="TODO.md"):
+    """A single checklist project `demo`, optionally with a cadence / due_soon_days.
+
+    Why: the --all --due tests vary exactly these two knobs (does the project have a
+    cadence? does its wire payload include a due-soon window?); everything else is the
+    shared checklist+relay shape.
+    """
+    cadence_line = f'cadence = "{cadence}"' if cadence else ""
+    dsd_line = f"due_soon_days = {due_soon_days}" if due_soon_days is not None else ""
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tasks"]
+        tasks_file = "{tasks_file}"
+        checklist = true
+        {cadence_line}
+        {dsd_line}
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def test_checklist_push_all_due_pushes_then_not_due(tmp_path, env_and_mocks, capsys):
+    """Two back-to-back `--all --due` runs: the first pushes, the second is NOT_DUE.
+
+    Why this matters: this is the cadence gate on the scheduled sweep. A daily-cadence
+    project pushed moments ago must be skipped on the next run (so a scheduler firing more
+    than once a day doesn't re-push), proven by the relay push count staying at 1.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_all_config(tmp_path, cadence="daily")
+
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 1  # first run: due (never pushed) → pushes
+
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 1  # second run: within 23h → NOT_DUE, no new push
+    assert "not due" in capsys.readouterr().out
+
+
+def test_checklist_push_all_due_change_gate_skips_unchanged(tmp_path, env_and_mocks, capsys):
+    """A due-but-unchanged project skips NO_CHANGE with NO relay call; an edit re-pushes.
+
+    Why this matters: the honesty guard. The relay stamps updated_at on every push, so an
+    unattended run must not re-push identical content and make an untouched card look fresh.
+    A no-cadence project is ALWAYS due (Decision 3), so this also proves "always due" stays
+    harmless: it pushes only when the content actually changed. No cadence + change-gate is
+    the exact combination the scheduled tracker card relies on.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    todo = tmp_path / "TODO.md"
+    todo.write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_all_config(tmp_path)  # no cadence → always due
+
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 1  # first push
+
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 1  # unchanged content → NO_CHANGE, no relay call
+    assert "no change" in capsys.readouterr().out
+
+    # Edit the checklist: the next --due run detects the changed hash and re-pushes.
+    todo.write_text("- [x] Ship it\n- [ ] And more\n", encoding="utf-8")
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 2  # content changed → pushes again
+
+
+def test_checklist_push_all_due_repushes_on_due_soon_days_change(tmp_path, env_and_mocks):
+    """A config-only `due_soon_days` change re-pushes under --due (hash covers the wire).
+
+    Why this matters: the change-gate hashes the WIRE payload (items + kind + due_soon_days),
+    not the raw tasks_file — so changing only the due-soon window, with identical items,
+    still counts as a change and re-pushes. This keeps the relay's due-soon flag current (the
+    KI-35 case-2 mitigation) even under change-gating.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_all_config(tmp_path)  # no cadence, no due_soon_days
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 1
+
+    # Rewrite the SAME project with a due-soon window; items are untouched.
+    _checklist_all_config(tmp_path, due_soon_days=14)
+    assert cli.main(["checklist-push", "--all", "--due", "--config", str(toml)]) == 0
+    assert len(pushes) == 2  # wire payload changed (due_soon_days) → re-push
+    assert pushes[1][5] == 14  # the new window rode the push
+
+
+def test_checklist_push_all_without_due_is_unconditional(tmp_path, env_and_mocks):
+    """`--all` without `--due` pushes every run, even when content is unchanged.
+
+    Why this matters: the change-gate is the AUTOMATION surface only. A manual `--all`
+    sweep is explicit user intent, so it pushes unconditionally — two identical `--all`
+    runs both push (unlike `--all --due`, which would skip the second NO_CHANGE).
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_all_config(tmp_path)
+
+    assert cli.main(["checklist-push", "--all", "--config", str(toml)]) == 0
+    assert cli.main(["checklist-push", "--all", "--config", str(toml)]) == 0
+    assert len(pushes) == 2  # both runs push despite identical content
+
+
+def test_checklist_push_all_skips_non_checklist_project(tmp_path, env_and_mocks, capsys):
+    """`--all` pushes checklist projects and passes over ones with no checklist.
+
+    Why this matters: --all is a sweep, not a per-project assertion — a project without a
+    checklist source is skipped (NO_CHECKLIST), not an error that aborts the run. Only the
+    checklist-enabled project reaches the relay.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tasks"]
+        tasks_file = "TODO.md"
+        checklist = true
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+
+        [projects.reportonly]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["git"]
+
+          [[projects.reportonly.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    assert cli.main(["checklist-push", "--all", "--config", str(toml)]) == 0
+    assert len(pushes) == 1  # only `demo` (checklist-enabled) pushed
+    assert pushes[0][1] == "demo"
+    assert "no checklist" in capsys.readouterr().out  # `reportonly` skipped, not errored
+
+
+def test_checklist_push_all_is_fail_soft_and_exits_1_on_failure(tmp_path, env_and_mocks, capsys):
+    """A per-project relay failure is reported, the sweep continues, and exit is 1.
+
+    Why this matters: mirrors the report loop's fail-soft contract — one project's down/
+    rejected relay push must not abort the others, but a genuine failure must still surface
+    as a non-zero exit for a scheduler. Both projects are attempted; the run exits 1.
+    """
+    from orion.delivery import DeliveryError
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    # Every push fails — a down relay / bad token surfaces exactly this.
+    mp.setattr(
+        cli,
+        "push_checklist",
+        lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
+    )
+
+    (tmp_path / "A.md").write_text("- [ ] a\n", encoding="utf-8")
+    (tmp_path / "B.md").write_text("- [ ] b\n", encoding="utf-8")
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.a]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tasks"]
+        tasks_file = "A.md"
+        checklist = true
+
+          [[projects.a.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+
+        [projects.b]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["tasks"]
+        tasks_file = "B.md"
+        checklist = true
+
+          [[projects.b.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+
+    assert cli.main(["checklist-push", "--all", "--config", str(toml)]) == 1  # a failure occurred
+    err = capsys.readouterr().err
+    assert err.count("push failed") == 2  # both attempted despite the first failing
+
+    # A failed push records nothing for either project (record-after-success).
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert get_last_checklist_push(conn, "a") is None
+    assert get_last_checklist_push(conn, "b") is None
+
+
+def test_checklist_push_all_due_usage_errors(tmp_path, env_and_mocks):
+    """The flag-combination guards return exit 2 with a clear message.
+
+    Why this matters: --due only means anything as a filter over --all; --watch is a single-
+    project foreground loop; and project-vs---all is exclusive. Each misuse is a usage error
+    (exit 2), mirroring `report`'s XOR handling — caught before any config/relay work.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    toml = _checklist_all_config(tmp_path)
+
+    # --due without --all
+    assert cli.main(["checklist-push", "demo", "--due", "--config", str(toml)]) == 2
+    # --watch combined with --all
+    assert cli.main(["checklist-push", "--all", "--watch", "--config", str(toml)]) == 2
+    # --watch combined with --due
+    assert cli.main(["checklist-push", "demo", "--watch", "--due", "--config", str(toml)]) == 2
+    # a project name AND --all
+    assert cli.main(["checklist-push", "demo", "--all", "--config", str(toml)]) == 2
+    # neither a project nor --all
+    assert cli.main(["checklist-push", "--config", str(toml)]) == 2
+
+
 def test_checklist_push_carries_configured_due_soon_days(tmp_path, env_and_mocks):
     """A project's `due_soon_days` rides the /checklist push (E1.2 Unit 3, carrier 2).
 

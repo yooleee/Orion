@@ -10,9 +10,11 @@ from orion.state import (
     _BUSY_TIMEOUT_SECONDS,
     get_cache,
     get_discussion_watermark,
+    get_last_checklist_push,
     get_last_report_time,
     get_marker,
     open_state,
+    record_checklist_push,
     record_report,
     set_cache,
     set_discussion_watermark,
@@ -33,6 +35,47 @@ def test_get_last_report_time(tmp_path):
     record_report(conn, "demo", "second", ["Alex"], "2026-06-02T10:00:00+00:00")
     assert get_last_report_time(conn, "demo") == "2026-06-02T10:00:00+00:00"
     assert get_last_report_time(conn, "other") is None
+
+
+def test_get_last_checklist_push(tmp_path):
+    """Returns None until a push is recorded, then the LATEST (pushed_at, content_hash).
+
+    Why this matters: `checklist-push --all --due` (E1.3) reads this to gate a scheduled
+    push on both cadence (pushed_at) and content change (content_hash). None must mean
+    "never pushed" (first-run due), and a second push must supersede the first — proven
+    by recording two rows and asserting the reader returns the SECOND pair, not the first
+    and not a max-timestamp mix. A different project stays None (per-project isolation).
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert get_last_checklist_push(conn, "demo") is None
+
+    record_checklist_push(conn, "demo", "hash-one", "2026-07-01T10:00:00+00:00")
+    record_checklist_push(conn, "demo", "hash-two", "2026-07-02T10:00:00+00:00")
+    # The latest row wins (id DESC): its timestamp AND its hash, as a correlated pair.
+    assert get_last_checklist_push(conn, "demo") == (
+        "2026-07-02T10:00:00+00:00",
+        "hash-two",
+    )
+    assert get_last_checklist_push(conn, "other") is None
+
+
+def test_get_last_checklist_push_uses_insertion_order_not_timestamp(tmp_path):
+    """The latest push is the last one RECORDED, even if its timestamp is not the max.
+
+    Why this matters: get_last_checklist_push orders by id (insertion order), not by
+    MAX(pushed_at), so it stays correct if two pushes ever share a timestamp or a clock
+    correction makes a later push carry an earlier stamp. We record a newer push with a
+    deliberately EARLIER timestamp and assert its (earlier) pair is returned — the read
+    reflects "what we pushed most recently," which is what the change-gate compares.
+    """
+    conn = open_state(tmp_path / "state.sqlite3")
+    record_checklist_push(conn, "demo", "hash-old", "2026-07-02T10:00:00+00:00")
+    # A later push whose timestamp is EARLIER than the previous row's.
+    record_checklist_push(conn, "demo", "hash-new", "2026-07-01T09:00:00+00:00")
+    assert get_last_checklist_push(conn, "demo") == (
+        "2026-07-01T09:00:00+00:00",
+        "hash-new",
+    )
 
 
 def test_first_run_has_no_marker(tmp_path):

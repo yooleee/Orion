@@ -102,6 +102,21 @@ CREATE TABLE IF NOT EXISTS collector_cache (
     cached_at    TEXT NOT NULL,   -- ISO 8601 UTC of when the value was computed
     PRIMARY KEY (project, collector, cache_key)
 );
+
+-- E1.3: an append-only log of dedicated checklist pushes (the `checklist-push` command),
+-- the exact analogue of report_history for the checklist lane. It exists so a SCHEDULED
+-- `checklist-push --all --due` can answer two questions the stateless push path could not:
+-- "when did we last push this project" (cadence gate) and "with what content" (change gate).
+-- We store only a content_hash of the pushed wire payload, never the body: the pushed
+-- checklist already lives on the relay, and the hash is all the change-gate compares. A row
+-- is inserted ONLY after a successful push (mirroring report_history), so a failed push
+-- leaves no trace and the next run retries.
+CREATE TABLE IF NOT EXISTS checklist_push_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project      TEXT NOT NULL,
+    pushed_at    TEXT NOT NULL,     -- ISO 8601 UTC of the successful push
+    content_hash TEXT NOT NULL      -- sha256 of the exact wire payload that was pushed
+);
 """
 
 
@@ -398,3 +413,71 @@ def get_last_report_time(conn: sqlite3.Connection, project: str) -> str | None:
         (project,),
     ).fetchone()
     return row[0] if row is not None else None
+
+
+def record_checklist_push(
+    conn: sqlite3.Connection,
+    project: str,
+    content_hash: str,
+    pushed_at: str,
+) -> None:
+    """Append one successful checklist push to the history table.
+
+    Args:
+        conn: An open state connection.
+        project: The project whose checklist was pushed.
+        content_hash: sha256 of the exact wire payload that was pushed (items +
+            kind + due_soon_days) — an opaque marker to this store, never the body.
+        pushed_at: ISO 8601 UTC timestamp of the push. Supplied by the caller (as
+            record_report takes sent_at) so this store stays time-free and
+            deterministic to test.
+
+    Returns:
+        None. Side effect: inserts a checklist_push_history row and commits.
+
+    Why:
+        The write side of the scheduled-push change gate (E1.3). The caller invokes
+        this ONLY after push_checklist returns successfully — mirroring where
+        record_report sits — so the log reflects pushes that actually landed on the
+        relay, and a failed push records nothing and is retried next run. We store
+        the hash rather than the body because the pushed checklist already lives on
+        the relay; the hash is all `--due`'s change gate needs to compare.
+    """
+    conn.execute(
+        "INSERT INTO checklist_push_history (project, pushed_at, content_hash) "
+        "VALUES (?, ?, ?)",
+        (project, pushed_at, content_hash),
+    )
+    conn.commit()
+
+
+def get_last_checklist_push(
+    conn: sqlite3.Connection, project: str
+) -> tuple[str, str] | None:
+    """Return a project's most recent checklist push as (pushed_at, content_hash), or None.
+
+    Args:
+        conn: An open state connection.
+        project: The project name.
+
+    Returns:
+        A (pushed_at, content_hash) pair for the latest push, or None if the project
+        has never had a checklist push recorded.
+
+    Why:
+        `checklist-push --all --due` needs BOTH facts about the last push: `pushed_at`
+        gates the cadence check ("is it time to push again?") and `content_hash` gates
+        the change check ("would this push actually differ?"). Returning both in one
+        read (unlike get_last_report_time's single value) avoids a second lookup. We
+        take the MAX row by `id DESC` rather than MAX(pushed_at): id is a monotonic
+        insertion order and each run inserts exactly once after its push, so `id DESC`
+        is the true latest row and is robust to two pushes sharing a timestamp — a
+        correlated read of the pair, which MAX(pushed_at) alone could not give. None
+        is the universal "never pushed — nothing to compare" signal (first-run due).
+    """
+    row = conn.execute(
+        "SELECT pushed_at, content_hash FROM checklist_push_history "
+        "WHERE project = ? ORDER BY id DESC LIMIT 1",
+        (project,),
+    ).fetchone()
+    return (row[0], row[1]) if row is not None else None

@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from orion import cli
 from orion.config import get_project, load_config
+from orion.state import get_last_checklist_push, open_state
 
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
@@ -866,6 +867,85 @@ def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_moc
     # this lane too (shared _redacted_checklist).
     assert checklist[2]["done"] is False
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
+
+
+def test_checklist_push_one_shot_records_history(tmp_path, env_and_mocks):
+    """A successful one-shot push logs one checklist_push_history row (E1.3).
+
+    Why this matters: the scheduled `--due` path (Unit 2) reads this log to gate on
+    cadence + content change. This is the write side: after a real push, exactly one row
+    exists, and its content_hash equals the hash of the WIRE payload that was pushed
+    (items + kind + due_soon_days) — the same value the change-gate will later compare.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    _capture_checklist_pushes(mp)  # keep the push off the network
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path)
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 0
+
+    # Reopen the state store the command wrote (state_db resolves beside the config).
+    conn = open_state(tmp_path / "state.sqlite3")
+    row = get_last_checklist_push(conn, "demo")
+    assert row is not None
+    pushed_at, content_hash = row
+    assert pushed_at  # a non-empty ISO timestamp was stamped
+    # The recorded hash must match the wire payload the command pushed. `demo` sets no
+    # due_soon_days (None) and defaults kind="project", mirroring the push args above.
+    project = get_project(load_config(toml), "demo")
+    payload = cli._checklist_payload(project)
+    expected = cli._checklist_content_hash(
+        payload, project.kind, project.due_soon_days
+    )
+    assert content_hash == expected
+
+
+def test_checklist_push_failed_delivery_records_nothing(tmp_path, env_and_mocks):
+    """A push that raises DeliveryError leaves NO history row (record-after-success).
+
+    Why this matters: recording sits after push_checklist returns, so a failed push must
+    not look like it happened — otherwise a later `--due` run would think the project is
+    fresh and skip a real update. We make the push raise and assert exit 1 with an empty
+    history (the DB + table exist, opened before the push, but hold no row).
+    """
+    from orion.delivery import DeliveryError
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    # The push transport raises — a down relay / bad token surfaces exactly this.
+    mp.setattr(
+        cli,
+        "push_checklist",
+        lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
+    )
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path)
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 1  # a one-shot delivery failure is fatal
+
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert get_last_checklist_push(conn, "demo") is None  # nothing recorded
+
+
+def test_checklist_content_hash_sensitive_to_due_soon_days(tmp_path):
+    """The wire-payload hash changes when only due_soon_days changes (config-only edit).
+
+    Why this matters: the hash must cover the WIRE payload, not just the raw items, so a
+    horizon-only config change still counts as a change and re-pushes (keeping the relay's
+    due-soon flag current — the KI-35 case-2 mitigation under change-gating). Same items,
+    same kind, different due_soon_days → different hash; identical inputs → identical hash.
+    """
+    payload = [{"text": "Ship it", "done": False}]
+    base = cli._checklist_content_hash(payload, "project", None)
+    changed = cli._checklist_content_hash(payload, "project", 14)
+    assert base != changed
+    # Deterministic: identical inputs hash identically (no ordering/encoding nondeterminism).
+    assert base == cli._checklist_content_hash(payload, "project", None)
 
 
 def test_checklist_push_carries_configured_due_soon_days(tmp_path, env_and_mocks):

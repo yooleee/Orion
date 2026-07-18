@@ -2,9 +2,11 @@
 scheduling.md
 ---------------------------------------------------------------------------
 Responsible for: The per-OS runbook for running Orion UNATTENDED on a cadence by
-                 handing the one-shot `report --all --yes` command to the OS's
-                 native scheduler (cron / systemd timer / launchd / Task
-                 Scheduler).
+                 handing a one-shot command to the OS's native scheduler (cron /
+                 systemd timer / launchd / Task Scheduler). Two commands are
+                 schedulable: `report --all --yes` (send digests — gated on
+                 auto_send) and `checklist-push --all --due` (refresh tracker
+                 dashboard cards — relay-only, no auto_send gate).
 Role in project: Phase 4 ships unattended send but NOT a scheduler — Orion
                  delegates cadence to the OS (see plans/orion-plan.md, Phase 3.5
                  scheduling stance). This is where that delegation is documented.
@@ -60,6 +62,48 @@ two options:
 > **Before you schedule anything:** run the command once by hand in a terminal and confirm it
 > delivers what you expect. Set `auto_send = true` only on the projects you actually want sent
 > unattended, and prefer `share_level = "high_level"` for them (no code diff leaves the machine).
+
+---
+
+## Scheduling checklist pushes (keeping tracker dashboards fresh)
+
+There is a second schedulable command, and for many setups it is the **primary** one:
+
+```
+python -m orion checklist-push --all --due
+```
+
+This pushes each checklist-enabled project's **current checklist** to the relay dashboard — no
+report — for the projects **due** under their `cadence`, skipping a due project whose checklist is
+**unchanged** since its last push. A tracker project's card otherwise goes stale until you push it
+by hand (or hold a `--watch` loop open); this entry makes a fresh card the default state.
+
+How it differs from `report --all --yes`, and why it is often the primary scheduled line:
+
+- **Relay-only and previewless by design — no `auto_send` gate.** The checklist is your own
+  already-written to-do file (there is no LLM step and nothing leaves for a chat channel), so it
+  carries no unreviewed content and needs no preview opt-in. Redaction still runs on every item.
+  The practical consequence: if **no** project has `auto_send = true` (the common, cautious
+  posture), the `report --all --yes` entry sends nothing, and this checklist-push entry is the
+  one actually doing work on your schedule.
+- **Change-gated for honesty.** The relay stamps a card's "updated" time on every push, so an
+  unattended run must not re-push identical content and make an untouched card look freshly
+  worked. `--due` gates **when** to check (the cadence), a content hash gates **whether** to push
+  (only when something actually changed). Not-due and no-change are both routine — the run exits
+  0. (A manual `checklist-push --all` **without** `--due` pushes unconditionally.)
+- **Same `cadence` key, both actions.** `cadence` gates `report --all --due` **and**
+  `checklist-push --all --due`. A project that both reports and has a checklist runs both actions
+  on its one cadence, each from its own last-run record.
+
+> **Dual-action overlap (intentional).** A report already carries the checklist snapshot. So a
+> project that both reports and has a checklist — scheduled with a `report --all --due --yes`
+> entry *and* a `checklist-push --all --due` entry on the same cadence — can push its checklist
+> twice the same day, on the two independent timers. This is harmless: the relay upserts the
+> checklist idempotently, and the change-gate means the second carrier usually no-ops.
+
+The per-OS setup below is **identical** for this command — just substitute
+`checklist-push --all --due` for `report --all --yes` in an entry, or add a **second** scheduler
+entry for it alongside the report one.
 
 ---
 
@@ -268,5 +312,8 @@ that without that, the cadence stops whenever WSL shuts down, which is why Task 
    enabled" in the output).
 4. Once it's proven, set the real cadence.
 
-The deferred enhancement of a cadence-aware `report --all --due` filter (so Orion itself knows
-which projects are "due") is tracked in [`known-issues.md`](known-issues.md).
+Both cadence-aware `--due` filters have shipped — `report --all --due` (so Orion itself knows
+which projects are due) and `checklist-push --all --due` (the tracker-card refresh above). What
+remains deliberately **not** built is the in-process scheduler *layer* (activity-gating, quiet
+hours, per-recipient cadence); timing stays OS-delegated as documented above. That stance is
+recorded in [`plans/orion-plan.md`](../plans/orion-plan.md) (Horizon B5).

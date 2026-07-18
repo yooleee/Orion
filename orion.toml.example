@@ -125,11 +125,12 @@ share_level = "high_level"
 # See docs/scheduling.md for the per-OS scheduler setup.
 # auto_send = false
 
-# Report cadence — the minimum spacing between unattended reports. Used only by
-# `orion report --all --due`, which skips a project that already reported within
-# its cadence, so one scheduler entry can serve projects on mixed cadences. Presets:
-# "daily" or "weekly". Omit the key entirely for a project that is always due (the
-# default). Purely local — it is never sent anywhere.
+# Cadence — the minimum spacing between unattended runs for this project. Gates BOTH
+# `orion report --all --due` (skip a project that already reported within its cadence)
+# AND `orion checklist-push --all --due` (skip a tracker card pushed within its cadence,
+# and skip a due card whose content is unchanged). One scheduler entry per action can
+# then serve projects on mixed cadences. Presets: "daily" or "weekly". Omit the key
+# entirely for a project that is always due (the default). Purely local — never sent.
 # cadence = "weekly"
 
 # How many days ahead a checklist item's due date is flagged "due soon" on the

@@ -14,6 +14,52 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Relay backfill — recover already-sent reports onto the relay (KI-36, 2026-07-18)
+
+A report sent while the pushing key was **not yet scoped** for its project reached Discord/Slack but
+never landed on the relay (ingest 404s and the fail-soft `_relay_push` drops it) — concretely hit by
+`instruction-debugger`, which was reported before its relay grant existed. This slice (PR #108) adds
+the **recovery path**; the forward-fix (scoping a new project into the relay at `add-project` time)
+stays open under **KI-36**.
+
+### Added
+
+- **`orion relay-backfill <project> --generated-at <iso> [--body-file <f>]`.** Pushes the exact
+  content of an already-sent report (which the user still has in Slack/Discord) onto the relay at its
+  **original timestamp** — relay-only and **chat-silent** (no webhook delivery). The body comes from
+  `--body-file` or stdin, and the push reuses the report path's two-pass redaction and the `/ingest`
+  transport, so the relay record matches what a scoped push would have stored. One report per
+  invocation (a batch / `--from-history` replay is a recorded follow-on); the preview/confirm gate is
+  the idempotence guard — the history is append-only, so a re-run adds a duplicate row, and `--yes`
+  is a knowing re-push.
+
+## Scheduled checklist-push — `checklist-push --all --due`, change-gated (E1.3, 2026-07-18)
+
+Realizes the seam recorded 2026-07-16: a tracker project's `cadence` drives a dashboard **push**
+instead of a report, so a fresh tracker card becomes the default state without manual pushes. 100%
+producer-side — the relay is untouched (`POST /checklist` already existed). Built strictly
+unit-by-unit off [`docs/scheduled-checklist-push-kickoff.md`](docs/scheduled-checklist-push-kickoff.md),
+one PR per unit (PRs #105–#107). Unattended pushing is principled here, not a preview trade-off: a
+checklist is **user-authored structured content** with no LLM stage anywhere on the path (the
+preview-scope principle, 2026-07-17) — redaction still runs on the push.
+
+### Added
+
+- **`checklist_push_history` state table (Unit 1).** Records each checklist push with a hash of the
+  wire payload (items + `kind` + `due_soon_days`), giving `--due` its last-pushed source and the
+  change-gate its comparison basis — mirroring `report_history`'s role for reports.
+- **`checklist-push --all [--due]` with a change-gate (Unit 2).** `--due` filters to projects due
+  under their `cadence`, sharing report's due logic via the `_is_due_at` helper extracted from
+  `_is_due` (report's own tests untouched — the refactor's regression net). **Cadence gates when to
+  check; the payload hash gates whether to push**: an unchanged card is skipped as `NO_CHANGE`, so a
+  scheduled run never inflates the dashboard's `updated_at` freshness signal. `--due` requires
+  `--all`; a project without a `cadence` is always due (mirroring report).
+- **Scheduler close-out (Unit 3).** Docs sweep plus the live entry: `applications` set to
+  `cadence = "daily"` and a launchd agent `com.orion.checklist-push` firing **noon daily** with
+  `checklist-push --all --due` — verified end-to-end against the live relay, with both gates observed
+  (`NO_CHANGE` on an unchanged card, `NOT_DUE` within the interval, exit 0). Kill-switch:
+  `launchctl bootout gui/$(id -u)/com.orion.checklist-push`.
+
 ## Forward look & scheduling — cadence, `--due`, per-project due-soon window, milestone slip count (E1.2, 2026-07-17)
 
 The first **E1.2** slice: a set of forward-looking, real-use features built strictly unit-by-unit (five

@@ -18,11 +18,12 @@ guarantees — secrets never leak, the right model runs on the right lane, state
 after a real send, and the tool runs the same on every OS. This doc is the map: the
 **categories** of tests, **why each is necessary**, and how to run them.
 
-As of this writing: **154 tests across 19 files**, all passing. The only test dependency is
-**pytest** (the lone `[dev]` extra) — everything else is the standard library, matching
-Orion's minimal-dependency principle. Shared end-to-end setup for the CLI tests (the real-repo
-builder, the config writer, the mock fixture, and the scripted-`input` helper) lives in
-`tests/conftest.py`, so `test_cli.py` and `test_schedule.py` reuse one copy.
+As of this writing (2026-07-18): **785 tests across 38 files**, all passing. The only test
+dependency is **pytest** (the lone `[dev]` extra) — everything else is the standard library,
+matching Orion's minimal-dependency principle. Shared end-to-end setup (the real-repo builder,
+the config writer, the mock fixture, the scripted-`input` helper, and the isolation guards)
+lives in `tests/conftest.py` and is reused across the CLI, schedule, intake, and relay-facing
+end-to-end files.
 
 ## Running the suite
 
@@ -71,6 +72,14 @@ builds the configured backend lazily, with no network and no key.
 | **Event-driven hooks** (B1) | `test_hooks.py` | The generated hook's safety properties (delegates to `report --yes`, backgrounded, always `exit 0`, forward-slash paths) without executing a real hook; `resolve_hooks_dir` against a real repo; and the `install-hook` command (writes an executable hook, honors `--hook`, refuses to clobber without `--force`, `--print` writes nothing, warns when not opted in). |
 | **Config inspect** (B6) | `test_inspect.py` | The read-only `projects`/`show`/`check` commands: they print the right facts, fail cleanly on a bad config / unknown project, and **never print a secret value** (`check` reports webhook/API vars by name as set/MISSING, with a non-zero exit when a required one is missing). B4 adds the backend-aware key check: a keyless local summarizer is ready with no Anthropic key, while a keyed local endpoint's named var is flagged MISSING when unset. |
 | **Portability** (Phase 3.5) | `test_cli_entry.py`, `test_console_encoding.py` | The `python -m orion` entry point resolves on every OS, and the console UTF-8 guard never crashes on a redirected/odd stream. |
+| **Later structured signals** (D, E2) | `test_tracker_collector.py`, `test_disciplines_collector.py`, `test_extract.py`, `test_markdown_extract.py` | The status-aware tracker's checklist parsing, and the disciplines pipeline: markdown extraction from a project's own docs plus the opt-in, cache-gated LLM step (the extraction call is injected/faked — no key, no network). |
+| **Onboarding & visibility CLI** (Horizon D) | `test_add_project.py`, `test_scaffold.py`, `test_status.py` | `add-project`'s explicit, append-only config writing (Orion still never rewrites user TOML), project scaffolding, and the `status` backlog digest derived from `report_history`. |
+| **Report blob contract** | `test_report_serialize.py` | `serialize_blob` is the portable wire format every hosted surface consumes — all fields and the tuple→array conversions pinned losslessly. |
+| **Relay: store, auth, API, derive** (C/E2) | `test_relay_store.py`, `test_relay_server.py`, `test_relay_api.py`, `test_relay_derive.py` | The hosted half: the additive self-migrating SQLite store; per-user auth (cookie sessions + stateless revocation, Bearer principals, one generic 401, out-of-scope = 404 existence-hiding); the read-only JSON API serializers; and the derived views (effective checklist across producers, per-producer slippage, scheduling buckets, milestone slip counts). |
+| **Relay push** | `test_relay_delivery.py` | The producer→relay outbound seam: verbatim blob body, Bearer header, and every failure translated to a non-fatal `DeliveryError` (network mocked, mirroring `test_delivery.py`). |
+| **Parked bot** (KI-28) | `test_bot_core.py`, `test_bot_slack.py` | The Slack bot's transport-agnostic core and its parked shell: the revival seam stays importable and `orion bot` exits with the parked notice instead of posting. |
+| **Retirement / migration tools** | `test_migrate_comments.py`, `test_drop_retired_tables.py` | The one-time ops tools stay safe to re-run: the idempotent comment→discussion migration with its lossless collapse guard, and the backup-first, allowlisted table drop. |
+| **Test-isolation guards** | `test_isolation.py` | Pins the conftest guards themselves: no real network leaves the test process, and the real `.env` / secret env vars never bleed into a test — the structural reason the suite cannot leak a secret. |
 | **Manual / hardware** | `portability-smoke-test.md` (not pytest) | Native Windows / macOS validation that can't run in CI on one machine. |
 
 ### Why the security gate is its own category
@@ -120,12 +129,10 @@ Tracked honestly so "green" doesn't read as "everything is covered":
   by design. Config validation (`test_config.py::test_unknown_channel_is_rejected`) makes that
   branch unreachable, so the guard lives upstream. If a third channel is ever added to config
   but not to `compose`, that test is where the gap would surface.
-- **`test_report_compose.py` uses a non-empty `source_marker` fixture** while the field is
-  vestigial in production (always `""`, KI-8). This is deliberate: a distinctive value tests
-  that `build_report` *passes through* whatever marker it's handed; `""` would weaken that.
-
-When the deferred KI-8 schema migration finally drops `project_state.last_commit`, the two
-backfill tests in `test_state.py` become removable — revisit them *then*, not before.
+The KI-8 schema migration has since shipped: the legacy `last_commit` column, the one-time
+git-marker backfill, and the vestigial `source_marker` field are gone, and the two
+legacy-backfill tests were removed with them — `test_state.py` now pins that the drop left no
+references behind.
 
 ## Keeping this living
 

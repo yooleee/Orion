@@ -461,6 +461,13 @@ Deferred).
   auth-revamp / multi-producer pass **before** that happens. E1.3's change-gate hashes the wire payload
   (items + `kind` + `due_soon_days`), which keeps consequence (2) mitigated: a config-only horizon
   change still triggers a push.
+  **Decision (2026-07-19, auth-revamp planning pass): settings become set-only + explicit clear.**
+  All push paths will write `due_soon_days` only when present and never clear on absence. Clearing
+  becomes an explicit act (tri-state wire value: absent = leave, null = clear, int = set, sent by a
+  dedicated producer flag). This removes consequence (1), the silent scheduled clobber. Consequence
+  (2) returns in a narrower form (a set-then-unset horizon stays until explicitly cleared), accepted
+  as the rarer, human-visible case. Slated as Unit 1 of the auth-revamp build (it lands before any
+  agent or second producer gets a key).
 
 ## KI-36 — Reports sent before a relay grant never land on the dashboard (backfill path added)
 
@@ -487,7 +494,9 @@ Deferred).
 - **Severity:** low–medium (recovery exists; the forward-fix is a convenience, and the gap only
   bites at onboarding, before a grant).
 - **Status:** Partially addressed — the `relay-backfill` recovery command shipped in this slice;
-  the `add-project` scope-prompt forward-fix stays **Open** (revisit with the auth-revamp pass).
+  the `add-project` scope-prompt forward-fix stays **Open**. Revisited at the auth-revamp planning
+  pass (2026-07-19): kept **out of the revamp arc** to bound its scope, recorded as a small
+  follow-on once the account model lands (the prompt then scopes an account, not a bare key).
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

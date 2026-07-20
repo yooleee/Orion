@@ -1,8 +1,6 @@
 # Orion Architecture
 
 > A from-scratch mental model of how Orion is built, written to be read cold.
-> This is a working draft built unit by unit. Location and commit status are not
-> yet settled (see the end of the session plan).
 
 ## The one fact everything hangs off
 
@@ -15,7 +13,7 @@ Orion is **two decoupled halves that share no code and agree on exactly one cont
  │                            │        │                          │
  │  collectors → summarizer   │        │  HTTP server (stdlib)    │
  │  → redact → compose        │        │  + sqlite store          │
- │  → preview → deliver       │        │  + per-user auth         │
+ │  → preview → deliver       │        │  + account/credential auth│
  │                            │        │  + read-only JSON API    │
  └─────────────┬──────────────┘        └────────────┬─────────────┘
                │                                     │
@@ -56,8 +54,11 @@ Why it is built this way:
    activity into a report and sends it. It is a command-line program, entry point
    `orion.cli:main`.
 2. **The relay** (`relay/`) is the hosted service. It receives reports, stores them
-   in sqlite, and exposes a read-only JSON API. It is a separate Python package that
-   is deliberately **not** part of the installed producer wheel.
+   in sqlite, authenticates and scopes every reader, and exposes a read-only JSON API.
+   It is a separate Python package that is deliberately **not** part of the installed
+   producer wheel. The dependency asymmetry is architectural, not incidental: the relay
+   needs `argon2-cffi` to hash passwords, and containing it behind a `relay` extra is what
+   keeps the producer install small. The producer never imports it.
 3. **The SPA** (`web/`) is a React/Vite dashboard. It holds no business logic. It
    reads the relay's JSON API and renders it. In production the relay serves the
    built SPA files itself (single-host).
@@ -344,3 +345,69 @@ This is why the preview gate in Unit 1 (stage 9) is so strict about needing both
 *and* `auto_send` to skip: skipping the preview removes the *guaranteeing* layer, so it's
 gated behind an explicit, deliberate opt-in.
 
+
+## Unit 4 — Identity on the relay (accounts, credentials, scope)
+
+Everything above is the producer. This unit is the relay's other half: deciding *who is
+asking* and *what they may see*. It is worth reading as its own model, because the shape is
+not obvious from the endpoints.
+
+### Accounts and credentials are 1:N, and that is the whole idea
+
+```
+  relay_users  (the ACCOUNT — durable identity)
+    id, name, role, kind, operated_by, active, session_version
+        │
+        │ 1:N
+        ▼
+  relay_credentials  (attachable, individually revocable)
+    id, user_id, type ('key' | 'password'), label, verifier, active
+```
+
+The account is who you are; a credential is one way of proving it. That split is what lets
+one person hold keys on two machines under a single identity, lets a password be reset
+without disturbing any machine key, and lets a lost key be revoked without logging the human
+out everywhere. Before it, identity died with the credential's lifecycle.
+
+Two credential types, two hash strategies, for one reason — the threat differs:
+
+| Type | Held by | Verifier | Why |
+| --- | --- | --- | --- |
+| `key` | machines, agents | `HMAC-SHA256(pepper, key)` | server-minted, 256-bit — nothing to brute-force, so a slow hash buys nothing |
+| `password` | people | Argon2id (own salt + params) | a human picked it, so make guessing expensive |
+
+**One credential never spans both auth worlds.** A password cannot push; a key cannot log in
+once its account has a password. And every Bearer key resolves *contributor-bounded* — scoped
+to its account's grants regardless of the account's role — so no machine credential ever
+carries unrestricted push, not even on an admin account.
+
+### Authorization is one function, re-read every request
+
+`_allowed_projects` is the single place read scope is computed. It returns `None` for
+unrestricted (admin, legacy push, open relay) or a set of project names. Two inputs feed it:
+
+- **grants** — explicit per-project rows (`relay_user_projects`), default-deny.
+- **visibility** — `relay_project_meta.visibility`, `'org' | 'restricted'`. A `member` reads
+  every org-visible project unioned with its grants; every other scoped role reads grants only.
+
+Because scope is resolved per request rather than cached in the session cookie, a grant, a
+revoke, or a visibility flip takes effect immediately. The cookie deliberately carries only an
+id, a version, and an expiry — never a role or a scope. *Trust the database, not the cookie.*
+
+Out-of-scope always returns a `404` identical to a genuinely missing resource, so a status
+code can never enumerate what exists.
+
+### Agents: attribution and grouping point in opposite directions
+
+An agent is an account (`kind='agent'`) whose `operated_by` points at an accountable human.
+The two directions are deliberate and easy to conflate:
+
+- **Attribution keeps the agent** — a report is badged as agent work and names its operator,
+  so provenance is never lost.
+- **Work-tracking folds into the operator** — checklist cards group by
+  `operated_by ?? author_id`, so a person plus their agents is one contributor.
+
+The rule that keeps folding honest: it is a **display grouping applied after every
+derivation**. Slippage is derived on each raw producer's own observation stream and only
+unioned under the operator for display. Folding first would interleave two histories of the
+same item and manufacture a signal that never happened.

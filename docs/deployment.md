@@ -27,7 +27,7 @@ nothing else in the local pipeline changes.
   (`ORION_RELAY_TOKEN`), constant-time compared. This is the push credential your local
   side sends.
 - **Dashboard (GET routes + commenting)** — authenticated by a **per-user login session**.
-  Each viewer signs in at `/login` with their own access key and receives a signed,
+  Each person signs in at `/login` with their own name and password and receives a signed,
   `HttpOnly` session cookie (`Secure` when hosted). The cookie carries only an id, a
   version, and an expiry. The viewer's role and project scope are re-read from the
   database on every request, and a revoked user is rejected on their next request. HTTP
@@ -43,7 +43,7 @@ nothing else in the local pipeline changes.
   host without `ORION_RELAY_VIEW_TOKEN`, so you cannot accidentally serve an open dashboard.
   It also refuses to start an access-gated dashboard when the session secrets are missing.
 - **TLS is mandatory** and is terminated by your platform or a reverse proxy *in front
-  of* the relay — **never** expose plain HTTP to the internet (login keys and session
+  of* the relay — **never** expose plain HTTP to the internet (passwords and session
   cookies would travel in clear text).
 
 ### Generate the secrets
@@ -59,7 +59,7 @@ The relay's `.env` needs these, each its own independent random value:
 | `ORION_RELAY_TOKEN`       | Ingest (the report push)                    | Always                              |
 | `ORION_RELAY_VIEW_TOKEN`  | The bootstrap-admin login + the bind guard  | Any non-loopback bind               |
 | `ORION_RELAY_SESSION_KEY` | Signing session cookies                     | Whenever the dashboard is gated     |
-| `ORION_RELAY_USER_PEPPER` | Hashing stored login-key verifiers          | Whenever the dashboard is gated     |
+| `ORION_RELAY_USER_PEPPER` | Hashing stored **key** verifiers (not passwords) | Whenever the dashboard is gated     |
 | `ORION_RELAY_ADMIN_TOKEN` | The provisioning API (`relay-user`)         | To create/manage users              |
 
 The ingest token must match what your **local** `[relay].token_env_var` resolves to. The
@@ -83,21 +83,56 @@ After the relay is up and reachable, create accounts from your local machine (th
 `relay-user` commands read your `[relay].url` and `admin_token_env_var`):
 
 ```bash
-orion relay-user add alex --role viewer --project my-app       # a dashboard viewer
-orion relay-user add mac  --role contributor --project my-app  # a push-only producer (a machine)
-orion relay-user list
-orion relay-user grant mac --project other-app                 # widen an existing user's scope
-orion relay-user rotate mac                                    # re-mint the key (old one dies)
-orion relay-user revoke alex                                   # cutoff (keeps the name)
-orion relay-user delete alex                                   # hard-delete (frees the name)
+# People — provision, then give them a password. They never handle key material.
+orion relay-user add supervisor-a --role viewer --project my-app
+orion relay-user password set supervisor-a                     # prompts twice, hidden
+orion relay-user add teammate-b --role member                  # reads every org-visible project
+orion relay-user password set teammate-b --generate            # relay mints one, printed ONCE
+
+# Machines — provision, then hand the printed key to that machine's .env.
+orion relay-user add mac --role contributor --project my-app
+orion relay-user key add mac --label wsl2                      # a SECOND key on the same account
+orion relay-user key list mac                                  # ids + labels (never key material)
+orion relay-user key revoke mac --id 2                         # kill one credential only
+
+# Agents — a machine acting on a person's behalf.
+orion relay-user add claude-mac --role contributor --kind agent --operated-by yoo --project my-app
+
+# Lifecycle.
+orion relay-user list                                          # roster: role, kind, operator, scope
+orion relay-user grant mac --project other-app                 # widen an existing account's scope
+orion relay-user role supervisor-a supervisor                  # change a role (logs out live sessions)
+orion relay-user rename mac mac-mini                           # rename (history keeps the old name)
+orion relay-user revoke supervisor-a                           # cutoff (keeps the name)
+orion relay-user delete supervisor-a                           # hard-delete (frees the name)
+
+# Project visibility — who inside the org may read a project.
+orion relay-project visibility my-app org                      # any member can read it
+orion relay-project visibility my-app restricted               # back to grant-only (the default)
 ```
 
-Give each person their printed key over a secure channel. The key is shown once and cannot
-be retrieved later (only a verifier is stored). A `viewer` sees only the projects you grant;
-an `admin` sees everything and can provision; a `supervisor` is a scoped viewer that may also
-post to a project's discussion thread. `grant` widens a user's scope later; `rotate` replaces a
-lost/compromised key; `revoke` cuts off but keeps the name; `delete` frees the name to reuse
-(past reports/replies keep their recorded author). Full detail: [`dashboard-auth.md`](dashboard-auth.md).
+**People get passwords; machines get keys.** A printed key goes to a machine's `.env`, never to
+a person. Both a key and a generated password are shown exactly once and cannot be retrieved
+later (only a verifier is stored).
+
+Roles: a `viewer` sees only the projects you grant; a `supervisor` is a scoped viewer that may
+also post to a discussion thread; a `member` is a read-only org insider that sees every
+**org-visible** project with no grants at all; an `admin` sees everything on the dashboard and
+can provision. `grant` widens scope; `revoke` cuts off but keeps the name; `delete` frees the
+name to reuse (past reports/replies keep their recorded author).
+
+> **A `member` you just provisioned will see an empty dashboard.** Every project is
+> `restricted` by default, so nothing is org-visible until you flip it. That is deliberate —
+> opening a project up is an explicit act — but it is the first thing that looks broken. Run
+> `orion relay-project visibility <project> org` for each project the org should share.
+
+> **Replacing a machine key is `key add` → deploy → verify → `key revoke`.** Add the new
+> credential, install it, confirm a push works, and only then revoke the old one. The two keys
+> overlap, so no scheduled push starts silently 401ing and you cannot strand yourself if the
+> new key is lost in transit. For a compromise, reverse it: revoke immediately, add when ready.
+> (This replaced a one-shot `rotate` command, which had both of those failure modes.)
+
+Full detail: [`dashboard-auth.md`](dashboard-auth.md).
 
 **Multi-producer push (C3 Increment 2).** When more than one machine or person pushes into the
 same project, provision each producer a `contributor` (push-only) key and put it in that

@@ -490,6 +490,25 @@ Deferred).
   which was reachable on any migrating redeploy under traffic (see CHANGELOG → *"Accounts and
   credentials"*).
 
+## KI-38 — Login throttling has no per-IP dimension, so an attacker can degrade login for everyone
+
+- **Detail:** Unit 3's throttle limits login attempts per **account** (a short lockout after N failures)
+  and relay-wide (a coarse rolling bound that catches attempts sprayed thinly across many names). There
+  is deliberately **no per-IP dimension**. So someone hammering the login endpoint from one address trips
+  the global limiter, and legitimate logins are refused until they stop.
+- **Why it matters:** it is a denial-of-service on dashboard login, not a disclosure or bypass — the
+  per-account lockout still stops online guessing, and the admin `relay-user password unlock` clears an
+  account lockout immediately. At the current N (two humans) the exposure is small and the operator is
+  also the victim, so it would be noticed at once.
+- **Severity:** low at this scale; would rise to medium the moment the relay serves a real org, where
+  one attacker could lock out people who have no idea why.
+- **Status:** Open, deferred **by choice** at the auth-revamp planning pass (second-opinion amendment 6,
+  user-arbitrated). Per-IP means trusting a forwarded header behind Fly's proxy, and trusting one
+  wrongly is worse than not having it — an attacker forges the header and evades the limit entirely. The
+  fix is therefore gated on a `--behind-proxy`-style explicit trust flag, which is a misconfiguration
+  footgun in its own right. **The seam exists:** `relay/throttle.py` is keyed by DIMENSION (account,
+  global), so adding an `ip` dimension is additive rather than a redesign.
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
@@ -535,6 +554,9 @@ one-line index so a resolved id is still traceable from the issue tracker. Newes
   their denormalized author). The broader **auth-model revamp** (bare keys → a real key lifecycle / a more
   authentic login system) stays a recorded *direction* in `plans/orion-plan.md`, not part of this fix. See
   CHANGELOG → *"Contributor lifecycle — grant/rotate/delete + legacy-ingest retired"*.
+  **Superseded 2026-07-20:** that auth-model revamp shipped, and it **retired `relay-user rotate`** —
+  the multi-credential model makes it redundant, and its one-shot semantics invited a silent-401
+  window on scheduled machines. Key replacement is now `key add` → deploy → verify → `key revoke`.
 - **KI-28** — Comments and Discussion were two overlapping conversation systems (E2 Inc 5): the
   identity-first, two-way discussion loop and the older C2 comments (`report_comments` + its
   routes/CLI/UI/bot path) did one job with two stores. **Resolved 2026-07-07 (Stage 2, Slice 0)** by

@@ -46,13 +46,18 @@ orion discussions pull myproject   # pull supervisor messages back to your machi
 | `orion relay-serve` | Run the relay locally (ingest endpoint + read-only dashboard) on `127.0.0.1:8787`. Needs `ORION_RELAY_TOKEN` in `.env`. Blocks until Ctrl-C. |
 | `orion checklist-push <project>` | Push the project's **current checklist** to the relay dashboard **without a report** (needs `checklist = true` + a `tasks` or `tracker` source + an enabled `[relay]`). Add `--watch` for near-real-time: it polls the checklist source (`tasks_file` and/or `tracker_file`) and pushes on every change until Ctrl-C (`--interval` seconds, default 3). `--watch` is single-project. |
 | `orion checklist-push --all [--due]` | Push **every** checklist-enabled project (fail-soft). Add `--due` for the scheduled form: push only projects **due** under their `cadence`, skipping a due card whose content is **unchanged** since its last push (so an unattended run never re-stamps an untouched card). Relay-only, no `auto_send` gate — often the primary scheduled line (see [Scheduling](../docs/scheduling.md)). Manual `--all` without `--due` pushes unconditionally. |
+| `orion checklist-push <project> --clear-due-soon-days` | Explicitly **clear** a project's stored "due soon" horizon back to the 7-day default. Project settings are **set-only** — a push that omits a value leaves it alone rather than wiping it (KI-35) — so this flag is the only way to unset one. It bypasses the unchanged-content gate, since a clear must send even when the checklist itself did not change. Repeating it is harmless. |
 | `orion relay-backfill <project> --generated-at <iso>` | Push an **already-sent** report onto the relay dashboard, **relay-only (no chat)** — for reports sent before the relay was scoped in (KI-36). Body from `--body-file` or stdin; `--generated-at` is the original send time (read off the delivered message). One report per invocation; two-pass redaction still runs; preview/confirm unless `--yes`. |
-| `orion bot` | **PARKED** (KI-28 Stage 2): the bot's write path (relay comments) retired, so `orion bot` prints a parked notice and exits. It is revived — repointed at the discussion write with honest supervisor attribution — once per-user keys land in the follow-on slice. |
+| `orion bot` | **PARKED** (KI-28 Stage 2): the bot's write path (relay comments) retired, so `orion bot` prints a parked notice and exits. Its remaining blocker is delegation, not per-user keys — see below. |
 
-**`orion bot` is parked.** Its comment write target was retired in KI-28 Stage 2; pointing it at the
-discussion write must wait for per-user keys (that Bearer path stamps role `developer`, but a chat reply
-is supervisor speech). The pure decision core and the Slack shell are kept as the revival seam. Full
-context: [`docs/slack-bot.md`](slack-bot.md).
+**`orion bot` is still parked, but the blocker moved.** Its comment write target was retired in
+KI-28 Stage 2. The old note said revival waited on per-user keys — **those landed** in the auth
+revamp (accounts + credentials, Units 2b/3). What it actually needs now is **delegation**: the
+Bearer discussion path stamps role `developer`, but a chat reply is *supervisor* speech, so the
+bot must be able to write **as** a supervisor rather than as itself. The account model makes
+that expressible (it is the named acting-as seam) but the arc deliberately did not build it.
+The pure decision core and the Slack shell remain the revival seam. Full context:
+[`docs/slack-bot.md`](slack-bot.md).
 
 ## Dashboard user management (`relay-user`)
 
@@ -61,13 +66,47 @@ Provision and manage who can log into the relay dashboard. These talk to a runni
 (`admin_token_env_var` in `[relay]`, e.g. `ORION_RELAY_ADMIN_TOKEN` in `.env`) — never the
 ingest token. Full auth model: [`docs/dashboard-auth.md`](dashboard-auth.md).
 
+An **account** is the durable identity; **credentials** are N revocable things beneath it.
+People sign in with a name and password; machines hold keys. The two never overlap.
+
+### Accounts
+
 | Command | What it does |
 |---|---|
-| `orion relay-user add <name>` | Provision a user and print their access key **once** (it's never retrievable later, only revocable). `--role viewer` (default) or `--role admin`. |
+| `orion relay-user add <name>` | Provision an account and print its access key **once** (never retrievable later, only revocable). `--role` is one of `viewer` (default), `supervisor`, `member`, `admin`, `contributor`. |
 | `orion relay-user add <name> --role viewer --project a --project b` | A **viewer** scoped to specific projects (`--project` repeatable). A viewer with no projects sees nothing. |
-| `orion relay-user add <name> --role admin` | An **admin** sees **all** projects (present and future). The role does not grant user-provisioning — that stays gated on the admin token. |
-| `orion relay-user list` | List users with role, status (active/revoked), scope, and last login. Shows **no** credential material. |
-| `orion relay-user revoke <name>` | Revoke a user: deactivate their key and force-log-out any live session. |
+| `orion relay-user add <name> --role member` | A **member**: read-only org insider. Sees every **org-visible** project with no grants at all, plus any grants on top. Can write nothing. |
+| `orion relay-user add <name> --role admin` | An **admin** sees **all** projects on the dashboard. Note its *keys* are still contributor-bounded to its grants — no machine credential ever carries unrestricted push. |
+| `orion relay-user add <name> --kind agent --operated-by <human>` | An **agent**: a machine acting on a person's behalf. Must be `--role contributor`; the operator must be an active human. |
+| `orion relay-user list` | The roster: role, kind, operator, status, scope, last login. Shows **no** credential material. |
+| `orion relay-user grant <name> --project p` | Widen an account's project scope in place. |
+| `orion relay-user role <name> <role>` | Change a role. Bumps the session version, so live sessions are logged out. |
+| `orion relay-user rename <name> <new>` | Rename an account. Already-recorded history keeps the name it was written with. |
+| `orion relay-user set-operator <agent> <human>` | Repoint an agent at a different operator. Moves display grouping only; provenance is untouched. |
+| `orion relay-user revoke <name>` | Immediate cutoff: deactivates the account **and all its credentials**, and force-logs-out live sessions. Keeps the name. |
+| `orion relay-user delete <name>` | Hard-delete, freeing the `UNIQUE` name to reuse. Blocked while the account still operates active agents. |
+
+### Credentials
+
+| Command | What it does |
+|---|---|
+| `orion relay-user password set <name>` | Set a human's password — prompts twice, hidden. `--generate` mints a strong one and prints it **once**. Never accepts a password as an argument. |
+| `orion relay-user password unlock <name>` | Clear a login lockout without changing a password the person still knows. |
+| `orion relay-user key add <name> --label <l>` | Attach **another** key to an account; existing keys keep working. |
+| `orion relay-user key list <name>` | Credential ids, labels, and last-used. Never key material. |
+| `orion relay-user key revoke <name> --id <n>` | Revoke **one** credential. The account and its other keys live on, and the human's session is not disturbed. |
+
+Replacing a machine key is **`key add` → deploy → verify → `key revoke`**, so the two overlap
+and no scheduled push silently starts failing. (This replaced a one-shot `rotate` command.)
+
+## Project settings (`relay-project`)
+
+| Command | What it does |
+|---|---|
+| `orion relay-project visibility <project> org` | Make a project **org-visible**: any `member` account can read it with no per-project grant. |
+| `orion relay-project visibility <project> restricted` | Back to **grant-only** — the default every project is born with. |
+
+Viewers and supervisors are unaffected either way: they always see only their explicit grants.
 
 ## Handy flags
 

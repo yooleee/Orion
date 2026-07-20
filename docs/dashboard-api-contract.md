@@ -55,6 +55,16 @@ machine routes, below).
   reports return `404`, identical to a genuinely missing one (existence-hiding preserved).
   **Exception:** `GET /api/me` is exempt from the `401` gate — it always returns `200` with the current
   state (including `authenticated:false`), because it is how the SPA learns it must log in.
+- **Read scope has two inputs** since Unit 5: explicit per-project **grants**
+  (`relay_user_projects`) and each project's **visibility** (`relay_project_meta.visibility`,
+  `"org" | "restricted"`, defaulting to restricted for an absent row or a NULL). A `member` reads
+  every org-visible project unioned with its grants; every other scoped role reads its grants only,
+  so making a project org-visible never widens what an outside viewer or supervisor sees. Scope is
+  re-resolved on **every request**, so a grant, a revoke, or a visibility flip in either direction
+  takes effect immediately without re-login. The existence-hiding `404` is byte-identical across a
+  never-existed project, a restricted one, a report id belonging to a restricted one, and case or
+  Unicode variants of a real name — otherwise the status code itself would enumerate the org's
+  project list.
 - **Error model.** `401 {"error":"login required"}` when a gated relay has no valid session (the SPA
   routes to `/login`). `404 {"error":"not found"}` for missing or out-of-scope resources. No redirects
   from `/api/*`.
@@ -77,9 +87,15 @@ shell and to know whether to redirect to login.
 }
 ```
 
-- `identity` is `null` when not authenticated. `role` is `"admin" | "viewer"`.
+- `identity` is `null` when not authenticated. `role` is
+  `"admin" | "viewer" | "supervisor" | "member" | "contributor"` (an open enum at the DB layer;
+  only the first four ever reach an interactive session).
 - `scope.unrestricted` is `true` for an admin or an open (ungated) relay, with `projects: null`. For a
-  scoped viewer it is `false` with `projects` a sorted list of granted project names.
+  scoped viewer or supervisor it is `false` with `projects` a sorted list of granted project names.
+  For a **member** it is also `false`, but `projects` is the RESOLVED read set — every org-visible
+  project unioned with its explicit grants. The wire deliberately does not distinguish which of the
+  two sources admitted a given project: the SPA needs the resolved set, and splitting it would leak
+  which projects are org-visible to someone who was granted them individually.
 - On an open loopback relay: `gated:false, authenticated:false, identity:null, scope.unrestricted:true`.
 - `showcase_enabled` reflects `server.showcase_enabled` (the relay's `--showcase` flag): `true`
   when the public Showcase surface is on, else `false`. The SPA shows the "Public showcase"
@@ -212,6 +228,22 @@ Everything observed about one project. `404` when missing or out of scope.
   producer's card would just duplicate the aggregate). Note (C3 Inc 2.5): each producer card's
   `items[].slipping` now reflects **that producer's own** observation stream (partitioned by `author_id`);
   the aggregate `checklist` rows, milestones, and scheduling use the project-wide union.
+  **Operator-folding (Unit 4b):** cards are keyed by *effective* producer — an agent's row groups under
+  the human it acts for, so a person plus their two agents is ONE card bearing the person's name, and an
+  agent has no card of its own. Within that group the rows consolidate with the same done-OR /
+  last-writer-per-item merge used across producers, and the group's slipping sets are unioned.
+  Crucially the union happens **after** derivation: slippage is still derived per RAW producer stream,
+  because folding the observation histories first would interleave a human's and an agent's views of the
+  same item and manufacture a postponement that never occurred. Fold for display, never for derivation.
+- `reports[].author_kind` and `reports[].operated_by_name` (auth revamp, Unit 4a) accompany
+  `author_name` on every report shape. `author_kind` is `"human" | "agent" | null`, and
+  `operated_by_name` is the operating human's name for an agent, else `null`. **`null` is a third
+  state, not a synonym for `"human"`**: it means the push carried no resolvable identity — a legacy
+  anonymous push, or an account since deleted. Emitting `"human"` there would assert an attribution
+  the relay never made. Unlike `author_name` (denormalized at write time), these two are resolved by
+  joining the live account at READ time, so renaming an operator or reassigning an agent is
+  immediately correct on every past report — and both go `null` if the account is later deleted, even
+  though `author_name` survives.
 - `reports[].author_name` (C3 Inc 2) is the producer who pushed the report — a server-derived display
   name, or `null` for a legacy (shared-token) push or a report predating attribution. The name is
   denormalized at write time so it survives the user's later revocation; the internal `author_id` is
@@ -411,13 +443,13 @@ Body `{"body": "<text>"}`. Returns `201` with the created item in the same shape
   authenticated principal, **never** the request body — a client-supplied `author`/`role`/`author_id` is
   silently ignored, so attribution is unforgeable. `role` maps from the principal's `relay_users` role:
   `supervisor → "supervisor"`, `admin → "developer"` (the developer/owner, including the legacy bootstrap
-  admin). The `orion` item role is never producible by a human write (reserved for a later
+  admin). A `viewer` and a `member` map to nothing — both are read-only and are refused below. The `orion` item role is never producible by a human write (reserved for a later
   grounded-responder rung — observe-not-originate).
 - **Auth is always required** — there is **no** open-loopback free-text-author path. An attributable
   thread needs identity, so the discussion loop requires a gated (C3) relay.
 - **Guards, in order:** `401 {"error":"login required"}` when there is no session → `403 {"error":"origin
   check failed"}` on an Origin/Referer mismatch → `403 {"error":"not permitted"}` when the principal is a
-  **viewer** (read-only, no thread standing) → `400` for a non-object body or a non-string/empty `body` /
+  **viewer or member** (both read-only, no thread standing) → `400` for a non-object body or a non-string/empty `body` /
   one over `MAX_COMMENT_BODY_CHARS` (4000) → `404 {"error":"not found"}` when the project is out of scope
   **or** does not exist (identical response — existence-hiding).
 - **Append-only.** No edit or delete path; the thread is the memory.

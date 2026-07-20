@@ -120,9 +120,10 @@ serves a **read-only web dashboard** — *in addition to* your Discord/Slack del
 which is unchanged. This is opt-in and additive: with no `[relay]` table, nothing
 about Orion changes.
 
-At this stage the relay is **loopback-only** (it binds `127.0.0.1`), so the
-dashboard is for **your own machine** — your supervisors still see the Discord/Slack
-delivery, not the dashboard. (A hosted/shareable dashboard is a later step.)
+This section sets up a **loopback** relay (it binds `127.0.0.1`), which is the right
+starting point: the dashboard is for your own machine while you try it out. Deploying it
+so supervisors can reach a real URL is a separate, additive step — see
+[`deployment.md`](deployment.md).
 
 ### 1. Add a relay token to `.env`
 
@@ -133,10 +134,27 @@ a shared token and add it:
 python -c "import secrets; print('ORION_RELAY_TOKEN=' + secrets.token_urlsafe(32))" >> .env
 ```
 
-> If **more than one machine or person** pushes into the same project, don't share one token:
-> provision each producer its own push-only `contributor` key (`orion relay-user add … --role
-> contributor`) and put that key in this same `ORION_RELAY_TOKEN` variable on each machine. Reports
-> then show who pushed them. See [`dashboard-auth.md`](dashboard-auth.md).
+> If **more than one machine, person, or agent** pushes into the same project, don't share one
+> token. Provision each producer its own push-only key and put it in this same
+> `ORION_RELAY_TOKEN` variable on that machine — no `orion.toml` change needed. Reports then show
+> who pushed them.
+>
+> ```bash
+> orion relay-user add mac --role contributor --project my-app          # a machine
+> orion relay-user key add mac --label wsl2                             # a SECOND machine, same identity
+> orion relay-user add claude-mac --role contributor --kind agent \
+>     --operated-by yoo --project my-app                                # an agent acting for you
+> ```
+>
+> For a **person** who needs to view the dashboard, provision an interactive account instead and
+> give them a password — they never handle key material:
+>
+> ```bash
+> orion relay-user add supervisor-a --role viewer --project my-app
+> orion relay-user password set supervisor-a
+> ```
+>
+> See [`dashboard-auth.md`](dashboard-auth.md).
 
 ### 2. Enable `[relay]` in `orion.toml`
 

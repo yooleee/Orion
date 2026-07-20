@@ -1,9 +1,9 @@
 <!-- =========================================================================
 docs/dashboard-auth.md
 ---------------------------------------------------------------------------
-Responsible for: Explaining how the relay dashboard's multi-party access works
-                 (C3 Increment 1) — identity, login sessions, roles, per-project
-                 scope, provisioning, and the security model behind them.
+Responsible for: Explaining how the relay dashboard's multi-party access works —
+                 accounts and credentials, password login, roles, per-project scope
+                 and visibility, agents, provisioning, and the security model.
 Role in project: The reference a self-hoster or contributor reads to understand
                  who can see what on a shared dashboard and why. Operational deploy
                  steps live in docs/deployment.md; this file explains the model.
@@ -21,50 +21,53 @@ the password for everyone.
 The dashboard now has real per-user access, built from three distinct layers. Keeping them
 separate is the standard way to reason about access control.
 
-- **Identity** is who you are. Each person is a row in `relay_users` with a name, a role,
-  and a credential.
-- **Authentication (authN)** is proving who you are. You log in with a personal access key
-  and receive a session.
-- **Authorization (authZ)** is what you may see. Your role and project scope decide what the
-  dashboard shows you.
+- **Identity** is who you are. Each person or machine is an **account** (a row in
+  `relay_users`) with a name, a role, and a kind. The account is durable and outlives any
+  credential attached to it.
+- **Authentication (authN)** is proving who you are. A person logs in with a **name and
+  password**; a machine presents a **key**. Both resolve to an account.
+- **Authorization (authZ)** is what you may see. Your role, your project grants, and each
+  project's visibility decide what the dashboard shows you.
 
-Everything below is stdlib-only. There are no passwords, no OAuth, and no third-party auth
-service.
+The only third-party dependency in any of this is `argon2-cffi`, used on the relay to hash
+passwords. There is no OAuth and no external auth service.
 
 ## What a user experiences
 
 1. They open the dashboard. With no session they are redirected to `/login` (HTTP 303).
-2. They paste their personal **access key** into the login form and submit.
-3. The server verifies the key and, if it matches an active user, sets a **session cookie**
-   and redirects them to the dashboard.
+2. They enter their **name and password** and submit. (An account that has no password yet
+   can still sign in with its access key — see the transition note under Passwords.)
+3. The server verifies the password and, if it matches an active interactive account, sets a
+   **session cookie** and redirects them to the dashboard.
 4. They browse, seeing only what their role and scope allow. An admin sees every project. A
-   viewer sees only the projects granted to them, and anything else returns a plain
-   "not found."
-5. They can post to a project's discussion thread. The message is attributed to their account
-   name and role, not to anything they type.
+   viewer or supervisor sees only the projects granted to them. A member sees every
+   org-visible project plus its own grants. Anything else returns a plain "not found."
+5. They can post to a project's discussion thread, if their role permits it. The message is
+   attributed to their account name and role, not to anything they type.
 6. `GET /logout` clears the session.
 
-## Authentication: the access key and the session cookie
+## Authentication: credentials and the session cookie
 
-This is session-based authentication, the pattern most web apps use. Two credentials are in
-play, and it helps to keep them separate.
+This is session-based authentication, the pattern most web apps use. Several credentials are
+in play, and it helps to keep them separate.
 
-### The access key (long-lived)
+### The access key (machines)
 
-The access key is the personal credential, like a password but server-generated and high
-entropy (a 256-bit random value). You present it once, at login. The server never stores the
-key itself. It stores only a **verifier**, computed as `HMAC-SHA256(user_pepper, key)`. HMAC
-is a keyed hash, and the "pepper" is a server-side secret that lives only in the relay's
-environment, never in the database.
+An access key is a machine credential: server-generated and high entropy (a 256-bit random
+value). The server never stores the key itself. It stores only a **verifier**, computed as
+`HMAC-SHA256(user_pepper, key)`. HMAC is a keyed hash, and the "pepper" is a server-side
+secret that lives only in the relay's environment, never in the database.
 
 Two properties fall out of this. A database leak alone does not reveal anyone's key, because
 only the verifier is stored. And a database leak alone does not even let an attacker test
-candidate keys, because computing a verifier also needs the pepper. At login the server
-recomputes the verifier from the key you presented and looks for a matching active user.
+candidate keys, because computing a verifier also needs the pepper. On a push the server
+recomputes the verifier from the key presented and looks for a matching active credential.
 
-A slow password hash (bcrypt, argon2) is deliberately not used here. Those defend against
-brute-forcing low-entropy human passwords. These keys are server-minted and 256-bit random,
-so there is nothing to brute-force.
+A slow hash (bcrypt, argon2) is deliberately **not** used for keys. Slow hashes defend against
+brute-forcing low-entropy human secrets; these keys are server-minted and 256-bit random, so
+there is nothing to brute-force and the cost would buy nothing. Passwords are the opposite
+case — a human picked them — which is exactly why they *do* get Argon2id. Same reasoning,
+opposite conclusion, because the threat differs.
 
 ### The session cookie (short-lived)
 
@@ -89,35 +92,73 @@ with `relay-serve --session-days` (default 30).
 Because there is no session table, "log this person out everywhere, now" needs a mechanism.
 Each user row has a `session_version` integer, and the cookie carries the value it was minted
 with. To revoke someone the server bumps their `session_version`. On the next request the
-cookie's version no longer matches the database and is rejected. Revoking also sets the user
-`active = 0` so their key can no longer log in. Both happen in one update, so there is no
-window where one took effect but not the other.
+cookie's version no longer matches the database and is rejected. Revoking an **account** also
+sets `active = 0` and deactivates **all** of its credentials, so neither its password nor any
+of its keys work afterwards. Both happen in one update, so there is no window where one took
+effect but not the other.
 
-This is why a revoke is instant. The key stops logging in, and any cookie already in a browser
-dies on its next request, with no session bookkeeping to clean up.
+This is why a revoke is instant. Every credential stops working, and any cookie already in a
+browser dies on its next request, with no session bookkeeping to clean up.
+
+Credential lifecycle and session lifecycle are deliberately **separate**, though. Revoking one
+key does *not* bump `session_version` — losing a machine key should not log the human out
+everywhere. Setting or resetting a password *does*, because that is a change to how the human
+themselves authenticates.
 
 ## Authorization: roles and per-project scope
 
-Four roles exist today. The `role` column is an open enum, so more (for example `guest`) are
-additive later. The first three are **interactive** (they log into the dashboard); the fourth
-is **push-only** (it authenticates the machine ingest path and cannot log in — see below).
+Five roles exist today. The `role` column is an open enum, so more are additive later. The
+first four are **interactive** (they log into the dashboard); the fifth is **push-only** (it
+authenticates the machine ingest path and cannot log in — see below).
 
 - **admin** sees every project and can provision and revoke users.
 - **viewer** is scoped to the projects an admin granted, listed in `relay_user_projects`.
 - **supervisor** is a scoped participant like a viewer, and may additionally post to a
   project's discussion thread (E2 Inc 5).
+- **member** is the read-only **org insider**: it sees every **org-visible** project with no
+  per-project grant at all, plus any explicit grants on top. It can write nothing, anywhere —
+  not a push, not a discussion reply. This is the role a company-wide knowledge base is built
+  on, because it makes "everyone here can read our projects" possible without hand-granting
+  every person every project.
 - **contributor** (C3 Increment 2) is a **push-only producer identity**: it authenticates the
   machine ingest endpoints with its own key, scoped to its granted projects, but is deliberately
   barred from logging into the dashboard — one credential never spans both auth worlds, so a
   stolen push machine's `.env` cannot grant a human dashboard access. A person who both produces
-  and wants dashboard eyes gets a separate viewer/supervisor identity.
+  and wants dashboard eyes gets a separate interactive identity.
 
-The scope check runs on **every route**, not only the project index. A viewer who requests a
+Note the distinction between the two scoped read roles, because it is easy to miss: a
+**viewer/supervisor is an outside participant** (a family member, a mentor) and sees only what
+was explicitly shared with them — org-visibility does not widen their view. A **member is
+inside the org** and sees its shared work by default. Making a project org-visible therefore
+opens it to members, never to an external supervisor.
+
+### Project visibility
+
+Every project is either **`restricted`** (grant-only — the birth state, and the behavior every
+project had before this existed) or **`org`** (any member may read it). Flipping one is a
+deliberate admin act:
+
+```bash
+orion relay-project visibility my-app org         # any member can now read it
+orion relay-project visibility my-app restricted  # back to grant-only
+```
+
+Default-deny is what **absence** means, not merely a column default: a project with no stored
+visibility, a NULL value, and an explicit `restricted` all read as restricted. Nothing becomes
+readable because a row was never written or a migration did not run. A flip takes effect
+immediately in both directions for sessions already open, because scope is re-read on every
+request rather than cached in the cookie.
+
+### Existence-hiding
+
+The scope check runs on **every route**, not only the project index. Anyone who requests a
 project or report outside their scope receives a 404 that is byte-for-byte identical to a
 genuinely missing one. This is existence-hiding, chosen because the audience can include
-guests. A 403 "forbidden" would leak that the resource exists and reveal its name. A 404
-reveals nothing. The model is also default-deny: a new viewer with no grants sees an empty
-dashboard until an admin grants them a project.
+outsiders. A 403 "forbidden" would leak that the resource exists and reveal its name. A 404
+reveals nothing — and that has to hold for a restricted project, a report id belonging to one,
+and case or Unicode variants of a real name alike, or the status code itself would enumerate
+the org's project list. The model is also default-deny: a new viewer with no grants sees an
+empty dashboard until an admin grants them a project.
 
 ## Provisioning: the admin API and the `relay-user` CLI
 
@@ -125,19 +166,20 @@ Users are created and managed through a small admin API on the relay (`POST /api
 `GET /api/users`, `POST /api/users/revoke`), driven by the CLI:
 
 ```bash
-orion relay-user add alex --role viewer --project my-app       # a dashboard viewer
-orion relay-user add mac  --role contributor --project my-app  # a push-only producer (a machine)
-orion relay-user list                                          # the roster (no key material)
-orion relay-user grant mac --project other-app                 # add a project to an existing user
-orion relay-user role alex supervisor                          # change a role (logs out live sessions)
-orion relay-user rename mac mac-mini                           # rename (history keeps the old name)
-orion relay-user revoke mac                                    # instant cutoff (keeps the name)
-orion relay-user delete mac                                    # hard-delete: frees the name to reuse
+orion relay-user add supervisor-a --role viewer --project my-app  # a dashboard viewer
+orion relay-user add teammate-b --role member                     # reads every org-visible project
+orion relay-user add mac  --role contributor --project my-app     # a push-only producer (a machine)
+orion relay-user list                                             # the roster (no key material)
+orion relay-user grant mac --project other-app                    # add a project to an existing user
+orion relay-user role supervisor-a supervisor                     # change a role (logs out live sessions)
+orion relay-user rename mac mac-mini                              # rename (history keeps the old name)
+orion relay-user revoke mac                                       # instant cutoff (keeps the name)
+orion relay-user delete mac                                       # hard-delete: frees the name to reuse
 ```
 
 ### Passwords: how humans sign in
 
-Interactive accounts (`admin`, `viewer`, `supervisor`) log in with a **name and password**.
+Interactive accounts (`admin`, `viewer`, `supervisor`, `member`) log in with a **name and password**.
 Machines hold keys. The two do not overlap — a password is rejected on the push path, and a key
 is rejected at login once its account has a password.
 
@@ -200,6 +242,41 @@ independently of identity; **`revoke`** is an immediate cutoff that keeps the na
 the account and frees the `UNIQUE` name to be reused, while their past reports and discussion replies
 keep the author name already recorded on them.
 
+### Agents: machines that act on a person's behalf
+
+An **agent** (Claude Code, a CI job, a research runner) is a first-class account of kind
+`agent` with its own key, tied to the human it acts for:
+
+```bash
+orion relay-user add claude-mac --role contributor --kind agent --operated-by yoo --project my-app
+orion relay-user set-operator claude-mac someone-else   # reparent it to a different human
+```
+
+The rules are enforced, not conventional. An operator must be an **active human** account;
+agent-to-agent chains and self-reference are refused, because the whole point of the link is
+that it terminates at an accountable person. An agent is pinned to role `contributor` and
+cannot be promoted to an interactive role, so a machine account never gains a dashboard login.
+Deleting an account that still operates active agents is **blocked** — reassign them first
+(that is what `set-operator` is for). Revoking an operator does *not* revoke its agents: each
+credential is revoked individually, so retiring a person does not silently stop scheduled work
+nobody asked to stop.
+
+Two things follow, and they pull in opposite directions on purpose:
+
+- **Attribution keeps the agent.** A report pushed by an agent is badged as agent work and
+  names the human it acted for ("operated by …"). Provenance is never lost — you can always
+  see that a machine did a given piece of work and on whose behalf.
+- **Work-tracking folds into the operator.** For per-contributor checklist cards and producer
+  streams, an agent groups under its human: you plus your two agents is *one* contributor, not
+  three. An agent has no separate checklist of its own, because it is executing your work, not
+  proposing its own.
+
+One subtlety worth stating, since it is the easiest thing to get wrong: folding is a **display
+grouping applied after every derivation**, never before. Slippage is still derived on each raw
+producer's own observation stream and only unioned under the operator for display. Merging the
+histories first would interleave a human's and an agent's observations of the same item and
+manufacture a "postponed" signal that never happened.
+
 > **Watch out when demoting an admin.** Admins bypass project scope, so an admin account usually has
 > **no grants at all**. Changing it to a scoped role (`viewer`, `supervisor`, `member`) makes
 > default-deny apply immediately, and the account will see **nothing** until you `grant` it projects.
@@ -212,7 +289,8 @@ Two security points matter here.
   automatically be able to mint dashboard users. This bounds the blast radius if one secret
   leaks.
 - The access key is shown exactly once, at creation. Only the verifier is stored, so a lost key
-  cannot be recovered, only replaced (revoke the user and add a new one).
+  cannot be recovered, only replaced — `key add` a new credential, install it, verify a push,
+  then `key revoke` the old one. The account and its other credentials are untouched.
 
 `relay-user` needs only a `[relay]` table in your `orion.toml` (an `admin_token_env_var` plus
 the `url`), not a list of local projects, so an admin who runs the relay but reports from
@@ -313,22 +391,51 @@ docs/deployment.md for generating and setting them.
 | `ORION_RELAY_TOKEN`       | Ingest (the report push)                   | Always                          |
 | `ORION_RELAY_VIEW_TOKEN`  | Bootstrap-admin login + the bind guard     | Any non-loopback bind           |
 | `ORION_RELAY_SESSION_KEY` | Signing session cookies                    | Whenever the dashboard is gated |
-| `ORION_RELAY_USER_PEPPER` | Hashing stored login-key verifiers         | Whenever the dashboard is gated |
+| `ORION_RELAY_USER_PEPPER` | Hashing stored **key** verifiers (not passwords) | Whenever the dashboard is gated |
 | `ORION_RELAY_ADMIN_TOKEN` | The provisioning API (`relay-user`)        | To create or manage users       |
 
 `ORION_RELAY_PUBLIC_ORIGIN` (the deployed `https://...` URL) is recommended in production for
 the canonical-Origin CSRF check.
 
+Password hashing needs `argon2-cffi`, installed with the **`relay` extra** on the machine that
+runs the relay. It is deliberately relay-only — the producer never imports it, so a local Orion
+install keeps its small dependency footprint. If the relay starts without it, password login
+fails closed with a clear error rather than silently degrading to something weaker.
+
 ## Data and schema
 
-The relay stores everything in one SQLite database on a persistent volume. The multi-party
-tables (`relay_users`, `relay_user_projects`, `relay_admin_audit`) are created with
-`CREATE TABLE IF NOT EXISTS`, so adding multi-party access to a relay that already holds
-reports is additive. Existing reports and discussion threads are untouched.
+The relay stores everything in one SQLite database on a persistent volume. The identity tables
+are:
+
+| Table | Holds |
+| --- | --- |
+| `relay_users` | Accounts: name, role, `kind` (human/agent), `operated_by`, active flag, session version |
+| `relay_credentials` | N credentials per account: type (key/password), label, verifier, active flag |
+| `relay_user_projects` | Explicit per-project grants (default-deny) |
+| `relay_project_meta` | Per-project settings, including `visibility` (org/restricted) |
+| `relay_admin_audit` | A trail of provisioning acts |
+
+The account↔credential split is the structural change worth internalizing: **an account is the
+durable identity, and credentials are attachable, individually revocable things beneath it.**
+That is what lets one person hold keys on two machines under one identity, and what lets a
+password be reset without disturbing any machine key.
+
+Every table is created with `CREATE TABLE IF NOT EXISTS`, and new columns arrive as additive
+`ALTER`s, so a relay that already holds reports migrates itself on deploy. The one-time
+migration that copied each existing account's key into a credential row ran as a single
+serialized transaction with a postcondition check, so no account could be left credential-less
+and no key was ever re-minted.
 
 ## What is not here yet
 
-This is Increment 1 (shared read access). Named seams left for later increments: write or
-contributor access, a guest or demo role, self-service signup, per-recipient delivery state,
-and stamping an authenticated author onto the report blob itself (the submitter-identity half
-of KI-17, which waits for multi-user submission rather than multi-user viewing).
+Named seams, deliberately not built:
+
+- **Delegation (acting-as).** An agent acts *on behalf of* a human but is always attributed as
+  itself. A credential writing *as* another identity — the parked Slack bot's need — would
+  bolt on additively; nothing in the schema precludes it.
+- **Per-IP login throttling.** The throttle is keyed by dimension (account, global) so an `ip`
+  dimension is additive, but it needs a proxy-trust flag to be safe. See KI-38.
+- **Self-service signup, email, a password-change UI, OAuth/OIDC, teams/groups.** All additive
+  on the account model if ever wanted.
+- **Stamping an authenticated author onto the report blob itself** — the submitter-identity
+  half of KI-17.

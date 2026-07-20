@@ -70,6 +70,7 @@ docs/scheduled-checklist-push-kickoff.md
 docs/relay-backfill-kickoff.md
 docs/auth-revamp-planning-brief.md
 docs/auth-revamp-kickoff.md
+docs/auth-revamp-closeout-kickoff.md
 docs/claudemd-refresh-audit-kickoff.md
 
 # Scheduler run logs (launchd/cron StandardOut/Err targets — see docs/scheduling.md)

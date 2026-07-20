@@ -24,6 +24,7 @@ from orion.delivery.relay import (
     post_discussion,
     pull_discussions,
     push,
+    push_checklist,
     revoke_user,
 )
 
@@ -86,6 +87,63 @@ def test_successful_push_sends_blob_verbatim_with_bearer(monkeypatch):
     # A descriptive, non-default UA (consistency with the chat senders).
     assert captured["user_agent"] is not None
     assert "Orion" in captured["user_agent"]
+
+
+# --- KI-35: the tri-state due_soon_days on the checklist carrier ---------------------
+# The transport is where "absent" vs "explicit null" is actually decided, so the three
+# states are pinned here against the real request bytes, not a mock's kwargs.
+
+
+def _capture_checklist_payload(monkeypatch, **kwargs):
+    """Run push_checklist against a fake urlopen and return the decoded JSON payload."""
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = request.data.decode("utf-8")
+        return _FakeResponse(200)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    push_checklist(
+        "https://relay.test/ingest", "demo", [{"text": "Wire it", "done": False}],
+        "s3cr3t-token", **kwargs,
+    )
+    return json.loads(captured["body"])
+
+
+def test_push_checklist_omits_due_soon_days_when_unconfigured(monkeypatch):
+    """With no horizon configured, the key is absent from the payload entirely.
+
+    Why this matters: absence is the relay's "leave the stored value alone" signal
+    (KI-35). A producer that does not configure the horizon must send NO key, so it can
+    never disturb a value another producer set — this is the wire half of the fix.
+    """
+    payload = _capture_checklist_payload(monkeypatch)
+    assert "due_soon_days" not in payload
+
+
+def test_push_checklist_sends_explicit_null_when_clearing(monkeypatch):
+    """`clear_due_soon_days=True` puts a literal JSON null on the wire.
+
+    Why this matters: clearing is now an explicit act, and its only carrier is the
+    null. Asserting on the parsed payload (key PRESENT, value None) is what separates a
+    clear from an omission — the two are indistinguishable if you only check `.get()`.
+    """
+    payload = _capture_checklist_payload(monkeypatch, clear_due_soon_days=True)
+    assert "due_soon_days" in payload
+    assert payload["due_soon_days"] is None
+
+
+def test_push_checklist_refuses_to_clear_and_set_at_once(monkeypatch):
+    """Passing both a horizon and the clear flag is a caller bug, raised not silently resolved.
+
+    Why this matters: the two arguments express contradictory intent, and picking a
+    winner silently would make the wire depend on an arbitrary precedence rule. The CLI
+    never lets them combine, so this guards the library surface against a future caller.
+    """
+    with pytest.raises(ValueError):
+        _capture_checklist_payload(
+            monkeypatch, due_soon_days=14, clear_due_soon_days=True
+        )
 
 
 def test_non_2xx_status_becomes_delivery_error(monkeypatch):

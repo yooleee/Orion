@@ -781,31 +781,36 @@ def test_relay_push_carries_redacted_live_checklist(tmp_path, env_and_mocks):
 
 
 def _capture_checklist_pushes(mp):
-    """Record (url, project, checklist, token, kind, due_soon_days) push_checklist calls.
+    """Record (url, project, checklist, token, kind, due_soon_days, clear_due_soon_days) calls.
 
     Why: the command/watch loop call push_checklist as their only outbound effect; an
-    in-memory recorder lets each test assert on the exact payload without any network. Both
-    keyword-only extras ride every call, so the recorder captures them too: `kind` (E2 Inc
-    4, project/tracker) and `due_soon_days` (E1.2, the per-project due-soon window, None
-    when unset) — letting a test assert each propagates to the wire.
+    in-memory recorder lets each test assert on the exact payload without any network. Every
+    keyword-only extra rides every call, so the recorder captures them all: `kind` (E2 Inc
+    4, project/tracker), `due_soon_days` (E1.2, the per-project due-soon window, None
+    when unset), and `clear_due_soon_days` (KI-35, the explicit clear) — letting a test
+    assert each propagates to the wire. The clear flag is captured SEPARATELY from the
+    value because both a clear and an unconfigured project pass due_soon_days=None; only
+    the flag tells them apart (the transport turns it into an explicit JSON null).
     """
     pushes = []
     mp.setattr(
         cli,
         "push_checklist",
-        lambda url, project, checklist, token, *, kind="project", due_soon_days=None: pushes.append(
-            (url, project, checklist, token, kind, due_soon_days)
+        lambda url, project, checklist, token, *, kind="project", due_soon_days=None, clear_due_soon_days=False: pushes.append(
+            (url, project, checklist, token, kind, due_soon_days, clear_due_soon_days)
         ),
     )
     return pushes
 
 
-def _checklist_config(tmp_path, *, checklist=True, relay_enabled=True):
+def _checklist_config(tmp_path, *, checklist=True, relay_enabled=True, due_soon_days=None):
     """Write an orion.toml with a checklist-enabled project + a [relay] table.
 
     Why: the checklist-push tests share the same shape (a tasks project + a relay);
-    this keeps each test to the one knob (checklist on/off, relay on/off) it varies.
+    this keeps each test to the one knob (checklist on/off, relay on/off, an optional
+    configured due-soon horizon) it varies.
     """
+    horizon = "" if due_soon_days is None else f"due_soon_days = {due_soon_days}"
     toml = tmp_path / "orion.toml"
     toml.write_text(
         f"""
@@ -821,6 +826,7 @@ def _checklist_config(tmp_path, *, checklist=True, relay_enabled=True):
         collectors = ["tasks"]
         tasks_file = "TODO.md"
         checklist = {str(checklist).lower()}
+        {horizon}
 
           [[projects.demo.recipients]]
           name = "Alex"
@@ -855,7 +861,7 @@ def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_moc
     assert code == 0
     assert len(pushes) == 1
 
-    url, project, checklist, token, kind, due_soon_days = pushes[0]
+    url, project, checklist, token, kind, due_soon_days, _clear = pushes[0]
     assert url == "https://relay.test/ingest"  # the client derives /checklist from it
     assert project == "demo"
     assert token == "relay-secret"
@@ -901,6 +907,109 @@ def test_checklist_push_one_shot_records_history(tmp_path, env_and_mocks):
         payload, project.kind, project.due_soon_days
     )
     assert content_hash == expected
+
+
+# --- KI-35: `checklist-push --clear-due-soon-days` (the explicit clear) --------------
+
+
+def test_checklist_push_clear_flag_sends_the_clear_instead_of_the_config_value(
+    tmp_path, env_and_mocks
+):
+    """--clear-due-soon-days sends the clear signal, overriding the configured horizon.
+
+    Why this matters: the relay no longer clears a setting because a push omitted it
+    (KI-35), so this flag is the ONLY way to reset a horizon. It must reach the transport
+    as the clear flag with no value alongside it — a clear that quietly carried the config
+    value would set the horizon it was asked to remove. The project here deliberately HAS
+    `due_soon_days = 14` configured, which is the case where the two could conflict.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path, due_soon_days=14)
+
+    code = cli.main(
+        ["checklist-push", "demo", "--config", str(toml), "--clear-due-soon-days"]
+    )
+    assert code == 0
+    _url, _project, _checklist, _token, _kind, due_soon_days, clear = pushes[0]
+    assert clear is True
+    assert due_soon_days is None  # the config's 14 must NOT ride along
+
+
+def test_checklist_push_clear_flag_records_the_cleared_state_in_history(
+    tmp_path, env_and_mocks
+):
+    """The history row after a clear hashes the CLEARED horizon, not the configured one.
+
+    Why this matters: the `--all --due` change-gate compares a project's next payload
+    against this recorded hash. If a clear recorded config's 14 (what it did not send)
+    instead of None (what it did), the gate would be comparing against a state the relay
+    never saw, and a later push could be wrongly skipped as unchanged.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path, due_soon_days=14)
+
+    assert cli.main(
+        ["checklist-push", "demo", "--config", str(toml), "--clear-due-soon-days"]
+    ) == 0
+
+    conn = open_state(tmp_path / "state.sqlite3")
+    _pushed_at, content_hash = get_last_checklist_push(conn, "demo")
+    project = get_project(load_config(toml), "demo")
+    payload = cli._checklist_payload(project)
+    # Hashed with None — the horizon actually put on the wire — not project.due_soon_days.
+    assert content_hash == cli._checklist_content_hash(payload, project.kind, None)
+    assert content_hash != cli._checklist_content_hash(payload, project.kind, 14)
+
+
+def _assert_clear_flag_rejected(tmp_path, env_and_mocks, capsys, args):
+    """Assert a --clear-due-soon-days invocation is a usage error with no outbound push.
+
+    Why: the two rejection cases (--all, --watch) differ only in the argv they build, so
+    the setup and the three assertions live here rather than being written twice (DRY).
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+
+    assert cli.main(args(_checklist_config(tmp_path))) == 2
+    assert pushes == []  # rejected before any outbound effect
+    assert "clear-due-soon-days" in capsys.readouterr().err
+
+
+def test_checklist_push_clear_flag_is_rejected_with_all(tmp_path, env_and_mocks, capsys):
+    """--clear-due-soon-days with --all is a usage error (exit 2).
+
+    Why this matters: clearing is a deliberate act on ONE project. A sweep would wipe the
+    horizon of every project in the config at once — a destructive fat-finger the flag
+    should make impossible rather than merely discourage.
+    """
+    _assert_clear_flag_rejected(
+        tmp_path, env_and_mocks, capsys,
+        lambda toml: ["checklist-push", "--all", "--config", str(toml), "--clear-due-soon-days"],
+    )
+
+
+def test_checklist_push_clear_flag_is_rejected_with_watch(tmp_path, env_and_mocks, capsys):
+    """--clear-due-soon-days with --watch is a usage error (exit 2).
+
+    Why this matters: a watch loop re-pushes on every change, so a clear riding it would
+    fight any horizon the user later configures, re-clearing it indefinitely. A clear is
+    single-shot by nature. Confining the flag to the one-shot push also keeps it away from
+    the --all --due change-gate, so a clear can never be skipped as "no change".
+    """
+    _assert_clear_flag_rejected(
+        tmp_path, env_and_mocks, capsys,
+        lambda toml: ["checklist-push", "demo", "--config", str(toml), "--watch", "--clear-due-soon-days"],
+    )
 
 
 def test_checklist_push_failed_delivery_records_nothing(tmp_path, env_and_mocks):
@@ -1265,7 +1374,7 @@ def test_checklist_push_carries_configured_due_soon_days(tmp_path, env_and_mocks
     code = cli.main(["checklist-push", "demo", "--config", str(toml)])
     assert code == 0
     assert len(pushes) == 1
-    _url, _project, _checklist, _token, _kind, due_soon_days = pushes[0]
+    _url, _project, _checklist, _token, _kind, due_soon_days, _clear = pushes[0]
     assert due_soon_days == 14  # the configured window rides the push
 
 
@@ -1320,7 +1429,7 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
     assert code == 0
     assert len(pushes) == 1
 
-    _url, project, checklist, _token, _kind, _due_soon = pushes[0]
+    _url, project, checklist, _token, _kind, _due_soon, _clear = pushes[0]
     assert project == "apps"
     # The application item carries its status in the text and is done (Submitted); it also
     # emits the bare title as the stable forward-store `key` (Unit 3), the "Applications"
@@ -1383,7 +1492,7 @@ def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_an
     code = cli.main(["checklist-push", "apps", "--config", str(toml)])
     assert code == 0
 
-    _url, _project, checklist, _token, _kind, _due_soon = pushes[0]
+    _url, _project, checklist, _token, _kind, _due_soon, _clear = pushes[0]
     assert checklist[0] == {
         "text": "Claude Corps Fellow (job) - In progress",
         "done": False,

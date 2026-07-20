@@ -405,28 +405,48 @@ _VALID_PROJECT_KINDS = ("project", "tracker")
 _MIN_DUE_SOON_DAYS = 1
 _MAX_DUE_SOON_DAYS = 365
 
+# KI-35: a sentinel meaning "this key was not in the payload at all". Needed because
+# project-level settings are now TRI-STATE on the wire — absent = leave the stored value
+# alone, explicit null = clear it, int = set it — and `payload.get(k)` collapses the first
+# two into None. Reading with `payload.get(k, _ABSENT)` keeps them distinguishable. A bare
+# object() is the standard Python idiom for a sentinel that can never collide with a JSON
+# value (json.loads only ever produces dict/list/str/int/float/bool/None).
+_ABSENT = object()
 
-def _due_soon_days_error(value: object) -> str | None:
-    """Validate an OPTIONAL `due_soon_days` field, or None when it is absent/valid (E1.2).
+
+def _due_soon_days_error(value: object, *, allow_clear: bool) -> str | None:
+    """Validate a TRI-STATE `due_soon_days` field, or None when it is valid (E1.2, KI-35).
 
     Args:
-        value: The payload's `due_soon_days` (any type, or None when the key is absent —
-            payload.get returns None either way, which is the omit-when-unset case).
+        value: The payload's `due_soon_days` read via `payload.get(k, _ABSENT)` — so
+            `_ABSENT` means the key was omitted, None means an explicit JSON null, and
+            anything else is the presented value (any type — untrusted input).
+        allow_clear: Whether an explicit null is meaningful on this carrier. True for
+            /checklist (the dedicated settings carrier, which owns clearing); False for
+            /ingest, where a null is rejected outright.
 
     Returns:
-        None when the field is absent OR a valid int in 1..365; otherwise a short
-        human-readable 400 reason.
+        None when the field is absent, a permitted explicit null, or a valid int in
+        1..365; otherwise a short human-readable 400 reason.
 
     Why:
         The knob rides BOTH carriers (the ingest blob and the /checklist push), so validating
-        it in one shared helper keeps the two boundaries from ever diverging (DRY). It is
-        omit-when-unset, so an absent value (None) is accepted — the store simply leaves the
-        project's prior horizon untouched. bool is explicitly rejected even though it is an int
-        subclass in Python: True/False is never a meaningful day count, and letting it through
-        would store 1/0 (and 0 is out of range anyway).
+        it in one shared helper keeps the two boundaries from ever diverging (DRY). KI-35 made
+        absence mean "leave alone" on every carrier — a configless producer's scheduled push
+        must never silently wipe a horizon another producer set — so clearing needed its own
+        explicit signal, and only the settings carrier accepts it. An /ingest blob is a report,
+        and report blobs (including `intake` ones, which legitimately omit checklist config)
+        must never be able to clear project settings at all. bool is explicitly rejected even
+        though it is an int subclass in Python: True/False is never a meaningful day count, and
+        letting it through would store 1/0 (and 0 is out of range anyway).
     """
+    if value is _ABSENT:
+        return None  # omitted: leave whatever the project already has
     if value is None:
-        return None  # omit-when-unset: absent is valid, means "use the default"
+        # Explicit null. On /checklist this is the clear signal; on /ingest it is a 400.
+        if allow_clear:
+            return None
+        return "field 'due_soon_days' may not be null here; omit it to leave it unchanged"
     if not isinstance(value, int) or isinstance(value, bool):
         return "field 'due_soon_days' must be an integer"
     if not (_MIN_DUE_SOON_DAYS <= value <= _MAX_DUE_SOON_DAYS):
@@ -453,7 +473,9 @@ def _validate_checklist_request(payload: object) -> str | None:
         checklist is REQUIRED (the request exists to set it), and `project` must be a
         non-empty string (it is the upsert key). The item shape reuses the shared helper.
         `kind` is OPTIONAL (a producer predating the flag omits it ⇒ the relay defaults to
-        "project"), so it is validated only WHEN PRESENT, to a known value.
+        "project"), so it is validated only WHEN PRESENT, to a known value. `due_soon_days`
+        is tri-state here (KI-35): this is the carrier that owns clearing, so an explicit
+        null is accepted and means "clear".
     """
     if not isinstance(payload, dict):
         return "payload must be a JSON object"
@@ -466,8 +488,11 @@ def _validate_checklist_request(payload: object) -> str | None:
     kind = payload.get("kind")
     if kind is not None and kind not in _VALID_PROJECT_KINDS:
         return f"field 'kind' must be one of {_VALID_PROJECT_KINDS}"
-    # E1.2: `due_soon_days` is OPTIONAL here too (omit-when-unset), validated only when present.
-    due_soon_error = _due_soon_days_error(payload.get("due_soon_days"))
+    # E1.2 / KI-35: `due_soon_days` is OPTIONAL and TRI-STATE on this carrier — absent leaves
+    # the stored value, an explicit null clears it, an int sets it.
+    due_soon_error = _due_soon_days_error(
+        payload.get("due_soon_days", _ABSENT), allow_clear=True
+    )
     if due_soon_error is not None:
         return due_soon_error
     return None
@@ -573,10 +598,13 @@ def _validate_blob(payload: object) -> str | None:
             return items_error
 
     # E1.2 (forward-look): `due_soon_days` is an OPTIONAL project-level knob that also rides the
-    # blob (omit-when-unset). Validated via the shared helper WHEN PRESENT, exactly like the
-    # /checklist carrier — an out-of-range or non-int value is a clean 400 here, never a later
-    # crash in the store or a bad horizon in the classifier. An absent value is simply left off.
-    due_soon_error = _due_soon_days_error(payload.get("due_soon_days"))
+    # blob (omit-when-unset). Validated via the shared helper WHEN PRESENT — an out-of-range or
+    # non-int value is a clean 400 here, never a later crash in the store or a bad horizon in
+    # the classifier. An absent value is simply left off. KI-35: unlike /checklist, an explicit
+    # null is REJECTED — a report blob must never be able to clear a project's settings.
+    due_soon_error = _due_soon_days_error(
+        payload.get("due_soon_days", _ABSENT), allow_clear=False
+    )
     if due_soon_error is not None:
         return due_soon_error
 
@@ -953,17 +981,26 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 conn, payload["project"], payload["checklist"], received_at, author_id
             )
             # E2 Inc 4: record the project's kind (project | tracker) so the home can split
-            # projects from trackers. Optional on the wire — absent ⇒ "project" (the safe
-            # default, and what a producer predating the flag means). Its own meta row.
-            set_project_kind(conn, payload["project"], payload.get("kind") or "project")
-            # E1.2 (forward-look): the /checklist push is the AUTHORITATIVE carrier for the
-            # due-soon horizon — a configured producer sends it on every checklist push, and an
-            # unconfigured one never does. So we write it UNCONDITIONALLY: present ⇒ set the
-            # value; absent ⇒ pass None, which clears the column to NULL so an unset project
-            # resolves to the 7-day default. This is what fixes the set→unset staleness: without
-            # the clear, removing the config would leave the last value stuck forever. Shares
-            # the meta row with `kind`. (last-writer-wins across producers, like `kind`.)
-            set_due_soon_days(conn, payload["project"], payload.get("due_soon_days"))
+            # projects from trackers. KI-35: SET-ONLY — written only when the push actually
+            # carries a kind. An absent (or null) kind leaves the stored one alone; a project
+            # that never received one reads as "project" via the store's default. Previously
+            # this wrote `payload.get("kind") or "project"` unconditionally, which meant any
+            # push omitting the field silently reset a tracker back to a project — the same
+            # silent-clobber KI-35 is about, on the sibling setting in the same meta row.
+            kind = payload.get("kind")
+            if kind is not None:
+                set_project_kind(conn, payload["project"], kind)
+            # E1.2 / KI-35: the /checklist push is the settings carrier for the due-soon
+            # horizon, and it is TRI-STATE. Absent ⇒ leave the stored value (so a producer
+            # without the config can never wipe one another producer set — the silent
+            # scheduled clobber this KI closes). Explicit null ⇒ clear to NULL, so the project
+            # falls back to the 7-day default. Int ⇒ set. Accepted trade: because absence no
+            # longer clears, a horizon that is set and then dropped from config persists until
+            # someone clears it explicitly (`checklist-push --clear-due-soon-days`). That
+            # staleness is rare and human-visible; the clobber it replaces was neither. Shares
+            # the meta row with `kind` (single-column upserts, so neither touches the other).
+            if "due_soon_days" in payload:
+                set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
         finally:
             conn.close()
         count = len(payload["checklist"])

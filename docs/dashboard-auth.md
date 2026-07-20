@@ -129,20 +129,45 @@ orion relay-user add alex --role viewer --project my-app       # a dashboard vie
 orion relay-user add mac  --role contributor --project my-app  # a push-only producer (a machine)
 orion relay-user list                                          # the roster (no key material)
 orion relay-user grant mac --project other-app                 # add a project to an existing user
-orion relay-user rotate mac                                    # re-mint the key (old key dies); prints a new one
+orion relay-user role alex supervisor                          # change a role (logs out live sessions)
+orion relay-user rename mac mac-mini                           # rename (history keeps the old name)
 orion relay-user revoke mac                                    # instant cutoff (keeps the name)
 orion relay-user delete mac                                    # hard-delete: frees the name to reuse
 ```
 
-Each `add` and each `rotate` prints a one-time access key. For a `contributor`, that key is what the
+### Credentials: an account can hold several keys
+
+An **account** is the durable identity; a **credential** is one of N revocable things beneath it. That
+is what lets one person hold a key on their Mac and another on a WSL2 box under a single identity,
+instead of needing two identities (or re-keying one machine whenever the other changes).
+
+```bash
+orion relay-user key add mac --label wsl2   # attach ANOTHER key; existing keys keep working
+orion relay-user key list mac               # ids, labels, and last-used (never key material)
+orion relay-user key revoke mac --id 2      # kill ONE credential; the account and its others live on
+```
+
+Each `add` (account or key) prints a one-time access key. For a `contributor`, that key is what the
 producing machine puts in its own `.env` under `ORION_RELAY_TOKEN` (the same variable name the shared
 ingest token used), so no `orion.toml` change is needed — each machine simply carries its own key.
 
-The full lifecycle: **`grant`** widens a user's project scope in place (no re-provisioning); **`rotate`**
-replaces a compromised or lost key without churning identity, grants, or attributed history (an active
-user only — a revoked one is `delete` + `add`); **`revoke`** is an immediate cutoff that keeps the name;
-**`delete`** removes the user and frees the `UNIQUE` name to be reused, while their past reports and
-discussion replies keep the author name already recorded on them.
+**Replacing a machine key is `add` → deploy → verify → `revoke`.** Add the new credential, install it,
+confirm a push works, and only then revoke the old one. The two keys overlap, so there is no window
+where a scheduled push starts failing, and no way to strand yourself if the new key is lost in transit.
+Compromise response is the same sequence with the order reversed: `revoke` immediately, `add` when you
+are ready. (This replaced a one-shot `rotate` command, which killed the old key the instant the new one
+was minted and had both of those failure modes.)
+
+The full lifecycle: **`grant`** widens a user's project scope in place; **`role`** changes what an
+account is allowed to do; **`rename`** changes its label; **`key add`/`key revoke`** manage credentials
+independently of identity; **`revoke`** is an immediate cutoff that keeps the name; **`delete`** removes
+the account and frees the `UNIQUE` name to be reused, while their past reports and discussion replies
+keep the author name already recorded on them.
+
+> **Watch out when demoting an admin.** Admins bypass project scope, so an admin account usually has
+> **no grants at all**. Changing it to a scoped role (`viewer`, `supervisor`, `member`) makes
+> default-deny apply immediately, and the account will see **nothing** until you `grant` it projects.
+> The CLI warns when a role change leaves an account with an empty scope.
 
 Two security points matter here.
 
@@ -163,11 +188,22 @@ The machine ingest endpoints (report push, checklist/disciplines push, the CLI
 discussion pull/reply) authenticate with a **Bearer** token, not a login cookie. Two kinds of
 credential are accepted:
 
-- A **contributor's own key** (C3 Increment 2). The relay resolves it to that producer's
-  identity server-side, exactly as a login key resolves an interactive user. The producer may
-  push only to its granted projects — an out-of-scope push gets a 404 identical to a missing
-  project. Reports it pushes are attributed ("pushed by <name>"), its CLI discussion replies
-  carry its real name (any `--as` is ignored), and it keeps its own per-producer checklist.
+- An **account's own key credential** (C3 Increment 2; credential-based since the auth revamp).
+  The relay resolves the presented key to a credential, then to its owning account, server-side —
+  exactly as a login resolves an interactive user. Reports it pushes are attributed ("pushed by
+  <name>"), its CLI discussion replies carry its real name (any `--as` is ignored), and it keeps
+  its own per-producer checklist.
+
+  **A Bearer key is always contributor-bounded — including on an admin account.** Whatever role
+  the owning account holds, a key authenticates with contributor authority scoped to that
+  account's explicit project grants, and an out-of-scope push gets a 404 identical to a missing
+  project. An admin account with no grants can therefore push *nowhere*. This is deliberate and
+  permanent: once an account can hold several credentials, the natural thing to do is attach a
+  machine key to your own (admin) account — and under the old "admin sees everything" rule that
+  machine would silently gain push access to every project, making compartmentalization *worse*
+  than one key per identity. Admin authority still applies fully to the human's dashboard session;
+  it is only the machine credential that is bounded. Provisioning is unaffected — it uses the
+  separate admin token — and the legacy shared token below is unchanged.
 - The **legacy shared ingest token** (`ORION_RELAY_TOKEN` on the relay side). It still works for
   backward compatibility, but its pushes are **anonymous** (no author is ever mapped to it — any
   holder could impersonate a person). Every use logs a line so an operator can watch it go quiet

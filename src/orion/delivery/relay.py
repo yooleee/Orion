@@ -562,26 +562,125 @@ def grant_projects(
     )
 
 
-def rotate_key(
-    relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
+def add_user_key(
+    relay_url: str, admin_token: str, name: str, label: str, *, timeout: float = 10.0
 ) -> dict:
-    """Re-mint an active user's key, for `relay-user rotate` (KI-31 follow-up).
+    """Attach a new key credential to an account, for `relay-user key add`.
 
     Args:
         relay_url: The configured relay URL; the admin path is derived from it.
         admin_token: The admin Bearer token.
-        name: The user whose key to rotate (must be active — the relay 409s a revoked user).
+        name: The account to attach the key to.
+        label: A short label for the credential, unique among the account's active ones.
         timeout: Seconds to wait before failing.
 
     Returns:
-        The parsed 200 response: {"name": <name>, "key": <new one-time raw key>}.
+        The parsed 200 response: {"name", "label", "id", "key"} — `key` shown once.
 
     Why:
-        Lets an admin replace a compromised/lost key without churning the user's identity,
-        grants, or attributed history. The new key is returned once; the old key stops working.
+        Replaces rotate_key. Adding leaves existing credentials working, which is what makes
+        the safe add → deploy → verify → revoke sequence possible: no window where a scheduled
+        push 401s, and no way to strand the operator if this response is lost.
     """
-    url = urllib.parse.urljoin(relay_url, "/api/users/rotate")
+    url = urllib.parse.urljoin(relay_url, "/api/users/key-add")
+    return _admin_request("POST", url, admin_token, {"name": name, "label": label}, timeout)
+
+
+def list_user_keys(
+    relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
+) -> dict:
+    """List an account's credentials, for `relay-user key list`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The account whose credentials to list.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "credentials": [{id, type, label, active,
+        created_at, last_used_at}, ...]}. Never includes verifiers.
+
+    Why:
+        Revoking by id requires knowing the ids, and deciding WHICH to revoke requires
+        `last_used_at`. Both are unknowable once an account holds several keys.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/key-list")
     return _admin_request("POST", url, admin_token, {"name": name}, timeout)
+
+
+def revoke_user_key(
+    relay_url: str, admin_token: str, name: str, credential_id: int, *, timeout: float = 10.0
+) -> dict:
+    """Revoke one credential by id, for `relay-user key revoke`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The account the credential belongs to.
+        credential_id: The credential id to revoke.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "id", "revoked": true}.
+
+    Why:
+        Kills one credential, not the identity — a lost machine costs one key. Targets the id
+        because labels are reusable once a credential is retired.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/key-revoke")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "id": credential_id}, timeout
+    )
+
+
+def set_user_role(
+    relay_url: str, admin_token: str, name: str, role: str, *, timeout: float = 10.0
+) -> dict:
+    """Change an account's role, for `relay-user role`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The account whose role to change.
+        role: The new role; the relay validates it against the provisionable set.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "role", "projects": <scope after the change>}.
+
+    Why:
+        Roles were fixed at provisioning; the only alternative was delete + re-add, which
+        mints a new key and drops grants. The returned scope lets the caller warn when a
+        demotion leaves an account with no grants (and therefore nothing visible).
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/role")
+    return _admin_request("POST", url, admin_token, {"name": name, "role": role}, timeout)
+
+
+def rename_user(
+    relay_url: str, admin_token: str, name: str, new_name: str, *, timeout: float = 10.0
+) -> dict:
+    """Rename an account, for `relay-user rename`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The account to rename.
+        new_name: The new unique name (the relay 409s a taken name).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "new_name"}.
+
+    Why:
+        The account is the durable identity, so its label should be editable without
+        re-provisioning. Recorded history keeps its denormalized author_name.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/rename")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "new_name": new_name}, timeout
+    )
 
 
 def delete_user(

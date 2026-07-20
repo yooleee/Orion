@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -415,6 +416,24 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 # rather than a guessed machine name: the store genuinely does not know what the existing key
 # is installed on, and inventing "mac" would be a lie the CLI then displays.
 _MIGRATED_KEY_LABEL = "default"
+
+
+def _retired_column_sentinel() -> str:
+    """Return a unique, inert placeholder for the retired `relay_users.key_verifier` column.
+
+    Returns:
+        A per-row unique string that verifies nothing.
+
+    Why:
+        Unit 2b moved real verifiers into `relay_credentials`, but the legacy column is
+        NOT NULL and UNIQUE, and dropping a column is outside this store's additive-only
+        migration idiom — so every new row must still put SOMETHING there. The value is
+        generated from `uuid4`, deliberately independent of the account's actual credential:
+        it is not a hash of the key, not derived from it, and not guessable from it. So even
+        if some future code path were to read this column again, the value could not
+        authenticate anyone. Uniqueness satisfies the UNIQUE constraint without coordination.
+    """
+    return f"retired-unused-column-{uuid.uuid4().hex}"
 
 
 class RelayStoreMigrationError(RuntimeError):
@@ -1604,19 +1623,17 @@ def add_user(
         can map to a clean 4xx, rather than a silent second account. We INSERT OR
         IGNORE the project rows so a caller passing a duplicate project is harmless.
 
-        Auth revamp (Unit 2a): the verifier is DUAL-WRITTEN — into the legacy
-        `relay_users.key_verifier` column (which the resolvers still read until Unit 2b)
-        AND into a `relay_credentials` row (which they will read after it). Writing both
-        is what keeps this unit's behavior byte-identical: an account provisioned now
-        authenticates under the old resolver and under the new one, so there is no window
-        between the two deploys where a fresh account cannot log in or push. Unit 2b
-        retires the legacy write (a sentinel replaces it) in the same PR that moves the
-        resolvers over, so the column stops being written and read together.
+        Auth revamp (Unit 2b): the real verifier now goes ONLY into `relay_credentials`.
+        The legacy `relay_users.key_verifier` column is NOT NULL and cannot be dropped under
+        the additive-migration idiom, so it receives an inert per-row SENTINEL instead — a
+        value generated independently of any credential, which therefore verifies nothing.
+        Nothing reads that column any more (`get_user_by_verifier` and `rotate_key` were
+        removed in this unit), so a stale or planted value there cannot authenticate.
     """
     cursor = conn.execute(
         "INSERT INTO relay_users (name, key_verifier, role, created_by, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
-        (name, key_verifier, role, created_by, created_at),
+        (name, _retired_column_sentinel(), role, created_by, created_at),
     )
     user_id = cursor.lastrowid
     for project in projects:
@@ -1634,28 +1651,6 @@ def add_user(
     )
     conn.commit()
     return user_id
-
-
-def get_user_by_verifier(conn: sqlite3.Connection, key_verifier: str) -> sqlite3.Row | None:
-    """Look up a user by their credential verifier (the login path).
-
-    Args:
-        conn: An open relay-store connection.
-        key_verifier: HMAC-SHA256(pepper, raw_key) the server computed from the
-            presented key.
-
-    Returns:
-        The full user Row, or None when no user has that verifier.
-
-    Why:
-        Login resolves a presented key to a user by its verifier. We return the row
-        REGARDLESS of `active` so the caller (server) can deny a revoked user
-        deliberately; baking the active check in here would hide that decision. The
-        UNIQUE(key_verifier) index makes this an exact single-row lookup.
-    """
-    return conn.execute(
-        "SELECT * FROM relay_users WHERE key_verifier = ?", (key_verifier,)
-    ).fetchone()
 
 
 def get_user_by_id(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
@@ -1830,6 +1825,54 @@ def revoke_user(conn: sqlite3.Connection, user_id: int) -> None:
     conn.commit()
 
 
+def set_user_role(conn: sqlite3.Connection, user_id: int, role: str) -> None:
+    """Change an account's role and force-log-out its live sessions.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The account whose role to change.
+        role: The new role (the caller validates it against the provisionable set).
+
+    Returns:
+        None.
+
+    Why:
+        Roles were previously fixed at provisioning, so changing one meant delete + re-add —
+        which mints a new key the person must be re-issued and drops their grants. Bumping
+        `session_version` in the SAME UPDATE is the point of doing it here rather than as a
+        bare column write: a role change is an authority change, and a cookie minted under
+        the old role must not outlive it (the `revoke_user` guarantee, same reasoning).
+    """
+    conn.execute(
+        "UPDATE relay_users SET role = ?, session_version = session_version + 1 WHERE id = ?",
+        (role, user_id),
+    )
+    conn.commit()
+
+
+def rename_user(conn: sqlite3.Connection, user_id: int, new_name: str) -> None:
+    """Change an account's display name / CLI handle.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The account to rename.
+        new_name: The new unique name.
+
+    Returns:
+        None. Raises sqlite3.IntegrityError when the name is already taken (UNIQUE).
+
+    Why:
+        The account is the durable identity under the credential split, so its name should be
+        editable without re-provisioning. It deliberately does NOT rewrite the denormalized
+        `author_name` on past reports or discussion items: those columns exist precisely so
+        recorded history survives changes to (and deletion of) the account. A rename changes
+        who this account is going forward; it does not revise the record. It also does not
+        bump `session_version` — the person's authority is unchanged, only their label.
+    """
+    conn.execute("UPDATE relay_users SET name = ? WHERE id = ?", (new_name, user_id))
+    conn.commit()
+
+
 def grant_projects(
     conn: sqlite3.Connection, user_id: int, projects: list[str]
 ) -> None:
@@ -1855,44 +1898,6 @@ def grant_projects(
             "INSERT OR IGNORE INTO relay_user_projects (user_id, project) VALUES (?, ?)",
             (user_id, project),
         )
-    conn.commit()
-
-
-def rotate_key(conn: sqlite3.Connection, user_id: int, key_verifier: str) -> None:
-    """Replace a user's key verifier and invalidate their old key + live sessions, atomically.
-
-    Args:
-        conn: An open relay-store connection.
-        user_id: The user whose key to rotate.
-        key_verifier: The verifier for the freshly minted key (the caller computes it, exactly
-            as `add_user` receives one — the raw key never reaches the store).
-
-    Returns:
-        None.
-
-    Why:
-        A compromised or lost key needs replacing without churning the user's identity, grants,
-        or attributed history (KI-31). Swapping `key_verifier` kills the old key; bumping
-        `session_version` in the SAME UPDATE force-logs-out any live cookie session — no window
-        where one applied but not the other (the `revoke_user` guarantee). It deliberately does
-        NOT touch `active`: rotate refreshes a key for an ACTIVE user; reviving a revoked user is
-        `delete` + `add` (the server rejects rotating a revoked user), keeping the verbs distinct.
-
-        Auth revamp (Unit 2a): the rotation is applied to the account's migrated key
-        credential as well, so the two stores do not drift while both exist. This command
-        is RETIRED in Unit 2b — the multi-credential model replaces one-shot rotation with
-        add → deploy → verify → revoke — so this dual-write is deliberately short-lived
-        rather than the shape credentials are meant to be updated through.
-    """
-    conn.execute(
-        "UPDATE relay_users SET key_verifier = ?, session_version = session_version + 1 "
-        "WHERE id = ?",
-        (key_verifier, user_id),
-    )
-    conn.execute(
-        "UPDATE relay_credentials SET verifier = ? WHERE user_id = ? AND type = 'key'",
-        (key_verifier, user_id),
-    )
     conn.commit()
 
 

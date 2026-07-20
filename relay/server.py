@@ -44,6 +44,7 @@ from zoneinfo import ZoneInfo
 from . import api
 from .derive import today_in_tz
 from .store import (
+    add_credential,
     add_discussion_item,
     add_user,
     delete_user,
@@ -51,15 +52,16 @@ from .store import (
     effective_checklist,
     get,
     get_checklist,
+    get_credential_by_key_verifier,
     get_due_soon_days,
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
-    get_user_by_verifier,
     grant_projects,
     history,
     ingest,
     latest_report_per_project,
+    list_credentials,
     list_users,
     observed_history,
     open_relay_store,
@@ -68,10 +70,13 @@ from .store import (
     projects_for_user,
     record_admin_audit,
     record_observations,
+    rename_user,
+    revoke_credential,
     revoke_user,
-    rotate_key,
     set_due_soon_days,
+    set_user_role,
     set_project_kind,
+    touch_credential,
     update_last_login,
     upsert_checklist,
     upsert_producer_checklist,
@@ -796,11 +801,25 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/users/grant":
             self._handle_grant_user()
             return
-        if path == "/api/users/rotate":
-            self._handle_rotate_user()
-            return
         if path == "/api/users/delete":
             self._handle_delete_user()
+            return
+        # Unit 2b: credential lifecycle (the replacement for the retired /api/users/rotate)
+        # plus the two account-attribute mutations.
+        if path == "/api/users/key-add":
+            self._handle_add_user_key()
+            return
+        if path == "/api/users/key-list":
+            self._handle_list_user_keys()
+            return
+        if path == "/api/users/key-revoke":
+            self._handle_revoke_user_key()
+            return
+        if path == "/api/users/role":
+            self._handle_set_user_role()
+            return
+        if path == "/api/users/rename":
+            self._handle_rename_user()
             return
 
         # E2 Inc 4: the SPA's JSON auth siblings (the cookie-session login / logout).
@@ -1628,23 +1647,35 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"name": name, "projects": scope})
 
-    def _handle_rotate_user(self) -> None:
-        """Re-mint an ACTIVE user's key (POST /api/users/rotate) → a new one-time key.
+    # NOTE (Unit 2b): `_handle_rotate_user` / POST /api/users/rotate is RETIRED. Under the
+    # multi-credential account model, one-shot rotation is both redundant and worse than what
+    # replaces it: it killed the old key the instant the new one was minted, which opens a
+    # silent-401 window on every scheduled machine until the new key is installed, and strands
+    # the operator entirely if the response carrying the new key is lost (old key dead, new key
+    # never received). Replacement is now add → deploy → verify → revoke, each step idempotent
+    # and reversible, with overlap and no downtime. Emergency response also decouples: revoking
+    # a compromised credential no longer requires having somewhere to put a new one.
 
-        Body: name (required). Admin-gated; 404 unknown; **409 if the user is revoked**
-        (delete + add to re-onboard); 500 if user keys are not configured; 200 {name, key}.
+    def _handle_add_user_key(self) -> None:
+        """Attach a NEW key credential to an existing account (POST /api/users/key-add).
+
+        Body: name (required), label (required). Admin-gated; 404 unknown; 409 revoked or
+        duplicate active label; 500 if user keys are not configured; 200 {name, label, id, key}.
 
         Why:
-            A compromised or lost key needs replacing without churning the user's identity,
-            grants, or attributed history (KI-31). rotate_key swaps the verifier (old key dead)
-            and bumps session_version (live cookie logged out) in one UPDATE. Rotate is for
-            ACTIVE users only — reviving a revoked one is delete+add — so revoke/rotate/delete
-            stay distinct verbs. The new raw key is returned ONCE, like provisioning.
+            The replacement for rotate, and the thing that makes "two machines, one identity"
+            real: each box gets its own credential under the same account, so losing one
+            revokes one key instead of killing the identity. The raw key is returned ONCE,
+            like provisioning — the store only ever holds its verifier.
         """
         got = self._admin_read_named()
         if got is None:
             return
-        _, name = got
+        payload, name = got
+        label = payload.get("label")
+        if not isinstance(label, str) or not label.strip():
+            self._send_json(400, {"error": "field 'label' must be a non-empty string"})
+            return
         if self.server.user_pepper is None:
             self._send_json(500, {"error": "user keys are not configured on this relay"})
             return
@@ -1656,18 +1687,176 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 return
             if not user["active"]:
                 self._send_json(
-                    409,
-                    {"error": f"user {name!r} is revoked; delete and re-add to re-onboard"},
+                    409, {"error": f"user {name!r} is revoked; adding a key would not work"}
                 )
                 return
             raw_key = mint_key()
-            rotate_key(conn, user["id"], key_verifier(self.server.user_pepper, raw_key))
+            try:
+                credential_id = add_credential(
+                    conn, user["id"], "key", label,
+                    key_verifier(self.server.user_pepper, raw_key), _utc_now_iso(),
+                )
+            except sqlite3.IntegrityError:
+                # The active-label uniqueness index. A clear 409 beats a 500 — the admin
+                # simply picked a label this account is already using.
+                self._send_json(
+                    409,
+                    {"error": f"user {name!r} already has an active credential labelled {label!r}"},
+                )
+                return
             record_admin_audit(
-                conn, _ADMIN_ACTOR, "rotate", name, user["role"], [], _utc_now_iso()
+                conn, _ADMIN_ACTOR, "key_add", name, user["role"], [label], _utc_now_iso()
             )
         finally:
             conn.close()
-        self._send_json(200, {"name": name, "key": raw_key})
+        self._send_json(200, {"name": name, "label": label, "id": credential_id, "key": raw_key})
+
+    def _handle_list_user_keys(self) -> None:
+        """List an account's credentials (POST /api/users/key-list) → metadata only.
+
+        Body: name (required). Admin-gated; 404 unknown; 200 {name, credentials: [...]}.
+
+        Why:
+            Answers the question that has to precede a revocation — what is attached, and is
+            it still in use (`last_used_at`)? Verifiers are excluded by the store accessor, so
+            this listing cannot leak one.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        _, name = got
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            credentials = list_credentials(conn, user["id"])
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "credentials": credentials})
+
+    def _handle_revoke_user_key(self) -> None:
+        """Revoke ONE credential by id (POST /api/users/key-revoke).
+
+        Body: name (required), id (required int). Admin-gated; 404 unknown user or unknown /
+        already-revoked credential; 200 {name, id, revoked: true}.
+
+        Why:
+            Targets the credential id, not its label — labels are display metadata and are
+            reusable once a credential is retired, so revoking "the mac key" by name becomes
+            ambiguous the moment a replacement exists. Deliberately does NOT bump
+            session_version: losing a machine key must not log the human out of the dashboard
+            everywhere. The id is checked to belong to the named account, so a mistyped id
+            cannot revoke someone else's credential.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        credential_id = payload.get("id")
+        if not isinstance(credential_id, int) or isinstance(credential_id, bool):
+            self._send_json(400, {"error": "field 'id' must be an integer"})
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            # Ownership check before the revoke: the id must belong to THIS account, so a
+            # typo'd id is a 404 rather than a silent cross-account revocation.
+            owned = {cred["id"] for cred in list_credentials(conn, user["id"])}
+            if credential_id not in owned or not revoke_credential(conn, credential_id):
+                self._send_json(404, {"error": "not found"})
+                return
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "key_revoke", name, user["role"],
+                [str(credential_id)], _utc_now_iso(),
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "id": credential_id, "revoked": True})
+
+    def _handle_set_user_role(self) -> None:
+        """Change an existing account's role (POST /api/users/role).
+
+        Body: name (required), role (required, in _PROVISIONABLE_ROLES). Admin-gated;
+        404 unknown; 200 {name, role}.
+
+        Why:
+            Roles were fixed at provisioning, so the only way to change one was delete+re-add
+            — which mints a new key the person must be re-issued, and drops their grants. That
+            is a disproportionate amount of disruption for "this person supervises rather than
+            administers". Bumps session_version, because a role change is exactly the kind of
+            authority change a live cookie must not outlive. NOTE the operational consequence
+            an admin must plan for: demoting an admin to a scoped role makes default-deny
+            apply, so the account sees NOTHING until it is granted projects.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        role = payload.get("role")
+        if role not in _PROVISIONABLE_ROLES:
+            self._send_json(
+                400, {"error": f"field 'role' must be one of {list(_PROVISIONABLE_ROLES)}"}
+            )
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            set_user_role(conn, user["id"], role)
+            scope = projects_for_user(conn, user["id"])
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "set_role", name, role, scope, _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "role": role, "projects": scope})
+
+    def _handle_rename_user(self) -> None:
+        """Rename an account (POST /api/users/rename), preserving its identity and history.
+
+        Body: name (required), new_name (required). Admin-gated; 404 unknown; 409 if the new
+        name is taken; 200 {name, new_name}.
+
+        Why:
+            The account is the durable identity, so its display name should be editable
+            without re-provisioning. Already-recorded history keeps the name it was written
+            with: `author_name` is denormalized on reports and discussion items precisely so
+            it survives changes to (and deletion of) the account — the same stance `delete`
+            takes. So a rename changes who this account IS going forward, not what the record
+            says it was at the time.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        new_name = payload.get("new_name")
+        if not isinstance(new_name, str) or not new_name.strip():
+            self._send_json(400, {"error": "field 'new_name' must be a non-empty string"})
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            try:
+                rename_user(conn, user["id"], new_name)
+            except sqlite3.IntegrityError:
+                self._send_json(409, {"error": f"a user named {new_name!r} already exists"})
+                return
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "rename", name, user["role"], [new_name], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "new_name": new_name})
 
     def _handle_delete_user(self) -> None:
         """Hard-delete a user by name (POST /api/users/delete) → frees the name.
@@ -1890,7 +2079,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if not key or self.server.session_key is None:
             return None
         if self.server.user_pepper is not None:
-            user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, key))
+            # Auth revamp (Unit 2b): the presented key resolves through relay_credentials
+            # (active, type='key') rather than the retired relay_users.key_verifier column.
+            # An account may now hold several keys, so this is a credential lookup that then
+            # resolves its OWNER — the identity is the account, not the key.
+            credential = get_credential_by_key_verifier(
+                conn, key_verifier(self.server.user_pepper, key)
+            )
+            user = (
+                get_user_by_id(conn, credential["user_id"])
+                if credential is not None
+                else None
+            )
             # Fail-closed: only _INTERACTIVE_ROLES may mint a session. A push-only
             # contributor key thus falls through to the generic `return None` below,
             # indistinguishable from an unknown key — the login form can't enumerate
@@ -1945,14 +2145,33 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if not header.startswith(prefix):
             return None
         token = header[len(prefix):]
-        # 1) Identified principal: a provisioned user's own key. Only push-capable roles
-        # (_BEARER_ROLES) resolve — a viewer/supervisor key is refused here, fail-closed.
+        # 1) Identified principal: a credential belonging to a provisioned account. Only
+        # push-capable account roles (_BEARER_ROLES) resolve — a viewer/supervisor key is
+        # refused here, fail-closed.
         if self.server.user_pepper is not None:
-            user = get_user_by_verifier(conn, key_verifier(self.server.user_pepper, token))
+            credential = get_credential_by_key_verifier(
+                conn, key_verifier(self.server.user_pepper, token)
+            )
+            user = (
+                get_user_by_id(conn, credential["user_id"])
+                if credential is not None
+                else None
+            )
             if user is not None and user["active"] and user["role"] in _BEARER_ROLES:
+                touch_credential(conn, credential["id"], _utc_now_iso())
                 return {
                     "user_id": user["id"],
-                    "role": user["role"],
+                    # BEARER KEYS ARE ALWAYS CONTRIBUTOR-BOUNDED (a permanent invariant as
+                    # of Unit 2b). The principal's authority is pinned to "contributor"
+                    # REGARDLESS of the account's role, so _allowed_projects scopes it to the
+                    # account's explicit grants instead of returning None (unrestricted) for
+                    # an admin. Without this, attaching a machine key to an admin account —
+                    # exactly what the multi-credential model invites — would hand that
+                    # machine push access to EVERY project, making compartmentalization worse
+                    # than the single-key model it replaces. Admin's unrestricted Bearer push
+                    # is deliberately retired; provisioning uses the separate admin token, and
+                    # the legacy shared-token path below is untouched.
+                    "role": "contributor",
                     "name": user["name"],
                     "legacy": False,
                 }
@@ -2727,6 +2946,14 @@ def create_server(
             "secret: the read-only dashboard would be world-readable. Set a view "
             "secret (relay-serve --view-token-env) before binding beyond loopback."
         )
+    # Open the store ONCE at startup, before binding. The store applies its schema and
+    # migrations on open, and until Unit 2b every open happened inside a request — which
+    # meant a freshly deployed relay stayed un-migrated until the first request that
+    # actually touched SQLite. That was harmless while migrations were behavior-neutral, but
+    # the resolvers now READ a migrated table, so "deployed" and "migrated" must not be able
+    # to drift apart. Doing it here also turns a failed migration into a refusal to start
+    # (the fail-closed postcondition) rather than a 500 on whichever request arrives first.
+    open_relay_store(db_path).close()
     return RelayServer(
         (host, port), db_path, token, view_token, display_tz, auth, web_dir, showcase
     )

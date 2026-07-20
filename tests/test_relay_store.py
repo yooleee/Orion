@@ -38,7 +38,6 @@ from relay.store import (
     get_project_kind,
     get_user_by_id,
     get_user_by_name,
-    get_user_by_verifier,
     history,
     ingest,
     latest_report_per_project,
@@ -466,19 +465,37 @@ def test_backfill_refuses_to_serve_a_half_migrated_store(tmp_path, monkeypatch):
         open_relay_store(db)
 
 
-def test_add_user_dual_writes_the_credential(tmp_path):
-    """A newly provisioned account gets both the legacy verifier column AND a credential row.
+def test_add_user_writes_the_verifier_only_to_the_credential(tmp_path):
+    """A new account's real verifier goes ONLY to relay_credentials; the legacy column gets a sentinel.
 
-    Why this matters: Unit 2a must be behavior-identical, and the resolvers still read the legacy
-    column until Unit 2b. Writing only one of the two would open a window between the two deploys
-    where a freshly provisioned account cannot authenticate under one resolver or the other.
+    Why this matters: Unit 2b retires `relay_users.key_verifier`. The column is NOT NULL and
+    cannot be dropped under the additive-migration idiom, so it must hold something — and that
+    something must be inert. The sentinel is generated from uuid4, independent of the account's
+    actual key, so it is not a hash of the key and not derivable from it.
     """
     conn = open_relay_store(tmp_path / "relay.sqlite3")
     user_id = add_user(conn, "user", "verifier-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
 
-    assert conn.execute("SELECT key_verifier FROM relay_users WHERE id=?", (user_id,)).fetchone()[0] == "verifier-a"
+    legacy = conn.execute("SELECT key_verifier FROM relay_users WHERE id=?", (user_id,)).fetchone()[0]
+    assert legacy != "verifier-a"          # the real verifier is NOT here
+    assert legacy.startswith("retired-unused-column-")
     cred = get_credential_by_key_verifier(conn, "verifier-a")
     assert cred is not None and cred["user_id"] == user_id and cred["type"] == "key"
+
+
+def test_sentinels_are_unique_across_accounts(tmp_path):
+    """Two accounts get DIFFERENT sentinels, so the legacy UNIQUE constraint still holds.
+
+    Why this matters: a single shared constant would make the second `add_user` fail with an
+    IntegrityError on the legacy column's UNIQUE index — provisioning would break at the second
+    account, which is exactly when nobody is looking.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    add_user(conn, "a", "v-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+    add_user(conn, "b", "v-b", "viewer", [], "test", "2026-07-19T00:00:00+00:00")
+
+    sentinels = {r[0] for r in conn.execute("SELECT key_verifier FROM relay_users")}
+    assert len(sentinels) == 2
 
 
 def test_delete_user_removes_credentials_so_the_key_can_be_re_added(tmp_path):
@@ -1269,26 +1286,14 @@ def test_add_user_round_trips_with_defaults_and_scope(tmp_path):
     assert projects_for_user(conn, uid) == ["incubator", "orion"]
 
 
-def test_get_user_by_verifier_and_name_resolve_same_row(tmp_path):
-    """Login (by verifier) and CLI (by name) resolve to the same user.
-
-    Why this matters: auth looks up by verifier; admin ops look up by name. Both must
-    hit the one row so the two surfaces never disagree about who a user is.
-    """
-    conn = _store(tmp_path)
-    uid = add_user(conn, "Sam", "verifier-sam", "viewer", [], "admin-token", "2026-06-24T00:00:00+00:00")
-    assert get_user_by_verifier(conn, "verifier-sam")["id"] == uid
-    assert get_user_by_name(conn, "Sam")["id"] == uid
-
-
 def test_lookups_miss_return_none(tmp_path):
-    """Unknown verifier/id/name are a clean None, never an error.
+    """Unknown credential/id/name are a clean None, never an error.
 
-    Why this matters: a wrong key (no such verifier) or a dead session (deleted id)
+    Why this matters: a wrong key (no such credential) or a dead session (deleted id)
     must degrade to "not authenticated", which the server keys off a None.
     """
     conn = _store(tmp_path)
-    assert get_user_by_verifier(conn, "nope") is None
+    assert get_credential_by_key_verifier(conn, "nope") is None
     assert get_user_by_id(conn, 999) is None
     assert get_user_by_name(conn, "ghost") is None
 

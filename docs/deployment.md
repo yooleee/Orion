@@ -109,6 +109,27 @@ This cutover is deliberate — a machine credential should not silently expire �
 only once every producer has its own key (each legacy use logs a line so you can watch it go
 quiet). Full detail: [`dashboard-auth.md`](dashboard-auth.md).
 
+## The relay dependency (password login)
+
+The relay installs the **`relay` extra**, which adds `argon2-cffi` for password hashing:
+
+```bash
+pip install '.[relay]'     # the Dockerfile already does this
+```
+
+It is relay-only by construction — hashing happens exclusively on the relay, so the local
+producer install stays at three runtime dependencies and never imports it. Prebuilt manylinux
+wheels cover the Docker image, so no compiler is needed.
+
+If a relay starts **without** it and someone tries a password login, the login fails closed with
+a clear operator error in the logs rather than degrading to a weaker scheme. Key login is
+unaffected, so a relay missing the extra is still usable — it just cannot do passwords.
+
+**Memory.** Argon2id is memory-hard on purpose (~19 MiB per verification at the configured
+parameters). Concurrent verifications are capped so peak hashing memory stays around 76 MiB,
+which fits a 512 MB VM alongside the Python process. If you shrink the VM below 512 MB, check
+that headroom before assuming logins still work under load.
+
 ## Persistence (do not skip)
 
 The relay stores reports in a SQLite file. On ephemeral hosts (containers, Fly, Render's

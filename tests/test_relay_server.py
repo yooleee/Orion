@@ -2069,6 +2069,278 @@ def test_the_retired_rotate_endpoint_is_gone(tmp_path):
         assert _admin_post(base_url, "/api/users/rotate", {"name": "prod"})[0] == 404
 
 
+# --- Unit 3: password login, timing parity, and throttling --------------------------
+
+
+def _password_login(base_url, name, password):
+    """POST /api/login in name+password mode; return (status, cookie_or_None)."""
+    data = json.dumps({"name": name, "password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        base_url + "/api/login", data=data,
+        headers={"Content-Type": "application/json", "Origin": base_url}, method="POST",
+    )
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=10) as response:
+            set_cookie = response.headers.get("Set-Cookie") or ""
+            return response.status, (set_cookie.split(";")[0].split("=", 1)[1] if set_cookie else None)
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+
+
+def test_password_login_works_and_a_wrong_password_is_a_generic_401(tmp_path):
+    """A supervisor logs in with name+password; a wrong password is an indistinguishable 401.
+
+    Why this matters: the whole point of the unit — a human logs in with something they know
+    rather than pasting stored key material. The failure must carry no detail: the same status
+    and the same body as every other failure class.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        assert _admin_post(
+            base_url, "/api/users/password", {"name": "dad", "password": "a-real-passphrase"}
+        )[0] == 200
+
+        status, cookie = _password_login(base_url, "dad", "a-real-passphrase")
+        assert status == 200 and cookie
+        assert _password_login(base_url, "dad", "not-the-password") == (401, None)
+
+
+def test_every_failure_class_runs_exactly_one_argon2_verification(tmp_path, monkeypatch):
+    """Unknown name, no-password account, wrong password and lockout each verify exactly once.
+
+    Why this matters: this is the timing-parity guarantee, asserted by COUNTING the
+    verifications rather than by measuring wall-clock (which would be flaky under CI load).
+    If an unknown name skipped the hash, its response would return measurably sooner and the
+    response time would answer "does this account exist?" — the exact enumeration the shared
+    generic 401 exists to prevent.
+    """
+    from relay import passwords
+
+    calls = []
+    real_verify = passwords.verify_password
+
+    def counting_verify(stored_hash, password):
+        calls.append(stored_hash is not None)
+        return real_verify(stored_hash, password)
+
+    monkeypatch.setattr("relay.server.verify_password", counting_verify)
+
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "haspw", "k1", role="supervisor", projects=["demo"])
+        _provision_user(db, "nopw", "k2", role="supervisor", projects=["demo"])
+        assert _admin_post(
+            base_url, "/api/users/password", {"name": "haspw", "password": "correct-pass"}
+        )[0] == 200
+
+        calls.clear()
+        assert _password_login(base_url, "ghost", "x")[0] == 401       # unknown name
+        assert _password_login(base_url, "nopw", "x")[0] == 401        # exists, no password
+        assert _password_login(base_url, "haspw", "wrong")[0] == 401   # wrong password
+        assert _password_login(base_url, "haspw", "correct-pass")[0] == 200
+
+        # Four attempts, four verifications — no path short-circuits.
+        assert len(calls) == 4
+        # Only the two touching a real credential had a stored hash; the other two were
+        # verified against the dummy, which is what equalises their cost.
+        assert calls == [False, False, True, True]
+
+
+def test_login_locks_out_after_repeated_failures_and_admin_unlock_clears_it(tmp_path):
+    """Five failures lock the account; the correct password then fails; unlock restores it.
+
+    Why this matters: passwords are guessable in a way 256-bit keys are not, so throttling is
+    what makes password login safe at all. The lockout must bite even for the CORRECT password
+    (otherwise it is not a lockout), and the admin unlock must fully restore access without
+    changing a password the person still knows.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        assert _admin_post(
+            base_url, "/api/users/password", {"name": "dad", "password": "right-pass"}
+        )[0] == 200
+
+        for _ in range(5):
+            assert _password_login(base_url, "dad", "wrong")[0] == 401
+        # Locked: even the correct password is refused, with the same generic 401.
+        assert _password_login(base_url, "dad", "right-pass") == (401, None)
+
+        assert _admin_post(base_url, "/api/users/unlock", {"name": "dad"})[0] == 200
+        assert _password_login(base_url, "dad", "right-pass")[0] == 200
+
+
+def test_a_successful_login_clears_the_failure_count(tmp_path):
+    """Failures below the threshold are forgotten once a real login succeeds.
+
+    Why this matters: without a reset, a person who mistypes occasionally over days would
+    eventually be locked out by accumulated failures that were never an attack.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        _admin_post(base_url, "/api/users/password", {"name": "dad", "password": "right-pass"})
+
+        for _ in range(4):
+            assert _password_login(base_url, "dad", "wrong")[0] == 401
+        assert _password_login(base_url, "dad", "right-pass")[0] == 200
+        # The counter reset, so four more failures still do not lock the account.
+        for _ in range(4):
+            assert _password_login(base_url, "dad", "wrong")[0] == 401
+        assert _password_login(base_url, "dad", "right-pass")[0] == 200
+
+
+def test_a_password_never_authenticates_the_bearer_path(tmp_path):
+    """A valid password presented as a Bearer token is refused.
+
+    Why this matters: "one credential never spans both auth worlds". A password is an
+    interactive credential; if it also worked as a machine token, the compartmentalisation
+    this whole arc is built on would be an illusion.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "admin1", "admin-key", role="admin", projects=["demo"])
+        _admin_post(base_url, "/api/users/password", {"name": "admin1", "password": "pw-secret"})
+
+        assert _post(base_url, _blob_for("demo"), token="pw-secret")[0] == 401
+
+
+def test_setting_a_password_retires_key_login_but_not_key_pushes(tmp_path):
+    """Once an account has a password, its KEY stops logging in — but still pushes.
+
+    Why this matters: open decision 3, and the endpoint of the transition. Passwords become
+    THE interactive credential and keys become machine-only. The second half is the subtle
+    part: retiring key LOGIN must not break the same account's machine pushes, or setting a
+    password would silently break a producer.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "admin1", "admin-key", role="admin", projects=["demo"])
+        assert _login(base_url, "admin-key") is not None       # key login works beforehand
+        assert _post(base_url, _blob_for("demo"), token="admin-key")[0] == 201
+
+        _admin_post(base_url, "/api/users/password", {"name": "admin1", "password": "pw-secret"})
+
+        assert _login(base_url, "admin-key") is None            # key login retired
+        assert _password_login(base_url, "admin1", "pw-secret")[0] == 200  # password works
+        assert _post(base_url, _blob_for("demo"), token="admin-key")[0] == 201  # pushes unaffected
+
+
+def test_key_login_keeps_working_until_a_password_is_set(tmp_path):
+    """An account with no password still logs in with its key — no lockout mid-migration.
+
+    Why this matters: the transition has to be safe. Every existing account starts without a
+    password, so if key login stopped working the moment this unit deployed, everyone would be
+    locked out of the dashboard at once.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        assert _login(base_url, "dad-key") is not None
+
+
+def test_setting_a_password_logs_out_live_sessions(tmp_path):
+    """A password change invalidates cookies minted before it.
+
+    Why this matters: amendment 9 draws the line here — a machine key revocation does NOT log
+    the human out, but a password change DOES. A password change is the response to a
+    suspected compromise of the human's own credential, so any session opened under the old
+    one must die with it.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        cookie = _login(base_url, "dad-key")
+        assert _get(base_url, "/api/portfolio", cookie=cookie)[0] == 200
+
+        _admin_post(base_url, "/api/users/password", {"name": "dad", "password": "new-pass"})
+        assert _get(base_url, "/api/portfolio", cookie=cookie)[0] in (401, 403)
+
+
+def test_a_contributor_cannot_be_given_a_password(tmp_path):
+    """Setting a password on a push-only account is refused (409).
+
+    Why this matters: the same invariant from the other direction. A contributor is a machine
+    identity; giving it a password would create a credential that spans both worlds and could
+    mint an interactive session for something that should only ever push.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "bot", "bot-key", role="contributor", projects=["demo"])
+        assert _admin_post(
+            base_url, "/api/users/password", {"name": "bot", "password": "pw"}
+        )[0] == 409
+
+
+def test_password_set_can_mint_one_and_shows_it_once(tmp_path):
+    """Omitting the password makes the relay mint a strong one and return it.
+
+    Why this matters: provisioning someone else's account. The admin should not have to invent
+    a password, and the minted value is returned exactly once — the store keeps only its hash.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        status, r = _admin_post(base_url, "/api/users/password", {"name": "dad"})
+        assert status == 200
+        minted = r["password"]
+        assert minted and len(minted) >= 20
+        assert _password_login(base_url, "dad", minted)[0] == 200
+
+
+def test_replacing_a_password_retires_the_old_one(tmp_path):
+    """Setting a second password invalidates the first and leaves exactly one active.
+
+    Why this matters: the one-active-password index permits a single row, so replacement must
+    revoke before inserting. If the old credential stayed active the account would have two
+    valid passwords, and the DB constraint would reject the write outright.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        _admin_post(base_url, "/api/users/password", {"name": "dad", "password": "first-pass"})
+        _admin_post(base_url, "/api/users/password", {"name": "dad", "password": "second-pass"})
+
+        assert _password_login(base_url, "dad", "first-pass")[0] == 401
+        assert _password_login(base_url, "dad", "second-pass")[0] == 200
+        conn = open_relay_store(db)
+        active = conn.execute(
+            "SELECT COUNT(*) FROM relay_credentials WHERE type='password' AND active=1"
+        ).fetchone()[0]
+        assert active == 1
+
+
+def test_login_fails_closed_when_the_hashing_dependency_is_missing(tmp_path, monkeypatch):
+    """Without argon2-cffi, password login refuses rather than degrading.
+
+    Why this matters: the fail-closed invariant. The alternatives — falling back to a weaker
+    hash, or treating every password as correct/incorrect — are respectively an invisible
+    security downgrade and an undiagnosable outage. It must also stay a 401, not a 500: the
+    failure class is the operator's business, not an attacker's.
+    """
+    from relay.passwords import PasswordsUnavailable
+
+    def unavailable(*_a, **_k):
+        raise PasswordsUnavailable("argon2-cffi is not installed")
+
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        _admin_post(base_url, "/api/users/password", {"name": "dad", "password": "right-pass"})
+        monkeypatch.setattr("relay.server.verify_password", unavailable)
+        assert _password_login(base_url, "dad", "right-pass") == (401, None)
+
+
+def test_a_malformed_stored_hash_is_an_auth_failure_not_a_500(tmp_path):
+    """A corrupt value in the password column denies login without crashing.
+
+    Why this matters: a 500 would leak that this account is special (its hash is broken) and
+    would turn a data problem into an error page. Corruption should look exactly like a wrong
+    password to the person, and be visible to the operator in the logs.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="supervisor", projects=["demo"])
+        _admin_post(base_url, "/api/users/password", {"name": "dad", "password": "right-pass"})
+        conn = open_relay_store(db)
+        conn.execute(
+            "UPDATE relay_credentials SET verifier='not-an-argon2-hash' WHERE type='password'"
+        )
+        conn.commit()
+        conn.close()
+
+        assert _password_login(base_url, "dad", "right-pass") == (401, None)
+
+
 def test_role_change_rescopes_an_account_and_logs_it_out(tmp_path):
     """Demoting an admin to supervisor applies default-deny and invalidates its live session.
 

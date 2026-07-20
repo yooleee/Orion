@@ -65,8 +65,10 @@ from .store import (
     get_checklist,
     get_active_password_credential,
     get_credential_by_key_verifier,
+    VISIBILITIES,
     get_due_soon_days,
     get_project_kind,
+    get_project_visibility,
     get_user_by_id,
     get_user_by_name,
     grant_projects,
@@ -89,7 +91,10 @@ from .store import (
     set_operated_by,
     set_password_credential_verifier,
     set_user_role,
+    org_visible_projects,
+    project_exists,
     set_project_kind,
+    set_project_visibility,
     touch_credential,
     update_last_login,
     upsert_checklist,
@@ -171,7 +176,16 @@ _SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at on
 # added to _allowed_projects, so it falls through to the viewer's default-deny scope (sees
 # only its granted projects). Its added capability is writing to a project's discussion
 # thread, granted at that endpoint — not by widening read scope here.
-_INTERACTIVE_ROLES = ("admin", "viewer", "supervisor")
+#
+# "member" (auth revamp, Unit 5) is the KB reader: an ORG INSIDER who sees every org-visible
+# project WITHOUT a per-project grant, plus any explicit grants on top. It is strictly
+# READ-ONLY, and that is enforced by ABSENCE rather than by a check of its own — it is
+# missing from _BEARER_ROLES (so it can never push) and from _DISCUSSION_ROLE_BY_PRINCIPAL
+# (so it can never write a discussion item), which between them cover every write on the
+# relay. Adding it to either constant would silently grant write access across the whole
+# org-visible set; the member write-denial tests exist to catch exactly that.
+_MEMBER_ROLE = "member"
+_INTERACTIVE_ROLES = ("admin", "viewer", "supervisor", _MEMBER_ROLE)
 
 # Roles an admin may PROVISION. "contributor" (C3 Inc 2) is a PUSH-ONLY producer identity:
 # it authenticates the Bearer ingest endpoints with its own server-minted key, but is
@@ -892,6 +906,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/users/set-operator":
             self._handle_set_user_operator()
+            return
+        if path == "/api/projects/visibility":
+            self._handle_set_project_visibility()
             return
 
         # E2 Inc 4: the SPA's JSON auth siblings (the cookie-session login / logout).
@@ -2098,6 +2115,55 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"name": name, "new_name": new_name})
 
+    def _handle_set_project_visibility(self) -> None:
+        """Set a project's visibility (POST /api/projects/visibility).
+
+        Body: name (required, the PROJECT), visibility (required, 'org' | 'restricted').
+        Admin-token gated; 404 unknown project; 400 bad visibility; 200 {name, visibility}.
+
+        Why:
+            The KB's scoping act: flipping a project to 'org' lets every member read it
+            without a per-project grant. It is admin-token gated like the rest of the
+            provisioning surface — a cookie session, including an admin's, cannot reach it,
+            so widening the org's disclosure boundary always takes the separately-held
+            admin credential.
+
+            The project is validated against the CANONICAL UNIVERSE (a real report or a live
+            checklist), not against relay_project_meta. Meta rows are upserted with no
+            existence check and nothing ever deletes them, so validating against that table
+            would let a typo'd name write a visibility row for a project that does not
+            exist — a phantom that a later reader could surface. A 404 on an unknown project
+            also keeps this route consistent with every other existence boundary here.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        visibility = payload.get("visibility")
+        if visibility not in VISIBILITIES:
+            self._send_json(
+                400, {"error": f"field 'visibility' must be one of {list(VISIBILITIES)}"}
+            )
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            if not project_exists(conn, name):
+                self._send_json(404, {"error": f"no project named {name!r}"})
+                return
+            set_project_visibility(conn, name, visibility)
+            record_admin_audit(
+                conn,
+                _ADMIN_ACTOR,
+                "set_project_visibility",
+                name,
+                visibility,
+                [],
+                _utc_now_iso(),
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "visibility": visibility})
+
     def _handle_set_user_operator(self) -> None:
         """Repoint an agent account at a different operating human (set-operator).
 
@@ -2361,7 +2427,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             (both role == "admin"), a legacy anonymous push (`legacy` flag, C3 Inc 2), or an
             open relay (principal is None, reads are public). Otherwise a set of the scoped
             principal's allowed project names (possibly empty — default-deny, so a viewer or
-            contributor with no grants sees / can write nothing).
+            contributor with no grants sees / can write nothing). For a MEMBER (Unit 5) the
+            set is its explicit grants UNION every org-visible project.
 
         Why:
             One place computes read scope, so every route (the index filter, /project,
@@ -2369,11 +2436,32 @@ class _RelayHandler(BaseHTTPRequestHandler):
             authZ never drifts between routes. None vs a set is the explicit "unrestricted
             vs scoped" distinction; returning a set makes the membership checks at each
             call site a trivial, hard-to-get-wrong `in`. Scope is re-read per request (not
-            cached on the cookie), so a regrant/revoke takes effect immediately.
+            cached on the cookie), so a regrant/revoke — or a visibility flip in EITHER
+            direction — takes effect immediately, with no re-login.
+
+            SECURITY NOTE, load-bearing: this function is consulted on WRITE paths too
+            (/ingest, /checklist, /disciplines, both discussion writes), not only reads. So
+            widening it for `member` widens what a member could write to IF a member could
+            ever reach a write. It cannot: `member` is absent from _BEARER_ROLES (the three
+            push endpoints refuse to authenticate it) and from _DISCUSSION_ROLE_BY_PRINCIPAL
+            (the cookie discussion write 403s it before scope is even consulted). That
+            exclusion is what makes the union safe here, which is why it is pinned by
+            explicit write-denial tests against every write route rather than left as an
+            implicit property. Do not add `member` to either constant without revisiting
+            this union.
+
+            A member's org-visible set is intersected with the real project universe inside
+            org_visible_projects, so a stale meta row cannot inject a phantom name into an
+            authorization decision.
         """
         if principal is None or principal["role"] == "admin" or principal.get("legacy"):
             return None
-        return set(projects_for_user(conn, principal["user_id"]))
+        granted = set(projects_for_user(conn, principal["user_id"]))
+        if principal["role"] == _MEMBER_ROLE:
+            # The KB read: org-visible projects need no grant. Grants still stack on top, so
+            # a member may additionally be let into specific restricted projects.
+            return granted | org_visible_projects(conn)
+        return granted
 
     def _resolve_login(self, conn, key: str) -> tuple | None:
         """Verify an access key and resolve it to (sub, sv, identity), or None on a miss.

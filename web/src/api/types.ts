@@ -31,7 +31,13 @@ export type ProjectKind = "project" | "tracker";
  *  and "closed" are both done; "in_progress" is the open state `state` alone could not carry. */
 export type ItemStatus = "not_started" | "in_progress" | "submitted" | "closed";
 
-export type Role = "admin" | "viewer" | "supervisor";
+/** A relay account's role.
+ *
+ *  "member" (auth revamp, Unit 5) is the read-only ORG INSIDER: it sees every org-visible
+ *  project without a per-project grant, and can never write anything. The SPA needs no
+ *  special case for it — scope arrives already resolved in `/api/me`, and every write
+ *  surface is server-denied. */
+export type Role = "admin" | "viewer" | "supervisor" | "member";
 
 /** A discussion item's thread role (E2 Inc 5) — distinct from the relay_users `Role`.
  *  "orion" is reserved for a later grounded-responder rung and never appears this phase

@@ -14,6 +14,59 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## KB scoping: the `member` role and per-project visibility (auth-revamp Unit 5, 2026-07-20)
+
+The primitives a company-wide knowledge base needs. A project is now either **org-visible**
+or **restricted**, and a new read-only **member** role reads every org-visible project without
+a per-project grant.
+
+### Added
+
+- **`member`**, a read-only interactive role: the org insider. Its scope is every org-visible
+  project **plus** any explicit grants, so visibility is a floor rather than a ceiling —
+  someone can be an org member and still be brought into one restricted project.
+- **`relay_project_meta.visibility`** (`'org'` | `'restricted'`), additive and nullable.
+- **`orion relay-project visibility <project> <org|restricted>`**, admin-token gated like the
+  rest of the provisioning surface — widening who can read a project takes the separately-held
+  admin credential, never a cookie session.
+
+### Security properties worth stating explicitly
+
+- **Default-deny is what ABSENCE means.** A missing meta row, a NULL column, and an explicit
+  `'restricted'` all read as restricted. No project becomes readable through a row that was
+  never written or a migration that did not run — only an explicit `'org'` opens one up.
+- **A member can write nothing, anywhere.** This is enforced by absence — `member` is not in
+  `_BEARER_ROLES` (so it cannot authenticate any push endpoint) and not in
+  `_DISCUSSION_ROLE_BY_PRINCIPAL` (so the discussion write 403s it before scope is consulted).
+  Because a member's read scope is unioned into `_allowed_projects`, which is *also* consulted
+  on write paths, that exclusion is load-bearing rather than incidental — so it is pinned by a
+  positive write-denial test against every write route, verified to fail if `member` is added
+  to either constant.
+- **Restricted is indistinguishable from non-existent.** The 404 matrix is byte-identical
+  across never-existed, restricted-ungranted, a report id belonging to a restricted project,
+  and case/Unicode name variants. A response code must never enumerate the org's project list.
+- **Visibility mutations validate against the canonical project universe** (a real report or
+  live checklist), not against `relay_project_meta` — meta rows are upserted with no existence
+  check and never deleted, so validating against them would let a typo conjure a phantom
+  project. `org_visible_projects` re-applies the same intersection as defense in depth, since
+  its output feeds an authorization decision.
+- **Flips take effect mid-session in both directions**, with no re-login: scope is re-read per
+  request, never cached on the session cookie. Otherwise "restricted" would be a promise the
+  relay could not keep for anyone already logged in.
+
+### Unchanged on purpose
+
+Viewers and supervisors are **scoped outside participants** and still see only their explicit
+grants — making a project org-visible opens it to the org's own members, never to an external
+supervisor. The public showcase still serves only its curated allowlist, so flipping a project
+to `'org'` for internal readers cannot publish it.
+
+### Fixed
+
+- The home's scope banner told a member its projects were **"granted"**, which is false for an
+  account whose access comes from visibility and which may hold zero grants. A member now reads
+  "your organization's work · N projects visible".
+
 ## Operator-folding for producer streams (auth-revamp Unit 4b, 2026-07-20)
 
 An agent's work now groups under the human it acts for. The project page shows one

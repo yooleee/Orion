@@ -767,6 +767,31 @@ def set_user_operator(
     )
 
 
+def set_project_visibility(
+    relay_url: str, admin_token: str, name: str, visibility: str, *, timeout: float = 10.0
+) -> dict:
+    """Set a project's visibility, for `relay-project visibility` (Unit 5).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The project to set.
+        visibility: "org" (every member may read it) or "restricted" (grant-only).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "visibility"}.
+
+    Why:
+        The KB's scoping act. Admin-token gated like the rest of the provisioning surface,
+        because it widens who inside the org can read a project.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/projects/visibility")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "visibility": visibility}, timeout
+    )
+
+
 def delete_user(
     relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
 ) -> dict:

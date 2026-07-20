@@ -75,6 +75,7 @@ from orion.delivery.relay import (
     add_user_key as relay_add_user_key,
     list_user_keys as relay_list_user_keys,
     rename_user as relay_rename_user,
+    set_project_visibility as relay_set_project_visibility,
     set_user_operator as relay_set_user_operator,
     revoke_user_key as relay_revoke_user_key,
     set_user_password as relay_set_user_password,
@@ -913,14 +914,16 @@ def main(argv: list[str] | None = None) -> int:
     ru_add.add_argument("name", help="The user's unique display name / handle.")
     ru_add.add_argument(
         "--role",
-        choices=("viewer", "admin", "supervisor", "contributor"),
+        choices=("viewer", "admin", "supervisor", "member", "contributor"),
         default="viewer",
         help=(
             "The user's role (default: viewer). An admin sees all projects; a viewer "
             "or supervisor is scoped to its granted projects (a supervisor may also "
             "post to a project's discussion thread). A contributor is a push-only "
             "producer identity: its key authenticates the ingest endpoints for its "
-            "granted projects but never grants dashboard login."
+            "granted projects but never grants dashboard login. A member is a read-only "
+            "ORG INSIDER: it sees every org-visible project with no grant at all, plus "
+            "any grants on top, and can never write anything."
         ),
     )
     ru_add.add_argument(
@@ -1126,6 +1129,34 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    # Project-level admin ops. Separate from relay-user because the subject is a PROJECT,
+    # not an account — mixing them would make `relay-user visibility` read as a user setting.
+    relay_project_parser = subparsers.add_parser(
+        "relay-project",
+        help="Manage relay project settings: who inside the org may read a project.",
+    )
+    relay_project_subs = relay_project_parser.add_subparsers(
+        dest="relay_project_command", required=True
+    )
+    rp_visibility = relay_project_subs.add_parser(
+        "visibility",
+        help="Set whether a project is org-visible or grant-only (restricted).",
+    )
+    rp_visibility.add_argument("name", help="The project to set.")
+    rp_visibility.add_argument(
+        "visibility",
+        choices=("org", "restricted"),
+        help=(
+            "'org': every member-role account may read it with no per-project grant. "
+            "'restricted' (the default for every project): grant-only. Viewers and "
+            "supervisors are unaffected either way — they always see only their grants."
+        ),
+    )
+    rp_visibility.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "report":
         return cmd_report(
@@ -1269,6 +1300,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.relay_user_command == "delete":
             return cmd_relay_user_delete(args.name, Path(args.config))
+    if args.command == "relay-project":
+        if args.relay_project_command == "visibility":
+            return cmd_relay_project_visibility(
+                args.name, args.visibility, Path(args.config)
+            )
     return 1  # Unreachable: subparsers are required.
 
 
@@ -4642,6 +4678,39 @@ def cmd_relay_user_role(name: str, role: str, config_path: Path) -> int:
         print(f"    Grant projects with: orion relay-user grant {name} <project> [<project> ...]")
     elif role != "admin":
         print(f"  Scope: {', '.join(scope)}")
+    return 0
+
+
+def cmd_relay_project_visibility(name: str, visibility: str, config_path: Path) -> int:
+    """Set a project's visibility (`relay-project visibility`).
+
+    Args:
+        name: The project to set.
+        visibility: "org" (every member may read it) or "restricted" (grant-only).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (an unknown
+        project → the relay's 404).
+
+    Why:
+        The KB's scoping act: 'org' is what lets a member-role account read a project without
+        a per-project grant. Every project is born 'restricted', so opening one up is always
+        deliberate — which is the property that keeps default-deny meaningful as the org's
+        project list grows.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_set_project_visibility(relay_url, admin_token, name, visibility)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if visibility == "org":
+        print(f"{name!r} is now org-visible: any member-role account can read it.")
+    else:
+        print(f"{name!r} is now restricted: only accounts granted it can read it.")
+    print("  Viewers and supervisors are unaffected — they always see only their grants.")
     return 0
 
 

@@ -54,7 +54,11 @@ from relay.store import (
     record_admin_audit,
     record_observations,
     revoke_credential,
+    get_project_visibility,
+    org_visible_projects,
+    project_exists,
     rename_user,
+    set_project_visibility,
     revoke_user,
     set_due_soon_days,
     set_project_kind,
@@ -928,6 +932,63 @@ def test_revoking_an_operator_leaves_its_agents_card_grouped_under_it(tmp_path):
 
     (row,) = producer_checklists_for(conn, "demo")
     assert row["effective_producer_name"] == "yoo"
+
+
+# --- Unit 5: project visibility (the KB scoping primitive) ----------------------------
+
+
+def test_project_visibility_defaults_to_restricted_in_every_absent_case(tmp_path):
+    """A missing meta row, a NULL column, and an explicit 'restricted' all read the same.
+
+    Why this matters: default-deny must be what ABSENCE means, not merely a column default.
+    A project that never got a meta row (or a row written before the column existed) must
+    not fall open — only an explicit 'org' opens a project up.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # No meta row at all.
+    assert get_project_visibility(conn, "never-touched") == "restricted"
+    # A meta row that exists for another reason (kind), leaving visibility NULL.
+    set_project_kind(conn, "demo", "tracker")
+    assert get_project_visibility(conn, "demo") == "restricted"
+    # And an explicit restricted.
+    set_project_visibility(conn, "demo", "restricted")
+    assert get_project_visibility(conn, "demo") == "restricted"
+
+
+def test_setting_visibility_leaves_the_other_project_meta_knobs_alone(tmp_path):
+    """Visibility upserts touch only their own column — kind and due_soon_days survive.
+
+    The three knobs share one row but are written independently, so flipping visibility must
+    not reset a project's tracker kind or its due-soon horizon.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_project_kind(conn, "demo", "tracker")
+    set_due_soon_days(conn, "demo", 14)
+    set_project_visibility(conn, "demo", "org")
+
+    assert get_project_kind(conn, "demo") == "tracker"
+    assert get_due_soon_days(conn, "demo") == 14
+    assert get_project_visibility(conn, "demo") == "org"
+
+
+def test_org_visible_projects_never_surfaces_a_phantom(tmp_path):
+    """A meta row for a non-existent project is excluded — the universe join is the guard.
+
+    Why this matters: this function's output feeds an authorization decision. Meta rows are
+    upserted with no existence check and are never deleted, so a stale or hand-written row
+    must not be able to inject a project name that has no report and no checklist.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # A real project (it has a checklist) marked org-visible.
+    upsert_checklist(conn, "real", _items(("A", False)), "2026-06-25T00:00:00+00:00")
+    set_project_visibility(conn, "real", "org")
+    # A meta row for a project that does not exist in the universe.
+    set_project_visibility(conn, "ghost", "org")
+
+    assert org_visible_projects(conn) == {"real"}
+    # project_exists agrees, and is what the mutation validates against.
+    assert project_exists(conn, "real") is True
+    assert project_exists(conn, "ghost") is False
 
 
 def test_producer_checklists_for_unknown_project_is_empty(tmp_path):

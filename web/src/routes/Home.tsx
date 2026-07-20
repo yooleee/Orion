@@ -37,7 +37,7 @@ export function Home() {
         </p>
       </div>
 
-      <ScopeBanner scope={portfolio.scope} />
+      <ScopeBanner scope={portfolio.scope} role={me.identity?.role ?? null} />
 
       {isEmpty ? (
         <EmptyState />

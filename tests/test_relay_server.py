@@ -58,7 +58,9 @@ from relay.store import (
     get_due_soon_days,
     get_project_kind,
     get_user_by_name,
+    history,
     list_projects,
+    org_visible_projects,
     observed_history,
     open_relay_store,
     producer_disciplines_for,
@@ -2795,6 +2797,230 @@ def test_renaming_an_operator_updates_the_badge_on_existing_reports(tmp_path):
         assert entry["operated_by_name"] == "renamed-human"
         # The agent's own recorded name is history and does NOT move.
         assert entry["author_name"] == agent
+
+
+# --- Unit 5: the `member` role + per-project visibility (KB scoping) ------------------
+#
+# A member is a read-only ORG INSIDER: it reads every org-visible project with NO grant, plus
+# any explicit grants on top. Two properties carry the whole unit and are tested hardest:
+#   (1) it can WRITE nothing, anywhere — enforced by absence from _BEARER_ROLES and from
+#       _DISCUSSION_ROLE_BY_PRINCIPAL, which is exactly why it is pinned positively here
+#       rather than assumed; and
+#   (2) a RESTRICTED project is indistinguishable from one that never existed (404), so
+#       scoping never leaks the org's project list.
+
+
+def _set_visibility(base_url, project, visibility):
+    """Flip a project's visibility through the real admin route."""
+    return _admin_post(
+        base_url, "/api/projects/visibility", {"name": project, "visibility": visibility}
+    )
+
+
+def _seed_two_projects(base_url, db):
+    """Seed an org-visible project and a restricted one; return a member's session cookie.
+
+    The member gets ZERO grants on purpose — its entire read scope must come from
+    visibility, which is the property under test.
+    """
+    _post(base_url, _blob_for("open-project"), token=_TOKEN)
+    _post(base_url, _blob_for("secret-project"), token=_TOKEN)
+    _set_visibility(base_url, "open-project", "org")
+    _provision_user(db, "kb-member", "member-key", role="member")
+    return _login(base_url, "member-key")
+
+
+def test_a_member_reads_org_visible_projects_with_no_grants(tmp_path):
+    """The point of the role: org-visible projects need no per-project grant.
+
+    A viewer with zero grants sees nothing at all — that is default-deny and stays true. A
+    member with zero grants sees the org's open projects, which is what makes a company-wide
+    knowledge base possible without hand-granting every person every project.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _seed_two_projects(base_url, db)
+
+        status, portfolio = _get_json(base_url, "/api/portfolio", cookie=cookie)
+        assert status == 200
+        assert [p["name"] for p in portfolio["projects"]] == ["open-project"]
+        # The org-visible project reads in full...
+        assert _get_json(base_url, "/api/projects/open-project", cookie=cookie)[0] == 200
+        # ...and the restricted one is invisible.
+        assert _get_json(base_url, "/api/projects/secret-project", cookie=cookie)[0] == 404
+
+
+def test_a_members_grants_stack_on_top_of_org_visibility(tmp_path):
+    """An explicit grant lets a member into a RESTRICTED project too — the two sources union.
+
+    Why this matters: visibility is a floor, not a ceiling. Someone can be an org member and
+    still be brought into one confidential project without that project becoming org-wide.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _seed_two_projects(base_url, db)
+        _admin_post(
+            base_url, "/api/users/grant",
+            {"name": "kb-member", "projects": ["secret-project"]},
+        )
+
+        _, portfolio = _get_json(base_url, "/api/portfolio", cookie=cookie)
+        assert sorted(p["name"] for p in portfolio["projects"]) == [
+            "open-project", "secret-project",
+        ]
+
+
+def test_a_restricted_project_is_404_indistinguishable_from_one_that_never_existed(tmp_path):
+    """The existence-hiding matrix: every miss looks identical to a member.
+
+    Why this matters: if a restricted project 403'd while an unknown one 404'd, the response
+    code itself would enumerate the org's private project names to anyone with a login. Every
+    row below must be byte-identical.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _seed_two_projects(base_url, db)
+        # Find a report id belonging to the restricted project — a member must not be able to
+        # reach a project's content by guessing a report id either.
+        conn = open_relay_store(db)
+        secret_report_id = history(conn, "secret-project")[0]["id"]
+        conn.close()
+
+        misses = [
+            ("never-existed project", _get_json(base_url, "/api/projects/no-such", cookie=cookie)),
+            ("restricted, ungranted", _get_json(base_url, "/api/projects/secret-project", cookie=cookie)),
+            ("report id of a restricted project",
+             _get_json(base_url, f"/api/reports/{secret_report_id}", cookie=cookie)),
+            # Case and Unicode variants must not sneak past the membership check.
+            ("case variant", _get_json(base_url, "/api/projects/Secret-Project", cookie=cookie)),
+            ("unicode variant", _get_json(base_url, "/api/projects/secret-pr%C3%B6ject", cookie=cookie)),
+        ]
+        for label, (status, body) in misses:
+            assert status == 404, label
+            assert body == {"error": "not found"}, label
+
+
+def test_a_member_cannot_write_anything_anywhere(tmp_path):
+    """POSITIVE write-denial across EVERY write surface — the security core of Unit 5.
+
+    A member's read scope is unioned into `_allowed_projects`, which is ALSO consulted on
+    write paths. That union is only safe because a member can never reach a write, so this
+    test asserts that directly at each surface rather than trusting the property to hold.
+    If a future change adds `member` to _BEARER_ROLES or _DISCUSSION_ROLE_BY_PRINCIPAL, this
+    is what fails.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _seed_two_projects(base_url, db)
+
+        # 1) The cookie discussion write — 403 on the role allowlist, even for a project the
+        # member CAN read. Read access must not imply write access.
+        status, _, _ = _post_api_json(
+            base_url, "/api/discussions/open-project/items", {"body": "hi"}, cookie=cookie
+        )
+        assert status == 403
+
+        # 2-4) The Bearer push endpoints: a member's key cannot even authenticate, because
+        # member is absent from _BEARER_ROLES. One generic 401 on each.
+        for path, payload in (
+            ("/ingest", _blob_for("open-project")),
+            ("/checklist", json.dumps({"project": "open-project", "checklist": []}).encode()),
+            ("/disciplines", json.dumps({"project": "open-project", "disciplines": []}).encode()),
+        ):
+            status, _ = _post(base_url, payload, token="member-key", path=path)
+            assert status == 401, path
+
+        # 5) The Bearer discussion write — same refusal.
+        status, _ = _post(
+            base_url, json.dumps({"project": "open-project", "body": "hi"}).encode(),
+            token="member-key", path="/api/discussions",
+        )
+        assert status == 401
+
+        # 6) The admin surface is admin-TOKEN gated, so a member's cookie buys nothing there.
+        # Attempting the visibility flip with no admin token is a 401.
+        status, _ = _admin_post(
+            base_url, "/api/projects/visibility",
+            {"name": "secret-project", "visibility": "org"}, token="member-key",
+        )
+        assert status == 401
+
+
+def test_visibility_flips_take_effect_mid_session_in_both_directions(tmp_path):
+    """A flip is immediate, both ways, with no re-login — scope is re-read per request.
+
+    Why this matters: if scope were cached on the session cookie, restricting a project would
+    leave anyone already logged in still reading it until their session expired — which would
+    make "restricted" a promise the relay could not actually keep.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _seed_two_projects(base_url, db)
+        assert _get_json(base_url, "/api/projects/secret-project", cookie=cookie)[0] == 404
+
+        # Open it up: the SAME cookie now reads it.
+        _set_visibility(base_url, "secret-project", "org")
+        assert _get_json(base_url, "/api/projects/secret-project", cookie=cookie)[0] == 200
+
+        # Close it again: the same cookie loses access immediately.
+        _set_visibility(base_url, "secret-project", "restricted")
+        assert _get_json(base_url, "/api/projects/secret-project", cookie=cookie)[0] == 404
+
+
+def test_visibility_mutation_validates_against_the_real_project_universe(tmp_path):
+    """A typo'd project name is a 404, not a phantom visibility row.
+
+    Why this matters: relay_project_meta rows are upserted with no existence check and are
+    never deleted, so accepting an arbitrary name here would write a visibility row for a
+    project that does not exist. That is the phantom the canonical-universe check prevents.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _seed_two_projects(base_url, db)
+
+        status, body = _set_visibility(base_url, "typo-project", "org")
+        assert status == 404 and "typo-project" in body["error"]
+        # Nothing was written, so nothing can later surface it.
+        conn = open_relay_store(db)
+        assert org_visible_projects(conn) == {"open-project"}
+        conn.close()
+
+        # And an invalid visibility value is refused outright.
+        status, body = _set_visibility(base_url, "open-project", "public")
+        assert status == 400 and "visibility" in body["error"]
+
+
+def test_viewer_and_supervisor_scope_is_unchanged_by_visibility(tmp_path):
+    """Org-visibility is a MEMBER concept: a viewer/supervisor still sees only its grants.
+
+    Why this matters: viewers and supervisors are SCOPED OUTSIDE participants (a family
+    member, a mentor). Making a project org-visible opens it to the org's own members, and
+    must not silently widen what an external supervisor can see.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _seed_two_projects(base_url, db)
+        for name, key, role in (
+            ("outside-viewer", "viewer-key", "viewer"),
+            ("outside-super", "super-key", "supervisor"),
+        ):
+            _provision_user(db, name, key, role=role)
+            cookie = _login(base_url, key)
+            _, portfolio = _get_json(base_url, "/api/portfolio", cookie=cookie)
+            # Zero grants ⇒ sees nothing, even though "open-project" is org-visible.
+            assert portfolio["projects"] == [], role
+
+
+def test_the_public_showcase_ignores_visibility(tmp_path):
+    """The showcase serves its curated allowlist only — visibility neither adds nor removes.
+
+    Why this matters: the showcase is a public, no-login surface whose contents are an
+    explicit operator choice. If org-visibility leaked into it, flipping a project to 'org'
+    for internal readers would publish it to the internet.
+    """
+    with _running_relay(
+        tmp_path, auth=_admin_auth(),
+        showcase=ShowcaseConfig(enabled=True, projects=(("secret-project", ""),)),
+    ) as (base_url, db):
+        _seed_two_projects(base_url, db)
+
+        status, showcase = _get_json(base_url, "/api/showcase")
+        assert status == 200
+        # The curated (restricted!) project is shown; the org-visible one is NOT.
+        assert [c["name"] for c in showcase["projects"]] == ["secret-project"]
 
 
 # --- Multi-party auth: session-cookie + key-verifier crypto (Increment 1) ------

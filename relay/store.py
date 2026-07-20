@@ -364,7 +364,13 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     # to None so the classifier falls back to the 7-day default byte-identically. Added here
     # (not in _SCHEMA) so an already-deployed relay gains the column via one cheap ALTER —
     # relay_project_meta first shipped with only `kind`.
-    "relay_project_meta": [("due_soon_days", "INTEGER")],
+    # Auth revamp (Unit 5): the KB scoping primitive. 'org' means every interactive MEMBER
+    # may read this project without an explicit grant; 'restricted' (or NULL, which every
+    # pre-Unit-5 row holds) keeps today's grant-only behavior. NULLABLE with no default so
+    # the column is additive, and because NULL must read as RESTRICTED — default-deny has to
+    # be what ABSENCE means, not merely what a column default says, or a project that never
+    # got a meta row would fall open.
+    "relay_project_meta": [("due_soon_days", "INTEGER"), ("visibility", "TEXT")],
     # Auth revamp (Unit 2a): what an account IS, and (for an agent) whose behalf it acts on.
     # `kind` is NULLABLE with no default rather than "human" NOT NULL, per this table's
     # convention — existing rows read NULL, and every reader maps NULL to "human" (the only
@@ -1066,6 +1072,136 @@ def get_due_soon_days(conn: sqlite3.Connection, project: str) -> int | None:
         "SELECT due_soon_days FROM relay_project_meta WHERE project = ?", (project,)
     ).fetchone()
     return row["due_soon_days"] if row is not None else None
+
+
+# --- Project visibility: the KB scoping primitive (auth revamp, Unit 5) --------------
+#
+# A project is either 'org'-visible (every interactive MEMBER may read it, no grant needed)
+# or 'restricted' (grant-only — today's behavior for everyone). Default-deny is the birth
+# state: an unset/NULL value and a missing meta row BOTH read as restricted, so making a
+# project org-visible is always a deliberate act.
+VISIBILITY_ORG = "org"
+VISIBILITY_RESTRICTED = "restricted"
+VISIBILITIES = (VISIBILITY_ORG, VISIBILITY_RESTRICTED)
+
+# THE CANONICAL PROJECT UNIVERSE. A project exists iff it has at least one report OR a live
+# checklist row — the same union latest_report_per_project derives the portfolio from, and
+# the same test the /api/projects route's existence-hiding 404 applies. It lives here as one
+# constant because Unit 5 needs it in two more places (the visibility mutation's validation
+# and the org-visible lookup), and three hand-copied definitions of "exists" would be three
+# chances to disagree about what a project IS.
+#
+# relay_project_meta is deliberately NOT part of the union: meta rows are upserted without an
+# existence check and nothing deletes them, so treating a meta row as proof of existence
+# would let a typo'd mutation conjure a PHANTOM project onto the dashboard.
+_PROJECT_UNIVERSE_SQL = """
+    SELECT project FROM relay_reports
+    UNION
+    SELECT project FROM relay_project_checklists
+"""
+
+
+def project_exists(conn: sqlite3.Connection, project: str) -> bool:
+    """Return whether `project` is a real project (has a report or a live checklist).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project name to check (untrusted input).
+
+    Returns:
+        True when the project is in the canonical universe, else False.
+
+    Why:
+        Backs the visibility mutation's validation. Without it, setting visibility on a
+        mistyped name would INSERT a meta row for a project that does not exist — harmless
+        on its own, but it becomes a phantom the moment any read path trusts meta rows.
+        Checking the universe rather than the meta table is what keeps "exists" meaning one
+        thing across the relay.
+    """
+    row = conn.execute(
+        f"SELECT 1 FROM ({_PROJECT_UNIVERSE_SQL}) WHERE project = ? LIMIT 1", (project,)
+    ).fetchone()
+    return row is not None
+
+
+def set_project_visibility(
+    conn: sqlite3.Connection, project: str, visibility: str
+) -> None:
+    """Set a project's visibility ('org' | 'restricted'), upserting the meta row.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to set (the CALLER validates it exists — see project_exists).
+        visibility: One of VISIBILITIES, already validated by the server.
+
+    Why:
+        Mirrors set_project_kind / set_due_soon_days exactly: one idempotent upsert touching
+        only its own column, so the three project-meta knobs are written independently and a
+        visibility flip never disturbs a project's kind or due-soon horizon.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_meta (project, visibility)
+        VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET visibility = excluded.visibility
+        """,
+        (project, visibility),
+    )
+    conn.commit()
+
+
+def get_project_visibility(conn: sqlite3.Connection, project: str) -> str:
+    """Return a project's visibility, defaulting to 'restricted'.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to look up.
+
+    Returns:
+        'org' only when that was explicitly stored; 'restricted' for a missing meta row, a
+        row predating the column (NULL), or an explicit 'restricted'.
+
+    Why:
+        Fail-closed by construction: every way of "not being told this is org-visible"
+        collapses to restricted, so no project becomes readable through absence, a failed
+        migration, or a row that was never written. Only an explicit, deliberate 'org'
+        opens a project up.
+    """
+    row = conn.execute(
+        "SELECT visibility FROM relay_project_meta WHERE project = ?", (project,)
+    ).fetchone()
+    if row is None or row["visibility"] != VISIBILITY_ORG:
+        return VISIBILITY_RESTRICTED
+    return VISIBILITY_ORG
+
+
+def org_visible_projects(conn: sqlite3.Connection) -> set:
+    """Return the names of every REAL project marked 'org'-visible.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        A set of project names a member may read without an explicit grant. Empty until an
+        admin deliberately flips a project to 'org'.
+
+    Why:
+        Backs the member role's scope. It INTERSECTS the meta table with the canonical
+        universe rather than trusting meta rows alone: a stale or mistyped meta row must
+        never be able to surface a project name that does not exist. That is defense in
+        depth — the mutation already validates — because this function's output is fed
+        straight into an authorization decision, and the cost of the join is nil at this
+        scale.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT pm.project FROM relay_project_meta pm
+        WHERE pm.visibility = ?
+          AND pm.project IN ({_PROJECT_UNIVERSE_SQL})
+        """,
+        (VISIBILITY_ORG,),
+    ).fetchall()
+    return {row["project"] for row in rows}
 
 
 def record_observations(

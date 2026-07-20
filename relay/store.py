@@ -209,21 +209,24 @@ CREATE TABLE IF NOT EXISTS relay_discussion_items (
 CREATE INDEX IF NOT EXISTS idx_relay_discussion_items_project
     ON relay_discussion_items(project, id);
 
--- C3 / multi-party access (Increment 1). relay_users is the per-user identity +
--- credential store. The login credential is a server-minted high-entropy random key;
--- only its VERIFIER = HMAC-SHA256(pepper, key) is stored (the raw key is shown once at
--- creation, never persisted or logged). `active` + `session_version` give STATELESS
--- revocation: set active = 0 and/or bump session_version to invalidate a user's live
--- sessions WITHOUT a server-side session table — the signed cookie carries the
--- session_version it was minted with and is rejected once it no longer matches. `name`
--- is UNIQUE so CLI ops (e.g. revoke <name>) are unambiguous; `key_verifier` is UNIQUE so
--- a login lookup resolves to exactly one row. The role column is an open enum
--- (admin/viewer now; contributor/guest later) so new roles are additive.
+-- C3 / multi-party access (Increment 1), reshaped by the auth revamp (Units 2a-4a).
+-- relay_users is the durable ACCOUNT: who someone is, what they may see, and (for an
+-- agent) whose behalf they act on. Credentials no longer live here — they are N
+-- individually revocable rows in relay_credentials (keys for machines, one active
+-- password for an interactive human), so an account outlives any credential it holds.
+-- `key_verifier` is a RETIRED column: it is NOT NULL and cannot be dropped under the
+-- additive-migration idiom, so every row now carries an inert per-row sentinel that
+-- verifies nothing, and no code path reads it (see add_user).
+-- `active` + `session_version` give STATELESS revocation: set active = 0 and/or bump
+-- session_version to invalidate a user's live sessions WITHOUT a server-side session
+-- table — the signed cookie carries the session_version it was minted with and is
+-- rejected once it no longer matches. `name` is UNIQUE so CLI ops (e.g. revoke <name>)
+-- are unambiguous. The role column is an open enum so new roles stay additive.
 CREATE TABLE IF NOT EXISTS relay_users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,        -- display name + CLI handle
-    key_verifier    TEXT NOT NULL UNIQUE,        -- HMAC-SHA256(pepper, raw_key), hex
-    role            TEXT NOT NULL,               -- "admin" | "viewer"
+    key_verifier    TEXT NOT NULL UNIQUE,        -- RETIRED: inert sentinel, never read
+    role            TEXT NOT NULL,               -- admin | viewer | supervisor | contributor
     active          INTEGER NOT NULL DEFAULT 1,  -- 0 = revoked (login + sessions denied)
     session_version INTEGER NOT NULL DEFAULT 1,  -- bump to force-logout this user
     created_by      TEXT NOT NULL,               -- who provisioned (actor label)
@@ -1589,6 +1592,32 @@ def discussion_items_for_project(
 # server/auth layer's job, where the pepper lives, so no crypto belongs here. Every
 # write commits immediately, matching the rest of this module.
 
+# What an ACCOUNT is (auth revamp, Unit 4a). Stored in relay_users.kind, where NULL means
+# human — every row predating this unit is NULL, so normalizing NULL → "human" on read is
+# what makes the column additive with no backfill. These are DELIBERATELY not named plain
+# "kind": relay_project_meta.kind ("project" | "tracker") is an unrelated column on another
+# table, and the two must never be confused.
+ACCOUNT_KIND_HUMAN = "human"
+ACCOUNT_KIND_AGENT = "agent"
+ACCOUNT_KINDS = (ACCOUNT_KIND_HUMAN, ACCOUNT_KIND_AGENT)
+
+
+def account_kind_of(row: sqlite3.Row | dict) -> str:
+    """Read an account row's kind, mapping the pre-4a NULL to "human".
+
+    Args:
+        row: A relay_users row (or dict) carrying a `kind` key.
+
+    Returns:
+        "human" or "agent" — never None.
+
+    Why:
+        Every reader needs the same NULL → "human" rule, and spreading `row["kind"] or
+        "human"` across the server would make it one edit away from drifting. One
+        function owns the normalization so the additive-column decision stays honest.
+    """
+    return row["kind"] or ACCOUNT_KIND_HUMAN
+
 
 def add_user(
     conn: sqlite3.Connection,
@@ -1598,6 +1627,8 @@ def add_user(
     projects: list[str],
     created_by: str,
     created_at: str,
+    account_kind: str | None = None,
+    operated_by: int | None = None,
 ) -> int:
     """Insert a new user and their project scope; return the new user id.
 
@@ -1611,6 +1642,13 @@ def add_user(
             sees all; pass [] for an admin). Inserted into relay_user_projects.
         created_by: An actor label for the audit trail (e.g. "admin-token").
         created_at: ISO 8601 UTC timestamp.
+        account_kind: The ACCOUNT kind — "agent", or None for a human (Unit 4a). Named
+            `account_kind` rather than `kind` deliberately: `relay_project_meta.kind`
+            ("project" | "tracker") is an unrelated column on another table, and a bare
+            `kind` in this module would read ambiguously.
+        operated_by: For an agent, the relay_users.id of the operating HUMAN account;
+            None for a human. The caller (the server) enforces the lifecycle rules —
+            see the _ADDITIVE_COLUMNS note above.
 
     Returns:
         The new relay_users.id.
@@ -1629,11 +1667,25 @@ def add_user(
         value generated independently of any credential, which therefore verifies nothing.
         Nothing reads that column any more (`get_user_by_verifier` and `rotate_key` were
         removed in this unit), so a stale or planted value there cannot authenticate.
+
+        Auth revamp (Unit 4a): `kind`/`operated_by` are written here. A human account
+        stores NULL in both, which is exactly what every pre-4a row already holds — so
+        existing accounts and newly provisioned humans are indistinguishable, and no
+        backfill is needed.
     """
     cursor = conn.execute(
-        "INSERT INTO relay_users (name, key_verifier, role, created_by, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (name, _retired_column_sentinel(), role, created_by, created_at),
+        "INSERT INTO relay_users "
+        "(name, key_verifier, role, created_by, created_at, kind, operated_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            name,
+            _retired_column_sentinel(),
+            role,
+            created_by,
+            created_at,
+            account_kind,
+            operated_by,
+        ),
     )
     user_id = cursor.lastrowid
     for project in projects:
@@ -1720,17 +1772,27 @@ def list_users(conn: sqlite3.Connection) -> list[dict]:
 
     Returns:
         One dict per user — id, name, role, active, session_version, created_by,
-        created_at, last_login_at, and projects (a list) — ordered by name. The
-        `key_verifier` is DELIBERATELY excluded: a verifier never leaves the store.
+        created_at, last_login_at, account_kind ("human" | "agent"), operated_by_name
+        (the operating human's name for an agent, else None), and projects (a list) —
+        ordered by name. The `key_verifier` is DELIBERATELY excluded: a verifier never
+        leaves the store.
 
     Why:
         Backs `orion relay-user list`. We omit the verifier so an admin listing can
         never surface credential material, even hashed. The per-user scope query is a
         small N+1, acceptable for this tiny, admin-only table.
+
+        Unit 4a: a NULL `kind` normalizes to "human" here rather than leaking None to
+        callers — every pre-4a row is NULL, and "human" is the only thing an account
+        could have been before agents existed. The operator is resolved to a NAME via a
+        LEFT JOIN so the admin listing never has to show an internal id.
     """
     rows = conn.execute(
-        "SELECT id, name, role, active, session_version, created_by, created_at, "
-        "last_login_at FROM relay_users ORDER BY name"
+        "SELECT u.id, u.name, u.role, u.active, u.session_version, u.created_by, "
+        "u.created_at, u.last_login_at, u.kind, op.name AS operated_by_name "
+        "FROM relay_users u "
+        "LEFT JOIN relay_users op ON op.id = u.operated_by "
+        "ORDER BY u.name"
     ).fetchall()
     return [
         {
@@ -1742,6 +1804,8 @@ def list_users(conn: sqlite3.Connection) -> list[dict]:
             "created_by": row["created_by"],
             "created_at": row["created_at"],
             "last_login_at": row["last_login_at"],
+            "account_kind": row["kind"] or ACCOUNT_KIND_HUMAN,
+            "operated_by_name": row["operated_by_name"],
             "projects": projects_for_user(conn, row["id"]),
         }
         for row in rows
@@ -1899,6 +1963,109 @@ def grant_projects(
             (user_id, project),
         )
     conn.commit()
+
+
+def active_agents_operated_by(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    """List the names of ACTIVE agent accounts that `user_id` operates.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The candidate operator's relay_users.id.
+
+    Returns:
+        The operated agents' names, sorted; [] when the account operates none.
+
+    Why:
+        Backs the amendment-5 rule that deleting an operator is BLOCKED while active
+        agents still reference it. `operated_by` is deliberately not a declared foreign
+        key (this store never enables PRAGMA foreign_keys, so an FK would be decorative),
+        which means nothing at the DB layer would stop a delete from silently orphaning
+        an agent — leaving rows whose operator id resolves to nothing, or worse, to a
+        later account that reuses the id. Returning NAMES rather than a bare count lets
+        the server name them in the error, so the admin knows exactly what to reassign.
+
+        Only ACTIVE agents block: a revoked agent is already inert, so holding a delete
+        hostage to it would be busywork with no safety value.
+    """
+    rows = conn.execute(
+        "SELECT name FROM relay_users WHERE operated_by = ? AND active = 1 ORDER BY name",
+        (user_id,),
+    ).fetchall()
+    return [row["name"] for row in rows]
+
+
+def set_operated_by(conn: sqlite3.Connection, user_id: int, operator_id: int) -> None:
+    """Repoint an agent account at a different operating human.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The agent account to reassign.
+        operator_id: The new operating human's relay_users.id.
+
+    Returns:
+        None.
+
+    Why:
+        The explicit escape hatch for the blocked operator delete (amendment 5): an
+        operator with live agents cannot be removed until those agents are reparented.
+        This reassigns DISPLAY GROUPING only — every stored report and observation keeps
+        the agent's real `author_id`, so provenance is untouched and no history moves.
+        The caller validates that the new operator is an active human; this is the
+        write, not the policy.
+
+        It deliberately does NOT bump `session_version`: an agent holds no session
+        (a contributor cannot log in), so there is nothing to invalidate.
+    """
+    conn.execute(
+        "UPDATE relay_users SET operated_by = ? WHERE id = ?", (operator_id, user_id)
+    )
+    conn.commit()
+
+
+def author_attributions(conn: sqlite3.Connection, author_ids) -> dict:
+    """Resolve stored author_ids to their {id: (account_kind, operator_name)} for display.
+
+    Args:
+        conn: An open relay-store connection.
+        author_ids: An iterable of `author_id` values as denormalized onto report rows.
+            None entries (legacy anonymous pushes) and duplicates are both tolerated.
+
+    Returns:
+        A dict mapping each RESOLVABLE author_id to (account_kind, operated_by_name) —
+        e.g. {7: ("agent", "yoo"), 3: ("human", None)}. An id with no live account is
+        simply ABSENT from the dict, so callers get a clean `.get(id)` miss.
+
+    Why:
+        Attribution is resolved at READ time by joining the live account rather than
+        stamped onto the report at write time, so renaming an operator or reassigning an
+        agent is immediately correct on every past report — one source of truth, no
+        backfill. The accepted trade, recorded honestly: if the account is DELETED the
+        report keeps its denormalized `author_name` but loses the badge, because there is
+        no longer an account to ask. That matches the stance `delete_user` already takes
+        (live state goes, history stays) rather than contradicting it.
+
+        Bulk rather than per-report: a project page serializes its whole report history,
+        so a one-at-a-time lookup would be an N+1 on the hottest read path. One query with
+        an IN clause covers both call sites (a single report passes a one-element list),
+        so there is exactly one place this join is written.
+
+        An ABSENT entry, rather than a ("human", None) fallback, is the load-bearing
+        distinction: "this push carried no identity" is a genuinely different fact from "a
+        human pushed this", and collapsing them would badge legacy anonymous reports as
+        human work the relay never actually attributed.
+    """
+    ids = {author_id for author_id in author_ids if author_id is not None}
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT u.id, u.kind, op.name AS operated_by_name FROM relay_users u "
+        f"LEFT JOIN relay_users op ON op.id = u.operated_by WHERE u.id IN ({placeholders})",
+        tuple(ids),
+    ).fetchall()
+    return {
+        row["id"]: (account_kind_of(row), row["operated_by_name"]) for row in rows
+    }
 
 
 def delete_user(conn: sqlite3.Connection, user_id: int) -> None:

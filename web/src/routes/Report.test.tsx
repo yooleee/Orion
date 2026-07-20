@@ -38,6 +38,8 @@ function detail(over: Partial<ReportDetail>): ReportDetail {
     ingested_at: "2026-06-28T10:01:00+00:00",
     orion_version: "0.1.0",
     author_name: null,
+    author_kind: null,
+    operated_by_name: null,
     participants: [],
     source_tags: [],
     checklist_snapshot: { done: 0, total: 0, rows: [] },
@@ -67,5 +69,30 @@ describe("Report — pushed-by attribution", () => {
     // Wait for the header to render, then assert the attribution phrase is absent.
     expect(await screen.findByText(/Progress report #1/)).toBeInTheDocument();
     expect(screen.queryByText(/pushed by/)).toBeNull();
+  });
+
+  // --- Unit 4a: the report page badges an agent exactly as the timeline does -----
+
+  it("badges an agent push and names its operator", async () => {
+    mockGet.mockResolvedValue(
+      detail({
+        author_name: "claude-mac",
+        author_kind: "agent",
+        operated_by_name: "Supervisor A",
+      }),
+    );
+    const { container } = renderReport();
+    expect(await screen.findByText(/pushed by claude-mac/)).toBeInTheDocument();
+    expect(container.querySelector(".agent-chip")).not.toBeNull();
+    expect(screen.getByText(/operated by Supervisor A/)).toBeInTheDocument();
+  });
+
+  it("shows no chip for a human push", async () => {
+    mockGet.mockResolvedValue(
+      detail({ author_name: "Teammate B", author_kind: "human", operated_by_name: null }),
+    );
+    const { container } = renderReport();
+    expect(await screen.findByText(/pushed by Teammate B/)).toBeInTheDocument();
+    expect(container.querySelector(".agent-chip")).toBeNull();
   });
 });

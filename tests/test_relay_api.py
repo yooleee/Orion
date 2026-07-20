@@ -390,6 +390,10 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         "share_level": "high_level",
         "section_count": 2,
         "author_name": None,  # C3 Inc 2: null for an unattributed report
+        # Unit 4a: both null when no attributions map is passed — an unattributed report
+        # has nothing to badge, and this pins that the new fields never invent a "human".
+        "author_kind": None,
+        "operated_by_name": None,
         "source_tags": [],
     }
     # Discussions (E2 Inc 5): a REAL role per item (gap 7 closed for this surface), oldest

@@ -583,6 +583,31 @@ def _checklist_rows(
     ]
 
 
+def _attribution_fields(report: dict, attributions: dict | None) -> dict:
+    """Build the {author_kind, operated_by_name} pair for one report row (Unit 4a).
+
+    Args:
+        report: A report row carrying `author_id` (None on a legacy anonymous push).
+        attributions: {author_id: (account_kind, operated_by_name)} from
+            store.author_attributions, or None when the caller resolved none.
+
+    Returns:
+        {"author_kind": ..., "operated_by_name": ...} — both null when the author cannot
+        be resolved (legacy push, deleted account, or no map supplied).
+
+    Why:
+        The report timeline entry and the report detail page must badge identically, and
+        they are built in two different functions. One helper means the "what does an
+        unresolvable author look like on the wire" answer is written once.
+
+        Both fields stay null rather than defaulting to "human": a legacy push genuinely
+        carried no identity, and emitting "human" would assert an attribution the relay
+        never made. Null also keeps every pre-4a report byte-identical on the wire.
+    """
+    kind, operated_by_name = (attributions or {}).get(report.get("author_id"), (None, None))
+    return {"author_kind": kind, "operated_by_name": operated_by_name}
+
+
 def serialize_project(
     *,
     name: str,
@@ -595,6 +620,7 @@ def serialize_project(
     disciplines: dict | None,
     today: date,
     due_soon_days: int | None = None,
+    attributions: dict | None = None,
 ) -> dict:
     """Serialize one project's full detail (/api/projects/:name).
 
@@ -619,6 +645,10 @@ def serialize_project(
         due_soon_days: The project's due-soon horizon (store.get_due_soon_days), or None when
             unset ⇒ the 7-day default. Applied to the milestones, the checklist rows (aggregate
             AND per-producer), and the next-due state, so the whole page uses one window.
+        attributions: {author_id: (account_kind, operated_by_name)} from
+            store.author_attributions, for the report timeline's agent badge (Unit 4a). None
+            or a missing id both mean "nothing to badge", so a caller that does not pass it
+            gets today's output unchanged.
 
     Returns:
         The project-detail shape: stats, milestones, checklist, producer_checklists, reports,
@@ -718,6 +748,10 @@ def serialize_project(
                 # C3 Inc 2: producer who pushed it, or null for a legacy/old report (the
                 # timeline shows a "pushed by" only when present). author_id stays off the wire.
                 "author_name": r.get("author_name"),
+                # Unit 4a: what KIND of producer, and (for an agent) whose behalf it acted
+                # on — resolved from the live account, so a rename or reassignment is
+                # correct on every past report. Both null ⇒ nothing to badge.
+                **_attribution_fields(r, attributions),
                 "source_tags": [],  # contract gap 4: collector set not stored
             }
             for r in reports
@@ -827,6 +861,7 @@ def serialize_report(
     history: list[dict],
     today: date,
     due_soon_days: int | None = None,
+    attributions: dict | None = None,
 ) -> dict:
     """Serialize one report in full (/api/reports/:id).
 
@@ -839,6 +874,9 @@ def serialize_report(
         due_soon_days: The report's project horizon (store.get_due_soon_days), or None ⇒ the
             7-day default. Applied to the checklist snapshot rows so their due-ness matches the
             project page's window.
+        attributions: {author_id: (account_kind, operated_by_name)} from
+            store.author_attributions, for this report's agent badge (Unit 4a). None or a
+            missing id both mean "nothing to badge".
 
     Returns:
         The report-detail shape: body + sections, metadata, participants, checklist
@@ -872,6 +910,10 @@ def serialize_report(
         # null for a legacy/old report with no identity. author_id stays off the wire (mirrors
         # the discussion convention); .get keeps pre-attribution report dicts safe.
         "author_name": report.get("author_name"),
+        # Unit 4a: the producer's KIND, and (for an agent) the human it acted on behalf of.
+        # Resolved from the live account at read time, so both go null once that account is
+        # deleted even though the denormalized author_name above survives.
+        **_attribution_fields(report, attributions),
         # participants are stored as plain name strings; role is null until they carry an
         # identity (contract gap 3).
         "participants": [{"name": p, "role": None} for p in report["participants"]],

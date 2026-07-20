@@ -464,6 +464,8 @@ def create_user(
     role: str,
     projects: list[str],
     *,
+    account_kind: str | None = None,
+    operated_by: str | None = None,
     timeout: float = 10.0,
 ) -> dict:
     """Provision a relay user and return the response including the one-time key (C3).
@@ -475,25 +477,30 @@ def create_user(
         name: The new user's unique handle.
         role: "viewer" or "admin".
         projects: The viewer's allowed project names (ignored server-side for an admin).
+        account_kind: "agent" to provision an agent account, or None for a human (Unit 4a).
+        operated_by: For an agent, the operating HUMAN account's name; None for a human.
         timeout: Seconds to wait before failing.
 
     Returns:
-        The parsed 201 response: {id, name, role, projects, key} — `key` is the raw login
-        key, shown this once.
+        The parsed 201 response: {id, name, role, projects, kind, operated_by, key} —
+        `key` is the raw login key, shown this once.
 
     Why:
         Mirrors push()'s transport but POSTs to the derived /api/users admin route. The
         raw key comes straight back to the caller (the CLI prints it once); it is never
         stored or logged here.
+
+        Unit 4a's two fields are OMITTED from the payload when None rather than sent as
+        nulls, so provisioning a human puts exactly the pre-4a body on the wire — an older
+        relay keeps working, and the new fields cannot be misread as an explicit "clear".
     """
     url = urllib.parse.urljoin(relay_url, "/api/users")
-    return _admin_request(
-        "POST",
-        url,
-        admin_token,
-        {"name": name, "role": role, "projects": list(projects)},
-        timeout,
-    )
+    payload = {"name": name, "role": role, "projects": list(projects)}
+    if account_kind is not None:
+        payload["kind"] = account_kind
+    if operated_by is not None:
+        payload["operated_by"] = operated_by
+    return _admin_request("POST", url, admin_token, payload, timeout)
 
 
 def list_users(relay_url: str, admin_token: str, *, timeout: float = 10.0) -> dict:
@@ -731,6 +738,32 @@ def rename_user(
     url = urllib.parse.urljoin(relay_url, "/api/users/rename")
     return _admin_request(
         "POST", url, admin_token, {"name": name, "new_name": new_name}, timeout
+    )
+
+
+def set_user_operator(
+    relay_url: str, admin_token: str, name: str, operated_by: str, *, timeout: float = 10.0
+) -> dict:
+    """Repoint an agent at a different operating human, for `relay-user set-operator`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The AGENT account to reassign.
+        operated_by: The new operating human's account name.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "operated_by"}.
+
+    Why:
+        The explicit escape hatch for the blocked operator delete (an operator with live
+        agents cannot be removed until they are reparented). It changes display grouping
+        only — stored reports keep the agent's real author id, so provenance is untouched.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/set-operator")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "operated_by": operated_by}, timeout
     )
 
 

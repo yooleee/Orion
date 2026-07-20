@@ -14,6 +14,52 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Agent accounts and honest attribution (auth-revamp Unit 4a, 2026-07-20)
+
+An **agent** (Claude Code, a CI job, a research runner) is now a first-class account: kind
+`agent`, role contributor, its own key, and an `operated_by` pointer at the human it acts for.
+Its work stays attributed to the agent and names that human, so provenance is never lost.
+
+The `kind` and `operated_by` columns shipped inert in Unit 2a. This unit gives them meaning.
+
+### Added
+
+- **`relay-user add --kind agent --operated-by NAME`.** An agent must name an operator, that
+  operator must be an **active human**, and agent-to-agent chains are refused — the point of
+  `operated_by` is to terminate at an accountable person, and a chain would turn "who is
+  responsible for this?" into a graph walk.
+- **`relay-user set-operator <agent> <human>`.** The explicit escape hatch for the blocked
+  delete below. It moves **display grouping only**: stored reports keep the agent's real author
+  id, so no history moves.
+- **`author_kind` and `operated_by_name` on the report wire**, with an "agent" chip and an
+  "operated by <name>" line on the timeline entry and the report page.
+
+### Changed
+
+- **Deleting an account that still operates active agents is refused (409)**, naming the
+  agents so the admin knows what to reassign. `operated_by` is deliberately not a declared
+  foreign key (this store never enables `PRAGMA foreign_keys`, so one would be decorative),
+  which means without this guard the delete would silently orphan them.
+- **An agent cannot hold an interactive role**, enforced at provisioning *and* on
+  `relay-user role`. Validating only at creation would leave a two-step path — add an agent,
+  then promote it — to exactly the interactive machine account the "one credential never spans
+  both auth worlds" invariant forbids.
+- **Revoking an operator does not revoke its agents.** Revoking a person is an act about that
+  person; silently killing their agents' keys would stop scheduled pushes nobody asked to stop.
+
+### Design notes worth stating
+
+- **Attribution resolves at READ time**, by joining the live account rather than stamping the
+  report at write time. So renaming an operator or reassigning an agent is immediately correct
+  on every past report, with no backfill. The accepted trade: if the account is **deleted**, the
+  report keeps its denormalized `author_name` but loses the badge — matching the stance delete
+  already takes (live state goes, history stays).
+- **`author_kind: null` is a third state, not a synonym for "human".** A legacy anonymous push
+  genuinely carried no identity, and emitting "human" would assert an attribution the relay
+  never made.
+- **Not in this unit:** folding an agent's work into its operator's producer streams and
+  checklist cards. That is Unit 4b, where the derivations get their own reviewable change.
+
 ## Password login for humans (auth-revamp Unit 3, 2026-07-20)
 
 Interactive accounts log in with a **name and password**. Machines keep holding keys. The two

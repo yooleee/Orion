@@ -17,6 +17,7 @@ import { relativeTime } from "../lib/time";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { ReportBody } from "../components/ReportBody";
 import { ContextRail } from "../components/ContextRail";
+import { AgentBadge } from "../components/AgentBadge";
 
 export function Report() {
   const { id = "" } = useParams();
@@ -47,6 +48,8 @@ export function Report() {
             {/* C3 Inc 2: attribute the push when known; a legacy/older report has
                 author_name null and this line reads exactly as before. */}
             {data.author_name && <> · pushed by {data.author_name}</>}
+            {/* Unit 4a: badge an agent push and name the human it acted on behalf of. */}
+            <AgentBadge kind={data.author_kind} operatedBy={data.operated_by_name} />
           </p>
         </div>
         <div className="report-nav">

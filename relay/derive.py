@@ -468,6 +468,101 @@ def merge_producer_checklists(producer_lists: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+def _effective_producer_key(producer: dict, index: int):
+    """Return the grouping key for one producer row (auth revamp, Unit 4b).
+
+    Args:
+        producer: A producer checklist row. Carries `effective_producer_id` when it came
+            from producer_checklists_for; may carry neither that nor `author_id`.
+        index: The row's position, used only as the identity-less fallback.
+
+    Returns:
+        The effective producer id, or a per-row unique sentinel when the row carries no
+        identity at all.
+
+    Why:
+        `effective_producer_id` is what folds an agent into its operator. The fallback is
+        the load-bearing part: a caller that supplies NO identity (any caller working from
+        bare {items, updated_at} rows) must keep the pre-4b behavior where every row is its
+        own producer, so it gets one card each. Defaulting those rows to a SHARED key
+        instead would silently collapse unrelated producers into a single card.
+    """
+    key = producer.get("effective_producer_id")
+    if key is None:
+        key = producer.get("author_id")
+    return key if key is not None else ("__unidentified__", index)
+
+
+def fold_producer_checklists(producer_lists: list[dict]) -> list[dict]:
+    """Group producer rows by effective producer, consolidating each group into one card.
+
+    Args:
+        producer_lists: Producer checklist rows from producer_checklists_for, each
+            {"author_id", "author_name", "items", "updated_at", "effective_producer_id",
+            "effective_producer_name"}.
+
+    Returns:
+        One dict per EFFECTIVE producer, in the input's (name-ordered) first-seen order:
+        {"author_name": the effective producer's display name, "items": the group's
+        consolidated items, "updated_at": the group's latest push time, "author_ids": every
+        RAW author_id in the group}. A project with no agents returns one row per input row,
+        with `author_ids` a single-element list.
+
+    Why:
+        Agents act on their operator's behalf, so the project page shows ONE card per
+        person — a human plus their two agents is one contributor, not three. Provenance is
+        not lost: the stored rows keep each agent's real author_id, and `author_ids` carries
+        them forward so the caller can still resolve per-stream facts (slippage) against the
+        raw streams they were derived on.
+
+        Within a group the consolidation is exactly `merge_producer_checklists` — the same
+        done-OR, last-writer-per-item rule already used across producers, because the
+        problem is identical (several copies of one base checklist, any of which may be
+        stale). Crucially the group's rows are passed in WHOLE rather than pre-collapsed, so
+        each keeps its own `updated_at` and the last-writer ordering still decides metadata.
+        Folding them first would destroy exactly the timestamps that decision depends on.
+
+        Known accepted edge (recorded, not fixed): because `done` is OR-ed, re-opening an
+        item needs every stale copy in the group to re-push before the card shows it open.
+        That is the same trade the cross-producer merge already makes.
+    """
+    groups: dict = {}
+    for index, producer in enumerate(producer_lists):
+        key = _effective_producer_key(producer, index)
+        groups.setdefault(key, []).append(producer)
+    folded = []
+    for group in groups.values():
+        # The display name comes from the effective producer (the operator for an agent);
+        # a row with no operator falls back to its own denormalized author_name.
+        first = group[0]
+        name = first.get("effective_producer_name") or first.get("author_name")
+        folded.append(
+            {
+                "author_name": name,
+                # A group of ONE has nothing to reconcile, so its items pass through
+                # untouched. That is not just an optimization: it keeps this function
+                # usable by callers whose rows carry no `updated_at` (which the merge
+                # requires but a lone row never needs), so the overwhelmingly common
+                # no-agents case behaves exactly as it did before 4b.
+                "items": (
+                    first["items"] if len(group) == 1 else merge_producer_checklists(group)
+                ),
+                # The freshest push in the group — this row may itself be merged again by
+                # effective_checklist, where updated_at orders the cross-producer fold.
+                "updated_at": max(
+                    (p["updated_at"] for p in group if p.get("updated_at") is not None),
+                    default=None,
+                ),
+                # Every RAW author id that folded in. The caller unions their per-stream
+                # slipping sets; the streams themselves are never merged.
+                "author_ids": [
+                    p["author_id"] for p in group if p.get("author_id") is not None
+                ],
+            }
+        )
+    return folded
+
+
 def effective_checklist(
     aggregate_items: list[dict] | None, producer_lists: list[dict]
 ) -> list[dict] | None:
@@ -480,16 +575,31 @@ def effective_checklist(
             revoked-filtered by producer_checklists_for), each {"items", "updated_at"}.
 
     Returns:
-        The merged effective item list when ≥2 active identified producers exist;
-        otherwise the aggregate list UNCHANGED (including None passthrough).
+        The merged effective item list when ≥2 producer ROWS exist; otherwise the
+        aggregate list UNCHANGED (including None passthrough).
 
     Why:
-        The ≥2 gate mirrors the SPA's existing "show per-producer cards" threshold and
-        keeps every current single-producer / anonymous deployment BYTE-IDENTICAL: with
-        0–1 producers there is nothing to merge, so the aggregate (which anonymous
-        pushes still update) is returned as-is. Preserving None matters — the project
-        route's existence-hiding 404 tests `checklist is None`, so a genuinely
-        checklist-less project must stay None, not become [].
+        With 0–1 producers there is nothing to merge, so the aggregate (which anonymous
+        pushes still update) is returned as-is — every single-producer / anonymous
+        deployment stays BYTE-IDENTICAL. Preserving None matters — the project route's
+        existence-hiding 404 tests `checklist is None`, so a genuinely checklist-less
+        project must stay None, not become [].
+
+        DELIBERATE DEVIATION from the arc's amendment 4 (decided 2026-07-20, with the
+        user, on measured evidence): this gate counts RAW ROWS, *not* distinct effective
+        producers. Amendment 4 asked for the latter, reasoning that a person plus their
+        agent should not "spuriously" trip the merge. But the merge is not about people —
+        it reconciles COPIES, and a human and their agent genuinely hold two copies, either
+        of which may be stale. Counting effective producers there made a human+agent pair
+        fall back to the aggregate, which is last-writer-wins: the other producer's items
+        VANISH from the badge and its `done` state flips with push order. That is exactly
+        the KI-30 flicker the merge exists to prevent, reintroduced.
+
+        The ≥2 card threshold in the SPA and this gate therefore answer DIFFERENT questions
+        — "how many people?" (folded, one card per operator) versus "are there copies to
+        reconcile?" (raw rows). They previously coincided; agents are what separate them.
+        Folding is unaffected: fold_producer_checklists never consults this gate, so a
+        human+agent pair still renders as one card while the badge stays correct.
     """
     if len(producer_lists) >= 2:
         return merge_producer_checklists(producer_lists)

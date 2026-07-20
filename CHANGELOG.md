@@ -14,6 +14,46 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Operator-folding for producer streams (auth-revamp Unit 4b, 2026-07-20)
+
+An agent's work now groups under the human it acts for. The project page shows one
+per-contributor card **per person**, not per machine: a developer plus their two agents is one
+contributor. Provenance is untouched — every stored report and observation keeps the agent's
+real author id, and 4a's badge still shows which machine did the work.
+
+### Changed
+
+- **Per-producer cards group by effective producer** (`operated_by ?? author_id`), resolved in
+  `producer_checklists_for`'s existing join. Within a group, the rows consolidate with the
+  same done-OR / last-writer-per-item merge already used across producers — the problem is
+  identical (several copies of one base checklist, any of which may be stale).
+- **The operator's display name comes from the LIVE account**, so renaming an operator
+  regroups every card immediately. The row's own `author_name` stays denormalized, matching
+  how 4a's report attribution behaves.
+
+### The property this unit is really about
+
+**Slippage still derives on RAW per-author streams, and only unions under the operator for
+display.** Folding before deriving would interleave a human's and an agent's observations of
+the same item into one stream that appears to lurch back and forth, manufacturing a
+"postponed" signal that never happened — precisely the bug the per-producer partitioning
+fixed. Fold for display, never for derivation. The guard is pinned by a test built so that
+neither raw stream slips while a collapsed stream provably would.
+
+### Deviation from the arc's recorded design, on measured evidence
+
+The plan's amendment 4 asked for the ≥2 merge gate to count *distinct effective producers*, so
+a human+agent pair would skip the merge. Implementing that **lost data**: the pair fell back to
+the last-writer-wins aggregate, so whichever producer pushed last erased the other's items from
+the badge, and `done` flipped with push order. That is the KI-30 flicker the merge exists to
+prevent.
+
+The gate now counts **raw rows**, unchanged from before this unit. The reasoning: the merge
+reconciles *copies*, not *people*, and a human and their agent genuinely hold two copies. The
+SPA's card threshold and this gate answer different questions ("how many people?" versus "are
+there copies to reconcile?"); they happened to coincide until agents existed. Folding is
+unaffected either way — one card, and a correct badge.
+
 ## Agent accounts and honest attribution (auth-revamp Unit 4a, 2026-07-20)
 
 An **agent** (Claude Code, a CI job, a research runner) is now a first-class account: kind

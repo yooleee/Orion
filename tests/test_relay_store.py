@@ -54,6 +54,7 @@ from relay.store import (
     record_admin_audit,
     record_observations,
     revoke_credential,
+    rename_user,
     revoke_user,
     set_due_soon_days,
     set_project_kind,
@@ -833,6 +834,100 @@ def test_producer_checklists_excludes_revoked_producers(tmp_path):
 
     got = producer_checklists_for(conn, "demo")
     assert [p["author_name"] for p in got] == ["Teammate B"]  # revoked C's stale card is gone
+
+
+def test_producer_checklists_resolve_an_agents_effective_producer(tmp_path):
+    """An agent's row carries its OPERATOR as the effective producer; a human is its own.
+
+    Why this matters: this is the store half of Unit 4b's fold. Resolving it here — in the
+    one query that already joins relay_users for the active filter — is what lets the
+    serializer group cards without a second lookup.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    human_id = add_user(conn, "yoo", "v1", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    agent_id = add_user(
+        conn, "claude-mac", "v2", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00",
+        account_kind="agent", operated_by=human_id,
+    )
+    for producer_id, name in ((human_id, "yoo"), (agent_id, "claude-mac")):
+        upsert_producer_checklist(
+            conn, "demo", producer_id, name, _items(("A", True)), "2026-06-25T00:00:00+00:00"
+        )
+
+    rows = {p["author_name"]: p for p in producer_checklists_for(conn, "demo")}
+    # The agent folds into the human it acts for...
+    assert rows["claude-mac"]["effective_producer_id"] == human_id
+    assert rows["claude-mac"]["effective_producer_name"] == "yoo"
+    # ...while the human is its own effective producer (so a no-agents project is unchanged).
+    assert rows["yoo"]["effective_producer_id"] == human_id
+    assert rows["yoo"]["effective_producer_name"] == "yoo"
+
+
+def test_renaming_an_operator_regroups_its_agents_cards(tmp_path):
+    """The operator name comes from the LIVE account, so a rename regroups immediately.
+
+    Note the deliberate asymmetry this pins: `author_name` stays the row's DENORMALIZED value
+    (what the producer was called when it pushed), while the effective producer name is
+    resolved live — matching how 4a's report attribution behaves under a rename.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    human_id = add_user(conn, "yoo", "v1", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    agent_id = add_user(
+        conn, "claude-mac", "v2", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00",
+        account_kind="agent", operated_by=human_id,
+    )
+    upsert_producer_checklist(
+        conn, "demo", agent_id, "claude-mac", _items(("A", True)), "2026-06-25T00:00:00+00:00"
+    )
+    rename_user(conn, human_id, "yoo-renamed")
+
+    (row,) = producer_checklists_for(conn, "demo")
+    assert row["effective_producer_name"] == "yoo-renamed"  # live account, regrouped
+    assert row["author_name"] == "claude-mac"  # the push's own recorded name is untouched
+
+
+def test_revoking_an_agent_removes_only_its_own_card(tmp_path):
+    """A revoked agent's row drops out; its operator's own card survives.
+
+    The mirror of the no-silent-cascade rule from 4a: revoking one identity must not take
+    down the other's current state.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    human_id = add_user(conn, "yoo", "v1", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    agent_id = add_user(
+        conn, "claude-mac", "v2", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00",
+        account_kind="agent", operated_by=human_id,
+    )
+    for producer_id, name in ((human_id, "yoo"), (agent_id, "claude-mac")):
+        upsert_producer_checklist(
+            conn, "demo", producer_id, name, _items(("A", True)), "2026-06-25T00:00:00+00:00"
+        )
+    revoke_user(conn, agent_id)
+
+    assert [p["author_name"] for p in producer_checklists_for(conn, "demo")] == ["yoo"]
+
+
+def test_revoking_an_operator_leaves_its_agents_card_grouped_under_it(tmp_path):
+    """A revoked OPERATOR keeps grouping its still-active agent's card.
+
+    The active filter is an INNER JOIN on the PRODUCER's own account, not the operator's, so
+    a revoked operator does not silently erase work its agent is still doing. This mirrors 4a
+    (revoking an operator does not revoke its agents) — the card stays visible under the
+    operator's name, which is the honest reading: that work was done on their behalf.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    human_id = add_user(conn, "yoo", "v1", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00")
+    agent_id = add_user(
+        conn, "claude-mac", "v2", "contributor", ["demo"], "test", "2026-06-25T00:00:00+00:00",
+        account_kind="agent", operated_by=human_id,
+    )
+    upsert_producer_checklist(
+        conn, "demo", agent_id, "claude-mac", _items(("A", True)), "2026-06-25T00:00:00+00:00"
+    )
+    revoke_user(conn, human_id)
+
+    (row,) = producer_checklists_for(conn, "demo")
+    assert row["effective_producer_name"] == "yoo"
 
 
 def test_producer_checklists_for_unknown_project_is_empty(tmp_path):

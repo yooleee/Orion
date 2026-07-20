@@ -467,6 +467,29 @@ Deferred).
   pass (2026-07-19): kept **out of the revamp arc** to bound its scope, recorded as a small
   follow-on once the account model lands (the prompt then scopes an account, not a bare key).
 
+## KI-37 — Concurrent first opens of a non-WAL relay DB can fail on the WAL conversion
+
+- **Detail:** `open_relay_store` sets `PRAGMA journal_mode=WAL` on every open. Converting a database
+  from the default rollback-journal mode to WAL takes a brief **exclusive** lock, and that PRAGMA does
+  **not** honor the connection's busy timeout — so if two workers open a not-yet-WAL database at the
+  same instant, one raises `OperationalError: database is locked` immediately rather than waiting.
+  Found while building the auth-revamp Unit 2a migration (a concurrency test on a hand-seeded
+  rollback-mode DB reproduced it in roughly 5% of runs); it is **pre-existing and unrelated** to that
+  migration, which is why it was recorded rather than folded into that unit.
+- **Why it matters:** the relay opens the store **per request**, so this is reachable in principle.
+  In practice the window is very narrow: it only affects a database that is not yet in WAL mode, and
+  a relay's DB is converted on its very first open — which happens before it serves concurrent
+  traffic. Every already-deployed relay DB (including the live one) is long since WAL, where the
+  PRAGMA is a cheap no-op that takes no exclusive lock.
+- **Severity:** low (first-open-only, and a fresh relay converts before taking traffic).
+- **Status:** Open, unfixed by choice. A fix would be a small retry/tolerate around the PRAGMA, but it
+  must not silently swallow the error and leave the DB in rollback mode — the concurrency semantics
+  WAL provides are the reason it is set. Worth doing if the relay ever provisions databases under
+  live traffic. Note the sibling race in the same function **was** fixed at Unit 2a: `_ensure_columns`
+  ALTERs were check-then-act and two concurrent opens could collide with `duplicate column name`,
+  which was reachable on any migrating redeploy under traffic (see CHANGELOG → *"Accounts and
+  credentials"*).
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 

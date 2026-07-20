@@ -319,6 +319,12 @@ h3 {
   display: block;
   margin-bottom: 8px;
 }
+/* A field label that FOLLOWS an input needs breathing room above it — the login card now
+   stacks two fields (name, then password), and without this the second label crowds the
+   first input. Scoped to the adjacent-sibling case so a card's first label is unaffected. */
+.field + .field-label {
+  margin-top: 16px;
+}
 .field {
   width: 100%;
   padding: 11px 13px;
@@ -351,6 +357,29 @@ h3 {
   margin-bottom: 6px;
 }
 /* A subtle escape hatch on the login wall to the public showcase (when enabled). */
+/* The credential-mode switch on the login card. Styled as a quiet inline control rather
+   than a second button: it is an escape hatch for accounts that have no password yet, not
+   a choice most people should weigh. `all: unset` strips the default browser button
+   chrome — it must be a <button> for keyboard and screen-reader semantics, but it should
+   not LOOK like one competing with the primary action above it. */
+.login-mode-toggle {
+  all: unset;
+  display: block;
+  margin: 14px auto 0;
+  font-size: 13px;
+  color: var(--tmid);
+  cursor: pointer;
+  text-align: center;
+}
+.login-mode-toggle:hover {
+  color: var(--accent);
+}
+.login-mode-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
 .login-showcase-link {
   margin-top: 20px;
   font-size: 13px;

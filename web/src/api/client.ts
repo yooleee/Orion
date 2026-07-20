@@ -72,6 +72,23 @@ export const getShowcase = () => apiFetch<ShowcaseData>("/api/showcase");
 
 // --- Auth (the only writes in 4a) -------------------------------------------
 
+/**
+ * Sign in with a name + password (auth revamp, Unit 3) — the interactive credential.
+ * The relay answers one generic failure for every cause, so the caller has nothing to
+ * branch on beyond ok/not-ok.
+ */
+export const loginWithPassword = (name: string, password: string) =>
+  apiFetch<LoginResult>("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, password }),
+  });
+
+/**
+ * Sign in with an access key. Kept for accounts that have no password yet (and for
+ * machine-provisioned accounts during the transition) — once an account HAS a password,
+ * the relay stops accepting its key here.
+ */
 export const login = (key: string) =>
   apiFetch<LoginResult>("/api/login", {
     method: "POST",

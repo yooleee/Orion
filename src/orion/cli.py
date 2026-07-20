@@ -76,7 +76,9 @@ from orion.delivery.relay import (
     list_user_keys as relay_list_user_keys,
     rename_user as relay_rename_user,
     revoke_user_key as relay_revoke_user_key,
+    set_user_password as relay_set_user_password,
     set_user_role as relay_set_user_role,
+    unlock_user as relay_unlock_user,
 )
 from orion.delivery.slack import send as slack_send
 from orion.extract import (
@@ -1021,6 +1023,39 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    # `password` is a command GROUP (set/unlock). A password is NEVER accepted as an
+    # argument: argv lands in shell history, `ps` output, and CI logs. It is either typed
+    # at a hidden prompt or minted by the relay and shown once.
+    ru_pw = relay_user_subs.add_parser(
+        "password",
+        help="Manage an interactive account's password (set/unlock).",
+    )
+    ru_pw_subs = ru_pw.add_subparsers(dest="relay_user_password_command", metavar="{set,unlock}")
+
+    ru_pw_set = ru_pw_subs.add_parser(
+        "set",
+        help="Set/replace a password (prompts twice, hidden). Their keys stop logging in.",
+    )
+    ru_pw_set.add_argument("name", help="The interactive account to set a password for.")
+    ru_pw_set.add_argument(
+        "--generate", action="store_true",
+        help="Have the relay mint a strong password and print it ONCE, instead of prompting.",
+    )
+    ru_pw_set.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_pw_unlock = ru_pw_subs.add_parser(
+        "unlock",
+        help="Clear a login lockout after failed attempts (does not change the password).",
+    )
+    ru_pw_unlock.add_argument("name", help="The account to unlock.")
+    ru_pw_unlock.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     ru_role = relay_user_subs.add_parser(
         "role",
         help="Change an account's role (logs out live sessions; a scoped role needs grants).",
@@ -1176,6 +1211,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.relay_user_key_command == "revoke":
                 return cmd_relay_user_key_revoke(args.name, args.id, Path(args.config))
             print("Error: give a key subcommand: add, list, or revoke.", file=sys.stderr)
+            return 2
+        if args.relay_user_command == "password":
+            if args.relay_user_password_command == "set":
+                return cmd_relay_user_password_set(args.name, args.generate, Path(args.config))
+            if args.relay_user_password_command == "unlock":
+                return cmd_relay_user_password_unlock(args.name, Path(args.config))
+            print("Error: give a password subcommand: set or unlock.", file=sys.stderr)
             return 2
         if args.relay_user_command == "role":
             return cmd_relay_user_role(args.name, args.role, Path(args.config))
@@ -4402,6 +4444,89 @@ def cmd_relay_user_key_revoke(name: str, credential_id: int, config_path: Path) 
         return 1
 
     print(f"Revoked credential {credential_id} for {name!r}. Their other credentials still work.")
+    return 0
+
+
+def cmd_relay_user_password_set(name: str, generate: bool, config_path: Path) -> int:
+    """Set or replace an interactive account's password (`relay-user password set`).
+
+    Args:
+        name: The account to set a password for.
+        generate: When True, the relay mints the password and prints it once instead of
+            prompting for one.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request; 2 when the
+        two typed passwords do not match.
+
+    Why:
+        The password is read with `getpass` (hidden, prompted twice) and is never accepted as
+        a command-line argument — argv is visible in shell history, in `ps`, and in CI logs.
+        `--generate` exists for provisioning someone else's account, where the admin should
+        not be inventing (or seeing twice) a password the person will own.
+
+        Note the consequence printed below: once an account has a password, its access KEYS
+        stop working for login. That is the intended end state — humans know a password,
+        machines hold a key — but it takes effect immediately, so the person must be told.
+    """
+    password = None
+    if not generate:
+        import getpass
+
+        try:
+            password = getpass.getpass(f"New password for {name!r}: ")
+            confirm = getpass.getpass("Repeat password: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.", file=sys.stderr)
+            return 2
+        if not password:
+            print("Error: password must not be empty.", file=sys.stderr)
+            return 2
+        if password != confirm:
+            print("Error: the two passwords did not match.", file=sys.stderr)
+            return 2
+
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_set_user_password(relay_url, admin_token, name, password)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Password set for {name!r}. Any live session was logged out.")
+    if "password" in result:
+        print("  Password (shown ONCE — copy it now; it cannot be retrieved later):")
+        print(f"    {result['password']}")
+    print("  They now log in with their NAME and this password.")
+    print("  Their access key no longer works for login (it stays valid for machine pushes).")
+    return 0
+
+
+def cmd_relay_user_password_unlock(name: str, config_path: Path) -> int:
+    """Clear an account's login lockout (`relay-user password unlock`).
+
+    Args:
+        name: The account to unlock.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request.
+
+    Why:
+        Repeated failed logins lock an account for a short window, which means anyone who
+        knows the account name can lock its owner out. Keeping the lockout strict is right —
+        it is what makes online password guessing hopeless — so the counterweight is an
+        instant admin unlock that does NOT require changing a password the person still knows.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_unlock_user(relay_url, admin_token, name)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Cleared the login lockout for {name!r}. Their password is unchanged.")
     return 0
 
 

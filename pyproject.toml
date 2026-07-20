@@ -59,6 +59,16 @@ dev = ["pytest>=8.0"]
 # a first-class integration as the bot becomes load-bearing (the seams keep that
 # additive — see plans/build-the-native-bots-slice-squishy-key.md).
 slack-bot = ["slack-bolt>=1.18"]
+# Relay-side password hashing (auth revamp, Unit 3). Argon2id is the current
+# first-choice password hash — memory-hard and side-channel-resistant — and is
+# genuinely stronger here than anything the stdlib offers, which is why a real
+# dependency was accepted. It is RELAY-ONLY by construction: hashing happens
+# exclusively on the relay, so this rides the relay deployment (the Dockerfile
+# installs `.[relay]`) and the producer core install stays at three runtime deps.
+# Pinned to a major version so an upgrade that changed defaults cannot arrive
+# unnoticed — though relay/passwords.py also passes every parameter explicitly,
+# so stored hashes stay verifiable regardless.
+relay = ["argon2-cffi>=23.1,<26"]
 
 [project.scripts]
 # Installs an `orion` command on PATH that calls orion.cli:main.

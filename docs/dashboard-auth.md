@@ -135,6 +135,42 @@ orion relay-user revoke mac                                    # instant cutoff 
 orion relay-user delete mac                                    # hard-delete: frees the name to reuse
 ```
 
+### Passwords: how humans sign in
+
+Interactive accounts (`admin`, `viewer`, `supervisor`) log in with a **name and password**.
+Machines hold keys. The two do not overlap — a password is rejected on the push path, and a key
+is rejected at login once its account has a password.
+
+```bash
+orion relay-user password set dad          # prompts twice, hidden; never takes it as an argument
+orion relay-user password set dad --generate   # relay mints one and prints it ONCE
+orion relay-user password unlock dad       # clear a lockout without changing the password
+```
+
+Stated plainly: a password is **weaker per-credential** than a 256-bit key. The gain is
+compartmentalisation and human factors — a person can hold a password in their head and stops
+handling stored key material entirely. That trade is why login is throttled.
+
+**Setting a password is a one-way door for that account's key login.** From that moment the key
+no longer signs in (it keeps working for machine pushes). Until a password is set, key login
+still works, so an existing account is never locked out mid-transition.
+
+**Throttling.** Five failed attempts lock an account for fifteen minutes, and a relay-wide
+rolling bound catches attempts sprayed thinly across many names. Any admin can clear a lockout
+instantly with `password unlock` — which matters, because anyone who knows an account name can
+trigger a lockout on it. There is no per-IP limit: behind a proxy that means trusting a
+forwarded header, and trusting it wrongly would let an attacker forge it and evade the limit
+entirely.
+
+**Every failure looks identical** — same status, same body, same headers, and the same amount of
+time. Unknown name, wrong password, no password set, and locked-out all perform one Argon2
+verification (against a dummy hash where there is no real one), so response timing cannot be
+used to discover which accounts exist.
+
+**Operational note.** Argon2id is memory-hard by design, so concurrent verifications are capped
+to bound peak memory on a small VM. Under a burst of login attempts, logins queue rather than
+the relay running out of memory.
+
 ### Credentials: an account can hold several keys
 
 An **account** is the durable identity; a **credential** is one of N revocable things beneath it. That

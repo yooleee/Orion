@@ -634,6 +634,57 @@ def revoke_user_key(
     )
 
 
+def set_user_password(
+    relay_url: str, admin_token: str, name: str, password: str | None = None,
+    *, timeout: float = 10.0,
+) -> dict:
+    """Set or replace an account's password, for `relay-user password set`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The account whose password to set.
+        password: The plaintext to set, or None to have the relay mint one and return it.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "session_invalidated", and "password" only when
+        the relay minted one}.
+
+    Why:
+        The plaintext travels once, over HTTPS, and is hashed relay-side — it is never
+        stored or logged anywhere. Setting a password is also the moment an interactive
+        account stops accepting key login, so this call is the pivot of the transition.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/password")
+    body = {"name": name}
+    if password is not None:
+        body["password"] = password
+    return _admin_request("POST", url, admin_token, body, timeout)
+
+
+def unlock_user(
+    relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
+) -> dict:
+    """Clear an account's login lockout, for `relay-user password unlock`.
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The account to unlock.
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "unlocked": true}.
+
+    Why:
+        Anyone who knows an account name can lock it out by failing logins, so an immediate
+        admin unlock is the counterweight that lets the lockout stay strict.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/unlock")
+    return _admin_request("POST", url, admin_token, {"name": name}, timeout)
+
+
 def set_user_role(
     relay_url: str, admin_token: str, name: str, role: str, *, timeout: float = 10.0
 ) -> dict:

@@ -2079,6 +2079,33 @@ def revoke_credential(conn: sqlite3.Connection, credential_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def set_password_credential_verifier(
+    conn: sqlite3.Connection, credential_id: int, verifier: str
+) -> None:
+    """Replace a password credential's stored hash in place.
+
+    Args:
+        conn: An open relay-store connection.
+        credential_id: The password credential to update.
+        verifier: The new Argon2id encoded hash.
+
+    Returns:
+        None.
+
+    Why:
+        Used only for transparent rehashing: when a successful login finds the stored hash
+        was computed with outdated Argon2 parameters, the plaintext is in hand for exactly
+        that moment, so the hash is upgraded without the person doing anything. It updates
+        IN PLACE rather than revoke-and-insert so the credential keeps its id, its
+        created_at, and its position under the one-active-password index — the credential is
+        the same credential, only its cost parameters changed.
+    """
+    conn.execute(
+        "UPDATE relay_credentials SET verifier = ? WHERE id = ?", (verifier, credential_id)
+    )
+    conn.commit()
+
+
 def touch_credential(conn: sqlite3.Connection, credential_id: int, ts: str) -> None:
     """Stamp a credential's last_used_at.
 

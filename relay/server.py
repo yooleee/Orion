@@ -43,15 +43,21 @@ from zoneinfo import ZoneInfo
 
 from . import api
 from .derive import today_in_tz
+from .passwords import PasswordsUnavailable, hash_password, verify_password
+from .throttle import ACCOUNT as THROTTLE_ACCOUNT
+from .throttle import GLOBAL as THROTTLE_GLOBAL
+from .throttle import LoginThrottle
 from .store import (
     add_credential,
     add_discussion_item,
     add_user,
+    bump_session_version,
     delete_user,
     discussion_items_for_project,
     effective_checklist,
     get,
     get_checklist,
+    get_active_password_credential,
     get_credential_by_key_verifier,
     get_due_soon_days,
     get_project_kind,
@@ -74,6 +80,7 @@ from .store import (
     revoke_credential,
     revoke_user,
     set_due_soon_days,
+    set_password_credential_verifier,
     set_user_role,
     set_project_kind,
     touch_credential,
@@ -814,6 +821,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/users/key-revoke":
             self._handle_revoke_user_key()
+            return
+        if path == "/api/users/password":
+            self._handle_set_user_password()
+            return
+        if path == "/api/users/unlock":
+            self._handle_unlock_user()
             return
         if path == "/api/users/role":
             self._handle_set_user_role()
@@ -1778,6 +1791,104 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"name": name, "id": credential_id, "revoked": True})
 
+    def _handle_set_user_password(self) -> None:
+        """Set or replace an account's password (POST /api/users/password).
+
+        Body: name (required), password (optional — minted and returned when absent).
+        Admin-gated; 404 unknown; 409 for a non-interactive role; 400 over-length;
+        503 when the hashing dependency is missing; 200 {name, password?}.
+
+        Why:
+            Setting a password is what flips an interactive account from key login to
+            password login (its keys stop resolving at login the moment this succeeds), so
+            it is the pivot of the whole transition. It bumps `session_version` — a
+            credential change of this significance must invalidate live cookies — and clears
+            any lockout, which makes this the admin's unlock path as well.
+
+            Only interactive roles may hold one: giving a contributor a password would
+            create a credential spanning both auth worlds, which the arc's invariants forbid.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        supplied = payload.get("password")
+        if supplied is not None and (not isinstance(supplied, str) or not supplied):
+            self._send_json(400, {"error": "field 'password' must be a non-empty string"})
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            if user["role"] not in _INTERACTIVE_ROLES:
+                self._send_json(
+                    409,
+                    {"error": f"role {user['role']!r} cannot hold a password (machines use keys)"},
+                )
+                return
+            # Minted when the admin did not supply one. Shown ONCE, exactly like a key.
+            # Deliberately NOT called "one-time": there is no forced-change flow, so this
+            # is simply the account's password until someone sets another.
+            password = supplied if supplied is not None else mint_key()
+            try:
+                verifier = hash_password(password)
+            except PasswordsUnavailable as exc:
+                self._send_json(503, {"error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+
+            existing = get_active_password_credential(conn, user["id"])
+            if existing is not None:
+                # Revoke before inserting: the partial unique index permits only one active
+                # password per account, so replacing means retiring the old row first.
+                revoke_credential(conn, existing["id"])
+            add_credential(conn, user["id"], "password", "login", verifier, _utc_now_iso())
+            bump_session_version(conn, user["id"])
+            self.server.login_throttle.reset(name)
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "set_password", name, user["role"], [], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        body = {"name": name, "session_invalidated": True}
+        if supplied is None:
+            body["password"] = password  # shown once; never stored or logged
+        self._send_json(200, body)
+
+    def _handle_unlock_user(self) -> None:
+        """Clear an account's login lockout (POST /api/users/unlock).
+
+        Body: name (required). Admin-gated; 404 unknown; 200 {name, unlocked: true}.
+
+        Why:
+            The escape hatch for the throttle's self-DoS case: anyone who knows a person's
+            account name can lock them out by failing five logins. Per-account lockout is
+            still the right mechanism (it is what stops online guessing), so the answer is an
+            immediate admin unlock rather than a weaker limit. Distinct from `password set`,
+            which also clears the lockout but changes the credential — someone locked out by
+            an attacker should not have to change a password they still know.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        _, name = got
+        conn = open_relay_store(self.server.db_path)
+        try:
+            if get_user_by_name(conn, name) is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            self.server.login_throttle.reset(name)
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "unlock", name, "", [], _utc_now_iso()
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "unlocked": True})
+
     def _handle_set_user_role(self) -> None:
         """Change an existing account's role (POST /api/users/role).
 
@@ -2096,6 +2207,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # indistinguishable from an unknown key — the login form can't enumerate
             # producer identities, and one credential never spans both auth worlds.
             if user is not None and user["active"] and user["role"] in _INTERACTIVE_ROLES:
+                # Unit 3 (open decision 3): once an account HAS a password, its keys stop
+                # working here — passwords become THE interactive credential and keys become
+                # machine-only. Until a password is set, key login keeps working, so nobody
+                # is locked out mid-migration. This is what makes "what a human knows can't
+                # push, what a machine holds can't log in" true in both directions.
+                if get_active_password_credential(conn, user["id"]) is not None:
+                    return None
                 update_last_login(conn, user["id"], _utc_now_iso())
                 return user["id"], user["session_version"], {
                     "name": user["name"],
@@ -2245,17 +2363,36 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "login is not configured"})
             return
         raw = self._read_raw_body()
-        key = ""
+        key, name, password = "", "", ""
         if raw is not None:
             try:
                 parsed = json.loads(raw.decode("utf-8"))
-                key = parsed.get("key", "") if isinstance(parsed, dict) else ""
+                if isinstance(parsed, dict):
+                    key = parsed.get("key", "")
+                    name = parsed.get("name", "")
+                    password = parsed.get("password", "")
             except (ValueError, UnicodeDecodeError):
-                key = ""
+                pass
+        key = key if isinstance(key, str) else ""
+        name = name if isinstance(name, str) else ""
+        password = password if isinstance(password, str) else ""
+
         conn = open_relay_store(self.server.db_path)
         try:
-            resolved = self._resolve_login(conn, key if isinstance(key, str) else "")
+            # Unit 3: two login modes on one endpoint. Name+password is the interactive
+            # credential for humans; the key mode stays for machines-turned-interactive and
+            # for any account that has no password yet (open decision 3 — no lockout during
+            # the transition). They are resolved SEPARATELY and never fall through to one
+            # another: a password must never authenticate the key path, and vice versa.
+            if name and password:
+                resolved = self._resolve_password_login(conn, name, password)
+            else:
+                resolved = self._resolve_login(conn, key)
             if resolved is None:
+                # ONE generic failure for every cause — unknown name, wrong password,
+                # locked out, no password set, throttled, key rejected. Same status, same
+                # body, same headers. Anything that distinguished them would answer
+                # "does this account exist?" for free.
                 self._send_json(401, {"ok": False})
                 return
             sub, sv, identity = resolved
@@ -2266,6 +2403,76 @@ class _RelayHandler(BaseHTTPRequestHandler):
             )
         finally:
             conn.close()
+
+    def _resolve_password_login(self, conn, name: str, password: str) -> tuple | None:
+        """Verify a name+password login, or None on any failure (auth revamp, Unit 3).
+
+        Args:
+            conn: An open relay-store connection.
+            name: The posted account name (untrusted).
+            password: The posted password (untrusted).
+
+        Returns:
+            (sub, sv, identity) on success — the session cookie's subject + version and
+            {"name", "role"} — or None on ANY failure, which the caller turns into one
+            generic 401.
+
+        Why:
+            Every path through this function performs EXACTLY ONE Argon2 verification,
+            including the ones where there is nothing real to verify against (unknown name,
+            account with no password, locked-out account, relay-wide throttle tripped). That
+            is what makes the generic 401 above genuinely generic: without it, response time
+            distinguishes the failure classes and hands an attacker an account-enumeration
+            oracle that the identical status code was meant to close.
+
+            Roles are gated exactly as the key path gates them — only _INTERACTIVE_ROLES may
+            mint a session, so a contributor account that somehow held a password still could
+            not log in. One credential never spans both auth worlds.
+        """
+        throttle = self.server.login_throttle
+        # Blocked attempts still run a full verification below (against the dummy hash), so
+        # a lockout costs the same as any other failure and cannot be probed for.
+        blocked = throttle.is_blocked(THROTTLE_GLOBAL, "") or throttle.is_blocked(
+            THROTTLE_ACCOUNT, name
+        )
+
+        stored_hash = None
+        user = None
+        if not blocked:
+            user = get_user_by_name(conn, name)
+            if user is not None and user["active"] and user["role"] in _INTERACTIVE_ROLES:
+                credential = get_active_password_credential(conn, user["id"])
+                if credential is not None:
+                    stored_hash = credential["verifier"]
+
+        try:
+            ok, new_hash = verify_password(stored_hash, password)
+        except PasswordsUnavailable as exc:
+            # Fail closed and make it diagnosable: this is an operator misconfiguration
+            # (the relay deployed without its hashing dependency), not a user error.
+            print(f"[relay] password login unavailable: {exc}", file=sys.stderr)
+            return None
+
+        if not ok or user is None:
+            throttle.record_failure(THROTTLE_ACCOUNT, name)
+            throttle.record_failure(THROTTLE_GLOBAL, "")
+            if stored_hash is not None and not ok:
+                pass  # a real account, wrong password — nothing extra to record
+            return None
+
+        throttle.record_success(name)
+        if new_hash is not None:
+            # The stored hash used outdated parameters. Rewrite it now that we hold the
+            # plaintext — the only moment an upgrade is possible.
+            try:
+                set_password_credential_verifier(conn, credential["id"], new_hash)
+            except sqlite3.Error as exc:  # never fail a valid login over an upgrade
+                print(f"[relay] could not rehash password for {name!r}: {exc}", file=sys.stderr)
+        update_last_login(conn, user["id"], _utc_now_iso())
+        return user["id"], user["session_version"], {
+            "name": user["name"],
+            "role": user["role"],
+        }
 
     def _handle_api_logout(self) -> None:
         """Clear the session cookie via JSON (POST /api/logout).
@@ -2855,6 +3062,12 @@ class RelayServer(ThreadingHTTPServer):
         self.public_origin = auth.public_origin
         self.allow_legacy_admin = auth.allow_legacy_admin
         self.disable_legacy_ingest = auth.disable_legacy_ingest
+        # Unit 3: failed-login throttling. Held on the SERVER, not per-request, because the
+        # counters must persist across requests to mean anything — a per-request instance
+        # would reset on every attempt and throttle nothing. In-memory by choice (see
+        # throttle.py for what that costs); one instance is shared by every handler thread
+        # and is internally locked.
+        self.login_throttle = LoginThrottle()
         super().__init__(server_address, _RelayHandler)
 
 

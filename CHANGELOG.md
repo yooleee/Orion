@@ -14,6 +14,62 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Password login for humans (auth-revamp Unit 3, 2026-07-20)
+
+Interactive accounts log in with a **name and password**. Machines keep holding keys. The two
+credential types no longer overlap: what a human knows cannot push, and what a machine holds
+cannot log in.
+
+Recorded honestly: a password is *weaker per-credential* than a 256-bit key. The gain is
+compartmentalisation and human factors — people can hold a password in their head, and stop
+handling stored key material entirely. That trade is what obliges the throttling below.
+
+### Added
+
+- **Argon2id password hashing** (`argon2-cffi`, a new **relay-only** dependency in the `relay`
+  extra). The producer never imports it, so the core install stays at three runtime deps.
+  Parameters are passed explicitly (OWASP's m=19 MiB, t=2, p=1) so a library upgrade cannot
+  silently change the cost of every stored hash, and `check_needs_rehash` upgrades a hash
+  transparently on the next successful login. No pepper is reused — Argon2id carries its own
+  salt, and secret independence is worth keeping.
+- **`relay-user password set|unlock`.** `set` prompts twice with `getpass`, or mints a strong
+  password with `--generate` and prints it once. A password is **never** accepted as a
+  command-line argument — argv lands in shell history, `ps` output, and CI logs. `unlock`
+  clears a lockout without changing a password the person still knows.
+- **Login throttling**, keyed by dimension so a future per-IP dimension is additive rather than
+  a redesign. Five failures lock an account for fifteen minutes; a relay-wide rolling bound
+  catches attempts sprayed thinly across many names. Per-IP is deliberately **not** implemented:
+  behind Fly's proxy it means trusting a forwarded header, and trusting it wrongly lets an
+  attacker forge it and evade the limit entirely. The accepted trade is recorded in
+  `relay/throttle.py`.
+- **Name + password on the SPA login**, with the access-key mode kept as the transition
+  fallback for accounts that have no password yet.
+
+### Security properties worth stating explicitly
+
+- **Timing parity.** Every login attempt performs **exactly one** Argon2 verification —
+  including unknown names, accounts with no password, and locked-out accounts, which verify
+  against a server-held dummy hash. Without this, response time answers "does this account
+  exist?" for free and the shared generic 401 is decorative. Measured spread across all failure
+  classes: **0.3 ms (2.3%)**. Asserted in tests by counting verifications, not by wall-clock.
+- **Bounded memory.** Argon2 is memory-hard and the relay spawns an unbounded thread per
+  request, so concurrent attempts multiply memory: at OWASP parameters, ~20 simultaneous logins
+  would exhaust the 512 MB VM — an unauthenticated denial of service. Concurrent verifications
+  are capped by a semaphore (peak ≈76 MiB); excess requests wait rather than fail.
+- **Fail-closed.** Without `argon2-cffi` the relay refuses password auth with a clear operator
+  error rather than degrading to a weaker scheme. A malformed stored hash is an ordinary auth
+  failure plus a log line, never a 500.
+
+### Changed
+
+- **Once an account has a password, its keys stop working for login** (they keep working for
+  machine pushes). Until a password is set, key login still works, so nothing locks anyone out
+  mid-transition.
+- **Setting a password bumps `session_version`**, invalidating live cookies — a password change
+  is the response to a suspected compromise of the human's own credential.
+- A **contributor cannot be given a password** (409): a machine identity must not be able to
+  mint an interactive session.
+
 ## Credential-based authentication — the resolver cutover (auth-revamp Unit 2b, 2026-07-20)
 
 Unit 2a built the accounts/credentials schema without reading it. This unit moves both

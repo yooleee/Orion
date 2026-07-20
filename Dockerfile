@@ -34,7 +34,10 @@ WORKDIR /app
 # pyproject + src first so this layer caches unless the package itself changes.
 COPY pyproject.toml ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir .
+# The relay extra adds argon2-cffi for password login (relay-side only; the
+# producer never imports it). Prebuilt manylinux wheels cover this image, so
+# no compiler is needed in the final stage.
+RUN pip install --no-cache-dir '.[relay]'
 
 # The relay/ package is a SEPARATE top-level package (not under src/, so not part
 # of the installed wheel). Copy it alongside and put /app on PYTHONPATH so

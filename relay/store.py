@@ -242,6 +242,50 @@ CREATE TABLE IF NOT EXISTS relay_user_projects (
 -- The scope lookup filters by user_id on every authorized request; index it.
 CREATE INDEX IF NOT EXISTS idx_relay_user_projects_user ON relay_user_projects(user_id);
 
+-- Auth revamp (Unit 2a): CREDENTIALS split out from the account. An account (relay_users)
+-- is the durable identity — name, role, kind, scopes — and a credential is one of N
+-- attachable, individually revocable things beneath it. This is what lets one human hold a
+-- login password plus two machine keys (a Mac and a WSL2 box) under a SINGLE identity,
+-- instead of today's one-key-per-identity model where the identity dies with the key.
+--
+-- `type` is 'key' (a machine credential; verifier = HMAC-SHA256(pepper, raw_key), the same
+-- construction relay_users.key_verifier used) or 'password' (an interactive credential;
+-- verifier = an Argon2id encoded hash, which embeds its own salt and parameters — so the
+-- one `verifier` column carries both formats without the store needing to know either).
+-- `label` is display metadata ('mac', 'wsl2', 'login'); the credential ID is the identifier
+-- that revocation targets, because labels are for humans and can repeat over time.
+CREATE TABLE IF NOT EXISTS relay_credentials (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,            -- → relay_users.id (no FK: see the note below)
+    type         TEXT NOT NULL,               -- "key" | "password"
+    label        TEXT NOT NULL,               -- human label, e.g. "mac" / "wsl2" / "login"
+    verifier     TEXT NOT NULL,               -- HMAC hex (key) | argon2 encoded hash (password)
+    active       INTEGER NOT NULL DEFAULT 1,  -- 0 = revoked (this credential alone)
+    created_at   TEXT NOT NULL,               -- ISO 8601 UTC
+    last_used_at TEXT                         -- ISO 8601 UTC, NULL until first use
+);
+
+-- The Bearer resolver looks a presented key up by its verifier on EVERY authenticated push,
+-- so index it. UNIQUE across all key rows regardless of `active`: a revoked verifier stays
+-- reserved, so a revoked key can never be re-minted and silently resurrected.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_credentials_key_verifier
+    ON relay_credentials(verifier) WHERE type = 'key';
+
+-- At most ONE active password per account, enforced by the DB rather than by a read-then-write
+-- in application code (amendment 7): two admins setting a password concurrently would both see
+-- "no active password" and both insert. A partial unique index makes that race impossible.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_credentials_one_active_password
+    ON relay_credentials(user_id) WHERE type = 'password' AND active = 1;
+
+-- Labels are unique among an account's ACTIVE credentials, so CLI ops can address a
+-- credential by label conveniently. Revoked rows are excluded, so a label is reusable once
+-- its credential is retired (replacing a lost 'mac' key with a new 'mac' key).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_credentials_active_label
+    ON relay_credentials(user_id, label) WHERE active = 1;
+
+-- Every credential lookup for an account filters on user_id; index it.
+CREATE INDEX IF NOT EXISTS idx_relay_credentials_user ON relay_credentials(user_id);
+
 -- Append-only audit of admin/provisioning actions (who created/revoked whom, with what
 -- role + projects). A multi-party access model needs an accountability trail; this is it.
 CREATE TABLE IF NOT EXISTS relay_admin_audit (
@@ -291,6 +335,10 @@ def open_relay_store(db_path: Path) -> sqlite3.Connection:
     # every prior schema change was a whole new table). Run after the CREATEs so a fresh DB
     # and an already-deployed one converge to the same shape.
     _ensure_columns(conn)
+    # Auth revamp (Unit 2a): the store's first DATA migration — copy each pre-revamp account's
+    # key into a credential row. Runs after the columns exist, and is a cheap read-only no-op
+    # once done (see the function's docstring for why that is safe on a per-request open).
+    _migrate_key_credentials(conn)
     return conn
 
 
@@ -313,6 +361,16 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     # (not in _SCHEMA) so an already-deployed relay gains the column via one cheap ALTER —
     # relay_project_meta first shipped with only `kind`.
     "relay_project_meta": [("due_soon_days", "INTEGER")],
+    # Auth revamp (Unit 2a): what an account IS, and (for an agent) whose behalf it acts on.
+    # `kind` is NULLABLE with no default rather than "human" NOT NULL, per this table's
+    # convention — existing rows read NULL, and every reader maps NULL to "human" (the only
+    # thing an account could have been before agents existed). `operated_by` points at the
+    # operating HUMAN account for an agent, and is NULL for a human. It is deliberately NOT a
+    # declared foreign key: this store never enables PRAGMA foreign_keys, so a declared FK
+    # would be decorative — the lifecycle rules (an operator must be an active human, deleting
+    # an operator with live agents is blocked) are enforced in code at Unit 4a, where they can
+    # produce real error messages.
+    "relay_users": [("kind", "TEXT"), ("operated_by", "INTEGER")],
 }
 
 
@@ -332,13 +390,140 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         — the store's first real migration seam, kept deliberately tiny (no framework). The
         table and column names come from a hardcoded constant, never a request, so the f-string
         interpolation carries no injection surface (sqlite cannot parameterize DDL identifiers).
+
+        The `table_info` check alone is NOT enough under concurrency, and this store is opened
+        per request: two workers opening a not-yet-migrated DB at the same instant both read
+        "column missing" and both ALTER, and the loser gets OperationalError("duplicate column
+        name"). That surfaces as a 500 on a real request during exactly the redeploy a migration
+        happens on. Treating an already-present column as success closes the race without
+        introducing locking here — the check-then-act stays, and the DB itself is the arbiter.
     """
     for table, columns in _ADDITIVE_COLUMNS.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         for name, decl in columns:
             if name not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                except sqlite3.OperationalError as exc:
+                    # Only the lost-race case is benign; anything else is a real schema error.
+                    if "duplicate column name" not in str(exc):
+                        raise
     conn.commit()
+
+
+# The label given to the key credential each pre-revamp account is migrated into. "default"
+# rather than a guessed machine name: the store genuinely does not know what the existing key
+# is installed on, and inventing "mac" would be a lie the CLI then displays.
+_MIGRATED_KEY_LABEL = "default"
+
+
+class RelayStoreMigrationError(RuntimeError):
+    """Raised when the credential backfill cannot establish its postcondition.
+
+    Why:
+        The store must FAIL CLOSED. If any account were left without a key credential after
+        the backfill, the Unit 2b resolver would silently stop authenticating that account —
+        a working key would start returning 401 with no explanation. Refusing to hand back a
+        connection turns that silent auth failure into a loud startup failure, which is the
+        trade this project's fail-closed invariant asks for.
+    """
+
+
+def _migrate_key_credentials(conn: sqlite3.Connection) -> None:
+    """Back-fill one 'key' credential per pre-revamp account, exactly once, under a lock.
+
+    Args:
+        conn: An open relay-store connection (schema CREATEd, columns ensured).
+
+    Returns:
+        None. Inserts the missing credential rows in a single serialized transaction.
+
+    Raises:
+        RelayStoreMigrationError: if any active account still lacks a key credential
+            afterwards (the postcondition), so the store never serves a half-migrated DB.
+
+    Why:
+        This is the store's first DATA migration — every prior one was DDL (`_ensure_columns`).
+        It copies each account's existing `relay_users.key_verifier` into a credential row, so
+        every already-provisioned key keeps working with ZERO re-provisioning once Unit 2b's
+        resolver reads the credentials table. No key is ever re-minted: the verifier is copied
+        as-is, and the raw key it verifies is not knowable here anyway.
+
+        Two properties make it safe to run on EVERY open, which is what `open_relay_store`
+        does (it is called per request, not once at boot):
+
+        1. It is CHEAP in the steady state. The read-only "is there anything to do" check runs
+           first, outside any lock, and after the one-time migration it always answers no — so
+           normal request traffic never takes a write lock here.
+        2. It is SERIALIZED and idempotent when there IS work. Two workers opening the store
+           concurrently would otherwise both read "no credential exists" and both insert.
+           `BEGIN IMMEDIATE` takes the write lock up front so the second waits (the connection's
+           5s busy timeout covers the wait), and the `WHERE NOT EXISTS` guard means the loser
+           then inserts nothing rather than duplicating. A crash mid-migration simply leaves
+           work for the next open to finish — there is no partial state to repair, because the
+           transaction commits all-or-nothing.
+    """
+    # The pre-check is a plain read: no lock, no transaction. In the steady state (every
+    # request after the one-time migration) this is the only statement that runs.
+    if _accounts_missing_key_credentials(conn) == 0:
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Idempotent by construction: the NOT EXISTS subquery skips any account that already
+        # has a key credential, so a re-run — or a concurrent loser that waited on the lock —
+        # inserts nothing. Matched on type='key' only: a password credential must not make an
+        # account look migrated.
+        conn.execute(
+            """
+            INSERT INTO relay_credentials (user_id, type, label, verifier, active, created_at)
+            SELECT u.id, 'key', ?, u.key_verifier, u.active, u.created_at
+              FROM relay_users AS u
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM relay_credentials AS c
+                    WHERE c.user_id = u.id AND c.type = 'key'
+             )
+            """,
+            (_MIGRATED_KEY_LABEL,),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    # Postcondition, checked AFTER the commit against what is actually stored — not inferred
+    # from the rowcount, which would only tell us what we tried to write.
+    remaining = _accounts_missing_key_credentials(conn)
+    if remaining:
+        raise RelayStoreMigrationError(
+            f"credential backfill left {remaining} account(s) without a key credential; "
+            f"refusing to serve a half-migrated store"
+        )
+
+
+def _accounts_missing_key_credentials(conn: sqlite3.Connection) -> int:
+    """Count accounts that have no 'key' credential row yet.
+
+    Args:
+        conn: An open relay-store connection.
+
+    Returns:
+        The number of `relay_users` rows with no matching type='key' credential.
+
+    Why:
+        Used twice with deliberately different meanings — as the cheap pre-check that keeps
+        the migration off the hot path, and as the postcondition that proves it finished.
+        Sharing one query keeps those two answers from ever disagreeing (DRY).
+    """
+    return conn.execute(
+        """
+        SELECT COUNT(*) FROM relay_users AS u
+         WHERE NOT EXISTS (
+               SELECT 1 FROM relay_credentials AS c
+                WHERE c.user_id = u.id AND c.type = 'key'
+         )
+        """
+    ).fetchone()[0]
 
 
 def ingest(
@@ -1418,6 +1603,15 @@ def add_user(
         (astronomically unlikely) verifier collision a loud IntegrityError the server
         can map to a clean 4xx, rather than a silent second account. We INSERT OR
         IGNORE the project rows so a caller passing a duplicate project is harmless.
+
+        Auth revamp (Unit 2a): the verifier is DUAL-WRITTEN — into the legacy
+        `relay_users.key_verifier` column (which the resolvers still read until Unit 2b)
+        AND into a `relay_credentials` row (which they will read after it). Writing both
+        is what keeps this unit's behavior byte-identical: an account provisioned now
+        authenticates under the old resolver and under the new one, so there is no window
+        between the two deploys where a fresh account cannot log in or push. Unit 2b
+        retires the legacy write (a sentinel replaces it) in the same PR that moves the
+        resolvers over, so the column stops being written and read together.
     """
     cursor = conn.execute(
         "INSERT INTO relay_users (name, key_verifier, role, created_by, created_at) "
@@ -1430,6 +1624,14 @@ def add_user(
             "INSERT OR IGNORE INTO relay_user_projects (user_id, project) VALUES (?, ?)",
             (user_id, project),
         )
+    # The account's first credential. Shares the surrounding implicit transaction (the
+    # commit below closes it), so identity + scope + credential still land together or
+    # not at all — the "no half-created user" property this function already promised.
+    conn.execute(
+        "INSERT INTO relay_credentials (user_id, type, label, verifier, created_at) "
+        "VALUES (?, 'key', ?, ?, ?)",
+        (user_id, _MIGRATED_KEY_LABEL, key_verifier, created_at),
+    )
     conn.commit()
     return user_id
 
@@ -1610,11 +1812,20 @@ def revoke_user(conn: sqlite3.Connection, user_id: int) -> None:
         with the key is denied) and bump session_version (so any cookie already in a
         browser stops working on its next request). Doing them in a single UPDATE
         means there is no window where one took effect but not the other.
+
+        Auth revamp (Unit 2a): revoking the account also deactivates every credential
+        beneath it, so "the account is revoked" and "none of its credentials work" can
+        never disagree. This cannot change behavior in this unit — nothing reads the
+        credentials table until Unit 2b — but leaving active credential rows under a
+        revoked account would be a trap primed to spring the moment the resolver moves.
     """
     conn.execute(
         "UPDATE relay_users SET active = 0, session_version = session_version + 1 "
         "WHERE id = ?",
         (user_id,),
+    )
+    conn.execute(
+        "UPDATE relay_credentials SET active = 0 WHERE user_id = ?", (user_id,)
     )
     conn.commit()
 
@@ -1666,10 +1877,20 @@ def rotate_key(conn: sqlite3.Connection, user_id: int, key_verifier: str) -> Non
         where one applied but not the other (the `revoke_user` guarantee). It deliberately does
         NOT touch `active`: rotate refreshes a key for an ACTIVE user; reviving a revoked user is
         `delete` + `add` (the server rejects rotating a revoked user), keeping the verbs distinct.
+
+        Auth revamp (Unit 2a): the rotation is applied to the account's migrated key
+        credential as well, so the two stores do not drift while both exist. This command
+        is RETIRED in Unit 2b — the multi-credential model replaces one-shot rotation with
+        add → deploy → verify → revoke — so this dual-write is deliberately short-lived
+        rather than the shape credentials are meant to be updated through.
     """
     conn.execute(
         "UPDATE relay_users SET key_verifier = ?, session_version = session_version + 1 "
         "WHERE id = ?",
+        (key_verifier, user_id),
+    )
+    conn.execute(
+        "UPDATE relay_credentials SET verifier = ? WHERE user_id = ? AND type = 'key'",
         (key_verifier, user_id),
     )
     conn.commit()
@@ -1694,11 +1915,184 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> None:
         HISTORY, their `author_name` is denormalized (renders after the user is gone) and their
         `author_id` is already dropped from the wire — so a past report or reply keeps its recorded
         author. Live state goes; history stays.
+
+        Auth revamp (Unit 2a): the account's credentials go too. This is not optional
+        bookkeeping — key verifiers are UNIQUE across the credentials table, so an orphaned
+        row would keep the deleted account's verifier reserved forever and make re-adding
+        that same key fail with an IntegrityError.
     """
+    conn.execute("DELETE FROM relay_credentials WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_user_projects WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_producer_checklists WHERE author_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_producer_disciplines WHERE author_id = ?", (user_id,))
     conn.execute("DELETE FROM relay_users WHERE id = ?", (user_id,))
+    conn.commit()
+
+
+# --- Credentials: N per account, individually revocable (auth revamp, Unit 2a) ------
+# The store deals only in VERIFIERS, exactly as the user accessors above do — minting a raw
+# key and hashing a password both belong to the server/auth layer, where the pepper and the
+# hashing dependency live. These accessors are written in this unit but not yet CALLED by the
+# resolvers: Unit 2b cuts those over. They are here so the schema and its access surface land
+# and get tested together, with no behavior change riding along.
+
+
+def add_credential(
+    conn: sqlite3.Connection,
+    user_id: int,
+    cred_type: str,
+    label: str,
+    verifier: str,
+    created_at: str,
+) -> int:
+    """Attach a new credential to an account; return its id.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The account this credential belongs to.
+        cred_type: "key" (machine) or "password" (interactive).
+        label: A human label, unique among the account's ACTIVE credentials.
+        verifier: HMAC hex for a key, an Argon2id encoded hash for a password.
+        created_at: ISO 8601 UTC timestamp.
+
+    Returns:
+        The new relay_credentials.id — the handle revocation targets.
+
+    Why:
+        Adding a credential is how a machine is onboarded without touching identity: the
+        human keeps one account, and the new box gets its own revocable key. Duplicate
+        active labels, a second active password, and a re-used key verifier all raise
+        IntegrityError from their indexes rather than being pre-checked here — the DB is the
+        one place those races cannot slip through (amendment 7).
+    """
+    cursor = conn.execute(
+        "INSERT INTO relay_credentials (user_id, type, label, verifier, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (user_id, cred_type, label, verifier, created_at),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_credential_by_key_verifier(
+    conn: sqlite3.Connection, verifier: str
+) -> sqlite3.Row | None:
+    """Look up an ACTIVE key credential by its verifier (the Bearer resolution path).
+
+    Args:
+        conn: An open relay-store connection.
+        verifier: HMAC-SHA256(pepper, presented_key), hex.
+
+    Returns:
+        The credential row, or None when no active key matches.
+
+    Why:
+        This is what Unit 2b's `_resolve_bearer_principal` will call on every authenticated
+        push. It filters on `active` here rather than leaving that to the caller, so a
+        revoked key can never resolve through a caller that forgot to check. The account's
+        own `active` flag is a separate question the resolver still asks — a live credential
+        under a revoked account must not authenticate either.
+    """
+    return conn.execute(
+        "SELECT * FROM relay_credentials WHERE verifier = ? AND type = 'key' AND active = 1",
+        (verifier,),
+    ).fetchone()
+
+
+def get_active_password_credential(
+    conn: sqlite3.Connection, user_id: int
+) -> sqlite3.Row | None:
+    """Return an account's active password credential, or None if it has none.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The account to look up.
+
+    Returns:
+        The single active password row, or None (the account logs in by key, or not at all).
+
+    Why:
+        Unit 3's password login verifies against this row, and "has no password yet" is a
+        first-class answer rather than an error — it is the state every account is in until
+        an admin sets one, and the state machine accounts stay in permanently. The partial
+        unique index guarantees at most one row, so this cannot silently pick between two.
+    """
+    return conn.execute(
+        "SELECT * FROM relay_credentials "
+        "WHERE user_id = ? AND type = 'password' AND active = 1",
+        (user_id,),
+    ).fetchone()
+
+
+def list_credentials(conn: sqlite3.Connection, user_id: int) -> list[dict]:
+    """List an account's credentials (newest first), WITHOUT their verifiers.
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The account whose credentials to list.
+
+    Returns:
+        A list of dicts: id, type, label, active, created_at, last_used_at.
+
+    Why:
+        Backs `relay-user key list`, so a human can see what is attached before revoking
+        something. The verifier is excluded by construction, exactly as `list_users` excludes
+        `key_verifier` — a verifier never leaves the store, and a listing is the easiest place
+        to leak one by accident.
+    """
+    rows = conn.execute(
+        "SELECT id, type, label, active, created_at, last_used_at "
+        "FROM relay_credentials WHERE user_id = ? ORDER BY id DESC",
+        (user_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def revoke_credential(conn: sqlite3.Connection, credential_id: int) -> bool:
+    """Deactivate ONE credential by id; return whether a row changed.
+
+    Args:
+        conn: An open relay-store connection.
+        credential_id: The credential to revoke (its id, not its label).
+
+    Returns:
+        True when an active credential was deactivated, False when the id was unknown or
+        already revoked — so the caller can 404 rather than report a phantom success.
+
+    Why:
+        Targets the id, not the label: labels are display metadata and can be reused after a
+        revocation, so revoking "the mac key" by name would be ambiguous the moment a
+        replacement exists. Deliberately does NOT bump `session_version` (amendment 9) —
+        losing a machine key must not log the human out of the dashboard everywhere. Only a
+        password change or an account revocation does that.
+    """
+    cursor = conn.execute(
+        "UPDATE relay_credentials SET active = 0 WHERE id = ? AND active = 1",
+        (credential_id,),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def touch_credential(conn: sqlite3.Connection, credential_id: int, ts: str) -> None:
+    """Stamp a credential's last_used_at.
+
+    Args:
+        conn: An open relay-store connection.
+        credential_id: The credential that just authenticated.
+        ts: ISO 8601 UTC timestamp.
+
+    Returns:
+        None.
+
+    Why:
+        The mirror of `update_last_login` for machine credentials. It answers the question a
+        human actually has before revoking something — "is this key still in use, and by
+        what?" — which under a multi-credential account is otherwise unanswerable.
+    """
+    conn.execute(
+        "UPDATE relay_credentials SET last_used_at = ? WHERE id = ?", (ts, credential_id)
+    )
     conn.commit()
 
 

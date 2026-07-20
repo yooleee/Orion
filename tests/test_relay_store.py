@@ -16,11 +16,14 @@
 # =============================================================================
 
 import sqlite3
+import threading
 from datetime import date
 
 import pytest
 
+from relay import store
 from relay.store import (
+    add_credential,
     add_discussion_item,
     add_user,
     bump_session_version,
@@ -28,7 +31,9 @@ from relay.store import (
     discussion_items_for_project,
     effective_checklist,
     get,
+    get_active_password_credential,
     get_checklist,
+    get_credential_by_key_verifier,
     get_due_soon_days,
     get_project_kind,
     get_user_by_id,
@@ -37,6 +42,7 @@ from relay.store import (
     history,
     ingest,
     latest_report_per_project,
+    list_credentials,
     list_projects,
     list_users,
     observed_history,
@@ -44,9 +50,11 @@ from relay.store import (
     producer_checklists_for,
     producer_disciplines_for,
     project_disciplines,
+    RelayStoreMigrationError,
     projects_for_user,
     record_admin_audit,
     record_observations,
+    revoke_credential,
     revoke_user,
     set_due_soon_days,
     set_project_kind,
@@ -210,6 +218,360 @@ def test_ensure_columns_migrates_a_pre_attribution_schema(tmp_path):
 
     # Idempotent: a second open must not error (guarded ADD COLUMN is a no-op once present).
     open_relay_store(db).close()
+
+
+def test_ensure_columns_survives_two_concurrent_opens(tmp_path):
+    """Two threads migrating the same un-migrated DB at once must both succeed.
+
+    Why this matters: a pre-existing race, found while building the Unit 2a migration. The
+    `PRAGMA table_info` guard is check-then-act, so two workers opening a not-yet-migrated DB
+    simultaneously both see the column missing and both ALTER — the loser raised
+    OperationalError("duplicate column name"). Because the relay opens the store on EVERY
+    request, that surfaced as a 500 on a real request during precisely the redeploy a migration
+    runs on. The fix treats an already-present column as success.
+    """
+    db = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")  # as a deployed relay's DB already is — see _seed_pre_revamp_db
+    conn.execute(
+        "CREATE TABLE relay_observed_items (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "project TEXT NOT NULL, item_key TEXT NOT NULL, text TEXT NOT NULL, "
+        "done INTEGER NOT NULL, observed_at TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def open_it():
+        try:
+            barrier.wait()  # force both threads into the ALTER at the same moment
+            open_relay_store(db).close()
+        except Exception as exc:  # noqa: BLE001 — surface ANY failure, that is the point
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_it) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    conn = open_relay_store(db)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(relay_observed_items)")}
+    assert "author_id" in cols  # the column landed exactly once, from whichever thread won
+    conn.close()
+
+
+# --- Auth revamp Unit 2a: the credential backfill (the store's first DATA migration) ---
+# Every prior migration was DDL. This one copies data, runs on a per-request open, and must
+# survive concurrency and interruption — so the cases below are about those properties, not
+# just "the rows appeared".
+
+# A faithful copy of the pre-revamp relay_users schema, seeded via raw SQL so the test builds
+# a genuinely OLD database rather than a new one with rows in it.
+_PRE_REVAMP_USERS_DDL = """
+CREATE TABLE relay_users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    key_verifier    TEXT NOT NULL UNIQUE,
+    role            TEXT NOT NULL,
+    active          INTEGER NOT NULL DEFAULT 1,
+    session_version INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    last_login_at   TEXT
+);
+"""
+
+
+def _seed_pre_revamp_db(db, users):
+    """Build an old-schema DB holding `users` as (name, verifier, role, active) tuples.
+
+    The DB is put in WAL mode here because that is what a real pre-revamp relay DB is: it was
+    created by `open_relay_store`, which sets WAL on open. Seeding it in the default
+    rollback-journal mode would make the concurrency tests below exercise SQLite's one-time
+    WAL CONVERSION race (that conversion takes a brief exclusive lock and does not honor the
+    busy timeout) instead of the migration race they are actually about.
+    """
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(_PRE_REVAMP_USERS_DDL)
+    for name, verifier, role, active in users:
+        conn.execute(
+            "INSERT INTO relay_users (name, key_verifier, role, active, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, 'test', '2026-07-19T00:00:00+00:00')",
+            (name, verifier, role, active),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_open_backfills_a_key_credential_for_every_pre_revamp_account(tmp_path):
+    """Opening a pre-revamp DB gives every existing account a key credential with the SAME verifier.
+
+    Why this matters: this is the promise that makes the revamp deployable — "existing keys keep
+    working with zero re-provisioning". The verifier must be COPIED, not re-minted, because the raw
+    key it verifies lives on the user's machines and cannot be regenerated from here. If this copy
+    were wrong, every deployed key would break at the Unit 2b cutover with no way to recover them.
+    """
+    db = tmp_path / "old.sqlite3"
+    _seed_pre_revamp_db(db, [("user", "verifier-a", "admin", 1), ("dad", "verifier-b", "viewer", 1)])
+
+    conn = open_relay_store(db)
+    creds = conn.execute(
+        "SELECT u.name, c.type, c.label, c.verifier, c.active FROM relay_credentials c "
+        "JOIN relay_users u ON u.id = c.user_id ORDER BY u.name"
+    ).fetchall()
+    assert [(r["name"], r["type"], r["verifier"]) for r in creds] == [
+        ("dad", "key", "verifier-b"),
+        ("user", "key", "verifier-a"),
+    ]
+    # The legacy column is left intact — Unit 2b still reads it until the resolver cuts over.
+    assert conn.execute("SELECT key_verifier FROM relay_users WHERE name='user'").fetchone()[0] == "verifier-a"
+    conn.close()
+
+
+def test_backfill_carries_the_accounts_active_flag(tmp_path):
+    """A revoked account's migrated credential is created INACTIVE, not active.
+
+    Why this matters: the backfill must not resurrect access. A revoked account's key is dead
+    today (the resolver checks relay_users.active), and after the cutover the credential's own
+    `active` flag is what carries that — so copying it as active=1 would silently un-revoke a
+    key the admin deliberately killed.
+    """
+    db = tmp_path / "old.sqlite3"
+    _seed_pre_revamp_db(db, [("live", "v-live", "viewer", 1), ("revoked", "v-dead", "viewer", 0)])
+
+    conn = open_relay_store(db)
+    rows = dict(
+        conn.execute(
+            "SELECT u.name, c.active FROM relay_credentials c "
+            "JOIN relay_users u ON u.id = c.user_id"
+        ).fetchall()
+    )
+    assert rows == {"live": 1, "revoked": 0}
+    conn.close()
+
+
+def test_backfill_is_idempotent_across_repeated_opens(tmp_path):
+    """Reopening the store many times never duplicates a credential.
+
+    Why this matters: open_relay_store is called on EVERY request, not once at boot. A migration
+    that appended a row per open would grow without bound and break the "one active label per
+    account" index the moment a second credential is added.
+    """
+    db = tmp_path / "old.sqlite3"
+    _seed_pre_revamp_db(db, [("user", "verifier-a", "admin", 1)])
+
+    for _ in range(5):
+        open_relay_store(db).close()
+
+    conn = open_relay_store(db)
+    assert conn.execute("SELECT COUNT(*) FROM relay_credentials").fetchone()[0] == 1
+    conn.close()
+
+
+def test_two_concurrent_opens_race_cleanly(tmp_path):
+    """Two threads opening a pre-revamp DB at once produce exactly ONE credential per account.
+
+    Why this matters: the relay opens the store per request, so a redeploy under live traffic can
+    genuinely run this migration twice at the same instant. Without the serialized transaction,
+    both workers would read "no credential exists" and both insert — and the UNIQUE key-verifier
+    index would turn that into a 500 on a real request. This is the amendment-2 race, tested
+    rather than assumed.
+    """
+    db = tmp_path / "old.sqlite3"
+    _seed_pre_revamp_db(db, [("a", "v-a", "admin", 1), ("b", "v-b", "viewer", 1)])
+
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def open_it():
+        try:
+            barrier.wait()  # maximize the overlap — both threads hit the migration together
+            open_relay_store(db).close()
+        except Exception as exc:  # noqa: BLE001 — the test's job is to surface ANY failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_it) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    conn = open_relay_store(db)
+    assert conn.execute("SELECT COUNT(*) FROM relay_credentials").fetchone()[0] == 2
+    conn.close()
+
+
+def test_backfill_recovers_when_interrupted_before_it_ran(tmp_path):
+    """A DB where the table exists but the copy never happened is finished on the next open.
+
+    Why this matters: the crash-mid-migration case. If the process died between creating
+    relay_credentials and committing the backfill, the next open must complete the work rather
+    than treating the table's existence as proof the migration is done. The transaction makes
+    the copy all-or-nothing, so "interrupted" always looks exactly like this state.
+    """
+    db = tmp_path / "old.sqlite3"
+    _seed_pre_revamp_db(db, [("user", "verifier-a", "admin", 1)])
+
+    # Simulate the interruption: create the table (as a crashed open would have) but no rows.
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS relay_credentials ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, type TEXT NOT NULL,"
+        " label TEXT NOT NULL, verifier TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,"
+        " created_at TEXT NOT NULL, last_used_at TEXT);"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_relay_store(db)
+    assert conn.execute("SELECT verifier FROM relay_credentials").fetchone()[0] == "verifier-a"
+    conn.close()
+
+
+def test_backfill_refuses_to_serve_a_half_migrated_store(tmp_path, monkeypatch):
+    """If the copy silently did nothing, the open RAISES rather than returning a connection.
+
+    Why this matters: the fail-closed invariant. A half-migrated store is the dangerous state —
+    once Unit 2b's resolver reads credentials, an account with no credential row stops
+    authenticating, and a working key starts returning 401 with nothing to explain it. Turning
+    that into a loud startup failure is the whole point of checking a postcondition at all
+    instead of trusting the INSERT's own rowcount.
+
+    The setup makes the postcondition report work still outstanding after the copy ran — the
+    observable shape of ANY way the copy could fail to land (a partial write, a silently
+    swallowed statement, a future edit that breaks the WHERE clause). We drive the guard
+    rather than one specific cause of it firing.
+    """
+    db = tmp_path / "old.sqlite3"
+    _seed_pre_revamp_db(db, [("user", "verifier-a", "admin", 1)])
+
+    real_count = store._accounts_missing_key_credentials
+    calls = []
+
+    def count_that_never_reaches_zero(conn):
+        calls.append(1)
+        # First call is the pre-check (real answer: work to do). Every later call is the
+        # postcondition, which we force to keep reporting an unmigrated account.
+        return real_count(conn) if len(calls) == 1 else 1
+
+    monkeypatch.setattr(store, "_accounts_missing_key_credentials", count_that_never_reaches_zero)
+
+    with pytest.raises(RelayStoreMigrationError, match="without a key credential"):
+        open_relay_store(db)
+
+
+def test_add_user_dual_writes_the_credential(tmp_path):
+    """A newly provisioned account gets both the legacy verifier column AND a credential row.
+
+    Why this matters: Unit 2a must be behavior-identical, and the resolvers still read the legacy
+    column until Unit 2b. Writing only one of the two would open a window between the two deploys
+    where a freshly provisioned account cannot authenticate under one resolver or the other.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(conn, "user", "verifier-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+
+    assert conn.execute("SELECT key_verifier FROM relay_users WHERE id=?", (user_id,)).fetchone()[0] == "verifier-a"
+    cred = get_credential_by_key_verifier(conn, "verifier-a")
+    assert cred is not None and cred["user_id"] == user_id and cred["type"] == "key"
+
+
+def test_delete_user_removes_credentials_so_the_key_can_be_re_added(tmp_path):
+    """Deleting an account frees its key verifier for re-use.
+
+    Why this matters: key verifiers are UNIQUE across the credentials table. An orphaned row
+    would keep a deleted account's verifier reserved forever, so re-provisioning the same key
+    (or, more likely, a test or a re-add after a mistake) would fail with an IntegrityError far
+    from its cause. `delete_user` already frees the UNIQUE name; it must free this too.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(conn, "user", "verifier-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+    delete_user(conn, user_id)
+
+    assert conn.execute("SELECT COUNT(*) FROM relay_credentials").fetchone()[0] == 0
+    # The whole point: the same key can be provisioned again without an IntegrityError.
+    add_user(conn, "user", "verifier-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+
+
+def test_revoking_an_account_deactivates_its_credentials(tmp_path):
+    """Revoking an account deactivates every credential beneath it.
+
+    Why this matters: "the account is revoked" and "none of its credentials work" must never be
+    able to disagree. Nothing reads the credentials table yet, so this cannot change behavior in
+    this unit — it prevents a live credential row sitting under a revoked account, primed to
+    start authenticating the moment Unit 2b moves the resolver over.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(conn, "user", "verifier-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+    revoke_user(conn, user_id)
+
+    assert get_credential_by_key_verifier(conn, "verifier-a") is None  # excluded: inactive
+    assert conn.execute("SELECT active FROM relay_credentials").fetchone()[0] == 0
+
+
+def test_only_one_active_password_per_account_is_possible(tmp_path):
+    """A second active password for one account is refused by the DB, not by application code.
+
+    Why this matters: amendment 7. Two admins setting a password concurrently would both read
+    "no active password" and both insert, leaving an account with two valid passwords and no
+    defined answer for which one Unit 3 verifies against. The partial unique index makes that
+    unrepresentable rather than merely unlikely.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(conn, "user", "verifier-a", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+    add_credential(conn, user_id, "password", "login", "argon2-hash-1", "2026-07-19T00:00:00+00:00")
+
+    try:
+        add_credential(conn, user_id, "password", "login2", "argon2-hash-2", "2026-07-19T00:00:00+00:00")
+        raise AssertionError("a second active password must not be insertable")
+    except sqlite3.IntegrityError:
+        pass
+
+    # But revoking the first frees the slot — replacing a password is a normal act.
+    first = get_active_password_credential(conn, user_id)
+    assert revoke_credential(conn, first["id"]) is True
+    add_credential(conn, user_id, "password", "login2", "argon2-hash-2", "2026-07-19T00:00:00+00:00")
+    assert get_active_password_credential(conn, user_id)["verifier"] == "argon2-hash-2"
+
+
+def test_two_keys_on_one_account_revoke_independently(tmp_path):
+    """The two-machine case: two keys under one account, revoking one leaves the other working.
+
+    Why this matters: this is the concrete thing the whole revamp exists to enable — one identity
+    holding a Mac key and a WSL2 key, where losing a laptop revokes ONE credential instead of
+    killing the identity. Revocation targets the credential id, and must not touch its sibling.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(conn, "user", "v-mac", "contributor", ["demo"], "test", "2026-07-19T00:00:00+00:00")
+    wsl_id = add_credential(conn, user_id, "key", "wsl2", "v-wsl", "2026-07-19T00:00:00+00:00")
+
+    assert revoke_credential(conn, wsl_id) is True
+    assert get_credential_by_key_verifier(conn, "v-wsl") is None       # revoked
+    assert get_credential_by_key_verifier(conn, "v-mac") is not None   # untouched
+    # Revoking again reports no change, so a caller can 404 instead of faking success.
+    assert revoke_credential(conn, wsl_id) is False
+
+
+def test_list_credentials_never_exposes_a_verifier(tmp_path):
+    """The credential listing omits verifiers entirely.
+
+    Why this matters: the same rule `list_users` follows — a verifier never leaves the store. A
+    listing is the easiest place to leak one by accident, since it is the one accessor whose
+    whole job is to be displayed to a human.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(conn, "user", "v-mac", "admin", [], "test", "2026-07-19T00:00:00+00:00")
+    add_credential(conn, user_id, "key", "wsl2", "v-wsl", "2026-07-19T00:00:00+00:00")
+
+    listed = list_credentials(conn, user_id)
+    assert len(listed) == 2
+    assert all("verifier" not in cred for cred in listed)
+    assert {cred["label"] for cred in listed} == {"default", "wsl2"}
 
 
 def test_get_missing_id_returns_none(tmp_path):

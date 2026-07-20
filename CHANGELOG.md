@@ -14,6 +14,46 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Accounts and credentials — the schema split (auth-revamp Unit 2a, 2026-07-19)
+
+The spine of the auth revamp begins. Today an identity **is** its key: one key per account, and the
+identity dies with the key's lifecycle. This unit lays the schema for the split — an account is the
+durable identity, and credentials are N attachable, individually revocable things beneath it — so a
+human can hold a login password plus a Mac key plus a WSL2 key under one identity.
+
+This unit is deliberately **behavior-identical**. Nothing reads the new table yet: the resolvers still
+authenticate exactly as before, and Unit 2b cuts them over. That split exists so the live data
+migration and the resolver swap are two separately reviewable changes.
+
+### Added
+
+- **`relay_credentials`** — `id`, `user_id`, `type` (`key` | `password`), `label`, `verifier`,
+  `active`, `created_at`, `last_used_at`. The verifier column carries both formats: an HMAC hex for a
+  key, an Argon2id encoded hash (which embeds its own salt and parameters) for a password. Three
+  partial unique indexes do the enforcement the DB is better at than application code: one active
+  password per account, one active label per account, and key verifiers unique across all rows
+  (including revoked ones, so a revoked key can never be re-minted and resurrected).
+- **`relay_users.kind` / `relay_users.operated_by`** — additive nullable columns for the agent model
+  landing in Unit 4a. Existing rows read NULL, which every reader maps to "human".
+- **A one-time credential backfill**, the store's first DATA migration (every prior one was DDL). It
+  copies each existing account's `key_verifier` into a credential row, so **every already-provisioned
+  key keeps working with zero re-provisioning**. No key is ever re-minted. It runs inside a single
+  `BEGIN IMMEDIATE` transaction with an idempotent `WHERE NOT EXISTS` guard, so two workers opening
+  the store at the same instant cannot double-insert, and a crash mid-migration simply leaves the work
+  for the next open. A postcondition — every account has a key credential — is verified against what
+  is actually stored before the store will serve, and refuses to hand back a connection otherwise.
+
+### Fixed
+
+- **A pre-existing race in `_ensure_columns`**, found by the new concurrency tests and unrelated to
+  this unit's own migration. The `PRAGMA table_info` guard is check-then-act, so two workers opening a
+  not-yet-migrated DB simultaneously both saw a column missing and both issued `ALTER`, and the loser
+  raised `OperationalError: duplicate column name`. Since the relay opens the store on **every
+  request**, that surfaced as a 500 on a real request during precisely the redeploy a migration runs
+  on. An already-present column is now treated as success.
+- Recorded, not fixed: **KI-37**, a sibling race on the one-time WAL conversion in the same function.
+  See [`docs/known-issues.md`](docs/known-issues.md) for why it was scoped out.
+
 ## Set-only project settings + explicit clear (auth-revamp Unit 1, KI-35, 2026-07-19)
 
 The opening unit of the **auth-model revamp** arc, built off

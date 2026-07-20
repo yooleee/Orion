@@ -14,6 +14,59 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Credential-based authentication — the resolver cutover (auth-revamp Unit 2b, 2026-07-20)
+
+Unit 2a built the accounts/credentials schema without reading it. This unit moves both
+resolvers onto it, so an account genuinely holds N independently revocable credentials. It also
+introduces a new permanent invariant on the push path.
+
+### Changed
+
+- **Both resolvers now read `relay_credentials`.** A presented key resolves to a credential,
+  then to its owning account. `relay_users.key_verifier` is no longer read by anything.
+- **Bearer keys are always contributor-bounded — including on an admin account** (a permanent
+  invariant). A key authenticates with contributor authority scoped to its account's explicit
+  grants, whatever role that account holds; an admin account with no grants can push nowhere.
+  Once an account can hold several credentials, attaching a machine key to your own admin
+  account is the natural thing to do — and under the old "admin bypasses scope" rule that
+  machine would have silently gained push access to every project, making compartmentalization
+  *worse* than one key per identity. Admin authority is untouched on the human's dashboard
+  session; only the machine credential is bounded. Provisioning (separate admin token) and the
+  legacy shared-token path are unaffected.
+- **New accounts write an inert sentinel** into the retired, NOT NULL `key_verifier` column,
+  generated independently of any credential. A test plants a correctly-computed verifier there
+  and proves it grants neither a session nor a push.
+- **The store is opened once at startup**, before binding. Migrations previously ran inside the
+  first request that happened to touch SQLite — and unauthenticated `/api/*` falls through to
+  the SPA shell without doing so, meaning a freshly deployed relay could sit un-migrated. That
+  was harmless while migrations were behavior-neutral; now that the resolvers read a migrated
+  table, "deployed" and "migrated" must not drift apart. A failed migration is now a refusal to
+  start rather than a 500 on whichever request arrives first.
+
+### Added
+
+- **`relay-user key add|list|revoke`** — credential lifecycle. `add` attaches another key
+  without disturbing existing ones; `list` shows ids, labels and `last_used_at` and never key
+  material; `revoke` kills one credential by id, leaving the account and its other keys intact.
+  Revoking a key deliberately does **not** bump `session_version` — losing a machine key must
+  not log the human out of the dashboard everywhere.
+- **`relay-user role <name> <role>`** — change an account's role in place. Bumps
+  `session_version`, since a cookie must not outlive the authority it was minted under. Warns
+  when the change leaves an account with no grants: admins bypass scope, so demoting one to a
+  scoped role produces an account that sees **nothing** until it is granted projects.
+- **`relay-user rename`** — the account is the durable identity, so its label is editable
+  without re-provisioning. Recorded history keeps the denormalized `author_name` it was written
+  with; a rename is not a retroactive edit.
+
+### Removed
+
+- **`relay-user rotate` and `POST /api/users/rotate`**, retired rather than deprecated. One-shot
+  rotation killed the old key the instant the new one was minted, which opens a silent-401
+  window on every scheduled machine until the new key is installed, and strands the operator
+  entirely if the response carrying it is lost. Replacement is **add → deploy → verify →
+  revoke** — overlapping, idempotent, no downtime — and it decouples emergency revocation from
+  having somewhere to put a new key.
+
 ## Accounts and credentials — the schema split (auth-revamp Unit 2a, 2026-07-19)
 
 The spine of the auth revamp begins. Today an identity **is** its key: one key per account, and the

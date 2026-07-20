@@ -57,6 +57,7 @@ from relay.store import (
     get_checklist,
     get_due_soon_days,
     get_project_kind,
+    get_user_by_name,
     list_projects,
     observed_history,
     open_relay_store,
@@ -1879,35 +1880,268 @@ def test_grant_is_idempotent_and_requires_a_project(tmp_path):
         )[0] == 400
 
 
-def test_rotate_kills_the_old_key_and_issues_a_working_new_one(tmp_path):
-    """POST /api/users/rotate re-mints an active user's key: old key dies, returned new key works.
+def test_key_add_lets_two_keys_push_under_one_account(tmp_path):
+    """The two-machine case: add a second key, and BOTH keys push as the same identity.
 
-    Why this matters: KI-31 — replacing a compromised/lost key without churning identity or
-    grants. We confirm the old key pushes, rotate, then that the OLD key 401s and the NEW key pushes.
+    Why this matters: this is what the whole credential split exists to deliver. Before it,
+    a second machine meant a second identity (or re-keying the first). Both pushes must also
+    be attributed to the SAME account name, or "one identity, two machines" is a fiction.
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
-        _provision_user(db, "prod", "old-key", role="contributor", projects=["demo"])
-        assert _post(base_url, _blob_for("demo"), token="old-key")[0] == 201  # old key works
+        _provision_user(db, "prod", "mac-key", role="contributor", projects=["demo"])
+        assert _post(base_url, _blob_for("demo"), token="mac-key")[0] == 201
 
-        status, r = _admin_post(base_url, "/api/users/rotate", {"name": "prod"})
+        status, r = _admin_post(
+            base_url, "/api/users/key-add", {"name": "prod", "label": "wsl2"}
+        )
         assert status == 200
-        new_key = r["key"]
-        assert new_key and len(new_key) >= 40 and new_key != "old-key"
+        wsl_key = r["key"]
+        assert wsl_key and len(wsl_key) >= 40 and wsl_key != "mac-key"
 
-        assert _post(base_url, _blob_for("demo"), token="old-key")[0] == 401  # old key dead
-        assert _post(base_url, _blob_for("demo"), token=new_key)[0] == 201  # new key works
+        # BOTH keys now work — adding never disturbs the existing credential.
+        assert _post(base_url, _blob_for("demo"), token="mac-key")[0] == 201
+        assert _post(base_url, _blob_for("demo"), token=wsl_key)[0] == 201
+
+        conn = open_relay_store(db)
+        authors = {row["author_name"] for row in conn.execute("SELECT author_name FROM relay_reports")}
+        assert authors == {"prod"}  # one identity, whichever machine pushed
 
 
-def test_rotate_a_revoked_user_is_409(tmp_path):
-    """Rotating a revoked user is refused 409 — revoke/rotate stay distinct (delete+add to revive).
+def test_key_revoke_kills_one_credential_and_leaves_the_other(tmp_path):
+    """Revoking one credential leaves the account and its other keys working.
 
-    Why this matters: rotate is a key-refresh for an ACTIVE user; reviving a revoked one is a
-    separate delete+add. A revoked rotate is a clean 409 rather than a silently-useless new key.
+    Why this matters: the point of the split — a lost laptop costs ONE key, not the identity.
+    This is the property the retired `rotate` could not express, since it replaced the single
+    key wholesale.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "mac-key", role="contributor", projects=["demo"])
+        wsl_key = _admin_post(
+            base_url, "/api/users/key-add", {"name": "prod", "label": "wsl2"}
+        )[1]["key"]
+
+        listed = _admin_post(base_url, "/api/users/key-list", {"name": "prod"})[1]["credentials"]
+        wsl_id = next(c["id"] for c in listed if c["label"] == "wsl2")
+        assert all("verifier" not in c for c in listed)  # never leaks key material
+
+        assert _admin_post(
+            base_url, "/api/users/key-revoke", {"name": "prod", "id": wsl_id}
+        )[0] == 200
+        assert _post(base_url, _blob_for("demo"), token=wsl_key)[0] == 401   # revoked
+        assert _post(base_url, _blob_for("demo"), token="mac-key")[0] == 201  # untouched
+
+
+def test_key_revoke_does_not_log_the_human_out(tmp_path):
+    """Revoking a machine key leaves the account's live dashboard session valid.
+
+    Why this matters: amendment 9 — credential and session lifecycles are separate. Losing a
+    machine key must not force the human to log in again everywhere; only a password change or
+    an account revocation does that. Coupling them would make people delay revocations.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "human", "login-key", role="admin")
+        cookie = _login(base_url, "login-key")
+        assert cookie is not None
+        machine_id = _admin_post(
+            base_url, "/api/users/key-add", {"name": "human", "label": "mac"}
+        )[1]["id"]
+
+        assert _admin_post(
+            base_url, "/api/users/key-revoke", {"name": "human", "id": machine_id}
+        )[0] == 200
+        assert _get(base_url, "/api/portfolio", cookie=cookie)[0] == 200  # session survives
+
+
+def test_key_revoke_of_another_accounts_credential_is_404(tmp_path):
+    """A credential id belonging to a different account cannot be revoked through this name.
+
+    Why this matters: the id is a global autoincrement, so without an ownership check a typo'd
+    id would silently revoke someone else's credential — a cross-account action from a
+    single-account request. Existence-hiding 404, consistent with every other scope boundary.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "alice", "a-key", role="contributor", projects=["demo"])
+        _provision_user(db, "bob", "b-key", role="contributor", projects=["demo"])
+        bob_id = _admin_post(base_url, "/api/users/key-list", {"name": "bob"})[1]["credentials"][0]["id"]
+
+        assert _admin_post(
+            base_url, "/api/users/key-revoke", {"name": "alice", "id": bob_id}
+        )[0] == 404
+        assert _post(base_url, _blob_for("demo"), token="b-key")[0] == 201  # bob unaffected
+
+
+def test_key_add_rejects_a_duplicate_active_label(tmp_path):
+    """Two active credentials cannot share a label on one account (409, not a 500).
+
+    Why this matters: labels are how a human tells credentials apart when deciding what to
+    revoke, so duplicates would defeat their only purpose. The DB index enforces it; the
+    handler turns that into a clear 409 rather than leaking an IntegrityError as a 500.
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
         _provision_user(db, "prod", "k", role="contributor", projects=["demo"])
-        assert _admin_post(base_url, "/api/users/revoke", {"name": "prod"})[0] == 200
-        assert _admin_post(base_url, "/api/users/rotate", {"name": "prod"})[0] == 409
+        assert _admin_post(base_url, "/api/users/key-add", {"name": "prod", "label": "mac"})[0] == 200
+        assert _admin_post(base_url, "/api/users/key-add", {"name": "prod", "label": "mac"})[0] == 409
+
+
+def test_a_bearer_key_on_an_admin_account_is_scoped_to_its_grants(tmp_path):
+    """THE bounded-authority invariant: an admin account's key pushes ONLY to granted projects.
+
+    Why this matters: amendment 1, and the reason it is a permanent invariant. The
+    multi-credential model actively invites attaching a machine key to a human's account — and
+    that human is often an admin. Under the old rule (role admin ⇒ unrestricted) that machine
+    would silently gain push access to EVERY project, making compartmentalization worse than
+    the single-key model this replaces. A key is a machine credential, so it carries
+    contributor authority regardless of who owns it.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        # An ADMIN account, granted exactly one project.
+        _provision_user(db, "root", "admin-key", role="admin", projects=["demo"])
+
+        assert _post(base_url, _blob_for("demo"), token="admin-key")[0] == 201    # granted
+        assert _post(base_url, _blob_for("secret"), token="admin-key")[0] == 404  # NOT granted
+
+
+def test_an_admin_account_with_no_grants_can_push_nowhere(tmp_path):
+    """An admin account with zero grants pushes to nothing at all (default-deny, not a bypass).
+
+    Why this matters: the sharper edge of the same invariant. Admin accounts routinely have no
+    grants precisely because the old rule made grants meaningless for them. Bounded authority
+    must therefore mean "scoped to grants" even when that set is empty — if an empty grant set
+    fell back to unrestricted, the invariant would be inverted exactly where it matters most.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "root", "admin-key", role="admin")  # no projects
+
+        assert _post(base_url, _blob_for("demo"), token="admin-key")[0] == 404
+
+
+def test_an_admin_key_still_reads_everything_through_the_cookie(tmp_path):
+    """The Bearer bound does NOT shrink an admin's dashboard scope after logging in.
+
+    Why this matters: amendment 1 bounds the PUSH path only. An admin logging in to the
+    dashboard is a human exercising human authority, and must still see everything — otherwise
+    "keys are contributor-bounded" would have quietly demoted the admin role itself.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "root", "admin-key", role="admin")  # no grants at all
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo"])
+        assert _post(base_url, _blob_for("demo"), token="prod-key")[0] == 201
+
+        cookie = _login(base_url, "admin-key")
+        status, body = _get(base_url, "/api/portfolio", cookie=cookie)
+        assert status == 200
+        assert any(e["name"] == "demo" for e in json.loads(body)["projects"])
+
+
+def test_a_verifier_planted_only_in_the_legacy_column_authenticates_nothing(tmp_path):
+    """A valid-looking verifier written ONLY to relay_users.key_verifier is dead on both paths.
+
+    Why this matters: amendment 8's shadow-credential test. The legacy column is NOT NULL and
+    cannot be dropped, so it still exists and still holds a value on every row. This proves
+    nothing reads it any more: a correctly-computed verifier placed there — the exact thing
+    that used to authenticate — grants neither a session nor a push.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "real-key", role="admin", projects=["demo"])
+        # Plant a REAL, correctly-computed verifier for "shadow-key" in the retired column.
+        conn = open_relay_store(db)
+        conn.execute(
+            "UPDATE relay_users SET key_verifier = ? WHERE name = ?",
+            (key_verifier(_PEPPER, "shadow-key"), "prod"),
+        )
+        conn.commit()
+        conn.close()
+
+        assert _login(base_url, "shadow-key") is None                          # no session
+        assert _post(base_url, _blob_for("demo"), token="shadow-key")[0] == 401  # no push
+        assert _login(base_url, "real-key") is not None                        # the real one still works
+
+
+def test_the_retired_rotate_endpoint_is_gone(tmp_path):
+    """POST /api/users/rotate no longer exists.
+
+    Why this matters: rotate was retired deliberately, not merely deprecated — its one-shot
+    semantics open a silent-401 window on scheduled machines and can strand an operator whose
+    response is lost. An endpoint that quietly still worked would keep that hazard alive.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "k", role="contributor", projects=["demo"])
+        assert _admin_post(base_url, "/api/users/rotate", {"name": "prod"})[0] == 404
+
+
+def test_role_change_rescopes_an_account_and_logs_it_out(tmp_path):
+    """Demoting an admin to supervisor applies default-deny and invalidates its live session.
+
+    Why this matters: the exact operation planned for a real supervisor account. Two things
+    must hold together — the live cookie must not outlive the authority it was minted under,
+    and the demoted account must be scoped by grants (here: none, so it sees nothing until
+    granted). The second is the operational trap the CLI warns about.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="admin")
+        cookie = _login(base_url, "dad-key")
+        assert _get(base_url, "/api/portfolio", cookie=cookie)[0] == 200
+
+        status, r = _admin_post(base_url, "/api/users/role", {"name": "dad", "role": "supervisor"})
+        assert status == 200 and r["role"] == "supervisor" and r["projects"] == []
+
+        # The pre-change cookie is dead (session_version bumped).
+        assert _get(base_url, "/api/portfolio", cookie=cookie)[0] in (401, 403)
+        # Re-login works, but now sees nothing until granted.
+        fresh = _login(base_url, "dad-key")
+        assert fresh is not None
+        assert json.loads(_get(base_url, "/api/portfolio", cookie=fresh)[1])["projects"] == []
+
+
+def test_role_change_rejects_an_unknown_role(tmp_path):
+    """An out-of-set role is a 400 and leaves the account untouched.
+
+    Why this matters: role is an open enum in the DB, so nothing at the storage layer would
+    stop 'supervisorr' from being written — and an account with a typo'd role would silently
+    match no allowlist anywhere, failing closed in a way that looks like a bug.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dad", "dad-key", role="admin")
+        assert _admin_post(base_url, "/api/users/role", {"name": "dad", "role": "wizard"})[0] == 400
+        assert _login(base_url, "dad-key") is not None  # still an admin, still works
+
+
+def test_rename_preserves_attributed_history(tmp_path):
+    """Renaming an account keeps its past reports under the name they were pushed with.
+
+    Why this matters: `author_name` is denormalized precisely so recorded history survives the
+    account changing or being deleted. A rename that rewrote history would make the report log
+    disagree with what was actually sent at the time.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "macos", "k", role="contributor", projects=["demo"])
+        assert _post(base_url, _blob_for("demo"), token="k")[0] == 201
+
+        assert _admin_post(
+            base_url, "/api/users/rename", {"name": "macos", "new_name": "mac-mini"}
+        )[0] == 200
+
+        conn = open_relay_store(db)
+        assert conn.execute("SELECT author_name FROM relay_reports").fetchone()[0] == "macos"
+        assert get_user_by_name(conn, "mac-mini") is not None
+        assert get_user_by_name(conn, "macos") is None
+        conn.close()
+        # The key still works — a rename is a label change, not a re-provisioning.
+        assert _post(base_url, _blob_for("demo"), token="k")[0] == 201
+
+
+def test_rename_to_a_taken_name_is_409(tmp_path):
+    """Renaming onto an existing name is refused, not silently collapsed.
+
+    Why this matters: names are UNIQUE and are the CLI's handle for every admin verb. Allowing
+    a collision would make `revoke <name>` ambiguous at exactly the wrong moment.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "alice", "a", role="contributor", projects=["demo"])
+        _provision_user(db, "bob", "b", role="contributor", projects=["demo"])
+        assert _admin_post(
+            base_url, "/api/users/rename", {"name": "alice", "new_name": "bob"}
+        )[0] == 409
 
 
 def test_delete_frees_the_name_and_drops_the_card_but_keeps_report_history(tmp_path):
@@ -1940,18 +2174,25 @@ def test_delete_frees_the_name_and_drops_the_card_but_keeps_report_history(tmp_p
         assert detail["reports"][0]["author_name"] == "prod"  # its report keeps the recorded name
 
 
-def test_grant_rotate_delete_404_unknown_and_require_admin_token(tmp_path):
+def test_admin_verbs_404_unknown_and_require_admin_token(tmp_path):
     """Each new verb 404s an unknown name and refuses the ingest token (admin-gated)."""
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
         assert _admin_post(
             base_url, "/api/users/grant", {"name": "ghost", "projects": ["demo"]}
         )[0] == 404
-        assert _admin_post(base_url, "/api/users/rotate", {"name": "ghost"})[0] == 404
         assert _admin_post(base_url, "/api/users/delete", {"name": "ghost"})[0] == 404
+        assert _admin_post(base_url, "/api/users/key-add", {"name": "ghost", "label": "l"})[0] == 404
+        assert _admin_post(base_url, "/api/users/key-list", {"name": "ghost"})[0] == 404
+        assert _admin_post(base_url, "/api/users/role", {"name": "ghost", "role": "viewer"})[0] == 404
+        assert _admin_post(base_url, "/api/users/rename", {"name": "ghost", "new_name": "g2"})[0] == 404
         for path, obj in (
             ("/api/users/grant", {"name": "x", "projects": ["demo"]}),
-            ("/api/users/rotate", {"name": "x"}),
             ("/api/users/delete", {"name": "x"}),
+            ("/api/users/key-add", {"name": "x", "label": "l"}),
+            ("/api/users/key-list", {"name": "x"}),
+            ("/api/users/key-revoke", {"name": "x", "id": 1}),
+            ("/api/users/role", {"name": "x", "role": "viewer"}),
+            ("/api/users/rename", {"name": "x", "new_name": "y"}),
         ):
             assert _admin_post(base_url, path, obj, token=_TOKEN)[0] == 401  # ingest token refused
 

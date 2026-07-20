@@ -2634,8 +2634,13 @@ def test_relay_user_grant_without_project_is_clean_error(tmp_path, monkeypatch, 
     assert "project" in capsys.readouterr().err.lower()
 
 
-def test_relay_user_rotate_calls_client_and_prints_new_key_once(tmp_path, monkeypatch, capsys):
-    """`relay-user rotate <name>` calls the client and prints the new one-time key."""
+def test_relay_user_key_add_prints_the_key_once_and_the_safe_sequence(tmp_path, monkeypatch, capsys):
+    """`relay-user key add` threads name+label and prints the one-time key plus next steps.
+
+    Why this matters: this replaced `rotate`, and the replacement is only safer if the
+    operator actually follows add → deploy → verify → revoke. Printing that sequence at the
+    moment the key is issued is what makes the safe path the obvious one.
+    """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
     repo = _make_repo(tmp_path)
@@ -2644,15 +2649,142 @@ def test_relay_user_rotate_calls_client_and_prints_new_key_once(tmp_path, monkey
     calls = []
     monkeypatch.setattr(
         cli,
-        "relay_rotate_key",
-        lambda url, token, name, **k: calls.append((url, token, name))
-        or {"name": name, "key": "NEWKEY-456"},
+        "relay_add_user_key",
+        lambda url, token, name, label, **k: calls.append((url, token, name, label))
+        or {"name": name, "label": label, "id": 7, "key": "NEWKEY-456"},
     )
-    code = cli.main(["relay-user", "rotate", "alice", "--config", str(toml)])
+    code = cli.main(["relay-user", "key", "add", "alice", "--label", "wsl2", "--config", str(toml)])
     assert code == 0
-    assert calls == [("https://relay.test/ingest", "admin-secret", "alice")]
+    assert calls == [("https://relay.test/ingest", "admin-secret", "alice", "wsl2")]
     out = capsys.readouterr().out
     assert "NEWKEY-456" in out and "once" in out.lower()
+    assert "still work" in out.lower()   # the existing keys are explicitly not disturbed
+    assert "revoke" in out.lower()       # and the operator is pointed at the final step
+
+
+def test_relay_user_key_list_never_prints_key_material(tmp_path, monkeypatch, capsys):
+    """`relay-user key list` shows ids/labels/usage, and no verifier ever reaches the output.
+
+    Why this matters: the listing is the one credential surface designed to be read by a
+    human, which makes it the easiest place to leak key material by accident.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_list_user_keys",
+        lambda url, token, name, **k: {"name": name, "credentials": [
+            {"id": 1, "type": "key", "label": "mac", "active": 1,
+             "created_at": "2026-07-19T00:00:00+00:00", "last_used_at": "2026-07-20T00:00:00+00:00"},
+            {"id": 2, "type": "key", "label": "wsl2", "active": 0,
+             "created_at": "2026-07-19T00:00:00+00:00", "last_used_at": None},
+        ]},
+    )
+    assert cli.main(["relay-user", "key", "list", "alice", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "mac" in out and "wsl2" in out
+    assert "active" in out and "revoked" in out
+    assert "never used" in out          # the signal that decides what is safe to revoke
+    assert "verifier" not in out.lower()
+
+
+def test_relay_user_key_revoke_threads_the_id(tmp_path, monkeypatch, capsys):
+    """`relay-user key revoke --id` targets one credential and says the others survive."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_revoke_user_key",
+        lambda url, token, name, cid, **k: calls.append((name, cid))
+        or {"name": name, "id": cid, "revoked": True},
+    )
+    code = cli.main(["relay-user", "key", "revoke", "alice", "--id", "2", "--config", str(toml)])
+    assert code == 0
+    assert calls == [("alice", 2)]
+    assert "still work" in capsys.readouterr().out.lower()
+
+
+def test_relay_user_role_warns_when_a_demotion_leaves_no_scope(tmp_path, monkeypatch, capsys):
+    """`relay-user role` warns loudly when the new role has no grants (it would see nothing).
+
+    Why this matters: the real operational trap. Admins bypass scope, so an admin account
+    typically has ZERO grants — demoting it to a scoped role therefore produces an account
+    that can log in and see an empty dashboard. Without this warning that reads as a bug.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_set_user_role",
+        lambda url, token, name, role, **k: {"name": name, "role": role, "projects": []},
+    )
+    assert cli.main(["relay-user", "role", "dad", "supervisor", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "supervisor" in out
+    assert "WARNING" in out and "sees nothing" in out
+    assert "relay-user grant dad" in out   # the fix is spelled out, not just the problem
+
+
+def test_relay_user_role_reports_scope_when_the_account_has_grants(tmp_path, monkeypatch, capsys):
+    """With grants present, the role change reports the resulting scope and does NOT warn."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_set_user_role",
+        lambda url, token, name, role, **k: {"name": name, "role": role, "projects": ["orion"]},
+    )
+    assert cli.main(["relay-user", "role", "dad", "supervisor", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "orion" in out and "WARNING" not in out
+
+
+def test_relay_user_rename_notes_that_history_keeps_the_old_name(tmp_path, monkeypatch, capsys):
+    """`relay-user rename` threads both names and states the history consequence."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_rename_user",
+        lambda url, token, name, new_name, **k: calls.append((name, new_name))
+        or {"name": name, "new_name": new_name},
+    )
+    assert cli.main(["relay-user", "rename", "macos", "mac-mini", "--config", str(toml)]) == 0
+    assert calls == [("macos", "mac-mini")]
+    assert "keep the name they were sent under" in capsys.readouterr().out
+
+
+def test_relay_user_rotate_is_gone_from_the_cli(tmp_path, monkeypatch):
+    """`relay-user rotate` no longer parses — the verb is retired, not merely undocumented.
+
+    Why this matters: leaving a working `rotate` would keep its hazards (the silent-401 window
+    on scheduled machines, the stranded-response state) reachable by muscle memory.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+    try:
+        code = cli.main(["relay-user", "rotate", "alice", "--config", str(toml)])
+    except SystemExit as exc:      # argparse rejects an unknown subcommand with exit 2
+        code = exc.code
+    assert code == 2
 
 
 def test_relay_user_delete_calls_client_and_confirms(tmp_path, monkeypatch, capsys):

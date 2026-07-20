@@ -72,7 +72,11 @@ from orion.delivery.relay import (
     push_checklist,
     push_disciplines,
     revoke_user as relay_revoke_user,
-    rotate_key as relay_rotate_key,
+    add_user_key as relay_add_user_key,
+    list_user_keys as relay_list_user_keys,
+    rename_user as relay_rename_user,
+    revoke_user_key as relay_revoke_user_key,
+    set_user_role as relay_set_user_role,
 )
 from orion.delivery.slack import send as slack_send
 from orion.extract import (
@@ -972,14 +976,72 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
-    ru_rotate = relay_user_subs.add_parser(
-        "rotate",
-        help="Re-mint an active user's access key (the old key + live sessions stop working).",
+    # `key` is a command GROUP (add/list/revoke) — an account holds N credentials, so the
+    # verbs act on a credential, not on the account. This REPLACES the retired `rotate`:
+    # replacement is now add -> deploy -> verify -> revoke, which overlaps the two keys
+    # instead of killing the old one the instant the new one is minted.
+    ru_key = relay_user_subs.add_parser(
+        "key",
+        help="Manage an account's key credentials (add/list/revoke) — replaces `rotate`.",
     )
-    ru_rotate.add_argument("name", help="The user whose key to rotate (by name; must be active).")
-    ru_rotate.add_argument(
-        "--config",
-        default=default_config,
+    ru_key_subs = ru_key.add_subparsers(dest="relay_user_key_command", metavar="{add,list,revoke}")
+
+    ru_key_add = ru_key_subs.add_parser(
+        "add", help="Attach a NEW key to an account (shown once); the existing keys keep working."
+    )
+    ru_key_add.add_argument("name", help="The account to attach the key to.")
+    ru_key_add.add_argument(
+        "--label", required=True,
+        help="A short label for where this key lives, e.g. 'mac' or 'wsl2' (unique per account).",
+    )
+    ru_key_add.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_key_list = ru_key_subs.add_parser(
+        "list", help="List an account's credentials (never shows the key material itself)."
+    )
+    ru_key_list.add_argument("name", help="The account whose credentials to list.")
+    ru_key_list.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_key_revoke = ru_key_subs.add_parser(
+        "revoke", help="Revoke ONE credential by id; the account's other keys keep working."
+    )
+    ru_key_revoke.add_argument("name", help="The account the credential belongs to.")
+    ru_key_revoke.add_argument(
+        "--id", required=True, type=int,
+        help="The credential id to revoke (from `key list` — labels are reusable, ids are not).",
+    )
+    ru_key_revoke.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_role = relay_user_subs.add_parser(
+        "role",
+        help="Change an account's role (logs out live sessions; a scoped role needs grants).",
+    )
+    ru_role.add_argument("name", help="The account whose role to change.")
+    ru_role.add_argument(
+        "role", help="The new role: admin | viewer | supervisor | contributor."
+    )
+    ru_role.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    ru_rename = relay_user_subs.add_parser(
+        "rename",
+        help="Rename an account (already-recorded history keeps the name it was written with).",
+    )
+    ru_rename.add_argument("name", help="The account to rename.")
+    ru_rename.add_argument("new_name", help="The new (unique) name.")
+    ru_rename.add_argument(
+        "--config", default=default_config,
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
@@ -1106,8 +1168,19 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_relay_user_revoke(args.name, Path(args.config))
         if args.relay_user_command == "grant":
             return cmd_relay_user_grant(args.name, args.projects, Path(args.config))
-        if args.relay_user_command == "rotate":
-            return cmd_relay_user_rotate(args.name, Path(args.config))
+        if args.relay_user_command == "key":
+            if args.relay_user_key_command == "add":
+                return cmd_relay_user_key_add(args.name, args.label, Path(args.config))
+            if args.relay_user_key_command == "list":
+                return cmd_relay_user_key_list(args.name, Path(args.config))
+            if args.relay_user_key_command == "revoke":
+                return cmd_relay_user_key_revoke(args.name, args.id, Path(args.config))
+            print("Error: give a key subcommand: add, list, or revoke.", file=sys.stderr)
+            return 2
+        if args.relay_user_command == "role":
+            return cmd_relay_user_role(args.name, args.role, Path(args.config))
+        if args.relay_user_command == "rename":
+            return cmd_relay_user_rename(args.name, args.new_name, Path(args.config))
         if args.relay_user_command == "delete":
             return cmd_relay_user_delete(args.name, Path(args.config))
     return 1  # Unreachable: subparsers are required.
@@ -4234,33 +4307,164 @@ def cmd_relay_user_grant(name: str, projects: list[str], config_path: Path) -> i
     return 0
 
 
-def cmd_relay_user_rotate(name: str, config_path: Path) -> int:
-    """Re-mint an active user's access key (`relay-user rotate`).
+def cmd_relay_user_key_add(name: str, label: str, config_path: Path) -> int:
+    """Attach a new key credential to an account (`relay-user key add`).
 
     Args:
-        name: The user whose key to rotate (must be active — a revoked user is a clean error
-            pointing at delete + add).
+        name: The account to attach the key to.
+        label: A short label for where the key will live (unique among active credentials).
         config_path: Path to orion.toml.
 
     Returns:
-        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown name
-        → 404; revoked user → the relay's 409, surfaced as a clear message).
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown
+        name → 404; revoked account or duplicate active label → the relay's 409).
 
     Why:
-        Lets an admin replace a compromised or lost key without churning the user's identity,
-        grants, or attributed history (KI-31). The relay swaps the verifier and force-logs-out
-        live sessions; the NEW key is shown once here, exactly like provisioning.
+        The replacement for the retired `rotate`, and the command that makes one identity
+        across two machines real. Adding does NOT disturb the account's existing keys, so the
+        safe replacement sequence is add → deploy → verify → revoke: the old key keeps
+        working until the new one is confirmed, with no silent-401 window on a scheduled
+        push and no way to strand yourself if this output is lost.
     """
     try:
         relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_rotate_key(relay_url, admin_token, name)
+        result = relay_add_user_key(relay_url, admin_token, name, label)
     except (ConfigError, SecretsError, DeliveryError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Rotated {name!r}'s key — the old key and any live session no longer work.")
-    print("  New access key (shown ONCE — copy it now; it cannot be retrieved later):")
+    print(f"Added key {label!r} (id {result['id']}) to {name!r}. Existing keys still work.")
+    print("  Access key (shown ONCE — copy it now; it cannot be retrieved later):")
     print(f"    {result['key']}")
+    print("  Next: install it, verify a push, THEN revoke the old credential:")
+    print(f"    orion relay-user key list {name}")
+    return 0
+
+
+def cmd_relay_user_key_list(name: str, config_path: Path) -> int:
+    """List an account's credentials (`relay-user key list`).
+
+    Args:
+        name: The account whose credentials to list.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request.
+
+    Why:
+        The question that has to precede a revocation is "what is attached, and is it still
+        being used?" — `last_used_at` answers the second half, which is otherwise unknowable
+        once an account holds several keys. Key material is never shown: the relay's listing
+        excludes verifiers by construction.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_list_user_keys(relay_url, admin_token, name)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    credentials = result.get("credentials", [])
+    if not credentials:
+        print(f"{name!r} has no credentials.")
+        return 0
+    print(f"Credentials for {name!r}:")
+    for cred in credentials:
+        state = "active" if cred["active"] else "revoked"
+        used = cred["last_used_at"] or "never used"
+        print(f"  [{cred['id']:>3}] {cred['type']:<8} {cred['label']:<12} {state:<8} last used: {used}")
+    return 0
+
+
+def cmd_relay_user_key_revoke(name: str, credential_id: int, config_path: Path) -> int:
+    """Revoke one credential by id (`relay-user key revoke`).
+
+    Args:
+        name: The account the credential belongs to.
+        credential_id: The credential id (from `key list`).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown
+        account, or an id that is unknown / already revoked / not owned by this account → 404).
+
+    Why:
+        Revokes exactly one credential, leaving the account and its other keys intact — the
+        whole point of the credential split (a lost laptop kills one key, not an identity).
+        It deliberately does not log the person out of the dashboard: a machine key and a
+        browser session are different credentials with different lifecycles.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_revoke_user_key(relay_url, admin_token, name, credential_id)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Revoked credential {credential_id} for {name!r}. Their other credentials still work.")
+    return 0
+
+
+def cmd_relay_user_role(name: str, role: str, config_path: Path) -> int:
+    """Change an account's role (`relay-user role`).
+
+    Args:
+        name: The account whose role to change.
+        role: The new role (the relay validates it against the provisionable set).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request.
+
+    Why:
+        Roles were fixed at provisioning, so changing one previously meant delete + re-add —
+        minting a new key the person must be re-issued and dropping their grants. The warning
+        below is the operationally important part: demoting an admin to a scoped role makes
+        default-deny apply, so the account sees NOTHING until it is granted projects.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        result = relay_set_user_role(relay_url, admin_token, name, role)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{name!r} is now a {role}. Any live session was logged out.")
+    scope = result.get("projects") or []
+    if role != "admin" and not scope:
+        print("  WARNING: this account has NO project grants, so it currently sees nothing.")
+        print(f"    Grant projects with: orion relay-user grant {name} <project> [<project> ...]")
+    elif role != "admin":
+        print(f"  Scope: {', '.join(scope)}")
+    return 0
+
+
+def cmd_relay_user_rename(name: str, new_name: str, config_path: Path) -> int:
+    """Rename an account (`relay-user rename`).
+
+    Args:
+        name: The account to rename.
+        new_name: The new unique name.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown
+        name → 404; taken name → the relay's 409).
+
+    Why:
+        The account is the durable identity under the credential split, so its label should be
+        editable without re-provisioning. Already-recorded reports and discussion items keep
+        the name they were written with — `author_name` is denormalized precisely so history
+        survives the account changing or being deleted — so this is not a retroactive edit.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_rename_user(relay_url, admin_token, name, new_name)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Renamed {name!r} to {new_name!r}. Past reports keep the name they were sent under.")
     return 0
 
 

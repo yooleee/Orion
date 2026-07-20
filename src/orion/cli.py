@@ -1087,7 +1087,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ru_role.add_argument("name", help="The account whose role to change.")
     ru_role.add_argument(
-        "role", help="The new role: admin | viewer | supervisor | contributor."
+        "role",
+        help="The new role: admin | viewer | supervisor | member | contributor.",
     )
     ru_role.add_argument(
         "--config", default=default_config,

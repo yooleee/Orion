@@ -324,23 +324,44 @@ a reverse proxy, with TLS and per-user login) — see
 [**docs/deployment.md**](docs/deployment.md). For the local walkthrough, see
 [**docs/new-project-setup.md**](docs/new-project-setup.md).
 
-**Multi-party access (per-user login).** When the dashboard is shared, each viewer signs in with
-their own **access key** rather than a shared password. An admin provisions users with the
-`relay-user` CLI, which talks to the running relay:
+**Multi-party access (per-user login).** When the dashboard is shared, each person signs in with
+their own **name and password** rather than a shared secret. Machines and agents hold **keys**
+instead — what a human knows cannot push, and what a machine holds cannot log in. An admin
+provisions accounts with the `relay-user` CLI, which talks to the running relay:
 
 ```bash
-orion relay-user add alex --role viewer --project my-app   # prints a one-time access key
-orion relay-user list                                       # who has access, and their scope
-orion relay-user revoke alex                                # cut off access immediately
+orion relay-user add supervisor-a --role viewer --project my-app  # a dashboard viewer
+orion relay-user password set supervisor-a                        # prompts twice, hidden
+orion relay-user add mac --role contributor --project my-app      # a machine (prints its key once)
+orion relay-user list                                             # who has access, and their scope
+orion relay-user revoke supervisor-a                              # cut off access immediately
 ```
 
-Each user gets a role (`admin` sees everything and provisions; `viewer` is limited to the projects
-you grant) and a persistent, revocable login session. A `viewer` sees only their granted projects;
-anything else returns "not found", so they cannot even learn that other projects exist. This needs
-three extra secrets in the relay's `.env` (`ORION_RELAY_SESSION_KEY`, `ORION_RELAY_USER_PEPPER`,
-`ORION_RELAY_ADMIN_TOKEN`) and an `admin_token_env_var` in the `[relay]` table. For how the login,
-sessions, roles, and scope work (and the security model behind them), see
-[**docs/dashboard-auth.md**](docs/dashboard-auth.md); for deploying it, see
+An **account** is the durable identity and holds N individually revocable **credentials**, so one
+person can run two machines under a single identity, and a lost key is replaced without disturbing
+anything else.
+
+Each account has a role: `admin` sees everything and provisions; `viewer` and `supervisor` see only
+the projects you grant them; `member` is a read-only org insider that sees every **org-visible**
+project without per-project grants; `contributor` is a push-only machine identity that can never log
+in. Anything out of scope returns "not found", so nobody can even learn that other projects exist.
+
+**Agents.** A machine acting on your behalf (Claude Code, a CI job) can be its own account tied to
+you:
+
+```bash
+orion relay-user add claude-mac --role contributor --kind agent --operated-by yoo --project my-app
+```
+
+Its reports stay attributed to the agent and are badged "operated by <you>", so provenance is never
+lost — while its checklist work folds into your contributor card, because an agent is doing your
+work rather than proposing its own.
+
+This needs three extra secrets in the relay's `.env` (`ORION_RELAY_SESSION_KEY`,
+`ORION_RELAY_USER_PEPPER`, `ORION_RELAY_ADMIN_TOKEN`), an `admin_token_env_var` in the `[relay]`
+table, and the `relay` extra installed on the relay host (`pip install '.[relay]'`) for password
+hashing. For how login, sessions, roles, scope, and visibility work (and the security model behind
+them), see [**docs/dashboard-auth.md**](docs/dashboard-auth.md); for deploying it, see
 [**docs/deployment.md**](docs/deployment.md).
 
 ## Scheduling

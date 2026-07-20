@@ -50,7 +50,12 @@ dependencies = [
 [project.optional-dependencies]
 # Test-only dependency. Kept out of the runtime install so a user who just wants
 # to run Orion still gets the two-dependency "clone and run in 10 minutes" path.
-dev = ["pytest>=8.0"]
+# Test-only dependencies. argon2-cffi is listed here as well as in `relay` because the
+# suite covers the relay's password hashing: without it those tests fail outright (and
+# skipping them instead is how security tests quietly rot — CI is exactly where they
+# matter most). A self-referencing `orion[relay]` was tried first and does NOT resolve
+# under an editable install, so the pin is repeated deliberately — keep the two in sync.
+dev = ["pytest>=8.0", "argon2-cffi>=23.1,<26"]
 # Native Slack bot (C2-bots, `orion bot`). slack-bolt holds the Socket Mode
 # connection (its outbound WebSocket, heartbeat, and reconnect); it pulls in
 # slack_sdk. Kept OPTIONAL and lazily imported (only inside orion.bot.slack_bot)

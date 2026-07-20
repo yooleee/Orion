@@ -48,9 +48,15 @@ from .throttle import ACCOUNT as THROTTLE_ACCOUNT
 from .throttle import GLOBAL as THROTTLE_GLOBAL
 from .throttle import LoginThrottle
 from .store import (
+    ACCOUNT_KIND_AGENT,
+    ACCOUNT_KIND_HUMAN,
+    ACCOUNT_KINDS,
+    account_kind_of,
+    active_agents_operated_by,
     add_credential,
     add_discussion_item,
     add_user,
+    author_attributions,
     bump_session_version,
     delete_user,
     discussion_items_for_project,
@@ -80,6 +86,7 @@ from .store import (
     revoke_credential,
     revoke_user,
     set_due_soon_days,
+    set_operated_by,
     set_password_credential_verifier,
     set_user_role,
     set_project_kind,
@@ -178,9 +185,18 @@ _PROVISIONABLE_ROLES = _INTERACTIVE_ROLES + ("contributor",)
 # Roles whose own key may authenticate a PUSH (Bearer ingest) request — the mirror image of
 # _INTERACTIVE_ROLES, and just as fail-closed: a viewer/supervisor key pointed at the ingest
 # path is refused (it cannot produce), exactly as a contributor key is refused at login.
-# "admin" is here so a single all-scope operator key can push everywhere; "contributor" is
-# the scoped producer identity. (See _resolve_bearer_principal.)
+# "contributor" is the scoped producer identity; "admin" is here only so an admin account's
+# key still RESOLVES — its authority does not follow, because since Unit 2b every Bearer key
+# is pinned to contributor semantics and scoped to the account's grants regardless of role
+# (admin's unrestricted push is retired). See _resolve_bearer_principal.
 _BEARER_ROLES = ("admin", "contributor")
+
+# The only role an AGENT account may hold (auth revamp, Unit 4a). An agent is a machine
+# identity that pushes on its operator's behalf, so it is a contributor and nothing else:
+# giving one an interactive role would hand a machine account a dashboard login and breach
+# the "one credential never spans both auth worlds" invariant. Enforced at provisioning AND
+# on role change, so there is no path to an interactive agent.
+_AGENT_ROLE = "contributor"
 
 
 def _author_of(principal: dict) -> tuple[int | None, str | None]:
@@ -202,6 +218,46 @@ def _author_of(principal: dict) -> tuple[int | None, str | None]:
     if principal["legacy"]:
         return None, None
     return principal["user_id"], principal["name"]
+
+def _resolve_operator(conn, operator_name: str, agent_id: int | None = None) -> tuple:
+    """Resolve an operator NAME to its account id, enforcing the lifecycle rules.
+
+    Args:
+        conn: An open relay-store connection.
+        operator_name: The proposed operating account's name (untrusted input).
+        agent_id: The agent being assigned, when it already exists (the reassignment
+            path). None at provisioning, where the agent has no id yet.
+
+    Returns:
+        (operator_id, None) when the operator is valid, else (None, error_message) —
+        a message safe to return verbatim in a 400.
+
+    Why:
+        Amendment 5's rules are enforced in code rather than by a foreign key (this store
+        never enables PRAGMA foreign_keys, so an FK would be decorative and could not
+        produce a useful message). Both the provisioning path and the reassignment path
+        need EXACTLY these rules, so they live in one function — two copies would be one
+        edit away from a path that accepts what the other rejects.
+
+        Each rule earns its place: an operator must EXIST (a typo'd name would otherwise
+        store a dangling id), must be ACTIVE (a revoked human should not silently keep
+        acquiring agents), and must be a HUMAN — agent→agent chains are rejected because
+        the whole point of `operated_by` is to terminate at an accountable person, and a
+        chain would make "who is this really?" a graph walk with a cycle risk. The
+        self-reference check is reachable only on reassignment, since at provisioning the
+        agent does not exist yet.
+    """
+    operator = get_user_by_name(conn, operator_name)
+    if operator is None:
+        return None, f"no user named {operator_name!r}"
+    if agent_id is not None and operator["id"] == agent_id:
+        return None, "an agent cannot operate itself"
+    if not operator["active"]:
+        return None, f"user {operator_name!r} is revoked and cannot operate an agent"
+    if account_kind_of(operator) != ACCOUNT_KIND_HUMAN:
+        return None, f"user {operator_name!r} is an agent; an operator must be a human"
+    return operator["id"], None
+
 
 # Actor label written to the admin audit trail for token-driven provisioning. The admin
 # API authenticates with a shared admin token (not a named identity), so the trail
@@ -834,6 +890,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/users/rename":
             self._handle_rename_user()
             return
+        if path == "/api/users/set-operator":
+            self._handle_set_user_operator()
+            return
 
         # E2 Inc 4: the SPA's JSON auth siblings (the cookie-session login / logout).
         if path == "/api/login":
@@ -1399,10 +1458,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
         """Provision a user and return their raw login key ONCE (POST /api/users).
 
         Body fields:
-          - name     (required): the user's unique display name / handle.
-          - role     (optional): "viewer" (default) or "admin"; allowlisted.
-          - projects (optional): project names the viewer is scoped to (ignored for an
+          - name        (required): the user's unique display name / handle.
+          - role        (optional): "viewer" (default) or "admin"; allowlisted.
+          - projects    (optional): project names the viewer is scoped to (ignored for an
             admin, which sees all). Defaults to [].
+          - kind        (optional): "human" (default) or "agent" (Unit 4a).
+          - operated_by (optional): for an agent, the operating HUMAN account's NAME —
+            required for an agent and forbidden for a human.
 
         The inbound-security checklist, IN ORDER (auth-first, mirrors _handle_ingest):
           1. Auth — the ADMIN token (NOT the ingest token); 401 otherwise, before the body.
@@ -1466,6 +1528,35 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # carry whitespace-only or duplicate project names into the store.
         projects = list(dict.fromkeys(p.strip() for p in projects if p.strip()))
 
+        # 3b) Account kind + operator (Unit 4a). "human" is the wire default so every
+        # pre-4a caller keeps provisioning humans with an unchanged payload.
+        account_kind = payload.get("kind", ACCOUNT_KIND_HUMAN)
+        if account_kind not in ACCOUNT_KINDS:
+            self._send_json(
+                400, {"error": f"field 'kind' must be one of {list(ACCOUNT_KINDS)}"}
+            )
+            return
+        operator_name = payload.get("operated_by")
+        is_agent = account_kind == ACCOUNT_KIND_AGENT
+        if is_agent and role != _AGENT_ROLE:
+            # An agent is a machine identity; an interactive role would give it a login.
+            self._send_json(
+                400, {"error": f"an agent account must have role {_AGENT_ROLE!r}"}
+            )
+            return
+        if is_agent and (not isinstance(operator_name, str) or not operator_name.strip()):
+            self._send_json(
+                400, {"error": "an agent account requires 'operated_by' (a human's name)"}
+            )
+            return
+        if not is_agent and operator_name is not None:
+            # Rejected rather than ignored: silently dropping it would let an admin
+            # believe they had assigned an operator that was never stored.
+            self._send_json(
+                400, {"error": "'operated_by' is only valid for an agent account"}
+            )
+            return
+
         # The pepper is required to compute the verifier. cmd_relay_serve fails closed
         # when the admin token is set without it, so this is a defensive guard only.
         if self.server.user_pepper is None:
@@ -1478,9 +1569,26 @@ class _RelayHandler(BaseHTTPRequestHandler):
         verifier = key_verifier(self.server.user_pepper, raw_key)
         conn = open_relay_store(self.server.db_path)
         try:
+            # The operator is resolved INSIDE the store connection and immediately before
+            # the insert, so a name that was valid a moment ago cannot smuggle in a
+            # dangling or revoked operator id.
+            operator_id = None
+            if is_agent:
+                operator_id, operator_error = _resolve_operator(conn, operator_name.strip())
+                if operator_error is not None:
+                    self._send_json(400, {"error": operator_error})
+                    return
             try:
                 user_id = add_user(
-                    conn, name, verifier, role, projects, _ADMIN_ACTOR, _utc_now_iso()
+                    conn,
+                    name,
+                    verifier,
+                    role,
+                    projects,
+                    _ADMIN_ACTOR,
+                    _utc_now_iso(),
+                    account_kind=ACCOUNT_KIND_AGENT if is_agent else None,
+                    operated_by=operator_id,
                 )
             except sqlite3.IntegrityError:
                 # UNIQUE(name) (or an astronomically-unlikely verifier collision): a user
@@ -1495,7 +1603,17 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # 5) Return the raw key ONCE — the only place it ever appears.
         self._send_json(
             201,
-            {"id": user_id, "name": name, "role": role, "projects": projects, "key": raw_key},
+            {
+                "id": user_id,
+                "name": name,
+                "role": role,
+                "projects": projects,
+                "kind": account_kind,
+                # The operator's NAME, echoed back so the CLI can confirm what it stored
+                # without a second round trip. None for a human.
+                "operated_by": operator_name.strip() if is_agent else None,
+                "key": raw_key,
+            },
         )
 
     def _handle_list_users(self) -> None:
@@ -1903,6 +2021,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             authority change a live cookie must not outlive. NOTE the operational consequence
             an admin must plan for: demoting an admin to a scoped role makes default-deny
             apply, so the account sees NOTHING until it is granted projects.
+
+            Unit 4a closes the back door this endpoint would otherwise open: an AGENT is
+            pinned to `contributor`, so promoting one to an interactive role is refused
+            here as well as at provisioning. Validating only at creation would leave a
+            two-step path (add an agent, then promote it) to exactly the interactive
+            machine account the invariant forbids.
         """
         got = self._admin_read_named()
         if got is None:
@@ -1919,6 +2043,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
             user = get_user_by_name(conn, name)
             if user is None:
                 self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            if account_kind_of(user) == ACCOUNT_KIND_AGENT and role != _AGENT_ROLE:
+                self._send_json(
+                    400, {"error": f"an agent account must have role {_AGENT_ROLE!r}"}
+                )
                 return
             set_user_role(conn, user["id"], role)
             scope = projects_for_user(conn, user["id"])
@@ -1969,6 +2098,66 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"name": name, "new_name": new_name})
 
+    def _handle_set_user_operator(self) -> None:
+        """Repoint an agent account at a different operating human (set-operator).
+
+        Body: name (required, the AGENT), operated_by (required, the new operator's name).
+        Admin-gated; 404 unknown agent; 400 if the target is not an agent or the proposed
+        operator fails the lifecycle rules; 200 {name, operated_by}.
+
+        Why:
+            The explicit escape hatch amendment 5 requires: an operator with live agents
+            cannot be deleted, so there must be a way to reparent those agents that is not
+            "delete and re-provision the agent" (which would mint a new key every machine
+            holding it would need re-issued). It shares _resolve_operator with provisioning,
+            so a reassignment can never accept an operator that provisioning would reject.
+
+            This changes DISPLAY GROUPING only. Every stored report and observation keeps
+            the agent's real author_id, so provenance is untouched and no history moves —
+            the distinction that keeps folding (Unit 4b) honest.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        operator_name = payload.get("operated_by")
+        if not isinstance(operator_name, str) or not operator_name.strip():
+            self._send_json(
+                400, {"error": "field 'operated_by' must be a non-empty string"}
+            )
+            return
+        operator_name = operator_name.strip()
+        conn = open_relay_store(self.server.db_path)
+        try:
+            agent = get_user_by_name(conn, name)
+            if agent is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            if account_kind_of(agent) != ACCOUNT_KIND_AGENT:
+                self._send_json(
+                    400, {"error": f"user {name!r} is not an agent account"}
+                )
+                return
+            operator_id, operator_error = _resolve_operator(
+                conn, operator_name, agent_id=agent["id"]
+            )
+            if operator_error is not None:
+                self._send_json(400, {"error": operator_error})
+                return
+            set_operated_by(conn, agent["id"], operator_id)
+            record_admin_audit(
+                conn,
+                _ADMIN_ACTOR,
+                "set_operator",
+                name,
+                operator_name,
+                [],
+                _utc_now_iso(),
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "operated_by": operator_name})
+
     def _handle_delete_user(self) -> None:
         """Hard-delete a user by name (POST /api/users/delete) → frees the name.
 
@@ -1981,6 +2170,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             reports/discussion history, whose denormalized author_name survives (author_id is
             off the wire). The deletion is itself audited (the audit row is keyed by name, so it
             outlives the user).
+
+            Unit 4a (amendment 5): deleting an account that still OPERATES active agents is
+            BLOCKED with a 409. `operated_by` is not a declared foreign key, so nothing at
+            the DB layer would stop the delete from leaving agents pointing at a vanished
+            id — and because ids are reused by AUTOINCREMENT reuse rules only in narrow
+            cases, the failure would be silent rather than loud. The escape hatch is
+            explicit: reassign the agents (POST /api/users/set-operator), then delete. The
+            error names the blocking agents so the admin knows what to reassign.
         """
         got = self._admin_read_named()
         if got is None:
@@ -1991,6 +2188,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
             user = get_user_by_name(conn, name)
             if user is None:
                 self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            operated = active_agents_operated_by(conn, user["id"])
+            if operated:
+                self._send_json(
+                    409,
+                    {
+                        "error": (
+                            f"user {name!r} still operates active agent(s): "
+                            f"{', '.join(operated)}. Reassign or revoke them first."
+                        )
+                    },
+                )
                 return
             delete_user(conn, user["id"])
             record_admin_audit(
@@ -2605,6 +2814,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         # 7-day default), so the checklist rows, milestones, and next-due state
                         # classify against the same window the portfolio at-risk count used.
                         due_soon_days=get_due_soon_days(conn, name),
+                        # Unit 4a: resolve every timeline author's kind/operator in ONE
+                        # query, so the agent badge costs no per-report lookup.
+                        attributions=author_attributions(
+                            conn, [r.get("author_id") for r in reports]
+                        ),
                     ),
                 )
                 return
@@ -2628,6 +2842,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         # classify due-ness with the same window as the project page (None ⇒
                         # the 7-day default).
                         due_soon_days=get_due_soon_days(conn, report["project"]),
+                        # Unit 4a: this one report's author kind/operator for the badge.
+                        attributions=author_attributions(conn, [report.get("author_id")]),
                     ),
                 )
                 return

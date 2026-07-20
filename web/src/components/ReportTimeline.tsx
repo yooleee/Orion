@@ -10,6 +10,7 @@
 import { Link } from "react-router-dom";
 import type { ReportSummary } from "../api/types";
 import { relativeTime } from "../lib/time";
+import { AgentBadge } from "./AgentBadge";
 
 export function ReportTimeline({ reports }: { reports: ReportSummary[] }) {
   if (reports.length === 0) {
@@ -28,6 +29,8 @@ export function ReportTimeline({ reports }: { reports: ReportSummary[] }) {
               {/* C3 Inc 2: show the pushing producer only when attributed — a legacy/older
                   report has author_name null and renders exactly as before. */}
               {r.author_name && <> · {r.author_name}</>}
+              {/* Unit 4a: an agent's push is badged and names the human it acted for. */}
+              <AgentBadge kind={r.author_kind} operatedBy={r.operated_by_name} />
               {r.source_tags.length > 0 && <> · {r.source_tags.join(" ")}</>}
             </div>
           </div>

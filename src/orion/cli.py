@@ -75,6 +75,7 @@ from orion.delivery.relay import (
     add_user_key as relay_add_user_key,
     list_user_keys as relay_list_user_keys,
     rename_user as relay_rename_user,
+    set_user_operator as relay_set_user_operator,
     revoke_user_key as relay_revoke_user_key,
     set_user_password as relay_set_user_password,
     set_user_role as relay_set_user_role,
@@ -930,7 +931,28 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PROJECT",
         help=(
             "A project this viewer may see (repeatable: --project a --project b). "
-            "Ignored for an admin (which sees all). A viewer with none sees nothing."
+            "Ignored for an admin's dashboard reads (which see all), but NOT for pushes: "
+            "every key is scoped to its account's grants. A viewer with none sees nothing."
+        ),
+    )
+    ru_add.add_argument(
+        "--kind",
+        choices=("human", "agent"),
+        default="human",
+        dest="account_kind",
+        help=(
+            "What this account IS (default: human). An 'agent' is a machine identity "
+            "(Claude Code, a CI job) that pushes on a human's behalf: it must have role "
+            "contributor and requires --operated-by."
+        ),
+    )
+    ru_add.add_argument(
+        "--operated-by",
+        metavar="NAME",
+        help=(
+            "For --kind agent: the human account this agent acts on behalf of. Its work "
+            "stays attributed to the agent (badged, 'operated by <name>'), so provenance "
+            "is never lost."
         ),
     )
     ru_add.add_argument(
@@ -1080,6 +1102,19 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
 
+    ru_set_operator = relay_user_subs.add_parser(
+        "set-operator",
+        help="Repoint an agent account at a different operating human.",
+    )
+    ru_set_operator.add_argument("name", help="The agent account to reassign.")
+    ru_set_operator.add_argument(
+        "operator", help="The human account this agent should act on behalf of."
+    )
+    ru_set_operator.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
     ru_delete = relay_user_subs.add_parser(
         "delete",
         help="Hard-delete a user, freeing their name to be reused (revoke keeps the name).",
@@ -1195,7 +1230,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "relay-user":
         if args.relay_user_command == "add":
             return cmd_relay_user_add(
-                args.name, args.role, args.projects, Path(args.config)
+                args.name,
+                args.role,
+                args.projects,
+                Path(args.config),
+                account_kind=args.account_kind,
+                operated_by=args.operated_by,
             )
         if args.relay_user_command == "list":
             return cmd_relay_user_list(Path(args.config))
@@ -1223,6 +1263,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_relay_user_role(args.name, args.role, Path(args.config))
         if args.relay_user_command == "rename":
             return cmd_relay_user_rename(args.name, args.new_name, Path(args.config))
+        if args.relay_user_command == "set-operator":
+            return cmd_relay_user_set_operator(
+                args.name, args.operator, Path(args.config)
+            )
         if args.relay_user_command == "delete":
             return cmd_relay_user_delete(args.name, Path(args.config))
     return 1  # Unreachable: subparsers are required.
@@ -4198,7 +4242,12 @@ def _load_relay_admin(config_path: Path) -> tuple[str, str]:
 
 
 def cmd_relay_user_add(
-    name: str, role: str, projects: list[str], config_path: Path
+    name: str,
+    role: str,
+    projects: list[str],
+    config_path: Path,
+    account_kind: str = "human",
+    operated_by: str | None = None,
 ) -> int:
     """Provision a relay user and print their one-time access key (`relay-user add`).
 
@@ -4207,6 +4256,8 @@ def cmd_relay_user_add(
         role: "viewer" or "admin".
         projects: Project names a viewer may see (ignored for an admin).
         config_path: Path to orion.toml.
+        account_kind: "human" (default) or "agent" (Unit 4a).
+        operated_by: For an agent, the operating human's account name; None for a human.
 
     Returns:
         Exit code: 0 on success; 1 on a config/secrets error or a failed request
@@ -4219,14 +4270,37 @@ def cmd_relay_user_add(
         clear; it is never stored or logged. We print a copy-it-now warning so the operator
         knows it cannot be retrieved later (only its verifier is stored).
     """
+    # Caught here rather than server-side alone so the operator gets an immediate, local
+    # error instead of a round trip — the relay validates this too (never trust the client).
+    is_agent = account_kind == "agent"
+    if is_agent and not operated_by:
+        print(
+            "Error: --kind agent requires --operated-by NAME (the human it acts for).",
+            file=sys.stderr,
+        )
+        return 1
+    if not is_agent and operated_by:
+        print("Error: --operated-by is only valid with --kind agent.", file=sys.stderr)
+        return 1
+
     try:
         relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_create_user(relay_url, admin_token, name, role, projects)
+        result = relay_create_user(
+            relay_url,
+            admin_token,
+            name,
+            role,
+            projects,
+            account_kind="agent" if is_agent else None,
+            operated_by=operated_by if is_agent else None,
+        )
     except (ConfigError, SecretsError, DeliveryError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     print(f"Provisioned user {result['name']!r} (role: {result['role']}).")
+    if result.get("kind") == "agent":
+        print(f"  Kind: agent, operated by {result['operated_by']!r}.")
     scope = result.get("projects") or []
     if result["role"] == "admin":
         print("  Scope: all projects (admin).")
@@ -4275,9 +4349,16 @@ def cmd_relay_user_list(config_path: Path) -> int:
         else:
             scope = ", ".join(user.get("projects") or []) or "none"
         last_login = user.get("last_login_at") or "never"
+        # Unit 4a: only an agent gets an extra marker, so a human roster prints exactly as
+        # it did before. .get keeps this working against a pre-4a relay.
+        if user.get("account_kind") == "agent":
+            operator = user.get("operated_by_name") or "?"
+            marker = f"  agent, operated by {operator}"
+        else:
+            marker = ""
         print(
             f"{user['name']}  [{user['role']}, {status}]  "
-            f"scope: {scope}  last login: {last_login}"
+            f"scope: {scope}  last login: {last_login}{marker}"
         )
     return 0
 
@@ -4561,6 +4642,37 @@ def cmd_relay_user_role(name: str, role: str, config_path: Path) -> int:
         print(f"    Grant projects with: orion relay-user grant {name} <project> [<project> ...]")
     elif role != "admin":
         print(f"  Scope: {', '.join(scope)}")
+    return 0
+
+
+def cmd_relay_user_set_operator(name: str, operator: str, config_path: Path) -> int:
+    """Repoint an agent account at a different operating human (`relay-user set-operator`).
+
+    Args:
+        name: The agent account to reassign.
+        operator: The human account the agent should act on behalf of.
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown
+        agent → 404; not an agent, or an invalid operator → the relay's 400).
+
+    Why:
+        The explicit escape hatch for the blocked operator delete: an account that still
+        operates active agents cannot be deleted until they are reparented, and the
+        alternative (delete + re-provision the agent) would mint a new key every machine
+        holding it would need re-issued. Reassignment moves DISPLAY GROUPING only — stored
+        reports keep the agent's real author id, so no history moves and provenance holds.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_set_user_operator(relay_url, admin_token, name, operator)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{name!r} is now operated by {operator!r}.")
+    print("  Past reports keep their own attribution; only display grouping moves.")
     return 0
 
 

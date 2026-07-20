@@ -770,6 +770,28 @@ h3 {
   color: var(--tmid);
 }
 
+/* --- Agent attribution chip (auth revamp, Unit 4a) ------------------------- */
+
+/* Marks a report pushed by an AGENT account (a machine acting for a human), shown
+   inline after the producer name in the timeline meta line and the report header.
+   Deliberately quiet: uppercase mono at a small size with a hairline border, so it
+   reads as a type label rather than competing with the report title. It uses the same
+   --border / --tmid tokens as the surrounding meta text, which is what keeps it
+   theme-correct across all three themes with no per-theme override. */
+.agent-chip {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tmid);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 5px;
+  /* Nudge up so the small caps sit on the meta line's baseline rather than below it. */
+  vertical-align: 1px;
+}
+
 /* --- Per-producer checklists (C3 Inc 2) ------------------------------------ */
 
 /* One card per contributor, laid out side by side; auto-fill collapses to a single

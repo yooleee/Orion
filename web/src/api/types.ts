@@ -157,6 +157,13 @@ export interface ChecklistItem {
   slipping: boolean;
 }
 
+/** What KIND of producer pushed a report (auth revamp, Unit 4a).
+ *
+ *  `null` is a THIRD state, not a synonym for "human": it means the push carried no
+ *  resolvable identity at all — a legacy anonymous push, or an account since deleted.
+ *  The UI badges only "agent"; "human" and null both render as they always have. */
+export type AuthorKind = "human" | "agent" | null;
+
 export interface ReportSummary {
   id: number;
   number: number; // per-project ordinal (#1 = oldest in this project); id stays the identity
@@ -166,6 +173,8 @@ export interface ReportSummary {
   share_level: string;
   section_count: number;
   author_name: string | null; // C3 Inc 2: producer who pushed it; null for legacy/older reports
+  author_kind: AuthorKind; // Unit 4a: badge an agent's push; null when unattributed
+  operated_by_name: string | null; // Unit 4a: for an agent, the human it acted for
   source_tags: string[]; // [] in 4a (gap 4)
 }
 
@@ -263,6 +272,8 @@ export interface ReportDetail {
   ingested_at: string;
   orion_version: string;
   author_name: string | null; // C3 Inc 2: producer who pushed it; null for legacy/older reports
+  author_kind: AuthorKind; // Unit 4a: badge an agent's push; null when unattributed
+  operated_by_name: string | null; // Unit 4a: for an agent, the human it acted for
   participants: Participant[];
   source_tags: string[]; // [] in 4a (gap 4)
   checklist_snapshot: ChecklistSnapshot;

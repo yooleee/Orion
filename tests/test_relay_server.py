@@ -208,7 +208,9 @@ def _get(base_url, path, *, cookie=None, bearer=None):
         return exc.code, exc.read().decode("utf-8")
 
 
-def _provision_user(db, name, key, *, role="viewer", projects=()):
+def _provision_user(
+    db, name, key, *, role="viewer", projects=(), account_kind=None, operated_by=None
+):
     """Provision a real user (name + key verifier + scope) directly via the store.
 
     Args:
@@ -217,12 +219,19 @@ def _provision_user(db, name, key, *, role="viewer", projects=()):
         key: the raw login key (its HMAC verifier under _PEPPER is what gets stored).
         role: "viewer" (default) or "admin".
         projects: the viewer's allowed project names (ignored for an admin).
+        account_kind: "agent" to seed an agent account, else None (a human).
+        operated_by: for an agent, the operating human's user id.
 
     Why:
         The login / authZ tests need a genuine relay_users row to authenticate against.
         We insert it through the same store helper the provisioning endpoint will use,
         computing the verifier exactly as the server does (HMAC under the shared
         _PEPPER), so the real login path resolves the presented key to this user.
+
+        The agent params write the row DIRECTLY, deliberately bypassing the endpoint's
+        validation — so a test can seed a state (e.g. an agent whose operator was later
+        revoked) that provisioning would refuse to create, and still assert how the read
+        paths behave once it exists.
     """
     conn = open_relay_store(db)
     try:
@@ -234,6 +243,8 @@ def _provision_user(db, name, key, *, role="viewer", projects=()):
             list(projects),
             "test",
             "2026-06-24T00:00:00+00:00",
+            account_kind=account_kind,
+            operated_by=operated_by,
         )
     finally:
         conn.close()
@@ -2488,6 +2499,302 @@ def test_admin_actions_write_audit_rows(tmp_path):
             ("admin-token", "create_user", "carol"),
             ("admin-token", "revoke_user", "carol"),
         ]
+
+
+# --- Unit 4a: agent accounts, operator lifecycle, and attribution badging ------------
+# An agent is a machine identity (Claude Code, a CI job) that pushes on a human's behalf.
+# It is a first-class account (kind='agent', role contributor, its own key) with
+# `operated_by` pointing at an accountable human. These tests pin the amendment-5
+# lifecycle rules — which are enforced in CODE, not by a foreign key, because this store
+# never enables PRAGMA foreign_keys — and the read-time attribution join that badges an
+# agent's reports. Folding agents into their operator's producer streams is Unit 4b and is
+# deliberately NOT exercised here.
+
+
+def _admin_users(base_url):
+    """GET the admin roster (admin-token authed) and return the parsed users list."""
+    status, text = _get(base_url, "/api/users", bearer=_ADMIN)
+    assert status == 200, text
+    return json.loads(text)["users"]
+
+
+def _reader_cookie(db, base_url):
+    """Log in an admin account and return its session cookie for the /api reads.
+
+    Why:
+        The provisioning routes are ADMIN-TOKEN authed, but the dashboard reads
+        (/api/projects, /api/reports) are COOKIE authed — two deliberately separate
+        surfaces. The attribution tests read the dashboard, so they need a real session,
+        not the admin token.
+    """
+    _provision_user(db, "reader", "reader-key", role="admin")
+    return _login(base_url, "reader-key")
+
+
+def _seed_human_and_agent(db, base_url):
+    """Provision a human via the admin API, then an agent operated by them.
+
+    Returns (human_name, agent_name, agent_key) — the agent's raw key for push tests.
+
+    Why:
+        The happy path is the setup for most tests below, and going through the real
+        endpoint (not the store) is the point: it proves provisioning ACCEPTS a valid
+        agent, so the rejection tests that follow are contrasting against a case that
+        genuinely works rather than against nothing.
+    """
+    _admin_post(base_url, "/api/users", {"name": "human-a", "role": "viewer"})
+    status, body = _admin_post(
+        base_url,
+        "/api/users",
+        {
+            "name": "agent-a",
+            "role": "contributor",
+            "kind": "agent",
+            "operated_by": "human-a",
+            "projects": ["alpha"],
+        },
+    )
+    assert status == 201, body
+    return "human-a", "agent-a", body["key"]
+
+
+def test_provisioning_an_agent_records_its_kind_and_operator(tmp_path):
+    """The happy path: an agent account is created, badged as such, and echoes its operator.
+
+    Covers the base case the whole unit rests on — without this, every rejection test
+    below could pass simply because agent provisioning was broken outright.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, key = _seed_human_and_agent(db, base_url)
+
+        # The roster reflects what was stored, so the CLI can show kind + operator.
+        by_name = {u["name"]: u for u in _admin_users(base_url)}
+        assert by_name[agent]["account_kind"] == "agent"
+        assert by_name[agent]["operated_by_name"] == human
+        # A human account is untouched by the new fields — it reads as "human"/None, which
+        # is exactly what every pre-4a row (a NULL kind) also reads as.
+        assert by_name[human]["account_kind"] == "human"
+        assert by_name[human]["operated_by_name"] is None
+
+
+def test_agent_provisioning_rejects_each_invalid_operator(tmp_path):
+    """Every amendment-5 rejection case, each with its own reason.
+
+    These are the rules that keep `operated_by` meaningful: it must terminate at a real,
+    active, accountable HUMAN. Without them a typo would store a dangling id, a revoked
+    person would keep acquiring agents, and an agent->agent chain would turn "who is
+    actually responsible for this?" into a graph walk.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, _ = _seed_human_and_agent(db, base_url)
+
+        def agent_payload(**overrides):
+            payload = {"name": "new-agent", "role": "contributor", "kind": "agent"}
+            payload.update(overrides)
+            return payload
+
+        # An agent with no operator at all: there would be no accountable human.
+        status, body = _admin_post(base_url, "/api/users", agent_payload())
+        assert status == 400 and "operated_by" in body["error"]
+
+        # A typo'd operator name — must not silently store a dangling reference.
+        status, body = _admin_post(
+            base_url, "/api/users", agent_payload(operated_by="nobody")
+        )
+        assert status == 400 and "nobody" in body["error"]
+
+        # A REVOKED human should not keep acquiring agents.
+        _admin_post(base_url, "/api/users/revoke", {"name": human})
+        status, body = _admin_post(
+            base_url, "/api/users", agent_payload(operated_by=human)
+        )
+        assert status == 400 and "revoked" in body["error"]
+
+        # An agent operating an agent — the chain the design forbids.
+        status, body = _admin_post(
+            base_url, "/api/users", agent_payload(operated_by=agent)
+        )
+        assert status == 400 and "human" in body["error"]
+
+        # An interactive role on a machine account would breach "one credential never
+        # spans both auth worlds" — it would give the machine a dashboard login.
+        status, body = _admin_post(
+            base_url,
+            "/api/users",
+            agent_payload(role="viewer", operated_by="human-a"),
+        )
+        assert status == 400 and "contributor" in body["error"]
+
+        # And the mirror case: 'operated_by' on a HUMAN is rejected, not ignored — a
+        # silently dropped field would let an admin believe they assigned an operator.
+        status, body = _admin_post(
+            base_url,
+            "/api/users",
+            {"name": "h2", "role": "viewer", "operated_by": "human-a"},
+        )
+        assert status == 400 and "only valid for an agent" in body["error"]
+
+
+def test_an_agent_cannot_be_promoted_to_an_interactive_role(tmp_path):
+    """The two-step back door is closed: add an agent, then promote it -> refused.
+
+    Validating only at provisioning would leave `relay-user role` as a path to exactly the
+    interactive machine account the invariant forbids.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _, agent, _ = _seed_human_and_agent(db, base_url)
+
+        status, body = _admin_post(
+            base_url, "/api/users/role", {"name": agent, "role": "admin"}
+        )
+        assert status == 400 and "contributor" in body["error"]
+
+        # A human, by contrast, changes role freely — the guard is agent-specific and
+        # must not have broken the ordinary path.
+        status, _ = _admin_post(
+            base_url, "/api/users/role", {"name": "human-a", "role": "supervisor"}
+        )
+        assert status == 200
+
+
+def test_deleting_an_operator_is_blocked_until_its_agents_are_reassigned(tmp_path):
+    """An operator with live agents cannot be deleted; set-operator is the escape hatch.
+
+    `operated_by` is not a declared FK, so nothing at the DB layer would stop a delete from
+    leaving agents pointing at a vanished id. This is the code-level guard, plus the
+    documented way out.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, _ = _seed_human_and_agent(db, base_url)
+
+        status, body = _admin_post(base_url, "/api/users/delete", {"name": human})
+        assert status == 409
+        # The error NAMES the blocker, so the admin knows what to reassign.
+        assert agent in body["error"]
+
+        # Reassign to a second human, then the delete succeeds.
+        _admin_post(base_url, "/api/users", {"name": "human-b", "role": "viewer"})
+        status, _ = _admin_post(
+            base_url, "/api/users/set-operator", {"name": agent, "operated_by": "human-b"}
+        )
+        assert status == 200
+        status, _ = _admin_post(base_url, "/api/users/delete", {"name": human})
+        assert status == 200
+
+
+def test_set_operator_rejects_self_reference_and_non_agents(tmp_path):
+    """Reassignment enforces the same rules as provisioning, plus self-reference.
+
+    Self-reference is only reachable here (at provisioning the agent has no id yet), and it
+    would create an account that is its own accountable human — a cycle with no person at
+    the end of it.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, _ = _seed_human_and_agent(db, base_url)
+
+        status, body = _admin_post(
+            base_url, "/api/users/set-operator", {"name": agent, "operated_by": agent}
+        )
+        assert status == 400 and "itself" in body["error"]
+
+        # A HUMAN account has no operator to set — reassigning one is a category error.
+        status, body = _admin_post(
+            base_url, "/api/users/set-operator", {"name": human, "operated_by": human}
+        )
+        assert status == 400 and "not an agent" in body["error"]
+
+        # An unknown agent 404s, consistent with every other named admin route.
+        status, _ = _admin_post(
+            base_url, "/api/users/set-operator", {"name": "ghost", "operated_by": human}
+        )
+        assert status == 404
+
+
+def test_revoking_an_operator_does_not_revoke_its_agents(tmp_path):
+    """Amendment 5's no-silent-cascade rule: each credential revokes individually.
+
+    Revoking a person is an act about that person. Silently killing their agents' keys too
+    would take down scheduled pushes nobody asked to stop, and the operator would have no
+    signal that it happened.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, agent_key = _seed_human_and_agent(db, base_url)
+
+        _admin_post(base_url, "/api/users/revoke", {"name": human})
+
+        # The agent's key still pushes to its granted project.
+        code, _ = _post(base_url, _blob_for("alpha"), token=agent_key)
+        assert code == 201
+
+
+def test_an_agent_push_is_badged_with_its_kind_and_operator(tmp_path):
+    """The read-time attribution join: an agent's report carries author_kind + operator.
+
+    This is what makes agent work legible on the dashboard without losing provenance — the
+    report stays attributed to the AGENT, and names the human it acted for.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, agent_key = _seed_human_and_agent(db, base_url)
+        _post(base_url, _blob_for("alpha"), token=agent_key)
+        cookie = _reader_cookie(db, base_url)
+
+        _, project = _get_json(base_url, "/api/projects/alpha", cookie=cookie)
+        entry = project["reports"][0]
+        assert entry["author_name"] == agent  # provenance: the AGENT pushed it
+        assert entry["author_kind"] == "agent"
+        assert entry["operated_by_name"] == human
+
+        # The report detail page agrees with the timeline entry.
+        _, report = _get_json(base_url, f"/api/reports/{entry['id']}", cookie=cookie)
+        assert report["author_kind"] == "agent"
+        assert report["operated_by_name"] == human
+
+
+def test_a_human_push_and_a_legacy_push_carry_no_badge(tmp_path):
+    """Non-agent reports stay exactly as they were: a human badges "human", legacy nulls.
+
+    The null-vs-"human" distinction is load-bearing. A legacy anonymous push genuinely
+    carried NO identity, so emitting "human" for it would assert an attribution the relay
+    never made — and would badge unattributed history as someone's work.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "dev", "dev-key", role="contributor", projects=["alpha"])
+        _post(base_url, _blob_for("alpha"), token="dev-key")
+        # A legacy shared-token push carries no identity at all.
+        _post(base_url, _blob_for("alpha"), token=_TOKEN)
+        cookie = _reader_cookie(db, base_url)
+
+        _, project = _get_json(base_url, "/api/projects/alpha", cookie=cookie)
+        by_author = {r["author_name"]: r for r in project["reports"]}
+
+        assert by_author["dev"]["author_kind"] == "human"
+        assert by_author["dev"]["operated_by_name"] is None
+        # The legacy report: no author, and therefore nothing to badge.
+        assert by_author[None]["author_kind"] is None
+        assert by_author[None]["operated_by_name"] is None
+
+
+def test_renaming_an_operator_updates_the_badge_on_existing_reports(tmp_path):
+    """The read-time join in action: a rename is correct on already-pushed reports.
+
+    This is the property that justified resolving attribution at READ time instead of
+    stamping it at write time — no backfill, one source of truth. Contrast with
+    `author_name`, which is denormalized and deliberately keeps what it was written with.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        human, agent, agent_key = _seed_human_and_agent(db, base_url)
+        _post(base_url, _blob_for("alpha"), token=agent_key)
+
+        _admin_post(
+            base_url, "/api/users/rename", {"name": human, "new_name": "renamed-human"}
+        )
+        cookie = _reader_cookie(db, base_url)
+
+        _, project = _get_json(base_url, "/api/projects/alpha", cookie=cookie)
+        entry = project["reports"][0]
+        assert entry["operated_by_name"] == "renamed-human"
+        # The agent's own recorded name is history and does NOT move.
+        assert entry["author_name"] == agent
 
 
 # --- Multi-party auth: session-cookie + key-verifier crypto (Increment 1) ------

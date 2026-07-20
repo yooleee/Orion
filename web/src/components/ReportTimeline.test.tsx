@@ -25,6 +25,8 @@ function summary(over: Partial<ReportSummary>): ReportSummary {
     share_level: "high_level",
     section_count: 3,
     author_name: null,
+    author_kind: null,
+    operated_by_name: null,
     source_tags: [],
     ...over,
   };
@@ -53,6 +55,41 @@ describe("ReportTimeline — report attribution", () => {
     expect(meta).not.toBeNull();
     expect(meta?.textContent).not.toContain("·  ·"); // no empty author segment
     expect(container.textContent).not.toContain("undefined");
+    expect(container.textContent).not.toContain("null");
+  });
+
+  // --- Unit 4a: agent attribution ------------------------------------------
+  // An agent pushes on a human's behalf, so the timeline must show BOTH facts: the
+  // agent keeps the attribution (provenance is never lost) and the operator is named.
+
+  it("badges an agent's report and names the human it acted for", () => {
+    const { container, getByText } = renderTimeline([
+      summary({ author_name: "claude-mac", author_kind: "agent", operated_by_name: "Supervisor A" }),
+    ]);
+    expect(container.querySelector(".agent-chip")?.textContent).toBe("agent");
+    expect(getByText(/claude-mac/)).toBeInTheDocument(); // the agent keeps the attribution
+    expect(getByText(/operated by Supervisor A/)).toBeInTheDocument();
+  });
+
+  it("shows no chip for a human's report", () => {
+    // The overwhelmingly common case must stay visually unchanged — badging every
+    // human push would be noise, so only "agent" renders a chip.
+    const { container } = renderTimeline([
+      summary({ author_name: "Teammate B", author_kind: "human", operated_by_name: null }),
+    ]);
+    expect(container.querySelector(".agent-chip")).toBeNull();
+    expect(container.textContent).not.toContain("operated by");
+  });
+
+  it("badges an agent whose operator account was deleted, without naming one", () => {
+    // The read-time attribution join returns a null operator once that account is gone.
+    // The agent is still legitimately an agent, so the chip stays — we just have no
+    // human left to name, and must not render "operated by null".
+    const { container } = renderTimeline([
+      summary({ author_name: "claude-mac", author_kind: "agent", operated_by_name: null }),
+    ]);
+    expect(container.querySelector(".agent-chip")).not.toBeNull();
+    expect(container.textContent).not.toContain("operated by");
     expect(container.textContent).not.toContain("null");
   });
 });

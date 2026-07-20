@@ -723,12 +723,17 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
         project: The project to fetch per-producer checklists for.
 
     Returns:
-        A list of {"author_id", "author_name", "items", "updated_at"} dicts (items
-        JSON-decoded), one per ACTIVE identified producer that has pushed a checklist, ordered
-        by author_name for stable card positions. Empty when the project has no per-producer
-        checklists (never pushed by an identified producer, e.g. legacy-only or older data).
+        A list of {"author_id", "author_name", "items", "updated_at",
+        "effective_producer_id", "effective_producer_name"} dicts (items JSON-decoded), one
+        per ACTIVE identified producer that has pushed a checklist, ordered by author_name
+        for stable card positions. Empty when the project has no per-producer checklists
+        (never pushed by an identified producer, e.g. legacy-only or older data).
         `updated_at` (this producer's push time) feeds the effective-checklist merge's
         last-writer-per-item ordering (C3 Inc 2.5); the per-producer card consumer ignores it.
+
+        The two `effective_producer_*` fields are Unit 4b's operator-folding inputs:
+        `operated_by ?? author_id` and the matching display name. For a human they are just
+        that human, so a project with no agents reads exactly as it did before.
 
     Why:
         Backs the project page's per-producer cards. Ordering by name keeps a card from jumping
@@ -738,12 +743,21 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
         contributor is off the project, so their card is stale and should not show. We therefore
         INNER JOIN relay_users and keep only active producers; the row's denormalized author_name
         is still what we display (re-stamped on each push, so it is current for an active producer).
+
+        Unit 4b resolves the effective producer HERE, in the one query that already joins
+        relay_users, rather than making the serializer issue a second lookup. Note the
+        asymmetry that keeps this honest: `author_name` stays the row's DENORMALIZED value
+        (what the producer was called when it pushed), while the operator name comes from
+        the LIVE account — so renaming an operator regroups every card immediately, exactly
+        as renaming one regroups report attribution in 4a.
     """
     rows = conn.execute(
         """
-        SELECT pc.author_id, pc.author_name, pc.items, pc.updated_at
+        SELECT pc.author_id, pc.author_name, pc.items, pc.updated_at,
+               u.operated_by, op.name AS operator_name
         FROM relay_producer_checklists pc
         JOIN relay_users u ON u.id = pc.author_id
+        LEFT JOIN relay_users op ON op.id = u.operated_by
         WHERE pc.project = ? AND u.active = 1
         ORDER BY pc.author_name
         """,
@@ -755,6 +769,11 @@ def producer_checklists_for(conn: sqlite3.Connection, project: str) -> list[dict
             "author_name": row["author_name"],
             "items": json.loads(row["items"]),
             "updated_at": row["updated_at"],
+            # An agent folds into its operator; a human is its own effective producer.
+            # `or` is safe rather than sloppy here: relay_users.id is AUTOINCREMENT, so a
+            # real operated_by is never 0 — the only falsy value it takes is NULL.
+            "effective_producer_id": row["operated_by"] or row["author_id"],
+            "effective_producer_name": row["operator_name"] or row["author_name"],
         }
         for row in rows
     ]

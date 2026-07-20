@@ -497,6 +497,137 @@ def test_project_detail_marks_slipping_per_producer_stream():
     assert "author_id" not in cards["Producer One"]
 
 
+# --- Unit 4b: operator-folding on the project page ------------------------------------
+#
+# An agent folds into the human it acts for, so the page shows one card per PERSON. The
+# load-bearing property is the asymmetry: slippage still DERIVES on the raw per-author
+# streams and only UNIONS under the operator for display.
+
+
+def _agent_producer(author_id, author_name, items, operator):
+    """A producer row for an agent operated by `operator` = (id, name)."""
+    return {
+        "author_id": author_id,
+        "author_name": author_name,
+        "items": items,
+        "updated_at": "2026-06-26T10:00:00+00:00",
+        "effective_producer_id": operator[0],
+        "effective_producer_name": operator[1],
+    }
+
+
+def _human_producer(author_id, author_name, items):
+    """A producer row for a human (its own effective producer)."""
+    return _agent_producer(author_id, author_name, items, (author_id, author_name))
+
+
+def test_project_detail_folds_an_agent_card_into_its_operator():
+    """A human + their agent render ONE card, named for the human, unioning both streams.
+
+    The agent let todo-x slip in ITS stream; the human's stream was steady. The folded card
+    must show the slip (the operator's card covers all work done on their behalf), and there
+    must be exactly one card — not one per machine.
+    """
+    checklist = [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]
+    observations = [
+        # The human's stream: steady at 06-28 → no slip.
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-22T00:00:00+00:00", "author_id": 1},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-26T00:00:00+00:00", "author_id": 1},
+        # The agent's stream: postponed 06-20 → 06-28 → slipping.
+        {"item_key": "todo-x", "due_date": "2026-06-20", "done": False,
+         "observed_at": "2026-06-22T00:00:00+00:00", "author_id": 2},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-26T00:00:00+00:00", "author_id": 2},
+    ]
+    items = [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]
+    out = api.serialize_project(
+        name="orion", kind="project", reports=[], checklist=checklist,
+        observations=observations,
+        producer_checklists=[
+            _human_producer(1, "yoo", items),
+            _agent_producer(2, "claude-mac", items, (1, "yoo")),
+        ],
+        discussions=[], disciplines=None, today=_TODAY,
+    )
+
+    cards = out["producer_checklists"]
+    assert len(cards) == 1  # one person, one card
+    assert cards[0]["author_name"] == "yoo"
+    # The union across the folded group: the agent's slip surfaces on the operator's card.
+    assert cards[0]["items"][0]["slipping"] is True
+
+
+def test_folding_does_not_manufacture_a_slip_from_interleaved_histories():
+    """THE false-positive guard: neither raw stream slips, so the folded card must not either.
+
+    Scenario: a human and their agent each hold a DIFFERENT but individually STABLE due date
+    for the same item (the human consistently sees 06-28, the agent consistently sees 06-30 —
+    they pushed from configs that disagree). Both dates are in the FUTURE relative to _TODAY,
+    which matters: it isolates `is_slipping`'s postponement arm, so an overdue date cannot
+    trip the separate "lingering past-due" arm and make this test pass or fail for the wrong
+    reason. Within each raw stream the date never moves, so neither slips.
+
+    If folding happened BEFORE the slippage derivation, the two histories would interleave by
+    observed_at into one stream reading 06-28 → 06-30 → 06-28 → 06-30, whose first and last
+    due dates differ — and `is_slipping` would report a postponement that never occurred.
+    That is precisely the bug C3 Inc 2.5 fixed by partitioning on author_id, and
+    re-introducing it is the single biggest risk in this unit. Fold for DISPLAY, never for
+    derivation.
+    """
+    checklist = [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]
+    observations = [
+        # Human: 06-28 both times — stable, and not yet due, so no slip by either arm.
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-22T00:00:00+00:00", "author_id": 1},
+        {"item_key": "todo-x", "due_date": "2026-06-28", "done": False,
+         "observed_at": "2026-06-26T00:00:00+00:00", "author_id": 1},
+        # Agent: 06-30 both times — also stable. Interleaved by observed_at with the human's
+        # rows, so a collapsed stream would read as a 06-28 → 06-30 postponement.
+        {"item_key": "todo-x", "due_date": "2026-06-30", "done": False,
+         "observed_at": "2026-06-23T00:00:00+00:00", "author_id": 2},
+        {"item_key": "todo-x", "due_date": "2026-06-30", "done": False,
+         "observed_at": "2026-06-27T00:00:00+00:00", "author_id": 2},
+    ]
+    items = [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]
+    out = api.serialize_project(
+        name="orion", kind="project", reports=[], checklist=checklist,
+        observations=observations,
+        producer_checklists=[
+            _human_producer(1, "yoo", items),
+            _agent_producer(2, "claude-mac", items, (1, "yoo")),
+        ],
+        discussions=[], disciplines=None, today=_TODAY,
+    )
+
+    (card,) = out["producer_checklists"]
+    assert card["items"][0]["slipping"] is False  # neither raw stream slipped
+    # And the project-wide surfaces agree — nothing slipped anywhere.
+    assert out["checklist"][0]["slipping"] is False
+    assert next(m for m in out["milestones"] if m["group"] == "G")["slipping"] is False
+
+
+def test_project_detail_keeps_an_unrelated_contributor_as_its_own_card():
+    """A human + their agent + an unrelated contributor = TWO cards (two effective producers)."""
+    items = [_item("Task X", due_date="2026-06-28", key="todo-x", group="G")]
+    out = api.serialize_project(
+        name="orion", kind="project", reports=[], checklist=list(items),
+        observations=[],
+        producer_checklists=[
+            _human_producer(1, "yoo", items),
+            _agent_producer(2, "claude-mac", items, (1, "yoo")),
+            _human_producer(3, "teammate", items),
+        ],
+        discussions=[], disciplines=None, today=_TODAY,
+    )
+
+    names = [c["author_name"] for c in out["producer_checklists"]]
+    assert names == ["yoo", "teammate"]
+    # Internal ids stay off the wire even though folding now reads them.
+    assert all("author_ids" not in c and "author_id" not in c for c in out["producer_checklists"])
+
+
 def test_project_detail_emits_in_progress_state_and_passes_status_through():
     """A tracker item's structured status drives in_progress state + ships raw on the row (gap 8).
 

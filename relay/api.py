@@ -30,6 +30,7 @@ from .derive import (
     OVERDUE,
     bucket_counts,
     classify_item,
+    fold_producer_checklists,
     item_key,
     milestones,
     next_open_due,
@@ -632,9 +633,12 @@ def serialize_project(
         observations: The project's observed history (store.observed_history), each row carrying
             its recording producer's author_id, for per-producer slippage (C3 Inc 2.5).
         producer_checklists: Each identified producer's own live checklist
-            (store.producer_checklists_for) — {"author_id", "author_name", "items", ...} per
-            producer, for the per-producer cards (C3 Inc 2). author_id keys each card's own
-            slippage stream but is not emitted. Empty for a legacy-only / single-writer project.
+            (store.producer_checklists_for) — {"author_id", "author_name", "items",
+            "effective_producer_id", "effective_producer_name", ...} per producer, for the
+            per-producer cards (C3 Inc 2). author_id keys each card's own slippage stream but
+            is not emitted; the effective-producer fields drive Unit 4b's fold, so an agent's
+            row groups under the human it acts for. Empty for a legacy-only / single-writer
+            project.
         discussions: The project's discussion thread oldest-first
             (store.discussion_items_for_project) — the supervisor-interaction loop (E2 Inc 5).
             The single conversation surface since KI-28 Stage 2 retired per-report comments.
@@ -699,11 +703,20 @@ def serialize_project(
     checklist_rows = _checklist_rows(items, today, slipping, resolved_due_soon_days)
 
     # C3 Inc 2: one card per identified producer, each the same row shape as the aggregate.
-    # C3 Inc 2.5: each card marks slipping from its OWN producer's stream
-    # (slipping_by_author.get(author_id)), not the project-wide union — so a deadline that
-    # only one machine let slip shows on that producer's card alone. author_id keys the lookup
-    # but is never emitted (the wire hides internal ids). Empty list ⇒ the SPA shows no
-    # per-producer section (single-writer / legacy projects render unchanged).
+    # C3 Inc 2.5: each card marks slipping from its OWN producer's stream, not the
+    # project-wide union — so a deadline that only one machine let slip shows on that
+    # producer's card alone. Internal ids key the lookups but are never emitted (the wire
+    # hides them). Empty list ⇒ the SPA shows no per-producer section (single-writer /
+    # legacy projects render unchanged).
+    #
+    # Unit 4b: cards are keyed by EFFECTIVE producer, so an agent's card folds into its
+    # operator's — a person plus their agents is one contributor. The slipping lookup stays
+    # keyed on the RAW author ids and is UNIONED across the folded group. That asymmetry is
+    # the whole point: slippage is derived per raw stream (a streak needs ≥2 observations in
+    # the SAME stream), so folding before deriving would interleave a human's and an agent's
+    # histories and manufacture the false postponement C3 Inc 2.5 fixed. Fold for DISPLAY,
+    # never for derivation.
+    folded_producers = fold_producer_checklists(producer_checklists)
     producer_checklist_rows = [
         {
             "author_name": pc["author_name"],
@@ -711,11 +724,21 @@ def serialize_project(
                 sum(1 for item in pc["items"] if item.get("done")), len(pc["items"])
             ),
             "items": _checklist_rows(
-                pc["items"], today, slipping_by_author.get(pc["author_id"], set()),
+                pc["items"],
+                today,
+                # The union of every raw stream that folded into this card.
+                set().union(
+                    *(
+                        slipping_by_author.get(author_id, set())
+                        for author_id in pc["author_ids"]
+                    )
+                )
+                if pc["author_ids"]
+                else set(),
                 resolved_due_soon_days,
             ),
         }
-        for pc in producer_checklists
+        for pc in folded_producers
     ]
 
     # Per-project ordinal for each report (the timeline shows #N, not the gappy global id).

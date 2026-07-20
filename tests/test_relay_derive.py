@@ -22,6 +22,7 @@ from relay.derive import (
     classify_item,
     count_at_risk,
     effective_checklist,
+    fold_producer_checklists,
     is_slipping,
     item_key,
     merge_producer_checklists,
@@ -617,6 +618,139 @@ def test_effective_checklist_merges_only_at_two_or_more_producers():
     # 2 producers: now the merge runs and OR-s done → the item reads done.
     two = _producer([_item(text="Ship", done=False)], "2026-06-27T10:00:00Z")
     assert effective_checklist(aggregate, [one, two])[0]["done"] is True
+
+
+# --- Unit 4b: operator-folding (agents fold into the human they act for) --------------
+#
+# An agent is a machine acting on a person's behalf, so the project page shows ONE card per
+# PERSON: a human plus their two agents is one contributor, not three. These tests pin the
+# fold itself; the crucial "slippage still derives on RAW streams" half is pinned in
+# test_relay_api.py, where the observation streams actually exist.
+
+
+def _identified_producer(author_id, author_name, items, updated_at, operator=None):
+    """Build a producer row as producer_checklists_for returns it (Unit 4b shape).
+
+    Args:
+        operator: (id, name) of the operating human when this row is an AGENT, else None.
+
+    Why: the fold reads `effective_producer_id`/`effective_producer_name`, which the store
+    resolves as `operated_by ?? author_id`. Passing a human's own identity for a non-agent
+    is what makes "no agents behaves exactly as before" testable in one fixture.
+    """
+    operator_id, operator_name = operator if operator else (author_id, author_name)
+    return {
+        "author_id": author_id,
+        "author_name": author_name,
+        "items": items,
+        "updated_at": updated_at,
+        "effective_producer_id": operator_id,
+        "effective_producer_name": operator_name,
+    }
+
+
+def test_fold_groups_an_agent_into_its_operator_as_one_card():
+    """A human + their agent produce ONE card, named for the human, carrying both raw ids.
+
+    This is the core of the unit: agents act on their operator's behalf, so work-tracking
+    groups by person. Both raw author_ids must survive on the row — the caller needs them to
+    look up each stream's slippage, which is never merged.
+    """
+    human = _identified_producer(1, "yoo", [_item(text="Ship", done=False)], "2026-06-26T10:00:00Z")
+    agent = _identified_producer(
+        2, "claude-mac", [_item(text="Ship", done=True)], "2026-06-27T10:00:00Z",
+        operator=(1, "yoo"),
+    )
+
+    (card,) = fold_producer_checklists([human, agent])
+    assert card["author_name"] == "yoo"  # the person, not the machine
+    assert sorted(card["author_ids"]) == [1, 2]  # provenance carried forward
+    # Within the group the existing done-OR merge applies: the agent's done wins.
+    assert card["items"][0]["done"] is True
+    # The group's freshest push, for the cross-producer fold that may follow.
+    assert card["updated_at"] == "2026-06-27T10:00:00Z"
+
+
+def test_fold_groups_two_agents_of_one_operator_into_a_single_card():
+    """Two agents under one human still yield ONE card — the count is people, not machines."""
+    human = _identified_producer(1, "yoo", [_item(text="A", done=False)], "2026-06-26T10:00:00Z")
+    agent_a = _identified_producer(
+        2, "claude-mac", [_item(text="B", done=True)], "2026-06-27T10:00:00Z", operator=(1, "yoo")
+    )
+    agent_b = _identified_producer(
+        3, "codex", [_item(text="C", done=True)], "2026-06-28T10:00:00Z", operator=(1, "yoo")
+    )
+
+    cards = fold_producer_checklists([human, agent_a, agent_b])
+    assert len(cards) == 1
+    assert sorted(cards[0]["author_ids"]) == [1, 2, 3]
+    assert {i["text"] for i in cards[0]["items"]} == {"A", "B", "C"}
+
+
+def test_fold_keeps_unrelated_producers_apart():
+    """Two humans stay two cards — folding must group by operator, not collapse everything."""
+    a = _identified_producer(1, "yoo", [_item(text="A")], "2026-06-26T10:00:00Z")
+    b = _identified_producer(2, "teammate", [_item(text="B")], "2026-06-27T10:00:00Z")
+
+    cards = fold_producer_checklists([a, b])
+    assert [c["author_name"] for c in cards] == ["yoo", "teammate"]  # input (name) order kept
+
+
+def test_fold_leaves_a_lone_producers_items_untouched():
+    """A group of one passes its items through by identity — nothing to reconcile.
+
+    Why this matters: the overwhelmingly common no-agents case must not acquire merge
+    semantics (or the merge's `updated_at` requirement) just because folding now runs.
+    """
+    items = [_item(text="Ship", done=False)]
+    lone = _identified_producer(1, "yoo", items, "2026-06-26T10:00:00Z")
+    (card,) = fold_producer_checklists([lone])
+    assert card["items"] is items
+
+
+def test_the_merge_gate_still_counts_copies_not_people_when_an_agent_folds():
+    """A human + their agent still MERGE, even though they render as one card.
+
+    This pins the deliberate deviation from amendment 4 (decided on measured evidence).
+    Amendment 4 wanted this gate to count distinct effective producers, so a human+agent
+    pair would skip the merge. Doing that fell back to the last-writer-wins aggregate, which
+    DROPS whatever items the other producer holds and flips `done` by push order — KI-30's
+    flicker, reintroduced. The merge reconciles COPIES; a human and their agent genuinely
+    hold two, either of which may be stale.
+
+    Folding and this gate answer different questions, and both must hold at once: ONE card
+    (people) AND a merged badge (copies).
+    """
+    aggregate = [_item(text="Ship", done=False), _item(text="Human-only", done=False)]
+    human = _identified_producer(
+        1, "yoo",
+        [_item(text="Ship", done=False), _item(text="Human-only", done=False)],
+        "2026-06-26T10:00:00Z",
+    )
+    agent = _identified_producer(
+        2, "claude-mac",
+        [_item(text="Ship", done=True), _item(text="Agent-only", done=True)],
+        "2026-06-27T10:00:00Z", operator=(1, "yoo"),
+    )
+
+    merged = effective_checklist(aggregate, [human, agent])
+    by_text = {i["text"]: i for i in merged}
+    # Nothing is lost: both producers' items survive...
+    assert set(by_text) == {"Ship", "Human-only", "Agent-only"}
+    # ...and the agent's completion OR-s over the human's stale not-done copy.
+    assert by_text["Ship"]["done"] is True
+
+    # The two questions stay separate: still ONE card for the person.
+    assert len(fold_producer_checklists([human, agent])) == 1
+
+
+def test_effective_checklist_gate_is_unchanged_for_identity_less_rows():
+    """Rows carrying no identity behave exactly as before 4b — the gate is untouched."""
+    aggregate = [_item(text="Ship", done=False)]
+    one = _producer([_item(text="Ship", done=True)], "2026-06-26T10:00:00Z")
+    two = _producer([_item(text="Ship", done=False)], "2026-06-27T10:00:00Z")
+    assert effective_checklist(aggregate, [one, two])[0]["done"] is True
+    assert effective_checklist(aggregate, [one]) is aggregate
 
 
 def test_effective_checklist_preserves_none_aggregate_in_the_fallback():

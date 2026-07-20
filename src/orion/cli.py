@@ -333,6 +333,17 @@ def main(argv: list[str] | None = None) -> int:
         default=3.0,
         help="Seconds between polls in --watch mode (default: 3.0).",
     )
+    checklist_parser.add_argument(
+        "--clear-due-soon-days",
+        dest="clear_due_soon_days",
+        action="store_true",
+        help=(
+            "Single-project only: clear this project's stored 'due soon' horizon on the "
+            "relay, so it falls back to the default. The relay never clears a setting just "
+            "because a push omits it (KI-35), so dropping `due_soon_days` from config "
+            "leaves the old horizon in place until you run this."
+        ),
+    )
 
     disciplines_parser = subparsers.add_parser(
         "disciplines-push",
@@ -1001,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "checklist-push":
         return cmd_checklist_push(
             args.project, Path(args.config), args.watch, args.interval,
-            args.all_projects, args.due,
+            args.all_projects, args.due, args.clear_due_soon_days,
         )
     if args.command == "disciplines-push":
         return cmd_disciplines_push(args.project, Path(args.config))
@@ -1991,6 +2002,7 @@ def cmd_checklist_push(
     interval: float,
     all_projects: bool = False,
     due_only: bool = False,
+    clear_due_soon_days: bool = False,
 ) -> int:
     """Push a project's current checklist to the relay (single project, --all, or --watch).
 
@@ -2006,10 +2018,14 @@ def cmd_checklist_push(
             their `cadence` and skip a due project whose content is unchanged since its
             last push (the scheduled-run surface). Defaults False so manual pushes are
             unconditional.
+        clear_due_soon_days: True for `--clear-due-soon-days` — send an explicit clear for
+            this project's due-soon horizon instead of its configured value. Single-project
+            only (rejected with --all/--watch).
 
     Returns:
         Process exit code: 2 for a usage error (neither/both of project & --all, --due
-        without --all, or --watch with --all/--due); 1 on a setup error or a single-project
+        without --all, --watch with --all/--due, or --clear-due-soon-days outside a
+        single one-shot push); 1 on a setup error or a single-project
         delivery failure, OR if any project in an --all sweep genuinely FAILED; else 0.
         Not-due / no-change / no-checklist skips are all clean exit 0 (routine outcomes a
         scheduler should not alert on).
@@ -2041,6 +2057,17 @@ def cmd_checklist_push(
     if watch and (all_projects or due_only):
         print(
             "Error: --watch is single-project; it cannot combine with --all or --due.",
+            file=sys.stderr,
+        )
+        return 2
+    # KI-35: clearing a setting is a deliberate, single-shot act on ONE project — never
+    # something a sweep or a poll loop repeats. Confining it to the one-shot single-project
+    # push also means it never meets the --all --due change-gate, so a clear can't be
+    # skipped as "no change" (the gate is only consulted in _push_checklist_all).
+    if clear_due_soon_days and (all_projects or watch):
+        print(
+            "Error: --clear-due-soon-days is a single-project, one-shot act; it cannot "
+            "combine with --all or --watch.",
             file=sys.stderr,
         )
         return 2
@@ -2097,16 +2124,22 @@ def cmd_checklist_push(
     # here (unlike the watch loop, which retries), so the user sees a non-zero exit.
     try:
         payload = _checklist_payload(project)
+        # A clear sends an explicit null INSTEAD of the configured value, so the horizon we
+        # actually put on the wire is None. The recorded hash must reflect what was sent,
+        # not what config holds, or a later `--all --due` run would compare against a state
+        # the relay never saw.
+        sent_due_soon_days = None if clear_due_soon_days else project.due_soon_days
         push_checklist(
             relay_cfg.url, project.name, payload, token,
-            kind=project.kind, due_soon_days=project.due_soon_days,
+            kind=project.kind, due_soon_days=sent_due_soon_days,
+            clear_due_soon_days=clear_due_soon_days,
         )
         # Record only after the push succeeded (mirrors record_report): a DeliveryError
         # below skips this, so a failed push leaves no history row and is retried later.
         record_checklist_push(
             conn,
             project.name,
-            _checklist_content_hash(payload, project.kind, project.due_soon_days),
+            _checklist_content_hash(payload, project.kind, sent_due_soon_days),
             datetime.now(timezone.utc).isoformat(),
         )
     except DeliveryError as exc:

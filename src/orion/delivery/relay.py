@@ -104,6 +104,7 @@ def push_checklist(
     *,
     kind: str = "project",
     due_soon_days: int | None = None,
+    clear_due_soon_days: bool = False,
     timeout: float = 10.0,
 ) -> None:
     """POST a project's current checklist to a relay's /checklist endpoint.
@@ -124,6 +125,11 @@ def push_checklist(
             omit it (the relay then applies its default). E1.2: rides this push (the
             second of the two checklist carriers) so the relay flags due-soon items per
             this project's preference. None ⇒ the key is omitted from the payload.
+        clear_due_soon_days: When True, send an explicit JSON null for `due_soon_days`,
+            which tells the relay to CLEAR the stored horizon (back to its default).
+            Mutually exclusive with a non-None `due_soon_days`. KI-35: since the relay
+            no longer treats an absent value as "clear", clearing needs this explicit
+            carrier.
         timeout: Seconds to wait for the request before failing.
 
     Returns:
@@ -140,12 +146,21 @@ def push_checklist(
         DeliveryError unifies every failure mode so the CLI command / watch loop can
         report it and carry on.
     """
+    if clear_due_soon_days and due_soon_days is not None:
+        # A caller bug, not user input — the CLI never lets these combine.
+        raise ValueError(
+            "clear_due_soon_days cannot be combined with a due_soon_days value"
+        )
     endpoint = urllib.parse.urljoin(relay_url, "/checklist")
     payload = {"project": project, "checklist": checklist, "kind": kind}
-    # Optional field: include `due_soon_days` ONLY when configured. None ⇒ omit the key,
-    # so a project without it sends byte-identical payloads to before (back-compatible),
-    # mirroring the omit-when-None rule serialize_blob applies on the ingest carrier.
-    if due_soon_days is not None:
+    # KI-35: `due_soon_days` is tri-state on this carrier. Omit the key ⇒ the relay leaves
+    # the stored horizon alone (so a project without the config sends byte-identical
+    # payloads to before, and can never clobber another producer's value). Explicit null ⇒
+    # clear. An int ⇒ set. The omit-when-None rule matches what serialize_blob applies on
+    # the ingest carrier.
+    if clear_due_soon_days:
+        payload["due_soon_days"] = None
+    elif due_soon_days is not None:
         payload["due_soon_days"] = due_soon_days
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(

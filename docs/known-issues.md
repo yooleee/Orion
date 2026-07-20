@@ -438,37 +438,6 @@ Deferred).
   layout/IA pass is best done **alongside or just before** those, rather than as a one-off now. A redesign
   would touch the SPA shell + the project route, so it belongs in a deliberate slice with its own plan.
 
-## KI-35 — Per-project `due_soon_days` is last-writer-wins; the /checklist push is authoritative (E1.2)
-
-- **Detail:** The relay stores a project's `due_soon_days` horizon in `relay_project_meta` (sibling of
-  `kind`). The **/checklist push is the authoritative carrier**: it writes the value when present and
-  **clears it to NULL when absent** (so removing the config restores the 7-day default — the set→unset
-  round-trip). The **/ingest blob path is set-only** (writes when present, never clears), because /ingest
-  also carries `intake` blobs, which legitimately omit checklist config and must not wipe the horizon.
-- **Why it matters:** two consequences follow, both currently benign. **(1)** It is **last-writer-wins
-  across producers** (exactly like `kind`): in a future multi-machine setup, a producer whose config does
-  not set `due_soon_days` would clear a value another producer set, on its next /checklist push. **(2)** A
-  checklist-enabled project that sets the horizon, later removes it, and thereafter pushes **only reports**
-  (never /checklist) would keep the stale value, since only /checklist clears. Both are edge cases in the
-  current single-producer, checklist-pushing deployment.
-- **Severity:** low (single-producer today; the authoritative-carrier split keeps the common path correct).
-- **Status:** By-design (revisit with the per-producer/multi-machine model, alongside KI-32's
-  last-writer-wins concern; a per-producer horizon merge would arrive with that work if ever needed).
-  **Forward-note (2026-07-17, E1.3 planning):** the scheduled checklist-push slice (E1.3) automates the
-  authoritative `/checklist` carrier — fine while single-producer, but it means consequence (1) above
-  turns **periodic and silent** the moment a second producer (human, or an agent under the
-  agents-as-contributors idea) schedules pushes to a shared project. Revisit this KI as part of the
-  auth-revamp / multi-producer pass **before** that happens. E1.3's change-gate hashes the wire payload
-  (items + `kind` + `due_soon_days`), which keeps consequence (2) mitigated: a config-only horizon
-  change still triggers a push.
-  **Decision (2026-07-19, auth-revamp planning pass): settings become set-only + explicit clear.**
-  All push paths will write `due_soon_days` only when present and never clear on absence. Clearing
-  becomes an explicit act (tri-state wire value: absent = leave, null = clear, int = set, sent by a
-  dedicated producer flag). This removes consequence (1), the silent scheduled clobber. Consequence
-  (2) returns in a narrower form (a set-then-unset horizon stays until explicitly cleared), accepted
-  as the rarer, human-visible case. Slated as Unit 1 of the auth-revamp build (it lands before any
-  agent or second producer gets a key).
-
 ## KI-36 — Reports sent before a relay grant never land on the dashboard (backfill path added)
 
 - **Detail:** When a project's reports are sent (via `report`/`intake`) while the pushing key
@@ -489,8 +458,8 @@ Deferred).
   time — a project must be granted separately (`relay-user grant`). A follow-on could **prompt to
   scope a project into the relay during `add-project`** (opt-in, to preserve preview-before-send
   and avoid coupling the config writer to the admin token). This is a distinct SCOPING concern
-  from the ingest push, and ties into the multi-producer / auth-revamp pass (see KI-35's
-  forward-note): scheduled multi-producer scoping + last-writer semantics get reworked there.
+  from the ingest push, and ties into the multi-producer / auth-revamp pass (whose Unit 1 resolved
+  KI-35, the sibling last-writer concern): scheduled multi-producer scoping gets reworked there.
 - **Severity:** low–medium (recovery exists; the forward-fix is a convenience, and the gap only
   bites at onboarding, before a grant).
 - **Status:** Partially addressed — the `relay-backfill` recovery command shipped in this slice;
@@ -501,6 +470,17 @@ Deferred).
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-35** — Project-level settings on the relay cleared on absence: a `/checklist` push that omitted
+  `due_soon_days` wiped the stored horizon, so a second producer without that config would silently clear
+  a value another producer set (periodically, once E1.3 made pushes schedulable). `kind` had the identical
+  bug, demoting a tracker to a project. **Resolved 2026-07-19** in Unit 1 of the auth-revamp arc: both
+  settings became **set-only** (absence now means "leave it alone"), and clearing became explicit via a
+  tri-state wire value (absent = leave, `null` = clear, int = set) carried by
+  `checklist-push --clear-due-soon-days`. `/ingest` stays set-only and now REJECTS an explicit null — a
+  report blob must never clear project settings. Residual, accepted at the decision: a horizon that is set
+  and then dropped from config persists until someone clears it explicitly (the rarer, human-visible case,
+  traded for the silent one). KI-32's per-producer disciplines merge stays deferred. See CHANGELOG →
+  *"Set-only project settings + explicit clear (auth-revamp Unit 1)"*.
 - **KI-13** — Cadence-aware `report --all --due` filter (a per-project schedule + last-report-time gating,
   the stateless subset carved out of the deferred B5 layer). **Resolved 2026-07-17** in the E1.2 slice:
   `report --all --due` reads each project's `cadence` config against `report_history`'s `MAX(sent_at)` (no

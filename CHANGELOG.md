@@ -14,6 +14,44 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Set-only project settings + explicit clear (auth-revamp Unit 1, KI-35, 2026-07-19)
+
+The opening unit of the **auth-model revamp** arc, built off
+[`docs/auth-revamp-kickoff.md`](docs/auth-revamp-kickoff.md). It is deliberately orthogonal to the
+account work that follows, and lands first because the bug it closes goes live the moment a second
+producer holds a key.
+
+The relay keeps two project-level settings in one meta row: `due_soon_days` (the "due soon" horizon)
+and `kind` (project | tracker). Both were written **unconditionally** by the `/checklist` push, so a
+push that omitted a setting cleared it. That was safe under one producer. With two — a second machine,
+or an agent — a producer that does not configure the horizon would wipe the one another producer set,
+and E1.3 made those pushes **scheduled**, so the clobber would have been periodic and silent.
+
+### Changed
+
+- **Project settings are now set-only on every push path: absence never clears.** A `/checklist`
+  push that omits `due_soon_days` (or `kind`) leaves the stored value alone. `kind` had the identical
+  bug — the handler wrote `payload.get("kind") or "project"`, demoting a tracker to a project on any
+  push that omitted the field — and is fixed alongside.
+- **`due_soon_days` is tri-state on the `/checklist` carrier:** absent = leave, explicit `null` =
+  clear, int = set. `/ingest` stays set-only and now **rejects** an explicit null with a 400 — a report
+  blob (including an `intake` blob) must never be able to clear a project's settings.
+- **The accepted trade, recorded honestly:** because absence no longer clears, a horizon that is set
+  and later dropped from config **persists** until it is cleared explicitly. That staleness is rare and
+  human-visible; the silent cross-producer clobber it replaces was neither.
+
+### Added
+
+- **`orion checklist-push --clear-due-soon-days`.** The explicit clear — sends the wire null so the
+  project falls back to the 7-day default. Single-project and one-shot: rejected with `--all` (which
+  would wipe every project's horizon at once) and with `--watch` (which would re-clear on every poll).
+  Confining it to the one-shot push also keeps it clear of the `--all --due` change-gate, so a clear
+  can never be skipped as "no change". Repeating it is idempotent.
+
+### Fixed
+
+- **KI-35** — resolved. See [`docs/known-issues.md`](docs/known-issues.md).
+
 ## Relay backfill — recover already-sent reports onto the relay (KI-36, 2026-07-18)
 
 A report sent while the pushing key was **not yet scoped** for its project reached Discord/Slack but

@@ -56,6 +56,7 @@ from relay.store import (
     get,
     get_checklist,
     get_due_soon_days,
+    get_project_kind,
     list_projects,
     observed_history,
     open_relay_store,
@@ -555,18 +556,27 @@ def test_push_checklist_client_round_trips_through_the_relay(tmp_path):
         assert get_checklist(conn, "demo") == items
 
 
-# --- E1.2 (forward-look): the due_soon_days knob on the relay's inbound surfaces --------
-# The knob rides BOTH carriers (the /checklist push and the /ingest blob), is validated to an
-# int in 1..365 when present, is omit-when-unset (absent ⇒ stored NULL, back-compat), and is
-# last-writer-wins. End to end it widens the "due soon" classification the dashboard reads.
+# --- E1.2 (forward-look) / KI-35: the due_soon_days knob on the relay's inbound surfaces --
+# The knob rides BOTH carriers (the /checklist push and the /ingest blob) and is validated to
+# an int in 1..365 when present. KI-35 made it TRI-STATE on /checklist: absent = leave the
+# stored value alone, explicit null = clear, int = set. /ingest stays set-only and REJECTS an
+# explicit null. End to end it widens the "due soon" classification the dashboard reads.
 
 
-def _checklist_body_with_due_soon(project="demo", items=None, due_soon_days=None):
-    """A {project, checklist[, due_soon_days]} push body (due_soon_days omitted when None)."""
+def _checklist_body_with_due_soon(
+    project="demo", items=None, due_soon_days=None, clear=False
+):
+    """A {project, checklist[, due_soon_days]} push body.
+
+    `due_soon_days=None, clear=False` omits the key (leave-alone); `clear=True` sends an
+    explicit JSON null (the clear signal); an int sends the value.
+    """
     if items is None:
         items = [{"text": "Wire it", "done": False}]
     payload = {"project": project, "checklist": items}
-    if due_soon_days is not None:
+    if clear:
+        payload["due_soon_days"] = None
+    elif due_soon_days is not None:
         payload["due_soon_days"] = due_soon_days
     return json.dumps(payload).encode("utf-8")
 
@@ -587,32 +597,76 @@ def test_checklist_push_persists_due_soon_days(tmp_path):
         assert get_due_soon_days(open_relay_store(db), "demo") == 30
 
 
-def test_checklist_push_without_due_soon_days_stores_null(tmp_path):
-    """A /checklist push omitting due_soon_days leaves the horizon unset (NULL) — back-compat.
+def test_checklist_push_without_due_soon_days_leaves_the_horizon_unset(tmp_path):
+    """A /checklist push omitting due_soon_days on a fresh project leaves it unset — back-compat.
 
     Why this matters: a producer predating the knob omits it entirely; the relay must accept
-    that and store NULL so the classifier falls back to the 7-day default, byte-identically.
+    that and leave the horizon NULL so the classifier falls back to the 7-day default,
+    byte-identically.
     """
     with _running_relay(tmp_path) as (base_url, db):
         assert _post(base_url, _checklist_body_with_due_soon(), path="/checklist")[0] == 200
         assert get_due_soon_days(open_relay_store(db), "demo") is None
 
 
-def test_checklist_push_clears_due_soon_days_when_dropped(tmp_path):
-    """Setting due_soon_days then pushing WITHOUT it clears the horizon back to the default.
+def test_checklist_push_omitting_due_soon_days_preserves_a_set_horizon(tmp_path):
+    """KI-35: a push that omits due_soon_days must PRESERVE a horizon someone else set.
 
-    Why this matters: this is the fix for the stale-horizon bug — the /checklist push is the
-    authoritative carrier, so it must not only set the value but also CLEAR it when a producer
-    stops configuring it. Set 14, then push a plain checklist (config removed): the relay must
-    reset to NULL (→ 7-day default), not leave 14 stuck. Without the clear, the dashboard would
-    keep classifying against a horizon the user already removed.
+    Why this matters: this is the whole point of the unit, and it inverts the previous
+    behavior (absence used to clear). The scenario is two producers pushing to one shared
+    project: the first has `due_soon_days = 14` in its config, the second does not configure
+    it at all and so omits the field on every push. Once the second producer's push is
+    SCHEDULED (E1.3), the old clear-on-absence rule wiped the first producer's horizon
+    periodically and silently. Absence must now mean "leave it alone".
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        # Producer A (configured) sets the horizon.
+        assert _post(base_url, _checklist_body_with_due_soon(due_soon_days=14), path="/checklist")[0] == 200
+        assert get_due_soon_days(open_relay_store(db), "demo") == 14
+        # Producer B (no due_soon_days config) pushes the same project — omits the field.
+        assert _post(base_url, _checklist_body_with_due_soon(), path="/checklist")[0] == 200
+        assert get_due_soon_days(open_relay_store(db), "demo") == 14  # survives, not clobbered
+
+
+def test_checklist_push_explicit_null_clears_the_horizon_and_is_idempotent(tmp_path):
+    """An explicit JSON null on /checklist clears the horizon, and repeating it is a no-op.
+
+    Why this matters: with absence no longer clearing, clearing needs its own signal — the
+    tri-state's third state, sent by `checklist-push --clear-due-soon-days`. The clear must
+    reset to NULL (→ the 7-day default), and running it twice must be safe: a user who is not
+    sure whether the clear landed should be able to just run it again.
     """
     with _running_relay(tmp_path) as (base_url, db):
         assert _post(base_url, _checklist_body_with_due_soon(due_soon_days=14), path="/checklist")[0] == 200
         assert get_due_soon_days(open_relay_store(db), "demo") == 14
-        # The user removes due_soon_days from config; the next push omits it → cleared.
-        assert _post(base_url, _checklist_body_with_due_soon(), path="/checklist")[0] == 200
+        assert _post(base_url, _checklist_body_with_due_soon(clear=True), path="/checklist")[0] == 200
         assert get_due_soon_days(open_relay_store(db), "demo") is None
+        # Idempotent: a second clear on an already-cleared project still succeeds.
+        assert _post(base_url, _checklist_body_with_due_soon(clear=True), path="/checklist")[0] == 200
+        assert get_due_soon_days(open_relay_store(db), "demo") is None
+
+
+def test_checklist_push_omitting_kind_preserves_a_stored_tracker(tmp_path):
+    """KI-35 (sibling setting): a push omitting `kind` must not reset a tracker to a project.
+
+    Why this matters: `kind` shares the meta row with due_soon_days and had the identical
+    silent-clobber bug — the handler wrote `payload.get("kind") or "project"` unconditionally,
+    so any push that omitted the field demoted a tracker back to a project on the home page.
+    Set-only fixes both settings together. The second half of the test pins that a PRESENT
+    kind still sets, so set-only did not turn into never-set.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        body = json.loads(_checklist_body_with_due_soon())
+        body["kind"] = "tracker"
+        assert _post(base_url, json.dumps(body).encode("utf-8"), path="/checklist")[0] == 200
+        assert get_project_kind(open_relay_store(db), "demo") == "tracker"
+        # A push with no `kind` at all (an older or differently-configured producer).
+        assert _post(base_url, _checklist_body_with_due_soon(), path="/checklist")[0] == 200
+        assert get_project_kind(open_relay_store(db), "demo") == "tracker"  # preserved
+        # But a push that DOES carry a kind still sets it.
+        body["kind"] = "project"
+        assert _post(base_url, json.dumps(body).encode("utf-8"), path="/checklist")[0] == 200
+        assert get_project_kind(open_relay_store(db), "demo") == "project"
 
 
 def test_ingest_blob_without_due_soon_days_does_not_clear_it(tmp_path):
@@ -678,6 +732,26 @@ def test_ingest_blob_rejects_invalid_due_soon_days(tmp_path):
         assert status == 400
         assert "due_soon_days" in json.loads(resp)["error"]
         assert list_projects(open_relay_store(db)) == []  # no report row created
+
+
+def test_ingest_blob_rejects_an_explicit_null_due_soon_days(tmp_path):
+    """An explicit null on /ingest is a 400, and leaves an already-set horizon untouched.
+
+    Why this matters: the two carriers deliberately diverge on the clear signal (KI-35). A
+    report blob must never be able to clear a project's settings — /ingest also carries
+    `intake` blobs, and a clear riding a report would be exactly the accident the set-only
+    rule exists to prevent. Only the dedicated /checklist carrier owns clearing. The stored
+    value is asserted afterwards, not just the status code: a rejected payload must leave no
+    partial meta write behind.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, _checklist_body_with_due_soon(due_soon_days=14), path="/checklist")[0] == 200
+        blob = json.loads(_real_blob_json())
+        blob["due_soon_days"] = None
+        status, resp = _post(base_url, json.dumps(blob).encode("utf-8"))
+        assert status == 400
+        assert "due_soon_days" in json.loads(resp)["error"]
+        assert get_due_soon_days(open_relay_store(db), "demo") == 14  # untouched
 
 
 def test_due_soon_days_widens_at_risk_but_not_the_scheduling_week(tmp_path):

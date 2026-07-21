@@ -14,6 +14,47 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## KI-39 — `orion report` broken for any project enabling a push-only collector (2026-07-20)
+
+Found while dogfooding the new agent account during the auth-revamp live close-out: the first
+real `orion report orion` failed outright.
+
+### Fixed
+
+- **`orion report` no longer raises `Unknown collector 'disciplines'`.** The `collectors` config
+  list holds two different kinds of name, and nothing in the code distinguished them:
+  **report collectors** (`git`, `tasks`, `notes`, `incubator`, `tracker`), each with a dispatch
+  branch in `cli._collect_for` that produces a report section, and **push-only capability flags**
+  (`disciplines`), whose presence enables a dedicated push command (`orion disciplines-push`) and
+  which contribute no section at all. `SUPPORTED_COLLECTORS` listed both, so the report loop fed a
+  capability flag to `_collect_for`, hit the fall-through guard, and aborted the whole run.
+- **Blast radius:** total for an affected project — no report could be produced at all, on any
+  lane. `disciplines-push` *requires* the flag to be present in `collectors`, so the only
+  documented way to enable disciplines necessarily broke `report` for that project. Two of the
+  developer's five configured projects (`orion`, `instruction-debugger`) were affected.
+
+### Changed
+
+- **The taxonomy is now explicit in `config.py`**, following the existing `CHECKLIST_COLLECTORS`
+  idiom: `REPORT_COLLECTORS` and `PUSH_ONLY_COLLECTORS` are named separately and
+  `SUPPORTED_COLLECTORS` is *derived* as their concatenation, so a name can never be accepted by
+  validation while belonging to neither kind. The report loop skips push-only names by the
+  constant rather than by a literal, so the next push-only capability needs no change there.
+- **`_collect_for`'s two failure modes now give two messages.** A push-only name reaching dispatch
+  reports an internal Orion bug (the caller forgot to skip it); an unrecognized name still reports
+  config/dispatch drift. Its docstring previously asserted that config validation guarantees a name
+  is collectible — the false assumption at the root of this bug — and now states the weaker truth.
+- No config change and no migration: validation accepts exactly the same set as before.
+
+### Why it was missed
+
+The disciplines flag was added to `SUPPORTED_COLLECTORS` in E2 Inc 4 4b with tests covering the
+`disciplines-push` path, but none covering `report` on a project that also enables it — the
+interaction between a new capability and an existing command went untested. The regression tests
+added here include a **structural guard** that walks `REPORT_COLLECTORS` and asserts each name
+reaches a real dispatch branch, so the mirror-image mistake (adding a collector and forgetting the
+branch) is caught the moment a name is listed, with no test to remember to write.
+
 ## KB scoping: the `member` role and per-project visibility (auth-revamp Unit 5, 2026-07-20)
 
 The primitives a company-wide knowledge base needs. A project is now either **org-visible**

@@ -20,8 +20,16 @@
 import json
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from orion import cli
-from orion.config import get_project, load_config
+from orion.config import (
+    PUSH_ONLY_COLLECTORS,
+    REPORT_COLLECTORS,
+    ConfigError,
+    get_project,
+    load_config,
+)
 from orion.state import get_last_checklist_push, open_state
 
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
@@ -3065,6 +3073,175 @@ def test_incubator_collector_end_to_end(tmp_path, env_and_mocks):
     assert "Idea pipeline" in text
     assert "New idea: VLM Photo Overlay (refining)" in text
     assert "Annotate a photo" in text
+
+
+# --- Push-only collectors must not reach the report loop ----------------------
+# `collectors` holds two kinds of name: report collectors (a _collect_for branch, a
+# report section) and push-only capability flags (a dedicated push command, no section).
+# Treating the second kind as the first raised "Unknown collector 'disciplines'" and broke
+# `orion report` outright for every project that enabled it. These pin the distinction.
+
+
+def _write_disciplines_config(tmp_path, repo):
+    """Write an orion.toml enabling git plus the push-only `disciplines` capability.
+
+    Args:
+        tmp_path: pytest's per-test temporary directory.
+        repo: Path to the git repo the git collector will read.
+
+    Returns:
+        Path to the written orion.toml.
+
+    Why:
+        This is the exact real-world shape that broke: a normal reporting project that
+        ALSO enables disciplines so `disciplines-push` will run for it. `discipline_docs`
+        is required by config validation whenever the collector is on, so a real doc is
+        written — the point is a config that legitimately loads, not a malformed one.
+    """
+    doc = tmp_path / "principles.md"
+    doc.write_text("- Explicit over clever.\n", encoding="utf-8")
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        share_level = "high_level"
+        collectors = ["git", "disciplines"]
+        discipline_docs = ["{doc.as_posix()}"]
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def test_report_succeeds_with_a_push_only_collector_enabled(tmp_path, env_and_mocks):
+    """A project enabling `disciplines` alongside `git` still reports successfully.
+
+    Why this matters: this is the direct regression. `disciplines` is accepted by config
+    validation (it gates `disciplines-push`) but has no _collect_for branch by design, so
+    the report loop used to raise ConfigError and NO report could be produced at all for
+    such a project. Enabling one capability must never disable an unrelated command.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    repo = _make_repo(tmp_path)
+    toml = _write_disciplines_config(tmp_path, repo)
+    use_summary(mp, "Did the code work.")
+
+    _answer(mp, "y")
+    code = cli.main(["report", "demo", "--config", str(toml)])
+
+    assert code == 0
+    # The report actually went out — a silently-empty success would hide the bug.
+    assert len(env_and_mocks["sent"]) == 1
+    assert "Did the code work." in env_and_mocks["sent"][0][0]
+
+
+def test_push_only_collector_contributes_no_report_section(tmp_path, env_and_mocks):
+    """The skipped capability adds no section — not even an empty one.
+
+    Why this matters: the fix must be a true no-op, not a section with nothing in it. An
+    empty "Disciplines" heading would reach real supervisors and read as a bug. Asserting
+    on the exact section list also catches the opposite error — a future change that
+    starts routing a push-only capability into the report body.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    repo = _make_repo(tmp_path)
+    toml = _write_disciplines_config(tmp_path, repo)
+    use_summary(mp, "Did the code work.")
+
+    # Capture the blob handed to compose without changing what compose returns.
+    captured = {}
+    real_compose = cli.compose
+
+    def _capturing_compose(blob, channel, display_timezone):
+        captured["blob"] = blob
+        return real_compose(blob, channel, display_timezone)
+
+    mp.setattr(cli, "compose", _capturing_compose)
+
+    _answer(mp, "y")
+    assert cli.main(["report", "demo", "--config", str(toml)]) == 0
+
+    # Exactly one section: git's. Disciplines contributed nothing at all.
+    titles = [title for title, _ in captured["blob"].sections]
+    assert titles == ["Code activity"]
+
+
+def test_every_report_collector_has_a_dispatch_branch(tmp_path):
+    """Each REPORT_COLLECTORS name reaches a real branch in _collect_for.
+
+    Why this matters: this is the MIRROR of the disciplines bug. That one added a name to
+    the supported list with no dispatch branch; the same mistake made with a genuine
+    report collector would fail the same way, and only at run time on a real project.
+    Walking the constant means a newly-added collector is covered the moment it is
+    listed, with no test to remember to write.
+
+    A collector may still fail for its own reasons here (an empty fixture file, no
+    activity) — that is fine and not what we are pinning. We assert only that dispatch
+    RESOLVED: neither the unknown-name guard nor the push-only guard was hit.
+    """
+    repo = _make_repo(tmp_path)
+    # One empty file per file-backed collector. Content is irrelevant: we are testing
+    # dispatch resolution, not collector behavior (each has its own test module).
+    for filename in ("TODO.md", "NOTES.md", "IDEAS.md", "TRACKER.md"):
+        (tmp_path / filename).write_text("", encoding="utf-8")
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [projects.demo]
+        repo_path = "{repo.as_posix()}"
+        collectors = {list(REPORT_COLLECTORS)!r}
+        tasks_file = "TODO.md"
+        notes_file = "NOTES.md"
+        incubator_file = "IDEAS.md"
+        tracker_file = "TRACKER.md"
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """.replace("'", '"')
+    )
+    project = get_project(load_config(toml), "demo")
+
+    for collector in REPORT_COLLECTORS:
+        try:
+            cli._collect_for(project, collector, None)
+        except ConfigError as exc:
+            pytest.fail(
+                f"_collect_for has no dispatch branch for report collector "
+                f"{collector!r}: {exc}"
+            )
+        except Exception:
+            # A collector-specific failure means dispatch DID resolve, which is all
+            # this test claims. Deliberately broad: any non-ConfigError proves the
+            # name reached its branch.
+            pass
+
+
+def test_collect_for_rejects_a_push_only_collector_with_a_distinct_message(tmp_path):
+    """Reaching dispatch with a push-only name is reported as an Orion bug, not a typo.
+
+    Why this matters: the guard is defensive — the loop skips these before dispatch — but
+    if a future caller forgets, the message should say the caller is at fault rather than
+    blaming the user's config for an "unknown collector" they set correctly. Distinct
+    failure modes deserve distinct messages.
+    """
+    repo = _make_repo(tmp_path)
+    toml = _write_disciplines_config(tmp_path, repo)
+    project = get_project(load_config(toml), "demo")
+
+    for collector in PUSH_ONLY_COLLECTORS:
+        with pytest.raises(ConfigError, match="push-only capability"):
+            cli._collect_for(project, collector, None)
 
 
 # --- D4 follow-on: graduate-idea ----------------------------------------------

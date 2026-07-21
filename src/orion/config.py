@@ -24,7 +24,27 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Allowed values, kept as named constants so validation and error messages share
 # one source of truth (DRY) and adding a value later is a one-line change.
 SHARE_LEVELS = ("high_level", "detailed")  # "high_level" sends no code diff (safest).
-SUPPORTED_COLLECTORS = ("git", "tasks", "notes", "incubator", "tracker", "disciplines")  # E2 Inc 4 4b: disciplines added.
+
+# The `collectors` list holds two DIFFERENT kinds of name, and the difference is load-
+# bearing: conflating them is what let a capability flag reach the report loop and raise
+# "Unknown collector 'disciplines'" for every project that enabled it.
+#
+# REPORT_COLLECTORS feed `orion report`: each one has a dispatch branch in
+# cli._collect_for and returns a CollectorResult that becomes a section of the report.
+REPORT_COLLECTORS = ("git", "tasks", "notes", "incubator", "tracker")
+
+# PUSH_ONLY_COLLECTORS ride in the same `collectors` list (so enabling a signal stays one
+# config key, which is the ergonomics we want) but are NOT report inputs. They are
+# capability FLAGS: their presence enables a dedicated push command — "disciplines" gates
+# `orion disciplines-push` — and they contribute no report section. The report loop skips
+# them by this constant, so adding the next push-only capability needs no change there.
+PUSH_ONLY_COLLECTORS = ("disciplines",)  # E2 Inc 4 4b: disciplines added.
+
+# Everything config validation accepts. Derived from the two subsets rather than written
+# out again, so a name can never be listed as supported while belonging to neither kind
+# (the partition is asserted in the tests).
+SUPPORTED_COLLECTORS = REPORT_COLLECTORS + PUSH_ONLY_COLLECTORS
+
 SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
 
 # Which chat platforms the native two-way bot can listen on (C2-bots). Slack

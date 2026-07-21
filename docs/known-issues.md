@@ -512,6 +512,17 @@ Deferred).
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-39** — `orion report` aborted with `Unknown collector 'disciplines'` for any project that
+  enabled the `disciplines` capability, because `collectors` conflated report collectors (which have
+  a `_collect_for` branch) with push-only capability flags (which deliberately do not). Total
+  breakage of `report` for affected projects, and unavoidable — `disciplines-push` requires the flag
+  to be listed. **Resolved 2026-07-20**, found by dogfooding the new agent account in the
+  auth-revamp close-out: the two kinds are now named separately (`REPORT_COLLECTORS` /
+  `PUSH_ONLY_COLLECTORS`, with `SUPPORTED_COLLECTORS` derived from them), the report loop skips
+  push-only names by constant, and a structural test walks `REPORT_COLLECTORS` asserting each has a
+  dispatch branch so the mirror bug cannot recur. See CHANGELOG → *"KI-39 — `orion report` broken
+  for any project enabling a push-only collector"*.
+
 - **KI-35** — Project-level settings on the relay cleared on absence: a `/checklist` push that omitted
   `due_soon_days` wiped the stored horizon, so a second producer without that config would silently clear
   a value another producer set (periodically, once E1.3 made pushes schedulable). `kind` had the identical

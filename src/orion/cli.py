@@ -4288,6 +4288,30 @@ def _load_relay_admin(config_path: Path) -> tuple[str, str]:
     return relay_cfg.url, admin_token
 
 
+def _member_scope_sentence(scope: list[str]) -> str:
+    """Describe what a `member` account can read, given its explicit grants.
+
+    Args:
+        scope: The member's explicitly granted project names (often empty).
+
+    Returns:
+        A sentence describing the account's effective read scope.
+
+    Why:
+        Every other scoped role is grant-only, so "no grants" means "sees nothing" and the
+        CLI tells the operator to grant something. A member inverts that: it is an ORG
+        INSIDER that reads every org-visible project WITHOUT a grant, and grants are
+        ADDITIVE on top (visibility is a floor, not a ceiling). Reusing the grant-only
+        wording for a member therefore states something false and prompts the operator to
+        "fix" a configuration that is already correct — zero grants is the intended shape.
+        Both the provisioning and role-change paths need to say this, identically, so the
+        sentence lives here rather than being written twice (they drifted once already).
+    """
+    if scope:
+        return f"every org-visible project, plus these grants: {', '.join(scope)}"
+    return "every org-visible project (a member needs no grants)."
+
+
 def cmd_relay_user_add(
     name: str,
     role: str,
@@ -4351,6 +4375,8 @@ def cmd_relay_user_add(
     scope = result.get("projects") or []
     if result["role"] == "admin":
         print("  Scope: all projects (admin).")
+    elif result["role"] == "member":
+        print(f"  Scope: {_member_scope_sentence(scope)}")
     elif scope:
         print(f"  Scope: {', '.join(scope)}")
     elif result["role"] == "contributor":
@@ -4684,7 +4710,13 @@ def cmd_relay_user_role(name: str, role: str, config_path: Path) -> int:
 
     print(f"{name!r} is now a {role}. Any live session was logged out.")
     scope = result.get("projects") or []
-    if role != "admin" and not scope:
+    if role == "member":
+        # NOT the default-deny warning below: a member reads every org-visible project
+        # with no grant at all, so "no grants" is its intended shape. Warning here would
+        # state something false — that the account sees nothing — and push the operator
+        # to "fix" a correct configuration.
+        print(f"  Scope: {_member_scope_sentence(scope)}")
+    elif role != "admin" and not scope:
         print("  WARNING: this account has NO project grants, so it currently sees nothing.")
         print(f"    Grant projects with: orion relay-user grant {name} <project> [<project> ...]")
     elif role != "admin":

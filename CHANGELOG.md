@@ -14,6 +14,27 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## `relay-user` describes a member's scope correctly (2026-07-20)
+
+Follow-up from the auth-revamp live close-out: the CLI still described accounts using the
+pre-`member` role model, in which every scoped role is grant-only.
+
+### Fixed
+
+- **`relay-user add --role member`** reported zero grants as an unfinished setup (*"none yet —
+  grant projects so this viewer can see anything"*). A member with no grants is the **intended**
+  configuration — it reads every org-visible project without one.
+- **`relay-user role <name> member`** printed the default-deny warning *"this account has NO
+  project grants, so it currently sees nothing"*, which is **false** for a member. Beyond being
+  wrong, it invited an operator to grant projects the member already reads, widening access past
+  what was intended.
+- Both paths now share `_member_scope_sentence()` so the wording cannot drift between them, and a
+  member's explicit grants read as **additive** to the org-visible set — visibility is a floor,
+  not a ceiling, so an account can be an org member *and* hold a grant on one restricted project.
+
+Output-only: no behavior, authorization, or wire change. Three regression tests cover both
+commands and both grant states (PR #119).
+
 ## KI-39 — `orion report` broken for any project enabling a push-only collector (2026-07-20)
 
 Found while dogfooding the new agent account during the auth-revamp live close-out: the first

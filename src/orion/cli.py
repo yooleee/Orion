@@ -49,6 +49,8 @@ from orion.collectors.tracker import collect as collect_tracker
 from orion.collectors.tracker import snapshot as snapshot_tracker
 from orion.compose import ComposedMessage, compose
 from orion.config import (
+    PUSH_ONLY_COLLECTORS,
+    REPORT_COLLECTORS,
     SHARE_LEVELS,
     ConfigError,
     ProjectConfig,
@@ -1608,6 +1610,14 @@ def _run_report(
         summarizer: Summarizer | None = None
 
         for collector_name in project.collectors:
+            # A PUSH_ONLY_COLLECTORS name is a capability flag, not a report input: it
+            # enables a dedicated push command (today "disciplines" -> `disciplines-push`)
+            # and produces no section here. Skip it BEFORE dispatch — it has no
+            # _collect_for branch by design, and reading a marker for it would be
+            # meaningless too. Keyed off the constant, not a literal, so the next
+            # push-only capability is handled by adding one name in config.py.
+            if collector_name in PUSH_ONLY_COLLECTORS:
+                continue
             prior = get_marker(conn, project.name, collector_name)
             result = _collect_for(project, collector_name, prior)
             if not result.has_activity:
@@ -5133,20 +5143,32 @@ def _collect_for(project: ProjectConfig, collector: str, prior: str | None):
 
     Args:
         project: The project config (source of repo_path, share_level, file paths).
-        collector: The collector name ("git", "tasks", or "notes").
+        collector: The collector name — must be one of REPORT_COLLECTORS.
         prior: That collector's last-reported marker, or None on a first run.
 
     Returns:
         The collector's CollectorResult.
+
+    Raises:
+        ConfigError: If `collector` is a PUSH_ONLY_COLLECTORS capability flag (the
+            caller should have skipped it) or is not a known collector at all.
 
     Why:
         The collectors legitimately take different arguments (git wants a repo and
         a share level; the file collectors want a path), so the orchestrator's
         uniform loop needs one place that maps a name to the right call. This is a
         plain dispatch — deliberately NOT a plugin/registry — so the set of signals
-        stays small, explicit, and easy to read. config validation guarantees the
-        name is supported and that an enabled file collector has its path set, so
-        the final raise is a defensive guard, not an expected path.
+        stays small, explicit, and easy to read.
+
+        On the raises: config validation guarantees only that a name is SUPPORTED,
+        which is a weaker promise than "collectible here" — SUPPORTED_COLLECTORS
+        also contains push-only capability flags. Assuming those two were the same
+        thing is precisely how `disciplines` reached this dispatch and broke `report`
+        for every project that enabled it. So the two failure modes get two distinct
+        messages: a push-only name means the CALLER forgot to skip it (an internal
+        bug with a known fix), while an unrecognized name means config validation and
+        this dispatch have drifted apart. Both stay defensive guards, not expected
+        paths.
     """
     if collector == "git":
         return collect_git(project.repo_path, prior, project.share_level)
@@ -5158,6 +5180,12 @@ def _collect_for(project: ProjectConfig, collector: str, prior: str | None):
         return collect_incubator(project.incubator_file, prior)
     if collector == "tracker":
         return collect_tracker(project.tracker_file, prior)
+    if collector in PUSH_ONLY_COLLECTORS:
+        raise ConfigError(
+            f"Collector {collector!r} is a push-only capability, not a report input — "
+            f"it should have been skipped before dispatch. This is an Orion bug, not a "
+            f"config error."
+        )
     raise ConfigError(f"Unknown collector {collector!r}.")
 
 

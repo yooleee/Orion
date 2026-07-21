@@ -12,7 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from orion.config import ConfigError, get_project, load_config
+from orion.config import (
+    PUSH_ONLY_COLLECTORS,
+    REPORT_COLLECTORS,
+    SUPPORTED_COLLECTORS,
+    ConfigError,
+    get_project,
+    load_config,
+)
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -352,6 +359,28 @@ def test_no_recipients_raises(tmp_path):
     )
     with pytest.raises(ConfigError, match="recipients"):
         load_config(path)
+
+
+def test_supported_collectors_is_a_clean_partition():
+    """SUPPORTED_COLLECTORS is exactly REPORT_COLLECTORS + PUSH_ONLY_COLLECTORS, disjoint.
+
+    Why this matters: the two subsets encode a real distinction — a report collector has
+    a dispatch branch in cli._collect_for, a push-only capability flag deliberately does
+    not. Conflating them is what broke `orion report` for every project enabling
+    `disciplines`. If a future name lands in neither subset it would be accepted by
+    validation yet belong to no code path, and if it landed in BOTH the report loop would
+    skip a collector that actually produces a section. Both are silent failures, so the
+    partition is asserted rather than assumed.
+    """
+    overlap = set(REPORT_COLLECTORS) & set(PUSH_ONLY_COLLECTORS)
+    assert not overlap, f"a collector cannot be both report and push-only: {overlap}"
+
+    # Union covers SUPPORTED exactly — nothing accepted by validation is unclassified.
+    assert set(SUPPORTED_COLLECTORS) == set(REPORT_COLLECTORS) | set(PUSH_ONLY_COLLECTORS)
+
+    # No duplicates within the tuples themselves (a copy-paste would double-run a
+    # collector in the report loop, emitting the same section twice).
+    assert len(SUPPORTED_COLLECTORS) == len(set(SUPPORTED_COLLECTORS))
 
 
 def test_unknown_collector_still_rejected(tmp_path):

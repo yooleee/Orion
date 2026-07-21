@@ -2760,6 +2760,100 @@ def test_relay_user_role_reports_scope_when_the_account_has_grants(tmp_path, mon
     assert "orion" in out and "WARNING" not in out
 
 
+def test_relay_user_add_member_does_not_report_zero_grants_as_incomplete(
+    tmp_path, monkeypatch, capsys
+):
+    """Provisioning a grantless `member` describes org-visibility, not a missing grant.
+
+    Why this matters: a member with no grants is the INTENDED configuration — it reads every
+    org-visible project without one. The grant-only wording used for viewers ("none yet —
+    grant projects so this viewer can see anything") tells the operator to fix something that
+    is not broken, and understates what the account can actually read. Caught in the live
+    close-out when `relay-user add kb-check --role member` printed exactly that.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_create_user",
+        lambda url, token, name, role, projects, **k: {
+            "name": name,
+            "role": role,
+            "projects": [],
+            "key": "k",
+        },
+    )
+    assert cli.main(["relay-user", "add", "kb", "--role", "member", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "org-visible" in out
+    # The grant-only phrasing must not appear: it would misdescribe a correct account.
+    assert "none yet" not in out
+    assert "grant projects so this viewer" not in out
+
+
+def test_relay_user_add_member_with_grants_shows_them_as_additive(
+    tmp_path, monkeypatch, capsys
+):
+    """A member's explicit grants are reported as ADDITIONAL to org-visible projects.
+
+    Why this matters: visibility is a floor, not a ceiling — someone can be an org member
+    AND be granted one restricted project on top. Printing only the grant list (the generic
+    scoped-role branch) would imply the grant is the account's whole scope, hiding the
+    org-visible set it can also read.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_create_user",
+        lambda url, token, name, role, projects, **k: {
+            "name": name,
+            "role": role,
+            "projects": ["secret-project"],
+            "key": "k",
+        },
+    )
+    assert cli.main(
+        ["relay-user", "add", "kb", "--role", "member", "--project", "secret-project",
+         "--config", str(toml)]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "org-visible" in out and "secret-project" in out
+
+
+def test_relay_user_role_to_member_does_not_warn_about_missing_grants(
+    tmp_path, monkeypatch, capsys
+):
+    """Promoting an account to `member` must not warn that it "sees nothing".
+
+    Why this matters: this is the sharper half of the same bug — for a grantless member the
+    default-deny warning is not merely unhelpful, it is FALSE. The account sees every
+    org-visible project. Warning here would push an operator to grant projects that the
+    member already reads, quietly widening access beyond what was intended.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_set_user_role",
+        lambda url, token, name, role, **k: {"name": name, "role": role, "projects": []},
+    )
+    assert cli.main(["relay-user", "role", "kb", "member", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" not in out
+    assert "sees nothing" not in out
+    assert "org-visible" in out
+
+
 def test_relay_user_rename_notes_that_history_keeps_the_old_name(tmp_path, monkeypatch, capsys):
     """`relay-user rename` threads both names and states the history consequence."""
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)

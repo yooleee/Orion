@@ -1609,15 +1609,10 @@ def _run_report(
         # _build_summarizer keeps secret handling in the CLI (not in summarize.py).
         summarizer: Summarizer | None = None
 
-        for collector_name in project.collectors:
-            # A PUSH_ONLY_COLLECTORS name is a capability flag, not a report input: it
-            # enables a dedicated push command (today "disciplines" -> `disciplines-push`)
-            # and produces no section here. Skip it BEFORE dispatch — it has no
-            # _collect_for branch by design, and reading a marker for it would be
-            # meaningless too. Keyed off the constant, not a literal, so the next
-            # push-only capability is handled by adding one name in config.py.
-            if collector_name in PUSH_ONLY_COLLECTORS:
-                continue
+        # Push-only capability flags produce no section here and have no _collect_for
+        # branch by design, so they are filtered out before dispatch (see
+        # _report_collectors_of). Reading a marker for one would be meaningless too.
+        for collector_name in _report_collectors_of(project):
             prior = get_marker(conn, project.name, collector_name)
             result = _collect_for(project, collector_name, prior)
             if not result.has_activity:
@@ -3517,7 +3512,9 @@ def cmd_status(config_path: Path) -> int:
     for project in projects:
         new_signals: list[str] = []
         unreadable: list[str] = []
-        for collector_name in project.collectors:
+        # Report inputs only: a push-only capability flag has no activity to detect
+        # (and no dispatch branch), so it must not reach _collect_for.
+        for collector_name in _report_collectors_of(project):
             prior = get_marker(conn, project.name, collector_name)
             try:
                 # Reuse the exact report-flow detector — status must agree with what
@@ -3780,7 +3777,8 @@ def cmd_baseline(project_name: str, config_path: Path) -> int:
     # The marker timestamp: same ISO-8601 UTC form set_marker records on a real report.
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     baselined: list[str] = []
-    for collector_name in project.collectors:
+    # Report inputs only: a push-only capability flag has no marker to baseline.
+    for collector_name in _report_collectors_of(project):
         prior = get_marker(conn, project.name, collector_name)
         try:
             # _collect_for returns the collector's CURRENT marker as new_marker,
@@ -5168,6 +5166,29 @@ def _summarizer_key_env(cfg: SummarizerConfig) -> str | None:
     if cfg.provider == "local":
         return cfg.api_key_env  # None when the endpoint needs no key
     return None
+
+
+def _report_collectors_of(project: ProjectConfig) -> list[str]:
+    """List a project's collectors that are real report inputs, in config order.
+
+    Args:
+        project: The project config whose `collectors` list is being filtered.
+
+    Returns:
+        The project's collector names with every PUSH_ONLY_COLLECTORS capability
+        flag removed — i.e. exactly the names `_collect_for` can dispatch.
+
+    Why:
+        A push-only name (today "disciplines") rides in the same `collectors` list
+        so enabling a signal stays one edit, but it is a capability flag, not a
+        report input: it has no `_collect_for` branch by design. Every caller that
+        walks `project.collectors` to collect must therefore skip it first, and
+        KI-39 was exactly that skip being missed. Doing the filter in ONE place
+        keyed off the constant means a new push-only capability is handled
+        everywhere by adding one name in config.py — a caller cannot forget a skip
+        it does not have to write.
+    """
+    return [c for c in project.collectors if c not in PUSH_ONLY_COLLECTORS]
 
 
 def _collect_for(project: ProjectConfig, collector: str, prior: str | None):

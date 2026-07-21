@@ -30,7 +30,7 @@ from orion.config import (
     get_project,
     load_config,
 )
-from orion.state import get_last_checklist_push, open_state
+from orion.state import get_last_checklist_push, get_marker, open_state
 
 # The shared end-to-end helpers and the env_and_mocks fixture live in conftest.py
 # so test_schedule.py reuses the exact same setup (DRY). pytest auto-discovers the
@@ -3336,6 +3336,62 @@ def test_collect_for_rejects_a_push_only_collector_with_a_distinct_message(tmp_p
     for collector in PUSH_ONLY_COLLECTORS:
         with pytest.raises(ConfigError, match="push-only capability"):
             cli._collect_for(project, collector, None)
+
+
+def test_report_collectors_of_drops_every_push_only_name(tmp_path):
+    """_report_collectors_of keeps report inputs in order and drops capability flags.
+
+    Why this matters: this helper is the SINGLE place the push-only skip now lives, so
+    every command that walks a project's collectors inherits it. Walking the constant
+    (rather than naming "disciplines") means the next push-only capability is covered
+    the moment it is listed in config.py.
+    """
+    repo = _make_repo(tmp_path)
+    toml = _write_disciplines_config(tmp_path, repo)
+    project = get_project(load_config(toml), "demo")
+
+    kept = cli._report_collectors_of(project)
+
+    assert kept == ["git"], "report inputs should survive, in config order"
+    for collector in PUSH_ONLY_COLLECTORS:
+        assert collector not in kept
+
+
+def test_status_survives_a_project_enabling_a_push_only_collector(tmp_path, capsys):
+    """`orion status` reports on a disciplines-enabled project instead of crashing.
+
+    Why this matters: this is the KI-39 bug mirrored into a SIBLING command. The report
+    loop learned to skip push-only names; `status` kept dispatching them, so the digest
+    died with an unhandled ConfigError for any project enabling `disciplines` — which is
+    the developer's own live config. Found by the DF1 dogfood sweep, not by the suite,
+    because no test ran a second collector-walking command against that config shape.
+    """
+    repo = _make_repo(tmp_path)
+    toml = _write_disciplines_config(tmp_path, repo)
+
+    assert cli.main(["status", "--config", str(toml)]) == 0
+    # The project must actually appear: an empty digest would be a silent pass.
+    assert "demo" in capsys.readouterr().out
+
+
+def test_baseline_survives_a_push_only_collector_and_marks_no_marker_for_it(tmp_path):
+    """`orion baseline` baselines the real collectors and skips the capability flag.
+
+    Why this matters: the same mirror bug, and worse here — baseline calls set_marker
+    inside the loop, so it wrote git's marker and THEN crashed on `disciplines`, leaving
+    the store half-advanced while telling the user the command failed. Re-running would
+    then warn about re-baselining. We pin both halves: the command succeeds, and no
+    marker is invented for a push-only name.
+    """
+    repo = _make_repo(tmp_path)
+    toml = _write_disciplines_config(tmp_path, repo)
+
+    assert cli.main(["baseline", "demo", "--config", str(toml)]) == 0
+
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert get_marker(conn, "demo", "git") is not None, "the real collector baselined"
+    for collector in PUSH_ONLY_COLLECTORS:
+        assert get_marker(conn, "demo", collector) is None
 
 
 # --- D4 follow-on: graduate-idea ----------------------------------------------

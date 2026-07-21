@@ -509,6 +509,32 @@ Deferred).
   footgun in its own right. **The seam exists:** `relay/throttle.py` is keyed by DIMENSION (account,
   global), so adding an `ip` dimension is additive rather than a redesign.
 
+## KI-40 — Grants are add-only: no path removes a single project grant
+
+- **Detail:** `orion relay-user grant <name> --project <p>` adds grants, and nothing anywhere
+  removes one. There is no `ungrant`/`revoke-grant` subcommand, no admin-API route, and no
+  `DELETE FROM relay_user_projects` in the CLI or the relay. The only ways to narrow an
+  account's scope today are blunt: `revoke` (deactivates the whole account) or `delete` (drops
+  it entirely, then re-add with the smaller set — which mints a new credential the holder must
+  be re-issued).
+- **Why it matters:** scope is a **security control**, and a control that only ever widens is
+  the wrong shape. A grant handed out for one piece of work cannot be taken back without
+  disrupting the account. It also leaves stale grants accumulating with no cleanup path —
+  found exactly that way in the auth-revamp live close-out, where `macos` carries a grant for
+  `sliptest`, a project that does not exist on the relay. That particular grant is harmless
+  (a grant to a nonexistent project grants nothing), but it is unremovable, and the next one
+  may not be harmless.
+- **Note on severity:** low *today* because the deployment has one human, one machine, and one
+  agent, all trusted. It rises with the member/visibility work now shipped — the moment scopes
+  are handed to people outside the immediate circle, "cannot un-share" becomes a real problem.
+- **Severity:** low now, medium once accounts are provisioned for other people.
+- **Status:** Open. Recorded 2026-07-20 during the auth-revamp close-out; the approved
+  `sliptest` cleanup was **blocked** on it and deferred. Slotted for a proposed
+  **command overhaul / revamp slice** (with the sibling wording and lifecycle-ergonomics
+  findings) rather than a one-off patch, by user decision — the whole `relay-user` surface
+  grew additively across three arcs and deserves one considered pass.
+
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 

@@ -14,6 +14,39 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## DF1 dogfood sweep — producer-path fixes (2026-07-21)
+
+Findings from the **DF1 progressive-dogfood sweep** (`plans/orion-plan.md`, row DF1): working
+`docs/known-issues.md` end to end by actually *running* each affected path against real projects,
+rather than reasoning about the entries from the code. Both bugs below were found by ordinary
+commands in the first hour, and neither was reachable by the existing suite.
+
+### Fixed
+
+- **`orion status` and `orion baseline` crashed on push-only collectors** — the KI-39 bug
+  mirrored into two sibling commands. Both walked a project's whole `collectors` list into
+  `_collect_for`, so any project enabling `disciplines` died with an unhandled `ConfigError`.
+  `status` was therefore **totally broken on the live config** since disciplines was enabled;
+  `baseline` was worse, calling `set_marker` inside the loop so it **half-advanced state** and
+  then crashed while reporting failure. The push-only filter now lives in one place
+  (`_report_collectors_of`, keyed off `PUSH_ONLY_COLLECTORS`) that all three loops share, so a
+  caller cannot forget a skip it does not have to write (PR #122).
+- **`orion disciplines-push` silently wiped a project's cards when a doc could not be read** —
+  the push is a full-state replace and the snapshot is deliberately fail-soft, so a renamed or
+  moved doc (or a relative `discipline_docs` path resolving next to a config in another
+  directory, or an extraction that failed for every doc) produced zero cards, replaced the
+  project's whole "Working agreements" section with nothing, and **exited 0 reporting success**.
+  Reproduced live: 16 real cards → 0. An empty push is now refused with an error naming the
+  configured docs, and clearing became explicit via **`disciplines-push --clear`** (which reads
+  no docs and needs no API key). This keeps "observed nothing" and "asked for nothing" distinct
+  instead of collapsing both into an empty push — the tri-state idiom KI-35 settled for
+  `due_soon_days`, and the empty-clobber guard the retired skills batch endpoint already had.
+- **`add-project` closed by suggesting a command that does not parse** — the onboarding hint said
+  `orion check <project>`, but `check` validates the whole config and takes no project argument, so
+  the first command a newly-onboarded user is told to run exits with `unrecognized arguments`. Now
+  `orion check`. Its test parses the suggested command rather than matching its text, so the check
+  survives a rewording (PR #124).
+
 ## `relay-user` describes a member's scope correctly (2026-07-20)
 
 Follow-up from the auth-revamp live close-out: the CLI still described accounts using the

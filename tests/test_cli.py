@@ -18,11 +18,13 @@
 # =============================================================================
 
 import json
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from orion import cli
+from orion.extract import ExtractError
 from orion.config import (
     PUSH_ONLY_COLLECTORS,
     REPORT_COLLECTORS,
@@ -783,6 +785,144 @@ def test_relay_push_carries_redacted_live_checklist(tmp_path, env_and_mocks):
     assert "AKIAIOSFODNN7EXAMPLE" not in checklist[2]["text"]
     # And the secret never appears anywhere in the pushed payload.
     assert "AKIAIOSFODNN7EXAMPLE" not in blob_json
+
+
+# --- disciplines-push: the empty-clobber guard + the explicit clear -----------
+# The push is a full-state REPLACE, and the snapshot is deliberately fail-soft, so
+# "no cards" is reachable by accident (a moved doc, a failed extraction). These pin
+# that an accidental empty NEVER goes out, while a deliberate one still can.
+
+
+def _capture_disciplines_pushes(mp):
+    """Record (url, project, cards, token) push_disciplines calls.
+
+    Why: the command's only outbound effect is push_disciplines, so an in-memory
+    recorder lets a test assert what WOULD have hit the relay — including, crucially,
+    that nothing was pushed at all — with no network. Mirrors
+    _capture_checklist_pushes.
+    """
+    pushes = []
+    mp.setattr(
+        cli,
+        "push_disciplines",
+        lambda url, project, cards, token: pushes.append((url, project, cards, token)),
+    )
+    return pushes
+
+
+def _disciplines_config(tmp_path, doc_path):
+    """Write an orion.toml enabling disciplines against `doc_path` + a [relay] table.
+
+    Why: every test here varies exactly one thing — whether that doc is readable —
+    so the config shape is written once.
+    """
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["git", "disciplines"]
+        discipline_docs = ["{Path(doc_path).as_posix()}"]
+
+          [[projects.demo.recipients]]
+          name = "Alex"
+          channel = "discord"
+          webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """
+    )
+    return toml
+
+
+def test_disciplines_push_refuses_to_wipe_when_the_doc_cannot_be_read(
+    tmp_path, env_and_mocks
+):
+    """A missing discipline doc fails loudly instead of silently clearing the cards.
+
+    The scenario: a doc that was readable when the cards were first pushed is later
+    renamed, moved, or (the trap that found this) named by a RELATIVE path in a config
+    that lives in a different directory. snapshot() fail-softs to zero cards, the push
+    full-state-replaces, and the project's whole "Working agreements" section is wiped
+    while the command prints success. Reproduced live: 16 real cards -> 0, exit 0.
+
+    We assert the strong property — push_disciplines is never CALLED — because a guard
+    that merely warned would still have destroyed the data.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_disciplines_pushes(mp)
+    toml = _disciplines_config(tmp_path, tmp_path / "gone.md")  # never created
+
+    code = cli.main(["disciplines-push", "demo", "--config", str(toml)])
+
+    assert code == 1
+    assert pushes == [], "an accidental empty set must never reach the relay"
+
+
+def test_disciplines_push_refuses_when_every_extraction_fails(tmp_path, env_and_mocks):
+    """A readable doc whose extraction fails is also refused, not pushed as empty.
+
+    Why this matters: this is the same wipe by a likelier route. The doc is fine; the
+    model call failed (API error, unparseable reply), which snapshot() deliberately
+    fail-softs so other docs proceed. With one doc that leaves zero cards, and a
+    transient outage would have quietly cleared a live dashboard section.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_disciplines_pushes(mp)
+    doc = tmp_path / "PRINCIPLES.md"
+    doc.write_text("- Explicit over clever.\n", encoding="utf-8")
+    toml = _disciplines_config(tmp_path, doc)
+
+    # A doomed extractor: stands in for the model being unreachable this run.
+    class _FailingExtractor:
+        def extract(self, text, *, source):
+            raise ExtractError("simulated API failure")
+
+    mp.setattr(cli, "_build_extractor", lambda cfg, getter: _FailingExtractor())
+
+    code = cli.main(["disciplines-push", "demo", "--config", str(toml)])
+
+    assert code == 1
+    assert pushes == []
+
+
+def test_disciplines_push_clear_empties_the_section_deliberately(
+    tmp_path, env_and_mocks
+):
+    """`--clear` is the sanctioned way to retire the cards, and needs no doc or key.
+
+    Why this matters: the guard above must not trap a user who genuinely wants the
+    section gone. Keeping the deliberate clear as its own FLAG is what lets the code
+    tell "observed nothing" apart from "asked for nothing" instead of collapsing both
+    into an empty push — the same tri-state idiom KI-35 settled for due_soon_days.
+    Clearing observes nothing, so it must not demand an API key: _build_extractor is
+    monkeypatched to explode, proving it is never called.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_disciplines_pushes(mp)
+    toml = _disciplines_config(tmp_path, tmp_path / "also-gone.md")
+
+    def _explode(cfg, getter):
+        raise AssertionError("--clear must not build an extractor")
+
+    mp.setattr(cli, "_build_extractor", _explode)
+
+    code = cli.main(["disciplines-push", "demo", "--config", str(toml), "--clear"])
+
+    assert code == 0
+    assert len(pushes) == 1
+    _url, project, cards, token = pushes[0]
+    assert project == "demo"
+    assert cards == [], "an explicit clear pushes exactly the empty set"
+    assert token == "relay-secret"
 
 
 # --- checklist-push: the dedicated checklist-only push + --watch (near-real-time) ---

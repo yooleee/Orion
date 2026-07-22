@@ -368,6 +368,16 @@ def main(argv: list[str] | None = None) -> int:
         default=default_config,
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
+    disciplines_parser.add_argument(
+        "--clear",
+        action="store_true",
+        help=(
+            "Retire this project's cards: push an EMPTY set deliberately. A normal "
+            "push REFUSES to send an empty set (an unreadable doc would otherwise "
+            "wipe the section silently), so this is the explicit way to clear it. "
+            "Reads no docs and needs no API key."
+        ),
+    )
 
     intake_parser = subparsers.add_parser(
         "intake",
@@ -1181,7 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
             args.all_projects, args.due, args.clear_due_soon_days,
         )
     if args.command == "disciplines-push":
-        return cmd_disciplines_push(args.project, Path(args.config))
+        return cmd_disciplines_push(args.project, Path(args.config), clear=args.clear)
 
     if args.command == "install-hook":
         return cmd_install_hook(
@@ -2427,12 +2437,17 @@ def _disciplines_payload(
     return [d.as_dict() for d in items]
 
 
-def cmd_disciplines_push(project_name: str, config_path: Path) -> int:
+def cmd_disciplines_push(
+    project_name: str, config_path: Path, *, clear: bool = False
+) -> int:
     """Extract a project's disciplines from its docs and push them to the relay.
 
     Args:
         project_name: The project whose disciplines to push.
         config_path: Path to orion.toml.
+        clear: When True, push an EMPTY set deliberately — the explicit way to
+            retire a project's cards. Skips the docs, the extractor and the API
+            key entirely, since clearing observes nothing.
 
     Returns:
         Process exit code: 0 on success, 1 on a setup or delivery error.
@@ -2462,21 +2477,50 @@ def cmd_disciplines_push(project_name: str, config_path: Path) -> int:
                 f"push its observed principles."
             )
         token = get_required(relay_cfg.token_env_var)
-        # Building the extractor reads ANTHROPIC_API_KEY (anthropic provider) and
-        # rejects the local provider — both surface here as a clear setup error.
-        extractor = _build_extractor(config.summarizer, get_required)
+        # Clearing observes nothing, so it needs no docs, no model and no API key —
+        # building the extractor here would demand a key just to empty a section.
+        extractor = (
+            None if clear else _build_extractor(config.summarizer, get_required)
+        )
     except (ConfigError, SecretsError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     conn = open_state(config.state_db)
     try:
-        payload = _disciplines_payload(project, extractor, conn)
+        payload = [] if clear else _disciplines_payload(project, extractor, conn)
+
+        # The push is a full-state REPLACE, so an empty payload wipes the project's
+        # cards. Empty is reachable without anyone intending it: the snapshot is
+        # deliberately fail-soft, so a renamed/moved doc, a config whose relative
+        # `discipline_docs` resolves somewhere else, or an extraction that failed for
+        # every doc all yield zero cards — and the wipe then reports success. Refuse
+        # it, and make clearing say so out loud (`--clear`), which keeps "observed
+        # nothing" and "asked for nothing" distinct instead of collapsing both into
+        # an empty push. Mirrors intake's "Refusing to send an empty update" guard,
+        # and the empty-clobber guard the skills batch endpoint already carried.
+        if not payload and not clear:
+            print(
+                f"Refusing to push an empty discipline set for {project.name!r} — "
+                f"it would replace the project's current cards with nothing.\n"
+                f"  Configured docs: "
+                f"{', '.join(str(d) for d in project.discipline_docs) or '(none)'}\n"
+                f"  Check each path exists and is readable (a relative path resolves "
+                f"next to the CONFIG file, not the repo), then retry.\n"
+                f"  To retire the cards on purpose, run: orion disciplines-push "
+                f"{project.name} --clear",
+                file=sys.stderr,
+            )
+            return 1
+
         push_disciplines(relay_cfg.url, project.name, payload, token)
     except DeliveryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(f"Pushed disciplines for {project.name!r} ({len(payload)} card(s)).")
+    if clear:
+        print(f"Cleared disciplines for {project.name!r} (0 card(s)).")
+    else:
+        print(f"Pushed disciplines for {project.name!r} ({len(payload)} card(s)).")
     return 0
 
 

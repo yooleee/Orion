@@ -7,7 +7,9 @@ Responsible for: Explaining Orion's automated test suite — what categories of
 Role in project: The living map of the test suite. Update it in the same session
                  as any test change (new phase, new category, closed/opened gap)
                  so it never drifts from `tests/`.
-Companion: the manual cross-OS checks live in `portability-smoke-test.md`.
+Companions: the manual cross-OS checks live in `portability-smoke-test.md`, and the
+harness for exercising real code paths against real projects lives in
+`dogfood-harness.md`.
 ========================================================================= -->
 
 # Testing Orion
@@ -81,6 +83,7 @@ builds the configured backend lazily, with no network and no key.
 | **Retirement / migration tools** | `test_migrate_comments.py`, `test_drop_retired_tables.py` | The one-time ops tools stay safe to re-run: the idempotent comment→discussion migration with its lossless collapse guard, and the backup-first, allowlisted table drop. |
 | **Test-isolation guards** | `test_isolation.py` | Pins the conftest guards themselves: no real network leaves the test process, and the real `.env` / secret env vars never bleed into a test — the structural reason the suite cannot leak a secret. |
 | **Manual / hardware** | `portability-smoke-test.md` (not pytest) | Native Windows / macOS validation that can't run in CI on one machine. |
+| **Manual / dogfood** | `dogfood-harness.md` (not pytest) | Running real commands against real projects with state, webhooks and the relay redirected to disposable local copies. Catches what fixtures cannot — see the coverage gap below. |
 
 ### Why the security gate is its own category
 
@@ -125,6 +128,16 @@ Tracked honestly so "green" doesn't read as "everything is covered":
   `test_secrets.py`, because that behavior is what makes git-hook/scheduled runs find secrets. We
   do not separately test that `dotenv.load_dotenv` reads a file — that would exercise the library,
   not Orion. The accessor it feeds (`get_required`) *is* fully tested.
+- **Per-command CLI coverage is uneven, and the suite cannot see the gap.** The DF1 dogfood
+  sweep (2026-07-21) found three bugs a green suite had no way to catch, and the structural
+  reason is the same each time: coverage follows *whichever* command a behavior was first built
+  for, not every command that shares the behavior. `report` had a test proving it skips push-only
+  collectors; `status` and `baseline` walked the same list with no such test, and both crashed on
+  the real config. `cmd_disciplines_push` had **no CLI-level test at all**, so nothing noticed it
+  pushing an empty set over live data. When you fix a bug in one command, check whether a sibling
+  command shares the code path — and prefer a test that walks a **constant** (as
+  `test_every_report_collector_has_a_dispatch_branch` does) over one that names a case, so new
+  entries are covered without anyone remembering to add a test.
 - **`compose()`'s unknown-channel fall-through (KI-5) is not pinned in `test_report_compose.py`** —
   by design. Config validation (`test_config.py::test_unknown_channel_is_rejected`) makes that
   branch unreachable, so the guard lives upstream. If a third channel is ever added to config
@@ -141,4 +154,5 @@ When you add or change tests, update this doc in the same session:
 - New signal/channel/phase → add its tests to the right category row (and add a row if it's a
   genuinely new category).
 - Closed a gap → remove it from "Known coverage gaps"; opened one → add it there.
-- New manual check → put the runbook in `portability-smoke-test.md` and reference it here.
+- New manual check → put the runbook in `portability-smoke-test.md` (cross-OS) or
+  `dogfood-harness.md` (real-project exercise) and reference it here.

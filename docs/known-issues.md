@@ -15,6 +15,24 @@ fate stay traceable. Phase-specific work belongs in
 severity (low / medium / high), and a status (Open / Needs decision / Monitored /
 Deferred).
 
+> **DF1 dogfood sweep, 2026-07-21.** This list was worked end to end by *running* each
+> entry's affected path against real projects (see [`dogfood-harness.md`](dogfood-harness.md)
+> for the harness). Entries carrying an **"Exercised (DF1, 2026-07-21)"** line were actually
+> reproduced or checked; the line says what was run and what happened. Three new bugs were
+> found and fixed ([`CHANGELOG.md`](../CHANGELOG.md) → *DF1 dogfood sweep*), and one new
+> entry was filed ([[KI-41]]).
+>
+> **Not exercised in this sweep**, so their status is unchanged and unconfirmed:
+> **KI-10** (the Slack mrkdwn translator — real Haiku output in these runs contained no
+> links, tables or code fences, so nothing tested its limits), **KI-16** (the local
+> summarizer backend — needs a running local model), **KI-17** (configurable anonymity — a
+> design question, not a reproducible path), **KI-21** (forward-store item identity — needs a
+> tracker item renamed across pushes, which was cut for time), **KI-33** (the
+> anonymous→identified slippage split — needs a producer straddling that cutover), and
+> **KI-34** (project-page density — an IA judgment that S2.1 Unit 3 is already scoped to
+> address). Recorded so the absence of an "Exercised" line reads as *not yet done*, never as
+> *checked and fine*.
+
 ---
 
 ## KI-1 — Multi-recipient partial-failure policy
@@ -41,6 +59,11 @@ Deferred).
   marker advances though no subscriber received it. This is the same bounded, by-design gap at
   audience granularity, with the same proper fix (per-recipient/per-audience delivery state in
   C3). Not a new severity.
+- **Exercised (DF1, 2026-07-21):** reproduced deliberately — one project, four recipients,
+  one of them pointed at a sink returning HTTP 500. The run named the failed recipient
+  (`✗ Supervisor B (broken): Discord webhook returned HTTP 500`), sent to the other three,
+  advanced state, and said why: *"1 recipient(s) failed; state advanced because at least one
+  delivery succeeded."* The decided policy holds and reports itself honestly. No change.
 - **Severity:** medium
 - **Status:** Decided (by-design); per-recipient state deferred → **C3** (with KI-11).
 
@@ -51,8 +74,19 @@ Deferred).
 - **Why it matters:** A long (but already redacted) report loses its tail. Splitting into
   multiple messages would preserve everything; truncation was chosen as the simplest
   correct behavior for Phase 1.
+- **Exercised (DF1, 2026-07-21) — fires on ordinary use, not an edge case:** the first real
+  report of `instruction-debugger` (52 commits, `high_level`) hit it immediately. The Discord
+  recipient received **2000 characters, cut mid-word** (`- Unit 1: \`ch` + `… [truncated]`);
+  the Slack recipient on the same run received all **3066**. Two supervisors, materially
+  different content, roughly a third lost on one of them. **Detail not previously recorded:**
+  at that size Discord also silently drops the *embed* format and falls back to a plain
+  `content` string, so nothing on the sending side signals the loss — the preview shows the
+  full report, and only the delivered payload is short. That asymmetry (Slack whole, Discord
+  truncated, no warning either way) is a better argument for splitting than the original
+  entry made.
 - **Severity:** low
-- **Status:** Deferred (enhancement).
+- **Status:** Deferred (enhancement). The DF1 evidence raises its practical priority: the
+  trigger is a normal first report of a real project, not a pathological input.
 
 ## KI-3 — Redaction pattern set is inherently incomplete
 
@@ -62,8 +96,15 @@ Deferred).
   guaranteeing layer is the human preview-before-send. This entry exists to keep the risk
   visible and the pattern list under periodic review, and to resist any future change that
   would treat redaction as a sufficient control on its own.
+- **Exercised (DF1, 2026-07-21):** ran the real `detailed`-share diff of this repo (30306
+  characters of actual code and docs) through the live path. No false negative was observed —
+  nothing secret-shaped got through — but the pass produced **two false POSITIVES**, which is
+  a distinct problem now tracked as [[KI-41]]. Worth stating plainly for this entry: the
+  sweep did not test the pattern set against a corpus of *deliberately planted* secret
+  shapes, so "no false negative observed" here means "none in one real diff", not
+  "confirmed complete". The entry's premise stands.
 - **Severity:** ongoing / by-design
-- **Status:** Monitored.
+- **Status:** Monitored. See [[KI-41]] for the over-matching sibling.
 
 ## KI-4 — Haiku summary quality not yet empirically confirmed on varied diffs
 
@@ -79,8 +120,24 @@ Deferred).
   model, not the tiniest (the `README` / `orion.toml.example` local-model guidance was reconciled
   to this). A **model-tier comparison** — cloud vs local, finding the cost/adequacy sweet spot — is
   worthwhile but **non-foundational**: a future experiment, not a phase.
+- **Exercised (DF1, 2026-07-21) — first real evidence, and it is positive:** three real runs
+  on two projects, no hallucination and no missed nuance observed.
+  1. `instruction-debugger`, **52 commits**, `high_level` (messages + diffstat): correctly
+     identified the governance/detector work, the "no global instruction file" finding, and
+     the handoff, with outcome-level framing rather than a commit list.
+  2. `orion-detailed`, 8 commits, **`detailed`** (a real 30k-character diff): explained
+     KI-39's root cause — that `collectors` conflated report collectors with push-only
+     capability flags — and the taxonomy fix, *without being told any of it*. That is the
+     hardest thing asked of the summarizer so far and it landed.
+  3. A small scratch repo: accurate, no padding.
+  Caveats, so this is not overclaimed: one model version, one week of history, two repos,
+  both of them documentation-heavy Python; no adversarial or multi-language diffs; quality
+  judged by reading, not against a rubric or a Sonnet baseline. So this is **evidence for
+  keeping Haiku**, not a completed evaluation. The model-tier comparison remains the
+  non-foundational future experiment the entry already describes.
 - **Severity:** low
-- **Status:** Open (evaluate on real projects during use; Haiku is the working quality bar).
+- **Status:** Open, but **substantially answered in Haiku's favour** by the DF1 runs above.
+  Keep Haiku; revisit only if a real diff visibly defeats it.
 
 ## KI-5 — `compose()` silently falls through for unknown channels
 
@@ -93,6 +150,10 @@ Deferred).
   fall-through still returns Discord Markdown for anything else (config restricts the value,
   so it stays unreachable). The same shape exists in `cli._sender_for` (raises on an unknown
   channel) — the two should stay in sync as channels are added.
+- **Exercised (DF1, 2026-07-21):** confirmed still unreachable — loading a config with
+  `channel = "teams"` is rejected at validation (*"recipient #1 has invalid channel='teams'.
+  Supported now: ('discord', 'slack')"*), so no unknown value can reach `compose`. No change
+  needed; the entry is correctly parked until a third channel exists.
 - **Severity:** low
 - **Status:** Open (revisit when a third channel is added).
 
@@ -109,6 +170,12 @@ Deferred).
   here keeps the behavior intentional rather than surprising. A stable id (e.g. an inline
   `<!-- id -->` marker) would remove the ambiguity but adds syntax the user must maintain —
   not worth it for Phase 2.
+- **Exercised (DF1, 2026-07-21) — all three arms reproduced exactly as written:**
+  (a) renaming a completed item from *"Write the parser"* to *"Write the parser module"*
+  re-reported it as a brand-new completion; (b) two identical `- [x] Ship it` lines were
+  deduped to a single reported item; (c) unchecking an already-reported item and re-checking
+  it reported **nothing** (no "Completed tasks" section at all). The documentation is
+  accurate and the behavior is defensible for the common case. Left as-is.
 - **Severity:** low
 - **Status:** By-design (documented limitation; revisit only if it bites in real use).
 
@@ -122,6 +189,11 @@ Deferred).
   file as an append-only log, already-reported lines would resend. The append-log
   alternative (track a byte offset / line count) is deliberately not built; flagged so the
   semantics are a conscious choice.
+- **Exercised (DF1, 2026-07-21) — first real run ever:** `notes` is enabled in **no** live
+  project, so this was its first exercise outside the test suite. It works. The replace model
+  reproduced exactly: appending one line (*"Also fixed the flaky test."*) re-sent the **whole**
+  file, already-reported paragraph included. Correct per the entry's framing; the resend is
+  visible enough that a user treating the file as an append log would notice at once.
 - **Severity:** low
 - **Status:** By-design (revisit if an append-log notes workflow is actually wanted).
 
@@ -151,6 +223,10 @@ Deferred).
   dedupe pass would be premature. The eventual direction is per-supervisor routing (different
   supervisors per project / task / to-do); when individual people become first-class
   recipients, add dedupe-by-resolved-webhook then. Recorded so the modeling choice is explicit.
+- **Exercised (DF1, 2026-07-21):** reproduced directly — two recipients configured against
+  the same env var double-posted the identical message to the one destination (two POSTs,
+  same path, same body). Exactly as described, with no dedupe. Still the right deferral: the
+  configuration that triggers it is one a user has to construct on purpose.
 - **Severity:** low
 - **Status:** Deferred (add with the per-supervisor routing model).
 
@@ -211,6 +287,15 @@ Deferred).
   fragile hook-chaining logic, no silent clobbering). Chaining/awareness of hook managers is
   speculative complexity until a real user needs it. Recorded so the limitation is a conscious
   choice, and documented for users in [`git-hooks.md`](git-hooks.md).
+- **Exercised (DF1, 2026-07-21) — installed and fired for real:** `--print` renders a
+  reviewable script; installing writes the single standalone hook; a second install refuses to
+  clobber and points at `--force`. A real `git push` then fired it. With `auto_send = false`
+  it **fail-closed** correctly — *"--yes was given but auto_send is not enabled, so a preview
+  is required and no human is present. Nothing sent; state unchanged."* — and after enabling
+  `auto_send` the same push produced a complete unattended run (collect → summarize → redact →
+  deliver → relay). Worth noting as a quality signal: the install output proactively warns when
+  `auto_send=false` would make the hook a no-op, which is the kind of thing this sweep exists to
+  confirm actually happens. The single-file limitation is unchanged and still the right call.
 - **Severity:** low
 - **Status:** By-design (revisit if hook-manager coexistence or multi-project-per-repo is actually
   wanted).
@@ -312,6 +397,12 @@ Deferred).
 - **Why it matters:** Each is a producer/wire extension (richer `participants`, a `collectors` list, a
   `description` on the blob), deliberately out of the read-only 4a backend seam. They are
   flagged so the SPA's omissions read as intentional, and so the closing change is a known additive step.
+- **Exercised (DF1, 2026-07-21):** all three remaining gaps confirmed still open against a
+  live relay, read straight off `GET /api/projects/<name>`: **gap 5** — `description` is
+  present as a key but empty; **gap 4** — `source_tags` ships `[]`; **gap 3** — `participants`
+  came back `null` on the reports checked (so no roles, a fortiori). The SPA degrades rather
+  than inventing data, as designed. No change; recorded so the next producer-wire extension
+  knows these are still the open three.
 - **Severity:** low
 - **Status:** Partly closed. Gap 8 (item status) closed in the Tracker slice (see below); gaps 3/4/5/7
   remain by-design for 4a (graceful degradation), closed incrementally when the producer wire is next
@@ -342,6 +433,15 @@ Deferred).
 - **Why it matters:** observe-not-originate holds (the model reframes only stated principles, never
   invents, and the collector stamps `source`), but the *organization* of the cards is a model judgment.
   An outside reader sees a faithful-but-approximate grouping, not a guaranteed-canonical one.
+- **Exercised (DF1, 2026-07-21):** ran real extraction against two different real instruction
+  docs. `instruction-debugger`'s CLAUDE.md yielded **7 cards**, this repo's yielded **16** —
+  every one traceable to a principle actually stated in the doc, so **observe-not-originate
+  holds** on real input. Arm (c) produced no near-duplicate titles in this sample (not a
+  refutation: one sample, and the arm is about a case that needs two similar docs to appear).
+  Arm (b), selection/count, is visible in the 7-vs-16 spread — that is the doc's density
+  showing through, which is the entry's point. The approximation reads as intentional. No
+  change. Separately, this exercise is what surfaced the `disciplines-push` empty-clobber bug
+  (CHANGELOG, DF1 sweep) — a different failure of the same command.
 - **Severity:** low
 - **Status:** Open by-design for 4b (stage-appropriate), **shrunk by Unit 5 (2026-07-13)** — the scope arm
   (a) is now cosmetic (all cards render on the project page regardless of scope), leaving only
@@ -395,6 +495,11 @@ Deferred).
   for disciplines. It is not a data-loss bug: per-producer provenance is captured now precisely because it
   **cannot be backfilled** (every push before this shipped would otherwise be lost). The
   `producer_disciplines_for` read seam exists; only the merge/display is deferred.
+- **Exercised (DF1, 2026-07-21):** reproduced end to end with two real identified producers.
+  Provisioned two `contributor` accounts, minted a key each, and pushed the same project's
+  disciplines from both: `relay_producer_disciplines` gained **two rows** (`author_id` 2 and
+  3), while `relay_project_disciplines` kept its **single** row, overwritten by the second
+  push. Provenance captured, nothing reading it — exactly as the entry states.
 - **Severity:** low (provenance captured, roll-up fidelity only; per-producer rows are on the store).
 - **Status:** Open, deferred as **additive**. A later unit derives display from the `producer_disciplines_for`
   seam. Note: Unit 5 of the living-resume retirement (shipped 2026-07-13) moved disciplines onto the project
@@ -460,6 +565,15 @@ Deferred).
   and avoid coupling the config writer to the admin token). This is a distinct SCOPING concern
   from the ingest push, and ties into the multi-producer / auth-revamp pass (whose Unit 1 resolved
   KI-35, the sibling last-writer concern): scheduled multi-producer scoping gets reworked there.
+- **Exercised (DF1, 2026-07-21):** the recovery path works. `relay-backfill` pushed an exact
+  report body at its original `--generated-at`, previewed first, landed a row on the relay at
+  the backdated timestamp, and was correctly **chat-silent** (zero webhook requests during the
+  run — verified against the sink log, not just the absence of an error). The forward-fix
+  remains open and unexercised in its failing form: on the sandbox relay the push *succeeded*
+  without any grant, because legacy shared-token ingest is still enabled and accepts anonymous
+  pushes. Reproducing the original 404 drop requires `--disable-legacy-ingest` or a
+  contributor key, which is worth remembering when the forward-fix is finally built — the
+  behaviour differs by ingest mode.
 - **Severity:** low–medium (recovery exists; the forward-fix is a convenience, and the gap only
   bites at onboarding, before a grant).
 - **Status:** Partially addressed — the `relay-backfill` recovery command shipped in this slice;
@@ -481,6 +595,12 @@ Deferred).
   a relay's DB is converted on its very first open — which happens before it serves concurrent
   traffic. Every already-deployed relay DB (including the live one) is long since WAL, where the
   PRAGMA is a cheap no-op that takes no exclusive lock.
+- **Exercised (DF1, 2026-07-21) — still reproduces:** 40 freshly hand-seeded rollback-mode
+  databases, four concurrent `open_relay_store` calls each, gave **2 failures out of 160
+  opens** (~1.25%) with `database is locked`. Lower than the ~5% the original note recorded,
+  which is expected — the rate is timing-dependent, and the point is that it is non-zero and
+  still real. Everything else in the entry holds: a WAL database is unaffected, so no
+  deployed relay is exposed.
 - **Severity:** low (first-open-only, and a fresh relay converts before taking traffic).
 - **Status:** Open, unfixed by choice. A fix would be a small retry/tolerate around the PRAGMA, but it
   must not silently swallow the error and leave the DB in rollback mode — the concurrency semantics
@@ -500,6 +620,24 @@ Deferred).
   per-account lockout still stops online guessing, and the admin `relay-user password unlock` clears an
   account lockout immediately. At the current N (two humans) the exposure is small and the operator is
   also the victim, so it would be noticed at once.
+- **Exercised (DF1, 2026-07-21) — reproduced, with numbers:** against a local relay, a
+  legitimate account logged in successfully (200). One client then sprayed **60 wrong
+  passwords across 60 different account names**, tripping the relay-wide limiter
+  (`_GLOBAL_MAX_FAILURES = 50` in a `_GLOBAL_WINDOW_SECONDS = 5 * 60` window). The same
+  legitimate account, with its **correct** password, was then refused. Three details worth
+  adding to the entry:
+  1. **The cost of the attack is trivial** — 50 requests, well under a second, and sustaining
+     the lockout indefinitely just means continuing to send them.
+  2. **The victim gets no signal.** The refusal is a plain **401**, indistinguishable from a
+     wrong password, so a locked-out user retypes their password and concludes it is broken
+     rather than realising they are being throttled.
+  3. **The lockout is in-memory only** — restarting the relay clears it immediately (observed
+     twice during the sweep). That is a genuine mitigation for the operator (a redeploy is a
+     fix) and a limitation of the control (it does not survive a restart for real attackers
+     either).
+  Method note: an initial attempt appeared to reproduce this and did not — those 403s were
+  the same-origin **CSRF** check rejecting requests sent without an `Origin` header, not the
+  throttle. The numbers above come from the corrected run.
 - **Severity:** low at this scale; would rise to medium the moment the relay serves a real org, where
   one attacker could lock out people who have no idea why.
 - **Status:** Open, deferred **by choice** at the auth-revamp planning pass (second-opinion amendment 6,
@@ -527,12 +665,56 @@ Deferred).
 - **Note on severity:** low *today* because the deployment has one human, one machine, and one
   agent, all trusted. It rises with the member/visibility work now shipped — the moment scopes
   are handed to people outside the immediate circle, "cannot un-share" becomes a real problem.
+- **Exercised (DF1, 2026-07-21):** confirmed by both routes. The `relay-user` subcommand set
+  is `{add, list, revoke, grant, key, password, role, rename, set-operator, delete}` — no
+  ungrant verb. In the source, the only `DELETE FROM relay_user_projects` anywhere is inside
+  `delete_user` in `relay/store.py`, i.e. whole-account deletion. `grant` itself works and is
+  idempotent (granting `orion` to an existing contributor reported *"Scope is now:
+  applications, orion"*), which is precisely the asymmetry: scope widens on demand and never
+  narrows.
 - **Severity:** low now, medium once accounts are provisioned for other people.
 - **Status:** Open. Recorded 2026-07-20 during the auth-revamp close-out; the approved
   `sliptest` cleanup was **blocked** on it and deferred. Slotted for a proposed
   **command overhaul / revamp slice** (with the sibling wording and lifecycle-ergonomics
   findings) rather than a one-off patch, by user decision — the whole `relay-user` surface
   grew additively across three arcs and deserves one considered pass.
+
+
+## KI-41 — Redaction's catch-all matches ordinary prose, so reports go out mangled
+
+- **Detail:** the generic catch-all in `redact._PATTERNS` matches any name containing
+  `api_key` / `secret` / `token` / `password` / `access_key` / `private_key` / `auth` /
+  `credential`, followed by `:` or `=` and a 4+ character value. The keyword may sit
+  anywhere inside the name (`[\w.\-]*` on both sides), so ordinary English words match:
+  **`auth` matches `authenticated` and `author`**. Observed on the real Orion diff during
+  the DF1 sweep — two hits in one report, **both false positives**, both on documentation
+  prose:
+
+      authenticated: false   ->   authenticated: [REDACTED_SECRET]
+
+  Also confirmed: `author: yoolee committed the change` → `author: [REDACTED_SECRET]`.
+  Quoted JSON keys escape (`"author_id": null` survives, because the `"` breaks the
+  name-then-separator match), so the exposure is unquoted YAML/TOML-ish lines and prose —
+  which is most of what a diff of a docs-heavy repo contains.
+- **Why it matters:** the direction is **fail-safe** — this over-redacts, it never leaks,
+  so it is not a security hole. Two costs, though. First, it silently changes meaning in
+  text a supervisor reads: `authenticated: [REDACTED_SECRET]` gives no hint that the value
+  was `false`. Second, and more important, it inflates the *"N potential secret(s) were
+  redacted"* preview warning with routine noise. That warning is the human control
+  [[KI-3]] calls **the guaranteeing layer** — the thing redaction's incompleteness is
+  *supposed* to be backstopped by. Training the operator to scroll past it degrades the
+  actual control, which is a security consequence even though the mechanism is not.
+- **Note on the fix:** deliberately NOT patched on discovery. Narrowing a security control
+  trades false positives for the risk of false negatives, which is the failure mode that
+  matters, so it wants calibration data rather than a quick regex tweak. Two directions,
+  neither yet chosen: require the keyword to be a whole word within the name (kills
+  `author`/`authenticated`, keeps `AUTH_TOKEN` via the `token` keyword), and/or skip values
+  that are common non-secret literals (`true`/`false`/`null`/`none`) — the latter is nearly
+  risk-free since no real secret is literally `false`. Any change needs a corpus check
+  against real diffs, plus tests pinning that every currently-caught secret shape still is.
+- **Severity:** low (correctness/UX now, with a slow erosion of the preview control).
+- **Status:** Open. Found 2026-07-21 by the DF1 sweep, on the first `detailed`-share report
+  of a real repo. Relates to [[KI-3]] (the same control's false NEGATIVES).
 
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

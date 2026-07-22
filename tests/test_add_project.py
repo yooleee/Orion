@@ -148,6 +148,42 @@ def test_print_only_writes_nothing(tmp_path, capsys):
     assert not cfg.exists()  # nothing written
 
 
+def test_next_step_hint_is_a_command_that_actually_parses(tmp_path, capsys):
+    """The onboarding hint names a runnable command, not one the parser rejects.
+
+    Why this matters: add-project's closing line is the FIRST thing a new user is told
+    to run. It suggested `orion check <project>`, but `check` validates the whole config
+    and takes no project argument — so that command exits with
+    `unrecognized arguments: <project>`. Found by the DF1 dogfood sweep by simply doing
+    what the output said. We parse the suggested command rather than string-matching it,
+    so the assertion tracks the real parser instead of today's wording.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = tmp_path / "orion.toml"
+    _run_add(
+        ["demo", "--repo-path", str(repo), "--recipient", "Mom:slack:ORION_SLACK_MOM", "--yes"],
+        cfg,
+    )
+    hint = [
+        line for line in capsys.readouterr().out.splitlines() if line.strip().startswith("Then:")
+    ]
+    assert len(hint) == 1, "the closing hint should still be there"
+
+    # Turn "  Then: orion check" into the argv a user would actually type.
+    argv = hint[0].split("Then:", 1)[1].split()
+    assert argv[0] in ("orion", "python"), f"unexpected hint shape: {hint[0]}"
+    argv = argv[argv.index("orion") + 1 :]  # drop the program (and any `-m`)
+
+    parser_error = {}
+    try:
+        cli.main([*argv, "--config", str(cfg)])
+    except SystemExit as exc:  # argparse exits 2 on an unparseable command line
+        parser_error["code"] = exc.code
+    assert parser_error.get("code") != 2, (
+        f"add-project suggested a command the parser rejects: {' '.join(argv)}"
+    )
+
+
 def test_declined_preview_writes_nothing(tmp_path, monkeypatch):
     """Answering 'n' at the preview aborts without touching the config.
 

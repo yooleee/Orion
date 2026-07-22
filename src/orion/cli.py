@@ -3316,7 +3316,9 @@ def cmd_add_project(
             print(f"  Created a starter checklist at {new_tasks_path}. Add your tasks there.")
     env_vars = sorted({r.webhook_env_var for r in recipients})
     print(f"  Next: set the webhook URL(s) in your .env — {', '.join(env_vars)}")
-    print(f"  Then: python -m orion check {project_name}")
+    # `check` validates the WHOLE config and takes no project argument — naming one
+    # here made the first command a new user is told to run fail outright.
+    print("  Then: orion check")
     return 0
 
 

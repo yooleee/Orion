@@ -41,6 +41,11 @@ commands in the first hour, and neither was reachable by the existing suite.
   no docs and needs no API key). This keeps "observed nothing" and "asked for nothing" distinct
   instead of collapsing both into an empty push — the tri-state idiom KI-35 settled for
   `due_soon_days`, and the empty-clobber guard the retired skills batch endpoint already had.
+- **`add-project` closed by suggesting a command that does not parse** — the onboarding hint said
+  `orion check <project>`, but `check` validates the whole config and takes no project argument, so
+  the first command a newly-onboarded user is told to run exits with `unrecognized arguments`. Now
+  `orion check`. Its test parses the suggested command rather than matching its text, so the check
+  survives a rewording (PR #124).
 
 ## `relay-user` describes a member's scope correctly (2026-07-20)
 

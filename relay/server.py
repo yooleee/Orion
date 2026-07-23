@@ -66,6 +66,7 @@ from .store import (
     get_active_password_credential,
     get_credential_by_key_verifier,
     VISIBILITIES,
+    get_about,
     get_due_soon_days,
     get_project_kind,
     get_project_visibility,
@@ -87,6 +88,7 @@ from .store import (
     rename_user,
     revoke_credential,
     revoke_user,
+    set_about,
     set_due_soon_days,
     set_operated_by,
     set_password_credential_verifier,
@@ -539,6 +541,51 @@ def _due_soon_days_error(value: object, *, allow_clear: bool) -> str | None:
     return None
 
 
+# KB surface (Unit 2): a defensive upper bound on the stored About length. The real cap is
+# applied at EXTRACTION on the producer (~400 chars); this only rejects an absurd payload at
+# the boundary. Generous over the extraction cap because redaction can lengthen the text
+# (a placeholder is longer than the secret it replaces).
+_MAX_ABOUT_CHARS = 2000
+
+
+def _about_error(value: object, *, allow_clear: bool) -> str | None:
+    """Validate a TRI-STATE `about` field, or None when it is valid (KB surface Unit 2).
+
+    Args:
+        value: The payload's `about` read via `payload.get(k, _ABSENT)` — so `_ABSENT`
+            means the key was omitted, None means an explicit JSON null, and anything else
+            is the presented value (any type — untrusted input).
+        allow_clear: Whether an explicit null is meaningful on this carrier. True for
+            /checklist (which owns clearing); False for /ingest, where a null is rejected.
+
+    Returns:
+        None when About is absent, a permitted explicit null, or a string within the length
+        cap; otherwise a short human-readable 400 reason.
+
+    Why:
+        About rides BOTH carriers exactly like due_soon_days, so it gets the SAME shared
+        tri-state validator shape to keep the two boundaries from diverging (DRY). Absence
+        means "leave alone" on every carrier (KI-35), so a configless producer can never wipe
+        an About another producer set; clearing needs the explicit null, accepted only on the
+        settings carrier. An /ingest report blob is set-only and may not clear. The length cap
+        is a boundary guard against an unbounded string (the meaningful cap is the producer's
+        extraction cap); an empty string is allowed (it round-trips as a stored empty About,
+        which the serializers still carry — distinct from absence/null).
+    """
+    if value is _ABSENT:
+        return None  # omitted: leave whatever the project already has
+    if value is None:
+        # Explicit null. On /checklist this is the clear signal; on /ingest it is a 400.
+        if allow_clear:
+            return None
+        return "field 'about' may not be null here; omit it to leave it unchanged"
+    if not isinstance(value, str):
+        return "field 'about' must be a string"
+    if len(value) > _MAX_ABOUT_CHARS:
+        return f"field 'about' must be at most {_MAX_ABOUT_CHARS} characters"
+    return None
+
+
 def _validate_checklist_request(payload: object) -> str | None:
     """Check a parsed payload against the checklist-push contract (POST /checklist).
 
@@ -577,6 +624,11 @@ def _validate_checklist_request(payload: object) -> str | None:
     )
     if due_soon_error is not None:
         return due_soon_error
+    # KB surface (Unit 2): `about` is OPTIONAL and TRI-STATE here too — absent leaves, null
+    # clears, a string sets. Same carrier rules as due_soon_days.
+    about_error = _about_error(payload.get("about", _ABSENT), allow_clear=True)
+    if about_error is not None:
+        return about_error
     return None
 
 
@@ -689,6 +741,13 @@ def _validate_blob(payload: object) -> str | None:
     )
     if due_soon_error is not None:
         return due_soon_error
+
+    # KB surface (Unit 2): `about` also rides the blob (set-only). Validated WHEN PRESENT;
+    # like due_soon_days an explicit null is REJECTED here — a report may set About but never
+    # clear it (clearing is the /checklist carrier's --clear-about).
+    about_error = _about_error(payload.get("about", _ABSENT), allow_clear=False)
+    if about_error is not None:
+        return about_error
 
     return None
 
@@ -1012,6 +1071,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # convenience so a report push keeps the horizon fresh. Validated to be 1..365.
             if payload.get("due_soon_days") is not None:
                 set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
+            # KB surface (Unit 2): About also rides the blob, set-only for the same reason —
+            # a report (incl. `intake`) SETS About when present but never clears on absence.
+            if payload.get("about") is not None:
+                set_about(conn, payload["project"], payload["about"])
         finally:
             conn.close()
         print(
@@ -1109,6 +1172,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # the meta row with `kind` (single-column upserts, so neither touches the other).
             if "due_soon_days" in payload:
                 set_due_soon_days(conn, payload["project"], payload["due_soon_days"])
+            # KB surface (Unit 2): `about` is TRI-STATE on this carrier exactly like
+            # due_soon_days. `in payload` distinguishes absent (leave) from an explicit null
+            # (clear to NULL ⇒ no band) — a bare .get() would collapse the two. A string sets.
+            if "about" in payload:
+                set_about(conn, payload["project"], payload["about"])
         finally:
             conn.close()
         count = len(payload["checklist"])
@@ -2907,6 +2975,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         attributions=author_attributions(
                             conn, [r.get("author_id") for r in reports]
                         ),
+                        # KB surface (Unit 2): the project's About line under the title,
+                        # or None ⇒ no band.
+                        about=get_about(conn, name),
                     ),
                 )
                 return

@@ -346,6 +346,10 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
         # Last activity: a report's time when there is one, else the checklist's receive
         # clock — the same fallback the old portfolio card used.
         "updated_at": row["latest_generated_at"] or row["checklist_updated_at"],
+        # KB surface (Unit 2): the project's About line (None when unset → the SPA renders
+        # no sub-line). Carried on BOTH kinds — a tracker may set about_file too — but v1
+        # surfaces it on project rows only (the SPA decides presentation).
+        "about": row.get("about"),
     }
     if row["kind"] == "tracker":
         # A general checklist: the segmented bar + the chip list, plus an item count.
@@ -622,6 +626,7 @@ def serialize_project(
     today: date,
     due_soon_days: int | None = None,
     attributions: dict | None = None,
+    about: str | None = None,
 ) -> dict:
     """Serialize one project's full detail (/api/projects/:name).
 
@@ -653,6 +658,8 @@ def serialize_project(
             store.author_attributions, for the report timeline's agent badge (Unit 4a). None
             or a missing id both mean "nothing to badge", so a caller that does not pass it
             gets today's output unchanged.
+        about: The project's About line (store.get_about), or None ⇒ no About band. Rendered
+            under the title on the project page (KB surface Unit 2).
 
     Returns:
         The project-detail shape: stats, milestones, checklist, producer_checklists, reports,
@@ -748,6 +755,10 @@ def serialize_project(
         "name": name,
         "kind": kind,
         "description": None,  # contract gap 5: no project description field stored yet
+        # KB surface (Unit 2): the project's observed About line (its doc's first paragraph),
+        # or None ⇒ no band. A DISTINCT concept from `description` above (which stays an unset
+        # gap) — About is mechanically observed, not an authored project blurb.
+        "about": about,
         "stats": {
             "progress": _progress(done, len(items)),
             "next_due": _next_due(checklist, today, resolved_due_soon_days),

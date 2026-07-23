@@ -1,9 +1,13 @@
 // =============================================================================
 // web/src/routes/Project.tsx
 // -----------------------------------------------------------------------------
-// Responsible for: One project's full page — header stats, FORWARD LOOK milestones,
-//                  LIVE CHECKLIST, the REPORTS timeline, and the project-level DISCUSSION
-//                  thread (the one conversation surface here). Two-column layout.
+// Responsible for: One project's full page — header stats, the FORWARD LOOK (expandable
+//                  milestone groups, each holding its own checklist items), the REPORTS
+//                  timeline, and the project-level DISCUSSION thread (the one conversation
+//                  surface here). Two-column layout.
+// Note: the separate flat "Live checklist" section retired in KI-34 (KB surface Unit 3) —
+//       it repeated every item the milestone cards already summarized. Items now nest in
+//       their milestone group (ungrouped ones trail in "Other"), so nothing is lost.
 // Note: this project-level Discussion thread (E2 Inc 5) is the ONE conversation surface —
 //       per-report comments were retired outright in KI-28 Stage 2 (two near-identical
 //       surfaces doing one job, consolidated to Discussion).
@@ -20,7 +24,7 @@ import { useApiData } from "../lib/useApiData";
 import { deadlineLabel, formatDate } from "../lib/time";
 import { STATUS_STYLES } from "../theme/status";
 import { Breadcrumb } from "../components/Breadcrumb";
-import { MilestoneCard } from "../components/MilestoneCard";
+import { MilestoneGroup } from "../components/MilestoneGroup";
 import { ChecklistRow } from "../components/ChecklistRow";
 import { DisciplineCard } from "../components/DisciplineCard";
 import { ProgressBar } from "../components/ProgressBar";
@@ -50,6 +54,15 @@ export function Project() {
   if (!data) return null;
 
   const nextDue = data.stats.next_due;
+
+  // KI-34 (Unit 3): items whose group has no milestone roll-up (ungrouped, or a group the
+  // server derived no milestone for) still belong somewhere — they trail in an "Other"
+  // group rather than being dropped when the flat checklist section retired. Same rule the
+  // tracker page uses, so the two pages agree on what "ungrouped" means.
+  const milestoneGroups = new Set(data.milestones.map((m) => m.group));
+  const ungroupedItems = data.checklist.filter(
+    (i) => i.group === null || !milestoneGroups.has(i.group),
+  );
 
   return (
     <div>
@@ -104,24 +117,32 @@ export function Project() {
             </section>
           )}
 
-          {data.milestones.length > 0 && (
+          {/* KI-34 (Unit 3): the forward look and the live checklist are ONE section now.
+              Each milestone is an expandable group holding its own items, so the page reads
+              as group summaries with detail on demand — instead of milestone cards plus a
+              separate flat list of every item. Ungrouped items trail in "Other" so nothing
+              is dropped. */}
+          {(data.milestones.length > 0 || ungroupedItems.length > 0) && (
             <section>
               <div className="eyebrow block-label">Forward look</div>
               <div className="milestone-stack">
                 {data.milestones.map((m) => (
-                  <MilestoneCard key={m.group} milestone={m} tz={tz} />
+                  <MilestoneGroup
+                    key={m.group}
+                    title={m.group}
+                    milestone={m}
+                    items={data.checklist.filter((i) => i.group === m.group)}
+                    tz={tz}
+                  />
                 ))}
-              </div>
-            </section>
-          )}
-
-          {data.checklist.length > 0 && (
-            <section>
-              <div className="eyebrow block-label">Live checklist</div>
-              <div className="check-list">
-                {data.checklist.map((item, i) => (
-                  <ChecklistRow key={item.key ?? `${item.text}-${i}`} item={item} tz={tz} />
-                ))}
+                {ungroupedItems.length > 0 && (
+                  <MilestoneGroup
+                    title="Other"
+                    milestone={null}
+                    items={ungroupedItems}
+                    tz={tz}
+                  />
+                )}
               </div>
             </section>
           )}

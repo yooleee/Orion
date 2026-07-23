@@ -770,6 +770,49 @@ h3 {
   color: var(--tmid);
 }
 
+/* --- Expandable milestone group (KI-34 regroup, KB surface Unit 3) ---------- */
+
+/* The whole roll-up is the disclosure button. It is a <button> for keyboard/AT reasons,
+   so the browser's default button chrome is stripped back to the card's own layout. */
+.milestone-summary {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* The head already carries a bottom margin; inside the button the bar is the last row, so
+   no extra spacing is needed below it when the group is collapsed. */
+.milestone-summary .milestone-bar {
+  margin-bottom: 0;
+}
+/* A small caret that rotates to point down when the group is open. The state itself is
+   announced via aria-expanded — this is decoration, hence aria-hidden on the element. */
+.milestone-caret {
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--tfaint);
+  transition: transform 0.15s;
+}
+.milestone-caret.open {
+  transform: rotate(90deg);
+}
+/* The nested items, separated from the summary by a hairline so the group reads as
+   summary-then-detail rather than one undifferentiated block. */
+.milestone-items {
+  margin-top: 13px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.milestone-empty {
+  font-size: 12.5px;
+  color: var(--tfaint);
+}
+
 /* --- Agent attribution chip (auth revamp, Unit 4a) ------------------------- */
 
 /* Marks a report pushed by an AGENT account (a machine acting for a human), shown

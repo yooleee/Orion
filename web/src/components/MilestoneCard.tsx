@@ -17,8 +17,13 @@ import { deadlineLabel, deadlineState } from "../lib/time";
  * Compose a milestone's status signals: slipping and/or at-risk lead (an at-risk
  * milestone shows both ↝ slipped and △ at risk when applicable); otherwise the nearest
  * deadline, else not-started / on-track. Up to two, matching the design's milestone states.
+ *
+ * Exported so MilestoneGroup (the project page's expandable regroup, KI-34) composes the
+ * SAME signals from the same rule — the two presentations must never disagree about what a
+ * milestone's state reads as (DRY). This card itself is unchanged and still backs the
+ * Showcase demo's non-expandable Forward look.
  */
-function milestoneSignals(m: Milestone, tz: string): Array<{ state: Status; label: string }> {
+export function milestoneSignals(m: Milestone, tz: string): Array<{ state: Status; label: string }> {
   const sigs: Array<{ state: Status; label: string }> = [];
   // E1.2 Unit 5: surface the count only when more than one item slips ("2 slipped"). A
   // single slip stays the bare "slipped" label (and zero shows no slip signal at all), so

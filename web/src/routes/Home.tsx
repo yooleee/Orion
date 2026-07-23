@@ -1,7 +1,7 @@
 // =============================================================================
 // web/src/routes/Home.tsx
 // -----------------------------------------------------------------------------
-// Responsible for: The portfolio home — the sectioned overview (Projects + To-dos),
+// Responsible for: The portfolio home — the sectioned overview (Projects + Trackers),
 //                  a scope banner for restricted viewers, and the empty/first-run state.
 // Role in project: The dashboard's landing surface and the core IA decision (distinct
 //                  sections, not one flat list). Reads /api/portfolio via the shell's
@@ -60,7 +60,7 @@ export function Home() {
           {trackers.length > 0 && (
             <section className="home-section">
               <div className="section-header">
-                <h2>To-dos</h2>
+                <h2>Trackers</h2>
                 <span className="section-rule" />
               </div>
               <div className="row-stack">

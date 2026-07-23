@@ -5,7 +5,8 @@
 //                  NOT a project. A TRACKER header with a done/total + segmented bar, a
 //                  legend strip of the full state vocabulary, then grouped checklists
 //                  with circular indicators and per-group roll-ups.
-// Role in project: The To-dos surface. Reads /api/projects/:name (kind == "tracker");
+// Role in project: A tracker's detail page, part of the projects/KB surface (the standalone
+//                  To-dos section retired in KB-surface Inc 1). Reads /api/projects/:name (kind == "tracker");
 //                  a 404 renders a clean not-found (existence-hiding carries through).
 //                  Visual oracle: design/screenshots/desktop-04-tracker-sepia.png.
 // =============================================================================

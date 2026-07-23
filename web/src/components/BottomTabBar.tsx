@@ -1,10 +1,10 @@
 // =============================================================================
 // web/src/components/BottomTabBar.tsx
 // -----------------------------------------------------------------------------
-// Responsible for: The mobile primary nav — a fixed bottom tab bar (Projects, To-dos,
-//                  Schedule, More) that replaces the desktop sidebar on narrow screens,
-//                  plus a "More" sheet for the secondary actions (theme, showcase,
-//                  account/logout) the sidebar's bottom block holds.
+// Responsible for: The mobile primary nav — a fixed bottom tab bar (Projects, Schedule,
+//                  More) that replaces the desktop sidebar on narrow screens, plus a
+//                  "More" sheet for the secondary actions (theme, showcase, account/logout)
+//                  the sidebar's bottom block holds.
 // Role in project: The mobile half of the shell's navigation. Rendered alongside the
 //                  Sidebar in Shell and shown/hidden purely by CSS at the breakpoint —
 //                  no JS resize listener. Active-tab state comes from navActive(), the
@@ -85,7 +85,6 @@ export function BottomTabBar({ me, onLogout }: BottomTabBarProps) {
 
       <nav className="bottom-tabbar" aria-label="Primary">
         <Tab to="/" glyph="◇" label="Projects" active={active.projects} />
-        <Tab to="/todos" glyph="⊟" label="To-dos" active={active.todos} />
         <Tab to="/scheduling" glyph="◷" label="Schedule" active={active.scheduling} />
         {/* "More" is a menu, not a route — it toggles the sheet and shows active while open. */}
         <button

@@ -16,7 +16,7 @@ from orion.collectors.tasks import ChecklistItem
 from orion.report import ReportBlob, serialize_blob
 
 
-def _blob(sections=(), checklist=None, due_soon_days=None):
+def _blob(sections=(), checklist=None, due_soon_days=None, about=None):
     """A fully-populated ReportBlob for serialization tests.
 
     Args:
@@ -26,6 +26,8 @@ def _blob(sections=(), checklist=None, due_soon_days=None):
             Defaults to None so the field is absent unless a test opts in.
         due_soon_days: The optional "due soon" window (int) or None. Defaults to None
             so the field is absent from the wire unless a test opts in.
+        about: The optional About line (str) or None. Defaults to None so the field is
+            absent from the wire unless a test opts in.
 
     Why:
         Centralizes blob construction so each test varies only what it is checking
@@ -42,6 +44,7 @@ def _blob(sections=(), checklist=None, due_soon_days=None):
         sections=sections,
         checklist=checklist,
         due_soon_days=due_soon_days,
+        about=about,
     )
 
 
@@ -134,6 +137,30 @@ def test_serialize_blob_omits_due_soon_days_when_none():
     parsed = json.loads(serialize_blob(_blob(due_soon_days=None)))
 
     assert "due_soon_days" not in parsed
+
+
+def test_serialize_blob_emits_about_when_set():
+    """A blob carrying an About line emits the string on the wire.
+
+    Why this matters: this is the ingest-blob (set-only) carrier for the KB About band.
+    The relay reads it to store the project's About, so it must cross the seam as a plain
+    string under the agreed `about` key.
+    """
+    parsed = json.loads(serialize_blob(_blob(about="Orion turns activity into updates.")))
+
+    assert parsed["about"] == "Orion turns activity into updates."
+
+
+def test_serialize_blob_omits_about_when_none():
+    """A blob with no About omits the key entirely (back-compat + set-only).
+
+    Why this matters: About is OPTIONAL and omit-when-unset on this carrier — a project
+    without an about_file produces byte-identical output to before the field existed, and
+    a report never CLEARS About (there is no null case here). Same rule as due_soon_days.
+    """
+    parsed = json.loads(serialize_blob(_blob(about=None)))
+
+    assert "about" not in parsed
 
 
 def test_serialize_blob_emits_checklist_as_text_done_objects():

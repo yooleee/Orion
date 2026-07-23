@@ -78,6 +78,10 @@ class ReportBlob:
     # Optional per-project "due soon" window (days). Defaulted None so existing callers
     # and stored blobs stay valid; None ⇒ omitted from the wire (relay uses its default).
     due_soon_days: int | None = None
+    # Optional "About" line (what the project IS), observed from its about_file and already
+    # redacted by the caller. Defaulted None so existing callers/blobs stay valid; None ⇒
+    # omitted from the wire (set-only on this carrier — a report never CLEARS About).
+    about: str | None = None
 
 
 def build_report(
@@ -88,6 +92,7 @@ def build_report(
     sections: tuple[tuple[str, str], ...] = (),
     checklist: tuple[ChecklistItem, ...] | None = None,
     due_soon_days: int | None = None,
+    about: str | None = None,
 ) -> ReportBlob:
     """Assemble a ReportBlob from a project and a finished body.
 
@@ -104,6 +109,8 @@ def build_report(
             are unchanged.
         due_soon_days: The project's configured "due soon" window in days, or None to
             omit it (relay default). Defaulted so existing call sites are unchanged.
+        about: The project's redacted About line, or None to omit it. Defaulted so
+            existing call sites are unchanged.
 
     Returns:
         A populated ReportBlob.
@@ -127,6 +134,7 @@ def build_report(
         sections=sections,
         checklist=checklist,
         due_soon_days=due_soon_days,
+        about=about,
     )
 
 
@@ -179,6 +187,11 @@ def serialize_blob(blob: ReportBlob) -> str:
     # set it and a receiver predating the field is unaffected (same rule as `checklist`).
     if blob.due_soon_days is not None:
         payload["due_soon_days"] = blob.due_soon_days
+    # Optional field: emit `about` ONLY when the producer observed one. None ⇒ omit the key
+    # (same set-only rule as due_soon_days on this carrier — a report never CLEARS About, so
+    # there is no null case here; clearing is the /checklist carrier's --clear-about).
+    if blob.about is not None:
+        payload["about"] = blob.about
     # sort_keys → byte-stable output for a given blob; the seam needs a predictable
     # wire format more than it needs human-friendly field order.
     return json.dumps(payload, sort_keys=True)

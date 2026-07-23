@@ -105,6 +105,8 @@ def push_checklist(
     kind: str = "project",
     due_soon_days: int | None = None,
     clear_due_soon_days: bool = False,
+    about: str | None = None,
+    clear_about: bool = False,
     timeout: float = 10.0,
 ) -> None:
     """POST a project's current checklist to a relay's /checklist endpoint.
@@ -130,6 +132,10 @@ def push_checklist(
             Mutually exclusive with a non-None `due_soon_days`. KI-35: since the relay
             no longer treats an absent value as "clear", clearing needs this explicit
             carrier.
+        about: The project's redacted About line, or None to omit it (leave the relay's
+            stored About unchanged). Tri-state on this carrier exactly like due_soon_days.
+        clear_about: When True, send an explicit JSON null for `about`, telling the relay
+            to CLEAR the stored About. Mutually exclusive with a non-None `about`.
         timeout: Seconds to wait for the request before failing.
 
     Returns:
@@ -151,6 +157,9 @@ def push_checklist(
         raise ValueError(
             "clear_due_soon_days cannot be combined with a due_soon_days value"
         )
+    if clear_about and about is not None:
+        # A caller bug, not user input — the CLI never lets these combine.
+        raise ValueError("clear_about cannot be combined with an about value")
     endpoint = urllib.parse.urljoin(relay_url, "/checklist")
     payload = {"project": project, "checklist": checklist, "kind": kind}
     # KI-35: `due_soon_days` is tri-state on this carrier. Omit the key ⇒ the relay leaves
@@ -162,6 +171,13 @@ def push_checklist(
         payload["due_soon_days"] = None
     elif due_soon_days is not None:
         payload["due_soon_days"] = due_soon_days
+    # `about` is tri-state on this carrier too (KI-35 rule): omit ⇒ leave, null ⇒ clear,
+    # value ⇒ set. Same shape as due_soon_days, so a project without an about_file sends
+    # byte-identical payloads to before and can never clobber another producer's About.
+    if clear_about:
+        payload["about"] = None
+    elif about is not None:
+        payload["about"] = about
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         endpoint,

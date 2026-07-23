@@ -929,36 +929,42 @@ def test_disciplines_push_clear_empties_the_section_deliberately(
 
 
 def _capture_checklist_pushes(mp):
-    """Record (url, project, checklist, token, kind, due_soon_days, clear_due_soon_days) calls.
+    """Record push_checklist calls as (url, project, checklist, token, kind,
+    due_soon_days, clear_due_soon_days, about, clear_about) tuples.
 
     Why: the command/watch loop call push_checklist as their only outbound effect; an
     in-memory recorder lets each test assert on the exact payload without any network. Every
     keyword-only extra rides every call, so the recorder captures them all: `kind` (E2 Inc
     4, project/tracker), `due_soon_days` (E1.2, the per-project due-soon window, None
-    when unset), and `clear_due_soon_days` (KI-35, the explicit clear) — letting a test
-    assert each propagates to the wire. The clear flag is captured SEPARATELY from the
-    value because both a clear and an unconfigured project pass due_soon_days=None; only
-    the flag tells them apart (the transport turns it into an explicit JSON null).
+    when unset), `clear_due_soon_days` (KI-35, the explicit clear), and — Unit 2 — `about`
+    (the observed About line, None when unset) plus `clear_about`. Each clear flag is
+    captured SEPARATELY from its value because both a clear and an unconfigured project pass
+    the value as None; only the flag tells them apart (the transport turns it into an
+    explicit JSON null).
     """
     pushes = []
     mp.setattr(
         cli,
         "push_checklist",
-        lambda url, project, checklist, token, *, kind="project", due_soon_days=None, clear_due_soon_days=False: pushes.append(
-            (url, project, checklist, token, kind, due_soon_days, clear_due_soon_days)
+        lambda url, project, checklist, token, *, kind="project", due_soon_days=None, clear_due_soon_days=False, about=None, clear_about=False: pushes.append(
+            (url, project, checklist, token, kind, due_soon_days, clear_due_soon_days, about, clear_about)
         ),
     )
     return pushes
 
 
-def _checklist_config(tmp_path, *, checklist=True, relay_enabled=True, due_soon_days=None):
+def _checklist_config(
+    tmp_path, *, checklist=True, relay_enabled=True, due_soon_days=None, about_file=None
+):
     """Write an orion.toml with a checklist-enabled project + a [relay] table.
 
     Why: the checklist-push tests share the same shape (a tasks project + a relay);
     this keeps each test to the one knob (checklist on/off, relay on/off, an optional
-    configured due-soon horizon) it varies.
+    configured due-soon horizon, an optional about_file) it varies. about_file resolves
+    relative to repo_path (= tmp_path here), so a test writes tmp_path/<about_file>.
     """
     horizon = "" if due_soon_days is None else f"due_soon_days = {due_soon_days}"
+    about = "" if about_file is None else f'about_file = "{about_file}"'
     toml = tmp_path / "orion.toml"
     toml.write_text(
         f"""
@@ -975,6 +981,7 @@ def _checklist_config(tmp_path, *, checklist=True, relay_enabled=True, due_soon_
         tasks_file = "TODO.md"
         checklist = {str(checklist).lower()}
         {horizon}
+        {about}
 
           [[projects.demo.recipients]]
           name = "Alex"
@@ -1009,7 +1016,7 @@ def test_checklist_push_one_shot_pushes_redacted_checklist(tmp_path, env_and_moc
     assert code == 0
     assert len(pushes) == 1
 
-    url, project, checklist, token, kind, due_soon_days, _clear = pushes[0]
+    url, project, checklist, token, kind, due_soon_days, _clear, _about, _clear_about = pushes[0]
     assert url == "https://relay.test/ingest"  # the client derives /checklist from it
     assert project == "demo"
     assert token == "relay-secret"
@@ -1051,8 +1058,9 @@ def test_checklist_push_one_shot_records_history(tmp_path, env_and_mocks):
     # due_soon_days (None) and defaults kind="project", mirroring the push args above.
     project = get_project(load_config(toml), "demo")
     payload = cli._checklist_payload(project)
+    about, _ = cli._redacted_about(project)
     expected = cli._checklist_content_hash(
-        payload, project.kind, project.due_soon_days
+        payload, project.kind, project.due_soon_days, about
     )
     assert content_hash == expected
 
@@ -1082,7 +1090,7 @@ def test_checklist_push_clear_flag_sends_the_clear_instead_of_the_config_value(
         ["checklist-push", "demo", "--config", str(toml), "--clear-due-soon-days"]
     )
     assert code == 0
-    _url, _project, _checklist, _token, _kind, due_soon_days, clear = pushes[0]
+    _url, _project, _checklist, _token, _kind, due_soon_days, clear, _about, _clear_about = pushes[0]
     assert clear is True
     assert due_soon_days is None  # the config's 14 must NOT ride along
 
@@ -1113,8 +1121,9 @@ def test_checklist_push_clear_flag_records_the_cleared_state_in_history(
     project = get_project(load_config(toml), "demo")
     payload = cli._checklist_payload(project)
     # Hashed with None — the horizon actually put on the wire — not project.due_soon_days.
-    assert content_hash == cli._checklist_content_hash(payload, project.kind, None)
-    assert content_hash != cli._checklist_content_hash(payload, project.kind, 14)
+    # `demo` has no about_file, so About is None on the wire too.
+    assert content_hash == cli._checklist_content_hash(payload, project.kind, None, None)
+    assert content_hash != cli._checklist_content_hash(payload, project.kind, 14, None)
 
 
 def _assert_clear_flag_rejected(tmp_path, env_and_mocks, capsys, args):
@@ -1198,11 +1207,30 @@ def test_checklist_content_hash_sensitive_to_due_soon_days(tmp_path):
     same kind, different due_soon_days → different hash; identical inputs → identical hash.
     """
     payload = [{"text": "Ship it", "done": False}]
-    base = cli._checklist_content_hash(payload, "project", None)
-    changed = cli._checklist_content_hash(payload, "project", 14)
+    base = cli._checklist_content_hash(payload, "project", None, None)
+    changed = cli._checklist_content_hash(payload, "project", 14, None)
     assert base != changed
     # Deterministic: identical inputs hash identically (no ordering/encoding nondeterminism).
-    assert base == cli._checklist_content_hash(payload, "project", None)
+    assert base == cli._checklist_content_hash(payload, "project", None, None)
+
+
+def test_checklist_content_hash_sensitive_to_about(tmp_path):
+    """The wire-payload hash changes when only the About line changes.
+
+    Why this matters: About rides the checklist carrier, so a project whose ONLY change
+    since its last push is an edited About must NOT be gated as "no change" by the
+    `--all --due` scheduled sweep — otherwise the dashboard's About would silently go
+    stale (the freshness-honesty regression the Unit 2 risk list calls out). Same items,
+    same kind/horizon, different About → different hash; identical inputs → identical hash.
+    """
+    payload = [{"text": "Ship it", "done": False}]
+    base = cli._checklist_content_hash(payload, "project", None, None)
+    with_about = cli._checklist_content_hash(payload, "project", None, "A build tool.")
+    edited = cli._checklist_content_hash(payload, "project", None, "A deploy tool.")
+    assert base != with_about  # adding About is a change
+    assert with_about != edited  # editing About is a change
+    # Deterministic: identical inputs (including the About string) hash identically.
+    assert with_about == cli._checklist_content_hash(payload, "project", None, "A build tool.")
 
 
 # --- E1.3 Unit 2: `checklist-push --all [--due]` (the scheduled sweep) ----------------
@@ -1522,8 +1550,95 @@ def test_checklist_push_carries_configured_due_soon_days(tmp_path, env_and_mocks
     code = cli.main(["checklist-push", "demo", "--config", str(toml)])
     assert code == 0
     assert len(pushes) == 1
-    _url, _project, _checklist, _token, _kind, due_soon_days, _clear = pushes[0]
+    _url, _project, _checklist, _token, _kind, due_soon_days, _clear, _about, _clear_about = pushes[0]
     assert due_soon_days == 14  # the configured window rides the push
+
+
+def test_checklist_push_carries_observed_about(tmp_path, env_and_mocks):
+    """An `about_file`'s first paragraph rides the /checklist push (Unit 2, carrier 2).
+
+    Why this matters: this is the About band's producer half end to end — config →
+    read_about → redact → push_checklist. A project that points `about_file` at a README
+    must carry that README's opening prose to the relay under `about`.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "# Demo\n\nDemo turns activity into progress updates.\n", encoding="utf-8"
+    )
+    toml = _checklist_config(tmp_path, about_file="README.md")
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+    _url, _project, _checklist, _token, _kind, _due, _clear, about, clear_about = pushes[0]
+    assert about == "Demo turns activity into progress updates."
+    assert clear_about is False  # a normal push SETS About, never clears it
+
+
+def test_checklist_push_redacts_about_before_send(tmp_path, env_and_mocks):
+    """A secret in the About source is scrubbed before it rides the push.
+
+    Why this matters: About is user-authored content, so the privacy net must run on it
+    like any other outbound text — a token in the README's first paragraph must never
+    reach the relay.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    # An AWS-key-shaped secret embedded in the opening paragraph.
+    (tmp_path / "README.md").write_text(
+        "# Demo\n\nDeploy key AKIAIOSFODNN7EXAMPLE powers the pipeline.\n", encoding="utf-8"
+    )
+    toml = _checklist_config(tmp_path, about_file="README.md")
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 0
+    _url, _project, _checklist, _token, _kind, _due, _clear, about, _clear_about = pushes[0]
+    assert about is not None
+    assert "AKIAIOSFODNN7EXAMPLE" not in about  # the secret was scrubbed before the wire
+
+
+def test_checklist_push_clear_about_sends_the_clear(tmp_path, env_and_mocks):
+    """`--clear-about` sends the explicit clear instead of the observed value.
+
+    Why this matters: mirrors --clear-due-soon-days — removing about_file from config
+    never clears the relay's stored About (KI-35), so clearing is a deliberate one-shot
+    act that puts clear_about=True (and no value) on the wire.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "TODO.md").write_text("- [ ] Ship it\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n\nSome About.\n", encoding="utf-8")
+    toml = _checklist_config(tmp_path, about_file="README.md")
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml), "--clear-about"])
+    assert code == 0
+    _url, _project, _checklist, _token, _kind, _due, _clear, about, clear_about = pushes[0]
+    assert clear_about is True
+    assert about is None  # a clear puts None (→ explicit null) on the wire, not the value
+
+
+def test_checklist_push_clear_about_rejected_with_all(tmp_path, env_and_mocks):
+    """`--clear-about` is single-project only; combining it with --all is a usage error.
+
+    Why this matters: clearing is a deliberate one-shot act on ONE project, never
+    something a sweep repeats — the same guard --clear-due-soon-days has (exit 2).
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    _capture_checklist_pushes(mp)
+    toml = _checklist_config(tmp_path)
+
+    code = cli.main(["checklist-push", "--all", "--config", str(toml), "--clear-about"])
+    assert code == 2  # usage error, before any push
 
 
 def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
@@ -1577,7 +1692,7 @@ def test_checklist_push_works_for_tracker_only_project(tmp_path, env_and_mocks):
     assert code == 0
     assert len(pushes) == 1
 
-    _url, project, checklist, _token, _kind, _due_soon, _clear = pushes[0]
+    _url, project, checklist, _token, _kind, _due_soon, _clear, _about, _clear_about = pushes[0]
     assert project == "apps"
     # The application item carries its status in the text and is done (Submitted); it also
     # emits the bare title as the stable forward-store `key` (Unit 3), the "Applications"
@@ -1640,7 +1755,7 @@ def test_checklist_push_carries_item_deadline_through_redaction(tmp_path, env_an
     code = cli.main(["checklist-push", "apps", "--config", str(toml)])
     assert code == 0
 
-    _url, _project, checklist, _token, _kind, _due_soon, _clear = pushes[0]
+    _url, _project, checklist, _token, _kind, _due_soon, _clear, _about, _clear_about = pushes[0]
     assert checklist[0] == {
         "text": "Claude Corps Fellow (job) - In progress",
         "done": False,
@@ -1700,20 +1815,22 @@ def test_watch_tick_pushes_on_change_and_skips_when_unchanged(tmp_path, env_and_
     project = get_project(load_config(toml), "demo")
     relay_cfg = load_config(toml).relay
 
-    # First tick (no prior push): the current state is pushed.
-    last, pushed = cli._watch_tick(project, relay_cfg, "tok", None)
+    # First tick (no prior push): the current state is pushed. `demo` has no about_file,
+    # so the About the tick carries is None (the third tuple element).
+    last, about, pushed = cli._watch_tick(project, relay_cfg, "tok", None)
     assert pushed is True
+    assert about is None
     assert last == [{"text": "First", "done": False}]
     assert len(pushes) == 1
 
     # Second tick, file unchanged: no push, same baseline returned.
-    last, pushed = cli._watch_tick(project, relay_cfg, "tok", last)
+    last, about, pushed = cli._watch_tick(project, relay_cfg, "tok", last)
     assert pushed is False
     assert len(pushes) == 1  # unchanged → no new push
 
     # Edit the file: the next tick pushes the new checklist.
     todo.write_text("- [x] First\n- [ ] Second\n", encoding="utf-8")
-    last, pushed = cli._watch_tick(project, relay_cfg, "tok", last)
+    last, about, pushed = cli._watch_tick(project, relay_cfg, "tok", last)
     assert pushed is True
     assert last == [{"text": "First", "done": True}, {"text": "Second", "done": False}]
     assert len(pushes) == 2

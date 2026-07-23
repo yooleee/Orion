@@ -537,11 +537,25 @@ Deferred).
   an undifferentiated wall of sections works against that. It is a **UX/information-architecture** concern, not
   a correctness or security one.
 - **Severity:** low (cosmetic / IA; nothing is wrong or missing, only how it is grouped).
-- **Status:** Open, **deferred by decision (2026-07-13)** — noted now so it is not forgotten, but explicitly
-  **not** this-session work. The natural time to revisit is **when more of the project is built up** — the
-  cross-project shared knowledge base (stage 2) and the oracle (stage 3) will add their own surfaces, so a
-  layout/IA pass is best done **alongside or just before** those, rather than as a one-off now. A redesign
-  would touch the SPA shell + the project route, so it belongs in a deliberate slice with its own plan.
+- **Resolved (2026-07-22, KB surface Inc 1 Unit 3)** — the recorded candidate direction was adopted as
+  written, and it held up on real data. The "Forward look" milestone cards are now **expandable groups**
+  (`web/src/components/MilestoneGroup.tsx`): each milestone's own checklist items nest inside it, revealed
+  on click, and the **separate flat full-length checklist section was retired outright**. Groups are
+  **collapsed by default** — that collapse is the density fix itself, since the complaint was that every
+  item in every milestone rendered at once. Items belonging to no milestone group trail in an **"Other"**
+  group (the same rule the tracker page uses), so retiring the flat list drops nothing. Verified eyes-on
+  against a deliberately dense project (3 milestone groups, 13 items, 2 of them ungrouped) across all three
+  themes, desktop + mobile: the page went from *3 cards plus a 13-item flat list* to **4 scannable
+  summaries** that expand on demand, with per-item states (overdue / due-soon / done) intact inside.
+- **Deliberately not changed, so their absence is a decision:** the **"Working agreements" placement is
+  kept** where Unit 5 put it (leading the left column as context before the progress detail) — the placement
+  question this KI raised is settled as *keep*, not moved. No broader re-categorization of the remaining
+  sections (Working agreements, Forward look, By contributor, Reports, Discussion) was attempted: each is
+  now a distinct band and the page reads cleanly, so a further layout redesign has no concrete complaint
+  behind it. `MilestoneCard` itself is unchanged and still backs the Showcase demo's non-expandable view.
+- **Status:** **Resolved** (the density complaint this KI names is fixed). If the two-column layout feels
+  bloated again as stage-2/3 surfaces land, re-file with the specific section that reads wrong rather than
+  reopening this one — the concrete grievance recorded here (the duplicated flat checklist) is gone.
 
 ## KI-36 — Reports sent before a relay grant never land on the dashboard (backfill path added)
 

@@ -74,6 +74,7 @@ docs/auth-revamp-kickoff.md
 docs/auth-revamp-closeout-kickoff.md
 docs/claudemd-refresh-audit-kickoff.md
 docs/kb-surface-kickoff.md
+docs/kb-inc2-and-dr1-kickoff.md
 
 # Scheduler run logs (launchd/cron StandardOut/Err targets — see docs/scheduling.md)
 /orion-*.log

@@ -17,12 +17,65 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # The extraction cap, in characters. About is a one-glance line on a card/header, not a
-# summary, so a long opening paragraph is truncated on a word boundary with an ellipsis.
-# Applied at EXTRACTION (here) so the cap is enforced before the text ever rides the wire.
+# summary, so a long opening paragraph is truncated. Applied at EXTRACTION (here) so the cap
+# is enforced before the text ever rides the wire.
 _ABOUT_CAP = 400
+
+# When truncating, prefer ending on a COMPLETE SENTENCE rather than mid-clause — but only if
+# doing so still keeps a useful amount of text. A paragraph opening with a very short first
+# sentence ("Status: alpha.") would otherwise collapse the whole About to those two words, so
+# below this floor we fall back to a word-boundary cut with an ellipsis.
+_MIN_SENTENCE_CHARS = _ABOUT_CAP // 2
+
+# A sentence terminator followed by whitespace or the end of the clipped text. Deliberately
+# naive: an abbreviation ("e.g.", "Dr.") can read as a sentence end, which at worst cuts a
+# little early. Since we take the LAST match within the cap, that error is bounded and quiet.
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)")
+
+# --- Inline Markdown flattening ---------------------------------------------------------
+# A README is a MARKDOWN file, but About renders as PLAIN TEXT on the dashboard, so emphasis
+# syntax would otherwise show up as literal asterisks ("A **local-first** tool"). Stripping
+# the markers is a MEDIUM TRANSLATION, not an edit: the author's word is preserved exactly,
+# only the formatting notation that the destination cannot render is dropped. (The same
+# reasoning the Slack mrkdwn translator already applies for its destination.)
+#
+# Deliberately CONSERVATIVE — single-underscore and single-asterisk italics are NOT handled,
+# because `snake_case_names`, file globs and math would be mangled by them. Only the
+# unambiguous constructs below are touched.
+_INLINE_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")  # ![alt](url) -> dropped entirely
+_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")  # [text](url) -> text
+_BOLD_ITALIC_RE = re.compile(r"\*\*\*(.+?)\*\*\*")  # ***text***  -> text
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")  # **text**    -> text
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")  # `code`      -> code
+
+
+def _flatten_markdown(text: str) -> str:
+    """Strip inline Markdown notation the plain-text destination cannot render.
+
+    Args:
+        text: The extracted paragraph, still carrying Markdown inline syntax.
+
+    Returns:
+        The same prose with emphasis/code markers removed, links reduced to their link
+        TEXT, and inline images dropped. Word content is never altered.
+
+    Why:
+        About is observed from a Markdown doc and rendered as plain text, so leaving the
+        notation in would surface literal `**` to a reader — a rendering artifact, not the
+        author's meaning. Flattening keeps observe-not-originate intact (nothing is reworded
+        or invented) while making the observation legible in the medium it lands in.
+    """
+    text = _INLINE_IMAGE_RE.sub("", text)
+    text = _LINK_RE.sub(r"\1", text)
+    text = _BOLD_ITALIC_RE.sub(r"\1", text)
+    text = _BOLD_RE.sub(r"\1", text)
+    text = _INLINE_CODE_RE.sub(r"\1", text)
+    # Dropping an inline image can leave a double space behind; re-collapse runs.
+    return " ".join(text.split())
 
 
 def _is_prose_line(line: str) -> bool:
@@ -68,26 +121,40 @@ def _is_prose_line(line: str) -> bool:
 
 
 def _cap(text: str) -> str:
-    """Truncate About text to _ABOUT_CAP characters on a word boundary, with an ellipsis.
+    """Truncate About text to _ABOUT_CAP characters, preferring a whole-sentence ending.
 
     Args:
         text: The extracted, whitespace-collapsed About paragraph.
 
     Returns:
-        `text` unchanged when within the cap; otherwise a prefix cut at the last word
-        boundary at or before the cap, with a trailing "…".
+        `text` unchanged when within the cap. Otherwise the longest prefix that ends on a
+        SENTENCE boundary within the cap (returned as-is, with no ellipsis — it is a
+        complete thought); or, when no sentence ends late enough to keep a useful amount of
+        text, a prefix cut at the last word boundary with a trailing "…".
 
     Why:
         About is a single glance-able line, so an over-long opening paragraph is bounded
         here at extraction (before the wire) rather than trusting every render surface to
-        clamp it. Cutting on a space avoids slicing a word in half; the ellipsis signals
-        the text continues in the source doc.
+        clamp it. Cutting mid-clause reads as broken and can drop the qualifier that carried
+        the meaning (Orion's own README loses "before anything is sent" that way, turning a
+        privacy guarantee into a dangling phrase). Ending on the last complete sentence
+        inside the cap keeps the text honest and readable; the word-boundary + ellipsis path
+        remains for prose that has no sentence break to land on.
     """
     if len(text) <= _ABOUT_CAP:
         return text
     clipped = text[:_ABOUT_CAP]
-    # Prefer the last whole word; fall back to a hard cut if there is no space (a single
-    # very long token), so we always return at most _ABOUT_CAP + 1 (the ellipsis) chars.
+
+    # Prefer the LAST sentence terminator inside the cap, provided it retains enough text to
+    # still describe the project (see _MIN_SENTENCE_CHARS).
+    sentence_ends = list(_SENTENCE_END_RE.finditer(clipped))
+    if sentence_ends:
+        end = sentence_ends[-1].end()
+        if end >= _MIN_SENTENCE_CHARS:
+            return clipped[:end].rstrip()
+
+    # No usable sentence break: fall back to the last whole word (a hard cut only when the
+    # text is a single very long token), so we return at most _ABOUT_CAP + 1 chars.
     boundary = clipped.rfind(" ")
     if boundary > 0:
         clipped = clipped[:boundary]
@@ -111,9 +178,10 @@ def read_about(path: Path) -> str | None:
         The About band states what a project IS, observed from the project's own docs
         with no LLM (structured lane). The first paragraph after the badges/title is the
         conventional one-line description a README opens with, so skimming to it is a
-        faithful, mechanical reframe (observe-not-originate). Reading fails soft to None
-        so a mis-pointed or not-yet-written doc simply yields no band, never an error that
-        blocks a report or push.
+        faithful, mechanical reframe (observe-not-originate): the words are the author's,
+        and only Markdown notation the plain-text destination cannot render is dropped.
+        Reading fails soft to None so a mis-pointed or not-yet-written doc simply yields no
+        band, never an error that blocks a report or push.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -141,6 +209,10 @@ def read_about(path: Path) -> str | None:
     # a hard-wrapped source paragraph reads as one clean line. split()/join collapses all
     # runs (spaces, tabs) in one step.
     collapsed = " ".join(" ".join(paragraph).split())
-    if not collapsed:
+    # Then drop the inline Markdown notation the plain-text destination cannot render, and
+    # only cap AFTER flattening — so the budget is spent on words, not on syntax that will
+    # not be shown anyway.
+    flattened = _flatten_markdown(collapsed)
+    if not flattened:
         return None
-    return _cap(collapsed)
+    return _cap(flattened)

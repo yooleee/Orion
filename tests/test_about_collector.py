@@ -126,3 +126,79 @@ def test_prose_starting_before_any_heading(tmp_path):
     """
     path = _write(tmp_path, "Just a plain description with no heading at all.\n")
     assert read_about(path) == "Just a plain description with no heading at all."
+
+
+# --- Inline Markdown flattening -------------------------------------------------------
+# A README is Markdown but About renders as PLAIN TEXT, so notation the destination cannot
+# render is stripped. The words themselves are never altered (observe-not-originate).
+
+
+def test_flattens_bold_and_inline_code(tmp_path):
+    """Bold and inline-code markers are dropped, keeping the author's words intact.
+
+    Why this matters: without this the dashboard shows literal asterisks ("A **local-first**
+    tool") — a rendering artifact, not what the author meant. Orion's own README hits this.
+    """
+    path = _write(tmp_path, "# X\n\nA **local-first** tool using `sqlite3` for state.\n")
+    assert read_about(path) == "A local-first tool using sqlite3 for state."
+
+
+def test_flattens_links_to_their_text_and_drops_inline_images(tmp_path):
+    """A [text](url) link keeps its TEXT; an inline ![alt](url) image is dropped entirely.
+
+    Why this matters: inline links are extremely common in a README's opening sentence, and
+    the raw URL is noise in a one-line description. An inline image has no plain-text
+    equivalent at all, so it is removed rather than rendered as bracket soup.
+    """
+    path = _write(
+        tmp_path,
+        "# X\n\nSee the [docs](https://example.com/docs) ![badge](https://img.io/b) for setup.\n",
+    )
+    assert read_about(path) == "See the docs for setup."
+
+
+def test_does_not_touch_snake_case_or_single_asterisks(tmp_path):
+    """Single `_`/`*` runs are deliberately LEFT ALONE — they mangle identifiers.
+
+    Why this matters: this is the conservative boundary of the flattening. Treating a single
+    underscore as italics would turn `snake_case_name` into `snakecasename`, silently
+    corrupting an identifier the author wrote on purpose. Bounded flattening beats clever.
+    """
+    path = _write(tmp_path, "# X\n\nReads snake_case_name and a 3 * 4 grid.\n")
+    assert read_about(path) == "Reads snake_case_name and a 3 * 4 grid."
+
+
+# --- Sentence-aware capping -----------------------------------------------------------
+
+
+def test_long_paragraph_ends_on_a_complete_sentence(tmp_path):
+    """An over-long paragraph is cut at the last SENTENCE end inside the cap, no ellipsis.
+
+    Why this matters: cutting mid-clause can drop the qualifier carrying the meaning — the
+    real case is Orion's README, where a word-boundary cut turned "previewed in your terminal
+    before anything is sent" into a dangling "previewed in your terminal…". A complete
+    sentence reads as a finished thought, so no ellipsis is added.
+    """
+    first = "This project does the first thing well. " + ("filler words here " * 12)
+    second = "And then a trailing sentence that pushes it over the cap entirely."
+    path = _write(tmp_path, f"# X\n\n{first}{second}\n")
+    result = read_about(path)
+    assert result is not None
+    assert result.endswith(".")  # a finished sentence
+    assert not result.endswith("…")
+    assert len(result) <= _ABOUT_CAP
+
+
+def test_falls_back_to_word_boundary_when_the_first_sentence_is_tiny(tmp_path):
+    """A very short opening sentence must NOT collapse the whole About to those few words.
+
+    Why this matters: preferring a sentence end is only an improvement while it keeps enough
+    text. "Alpha." followed by the real description would otherwise yield an About of one
+    word, which is strictly worse than a truncated but informative line — so below the
+    floor we fall back to the word-boundary cut with an ellipsis.
+    """
+    path = _write(tmp_path, "# X\n\nAlpha. " + ("descriptive filler text " * 30) + "\n")
+    result = read_about(path)
+    assert result is not None
+    assert result != "Alpha."
+    assert result.endswith("…")  # fell back to the word-boundary path

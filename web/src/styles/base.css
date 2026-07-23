@@ -483,6 +483,14 @@ h3 {
   font-weight: 600;
   color: var(--thi);
 }
+/* KB surface (Unit 2): the About sub-line — the project's identity ("what it is"),
+   observed from its doc. A step stronger than the headline pulse below it (--tmid vs
+   --tlow) so the reading order is name → what it is → latest activity. */
+.row-about {
+  font-size: 13px;
+  color: var(--tmid);
+  margin-top: 3px;
+}
 .row-headline {
   font-size: 13px;
   color: var(--tlow);

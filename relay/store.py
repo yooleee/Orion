@@ -370,7 +370,15 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     # the column is additive, and because NULL must read as RESTRICTED — default-deny has to
     # be what ABSENCE means, not merely what a column default says, or a project that never
     # got a meta row would fall open.
-    "relay_project_meta": [("due_soon_days", "INTEGER"), ("visibility", "TEXT")],
+    # KB surface (Unit 2): the project's "About" line — its own doc's first paragraph,
+    # observed by the producer. NULLABLE with no default (omit-when-unset): NULL reads back
+    # as None (get_about), which renders no About band — absent, never an empty band. Added
+    # here (not in _SCHEMA) so an already-deployed relay gains it via one cheap ALTER.
+    "relay_project_meta": [
+        ("due_soon_days", "INTEGER"),
+        ("visibility", "TEXT"),
+        ("about", "TEXT"),
+    ],
     # Auth revamp (Unit 2a): what an account IS, and (for an agent) whose behalf it acts on.
     # `kind` is NULLABLE with no default rather than "human" NOT NULL, per this table's
     # convention — existing rows read NULL, and every reader maps NULL to "human" (the only
@@ -1050,6 +1058,59 @@ def set_due_soon_days(
     conn.commit()
 
 
+def set_about(conn: sqlite3.Connection, project: str, about: str | None) -> None:
+    """Record (or CLEAR) a project's About line, upserting the meta row (KB surface Unit 2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project the About line belongs to.
+        about: The project's redacted About text (validated by the server to be a string
+            within the length cap), or None to CLEAR it back to unset. None writes SQL NULL,
+            which get_about reads back as None and the serializers render as no About band.
+
+    Why:
+        About is a per-project observed value (its own doc's first paragraph) that rides the
+        checklist carriers — the KB-content sibling of due_soon_days. Like set_due_soon_days
+        this is CURRENT STATE (last-writer-wins), so ON CONFLICT(project) DO UPDATE makes it a
+        single idempotent upsert touching ONLY the `about` column: the two knobs share the meta
+        row but are written independently, so setting About never clobbers kind/due_soon_days
+        (or vice versa). Passing None writes NULL so an explicit clear genuinely restores "no
+        band" rather than leaving a stale line behind.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_meta (project, about)
+        VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET about = excluded.about
+        """,
+        (project, about),
+    )
+    conn.commit()
+
+
+def get_about(conn: sqlite3.Connection, project: str) -> str | None:
+    """Return a project's About line, or None when it has none set (KB surface Unit 2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to look up.
+
+    Returns:
+        The stored About string, or None when the project has no meta row OR the row predates
+        the column (NULL) — the omit-when-unset case, rendered as no About band.
+
+    Why:
+        None is the deliberate "no band" signal, distinct from a real (even empty-looking)
+        value: the serializers omit About entirely when None so a project that never set it
+        renders exactly as before the band existed. Kept a separate one-column lookup beside
+        get_due_soon_days; the portfolio query reads the column via its existing LEFT JOIN.
+    """
+    row = conn.execute(
+        "SELECT about FROM relay_project_meta WHERE project = ?", (project,)
+    ).fetchone()
+    return row["about"] if row is not None else None
+
+
 def get_due_soon_days(conn: sqlite3.Connection, project: str) -> int | None:
     """Return a project's "due soon" horizon in days, or None when it has none set (E1.2).
 
@@ -1420,7 +1481,10 @@ def latest_report_per_project(
                -- E1.2 (forward-look): the per-project due-soon horizon, NULL when unset. Read
                -- via the SAME meta LEFT JOIN as kind (one round-trip). NOT coalesced here —
                -- NULL is surfaced as-is so the Python side maps it to the DUE_SOON_DAYS default.
-               pm.due_soon_days AS due_soon_days
+               pm.due_soon_days AS due_soon_days,
+               -- KB surface (Unit 2): the project's About line, NULL when unset. Same meta
+               -- LEFT JOIN; surfaced as-is so the serializer omits the band when NULL.
+               pm.about AS about
         FROM projects p
         -- LEFT JOIN the latest report: NULL for a checklist-only project. The correlated
         -- subquery picks the exact row history() calls newest (generated_at DESC, id
@@ -1503,6 +1567,9 @@ def latest_report_per_project(
                 # and scheduling serializers reuse the SAME value this row's at-risk count used,
                 # without a second meta lookup. The serializer maps None → the default.
                 "due_soon_days": row["due_soon_days"],
+                # KB surface (Unit 2): the project's About line (None when unset), carried so
+                # _portfolio_entry surfaces it without a second meta lookup.
+                "about": row["about"],
                 "report_count": row["report_count"],
                 "latest_generated_at": row["latest_generated_at"],
                 "latest_report_id": row["latest_report_id"],

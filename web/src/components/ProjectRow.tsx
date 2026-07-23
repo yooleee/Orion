@@ -54,6 +54,10 @@ export function ProjectRow({ project, tz }: { project: ProjectSummary; tz: strin
     <Link to={`/project/${encodeURIComponent(project.name)}`} className="project-row">
       <div className="row-main">
         <div className="row-name">{project.name}</div>
+        {/* KB surface (Unit 2): the About line — what the project IS (observed from its
+            doc). Distinct from the headline below, which is the latest-report pulse. Shown
+            only when the project set an about_file. */}
+        {project.about && <div className="row-about">{project.about}</div>}
         {project.headline && <div className="row-headline">{project.headline}</div>}
       </div>
 

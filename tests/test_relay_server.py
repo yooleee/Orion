@@ -54,6 +54,7 @@ from relay.store import (
     bump_session_version,
     discussion_items_for_project,
     get,
+    get_about,
     get_checklist,
     get_due_soon_days,
     get_project_kind,
@@ -766,6 +767,128 @@ def test_ingest_blob_rejects_an_explicit_null_due_soon_days(tmp_path):
         assert status == 400
         assert "due_soon_days" in json.loads(resp)["error"]
         assert get_due_soon_days(open_relay_store(db), "demo") == 14  # untouched
+
+
+def _checklist_body_with_about(project="demo", items=None, about=None, clear=False):
+    """A {project, checklist[, about]} push body.
+
+    `about=None, clear=False` omits the key (leave-alone); `clear=True` sends an explicit
+    JSON null (the clear signal); a string sends the value. Mirrors the due_soon helper.
+    """
+    if items is None:
+        items = [{"text": "Wire it", "done": False}]
+    payload = {"project": project, "checklist": items}
+    if clear:
+        payload["about"] = None
+    elif about is not None:
+        payload["about"] = about
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_checklist_push_persists_about(tmp_path):
+    """A /checklist push carrying `about` stores it; a later push overwrites it.
+
+    Why this matters: About is CURRENT STATE riding the push — the first push persists it,
+    a later one wins (last-writer-wins), so the dashboard shows the newest observed line.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, _checklist_body_with_about(about="A build tool."), path="/checklist")[0] == 200
+        assert get_about(open_relay_store(db), "demo") == "A build tool."
+        assert _post(base_url, _checklist_body_with_about(about="A deploy tool."), path="/checklist")[0] == 200
+        assert get_about(open_relay_store(db), "demo") == "A deploy tool."
+
+
+def test_checklist_push_omitting_about_preserves_a_set_about(tmp_path):
+    """KI-35: a push that omits `about` must PRESERVE an About another producer set.
+
+    Why this matters: About rides the same tri-state carrier as due_soon_days, so absence
+    must mean "leave alone" — a configless producer's scheduled push can never wipe an About
+    another producer set (the silent scheduled clobber KI-35 closes, applied to About).
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, _checklist_body_with_about(about="Set by A."), path="/checklist")[0] == 200
+        assert _post(base_url, _checklist_body_with_about(), path="/checklist")[0] == 200  # B omits it
+        assert get_about(open_relay_store(db), "demo") == "Set by A."  # survives
+
+
+def test_checklist_push_explicit_null_clears_about_and_is_idempotent(tmp_path):
+    """An explicit JSON null on /checklist clears About, and repeating it is a no-op.
+
+    Why this matters: with absence no longer clearing, clearing needs the tri-state's third
+    state (sent by `--clear-about`). It must NULL the stored About (→ no band), and a second
+    clear on an already-cleared project must still succeed.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, _checklist_body_with_about(about="Clear me."), path="/checklist")[0] == 200
+        assert get_about(open_relay_store(db), "demo") == "Clear me."
+        assert _post(base_url, _checklist_body_with_about(clear=True), path="/checklist")[0] == 200
+        assert get_about(open_relay_store(db), "demo") is None
+        assert _post(base_url, _checklist_body_with_about(clear=True), path="/checklist")[0] == 200
+        assert get_about(open_relay_store(db), "demo") is None
+
+
+def test_ingest_blob_persists_about_set_only(tmp_path):
+    """The /ingest blob accepts and persists `about`, and omitting it does not clear a set one.
+
+    Why this matters: About rides the report blob too (set-only). A blob with the field is
+    accepted (201) and stored; a later plain report that omits it must leave the stored About
+    untouched — /ingest never clears (that's the /checklist carrier's job).
+    """
+    blob = json.loads(_real_blob_json())
+    blob["about"] = "Observed from the README."
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, json.dumps(blob).encode("utf-8"))[0] == 201
+        assert get_about(open_relay_store(db), "demo") == "Observed from the README."
+        # A plain report blob (no `about`) must not clear it.
+        assert _post(base_url, _real_blob_json().encode("utf-8"))[0] == 201
+        assert get_about(open_relay_store(db), "demo") == "Observed from the README."
+
+
+def test_ingest_blob_rejects_an_explicit_null_about(tmp_path):
+    """An explicit null `about` on /ingest is a 400 and leaves a set About untouched.
+
+    Why this matters: the two carriers diverge on the clear signal (KI-35) for About just as
+    for due_soon_days — a report blob must never clear a project's About (an `intake` blob
+    carrying a null would be exactly that accident). Only /checklist owns clearing.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        assert _post(base_url, _checklist_body_with_about(about="Keep me."), path="/checklist")[0] == 200
+        blob = json.loads(_real_blob_json())
+        blob["about"] = None
+        status, resp = _post(base_url, json.dumps(blob).encode("utf-8"))
+        assert status == 400
+        assert "about" in json.loads(resp)["error"]
+        assert get_about(open_relay_store(db), "demo") == "Keep me."  # untouched
+
+
+@pytest.mark.parametrize("bad_value", [123, True, ["x"], {"a": 1}])
+def test_checklist_push_rejects_non_string_about(tmp_path, bad_value):
+    """A non-string `about` is a clean 400 and stores nothing.
+
+    Why this matters: About is untrusted input; anything but a string (or the null/absent
+    signals) is refused at the boundary, never a bad type stored or rendered.
+    """
+    body = json.dumps({"project": "demo", "checklist": [{"text": "x", "done": False}], "about": bad_value}).encode("utf-8")
+    with _running_relay(tmp_path) as (base_url, db):
+        status, resp = _post(base_url, body, path="/checklist")
+        assert status == 400
+        assert "about" in json.loads(resp)["error"]
+        assert get_about(open_relay_store(db), "demo") is None
+
+
+def test_checklist_push_rejects_over_long_about(tmp_path):
+    """An About longer than the server cap is a clean 400 and stores nothing.
+
+    Why this matters: the boundary guards against an unbounded string even though the real
+    cap is the producer's extraction cap — a defensive limit, so a giant payload can't be
+    stored or rendered.
+    """
+    body = _checklist_body_with_about(about="x" * 5000)
+    with _running_relay(tmp_path) as (base_url, db):
+        status, resp = _post(base_url, body, path="/checklist")
+        assert status == 400
+        assert "about" in json.loads(resp)["error"]
+        assert get_about(open_relay_store(db), "demo") is None
 
 
 def test_due_soon_days_widens_at_risk_but_not_the_scheduling_week(tmp_path):

@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from orion.collectors import LANE_RAW, LANE_STRUCTURED
 from orion.collectors._markdown import Table, parse_tables
+from orion.collectors.about import read_about
 from orion.collectors.git import GitError
 from orion.collectors.git import collect as collect_git
 from orion.collectors.incubator import IncubatorError, read_index
@@ -352,6 +353,17 @@ def main(argv: list[str] | None = None) -> int:
             "relay, so it falls back to the default. The relay never clears a setting just "
             "because a push omits it (KI-35), so dropping `due_soon_days` from config "
             "leaves the old horizon in place until you run this."
+        ),
+    )
+    checklist_parser.add_argument(
+        "--clear-about",
+        dest="clear_about",
+        action="store_true",
+        help=(
+            "Single-project only: clear this project's stored About line on the relay. "
+            "Like --clear-due-soon-days, the relay never clears About just because a push "
+            "omits it (KI-35), so removing `about_file` from config leaves the old About "
+            "in place until you run this."
         ),
     )
 
@@ -1188,7 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "checklist-push":
         return cmd_checklist_push(
             args.project, Path(args.config), args.watch, args.interval,
-            args.all_projects, args.due, args.clear_due_soon_days,
+            args.all_projects, args.due, args.clear_due_soon_days, args.clear_about,
         )
     if args.command == "disciplines-push":
         return cmd_disciplines_push(args.project, Path(args.config), clear=args.clear)
@@ -1711,6 +1723,13 @@ def _run_report(
             redaction_hits += checklist_hits
             checklist = tuple(redacted_items)
 
+        # --- Observe the project's About line (KB-surface Unit 2), if configured ---
+        # The first prose paragraph of about_file, redacted and rides the ingest blob
+        # set-only (a report never clears About). None ⇒ omitted from the wire. Its
+        # redaction hits join the run count, like the checklist's.
+        about, about_hits = _redacted_about(project)
+        redaction_hits += about_hits
+
         full_blob = build_report(
             project,
             safe_body,
@@ -1721,6 +1740,8 @@ def _run_report(
             # Carrier 1 of 2 for the due-soon window: the ingest blob. None when the
             # project doesn't set it, which omits the key from the wire (relay default).
             due_soon_days=project.due_soon_days,
+            # Carrier 1 of 2 for About (set-only on ingest); None ⇒ omitted from the wire.
+            about=about,
         )
 
         # --- Group recipients into audiences and compose one filtered message
@@ -1944,8 +1965,42 @@ def _checklist_payload(project: ProjectConfig) -> list[dict]:
     return [serialize_checklist_item(item) for item in items]
 
 
+def _redacted_about(project: ProjectConfig) -> tuple[str | None, int]:
+    """Read and redact a project's About line, or (None, 0) when there is none.
+
+    Args:
+        project: The project to read. Its About source is `about_file` (the band is off
+            when that is None).
+
+    Returns:
+        A (about, hits) pair: the redacted About string (None when no about_file is set,
+        the doc is missing/unreadable, or it has no prose), and the count of secrets
+        scrubbed. None vs a string is the absent-vs-present distinction the caller uses to
+        decide whether to send About at all.
+
+    Why:
+        About is user-authored content, so it MUST pass the same structured-lane redaction
+        net as checklist item text before it leaves the machine (privacy rule). Factoring
+        it here means both carriers — the report/ingest blob and the /checklist push —
+        redact About in ONE place and cannot drift, exactly as _redacted_checklist does for
+        item text. Reading fails soft to None (via read_about) so a mis-pointed doc never
+        blocks a report or push.
+    """
+    if project.about_file is None:
+        return None, 0
+    raw = read_about(project.about_file)
+    if raw is None:
+        return None, 0
+    scrub = redact(raw)
+    # Unlike a checklist row we do NOT drop an all-secret About to None: the placeholder
+    # left by redaction is a truthful "there was a secret here" signal, and About is a
+    # single field, not a list where a blank row looks broken. read_about already ruled
+    # out empty input, so scrub.text is non-empty.
+    return scrub.text, scrub.hit_count
+
+
 def _checklist_content_hash(
-    payload: list[dict], kind: str, due_soon_days: int | None
+    payload: list[dict], kind: str, due_soon_days: int | None, about: str | None
 ) -> str:
     """Hash the exact checklist wire payload a push would send, for change detection.
 
@@ -1957,21 +2012,31 @@ def _checklist_content_hash(
             when None (as JSON null) so a config-only horizon change still changes the
             hash — that is what keeps a scheduled push refreshing the relay's due-soon
             flag (the KI-35 case-2 mitigation) under change-gating.
+        about: The project's redacted About line, or None. Included (even when None) for
+            the SAME reason as due_soon_days: About is content that rides this carrier, so
+            an edit to ONLY the About source must change the hash — otherwise a scheduled
+            `--all --due` push would skip it as "no change" and the dashboard's About would
+            never refresh (a freshness-honesty regression the risk list calls out).
 
     Returns:
-        A hex sha256 of the canonicalized {checklist, kind, due_soon_days} payload.
+        A hex sha256 of the canonicalized {about, checklist, kind, due_soon_days} payload.
 
     Why:
         `checklist-push --all --due` (Unit 2) must skip a scheduled push whose content
         has not changed, so it can never make an untouched card look freshly updated
         (the relay stamps updated_at on every push). This hashes the exact WIRE payload
         push_checklist transmits — not the raw tasks_file — so a change that alters the
-        wire form (e.g. due_soon_days) counts, and a raw-file edit that redaction erases
-        does not spuriously re-push. sort_keys canonicalizes dict key order (item list
-        order is left intact) so JSON key ordering can never fake or hide a change.
+        wire form (e.g. due_soon_days or about) counts, and a raw-file edit that redaction
+        erases does not spuriously re-push. sort_keys canonicalizes dict key order (item
+        list order is left intact) so JSON key ordering can never fake or hide a change.
     """
     canonical = json.dumps(
-        {"checklist": payload, "kind": kind, "due_soon_days": due_soon_days},
+        {
+            "checklist": payload,
+            "kind": kind,
+            "due_soon_days": due_soon_days,
+            "about": about,
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -1980,7 +2045,7 @@ def _checklist_content_hash(
 
 def _watch_tick(
     project: ProjectConfig, relay_cfg: RelayConfig, token: str, last_pushed: list | None
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict], str | None, bool]:
     """One watch iteration: snapshot the checklist and push it only if it changed.
 
     Args:
@@ -1991,25 +2056,29 @@ def _watch_tick(
             first tick (so the first snapshot always pushes).
 
     Returns:
-        A (payload, pushed) pair: the current checklist payload, and whether THIS tick
-        pushed it (True when it differed from last_pushed). On no change, returns
-        (last_pushed, False) and performs no network call.
+        A (payload, about, pushed) triple: the current checklist payload, the redacted
+        About sent with it (None when the project has no about_file), and whether THIS
+        tick pushed (True when the checklist differed from last_pushed). On no change,
+        returns (last_pushed, None, False) and performs no network call.
 
     Why:
         Factoring one iteration out of the loop makes the "push on change, skip when
         unchanged" rule unit-testable without an infinite loop. Content-compare (rather
         than file mtime) is robust to how editors save and self-dedupes a touch that
-        did not actually change the checklist. May raise DeliveryError (the loop treats
-        that as transient and retries next tick).
+        did not actually change the checklist. The CHECKLIST is the change trigger (About
+        is a separate file); when a checklist change fires a push we read About fresh and
+        carry it along, and return it so the loop records the exact hash that was sent.
+        May raise DeliveryError (the loop treats that as transient and retries next tick).
     """
     payload = _checklist_payload(project)
     if payload == last_pushed:
-        return last_pushed, False
+        return last_pushed, None, False
+    about, _hits = _redacted_about(project)
     push_checklist(
         relay_cfg.url, project.name, payload, token,
-        kind=project.kind, due_soon_days=project.due_soon_days,
+        kind=project.kind, due_soon_days=project.due_soon_days, about=about,
     )
-    return payload, True
+    return payload, about, True
 
 
 def _watch_checklist(
@@ -2052,18 +2121,20 @@ def _watch_checklist(
     try:
         while True:
             try:
-                last_pushed, pushed = _watch_tick(project, relay_cfg, token, last_pushed)
+                last_pushed, sent_about, pushed = _watch_tick(
+                    project, relay_cfg, token, last_pushed
+                )
                 if pushed:
                     # Record the push right after it landed (mirrors record_report's
                     # placement): a tick that pushed nothing records nothing. Recompute
-                    # the hash from the just-pushed payload — one cheap sha256 — so
-                    # _watch_tick stays a pure push-transport helper with no state/time
-                    # dependency of its own.
+                    # the hash from the just-pushed payload + the About actually sent —
+                    # one cheap sha256 — so _watch_tick stays a pure push-transport helper
+                    # with no state/time dependency of its own.
                     record_checklist_push(
                         conn,
                         project.name,
                         _checklist_content_hash(
-                            last_pushed, project.kind, project.due_soon_days
+                            last_pushed, project.kind, project.due_soon_days, sent_about
                         ),
                         datetime.now(timezone.utc).isoformat(),
                     )
@@ -2139,10 +2210,13 @@ def _push_checklist_all(
             continue
 
         # Build the exact wire payload (redaction runs inside _checklist_payload) and hash
-        # it — needed both to change-gate under --due and to record after a push.
+        # it — needed both to change-gate under --due and to record after a push. About is
+        # resolved+redacted here too so an About-only edit registers as a content change
+        # (otherwise the --due gate would skip it and the dashboard's About would go stale).
         payload = _checklist_payload(project)
+        about, _about_hits = _redacted_about(project)
         content_hash = _checklist_content_hash(
-            payload, project.kind, project.due_soon_days
+            payload, project.kind, project.due_soon_days, about
         )
 
         # Change-gate (ONLY under --due): skip a due project whose content is identical to
@@ -2157,7 +2231,7 @@ def _push_checklist_all(
         try:
             push_checklist(
                 relay_cfg.url, project.name, payload, token,
-                kind=project.kind, due_soon_days=project.due_soon_days,
+                kind=project.kind, due_soon_days=project.due_soon_days, about=about,
             )
             # Record only after a successful push (mirrors the single-project path): a
             # DeliveryError skips this, so a failed push leaves no history row.
@@ -2214,6 +2288,7 @@ def cmd_checklist_push(
     all_projects: bool = False,
     due_only: bool = False,
     clear_due_soon_days: bool = False,
+    clear_about: bool = False,
 ) -> int:
     """Push a project's current checklist to the relay (single project, --all, or --watch).
 
@@ -2232,6 +2307,9 @@ def cmd_checklist_push(
         clear_due_soon_days: True for `--clear-due-soon-days` — send an explicit clear for
             this project's due-soon horizon instead of its configured value. Single-project
             only (rejected with --all/--watch).
+        clear_about: True for `--clear-about` — send an explicit clear for this project's
+            stored About instead of its observed value. Single-project only, mirroring
+            --clear-due-soon-days (KI-35: an absent value never clears).
 
     Returns:
         Process exit code: 2 for a usage error (neither/both of project & --all, --due
@@ -2279,6 +2357,13 @@ def cmd_checklist_push(
         print(
             "Error: --clear-due-soon-days is a single-project, one-shot act; it cannot "
             "combine with --all or --watch.",
+            file=sys.stderr,
+        )
+        return 2
+    if clear_about and (all_projects or watch):
+        print(
+            "Error: --clear-about is a single-project, one-shot act; it cannot combine "
+            "with --all or --watch.",
             file=sys.stderr,
         )
         return 2
@@ -2340,17 +2425,23 @@ def cmd_checklist_push(
         # not what config holds, or a later `--all --due` run would compare against a state
         # the relay never saw.
         sent_due_soon_days = None if clear_due_soon_days else project.due_soon_days
+        # Same clear-vs-send rule for About: a clear puts None on the wire (and in the
+        # recorded hash), otherwise we send the observed, redacted About.
+        sent_about = None if clear_about else _redacted_about(project)[0]
         push_checklist(
             relay_cfg.url, project.name, payload, token,
             kind=project.kind, due_soon_days=sent_due_soon_days,
             clear_due_soon_days=clear_due_soon_days,
+            about=sent_about, clear_about=clear_about,
         )
         # Record only after the push succeeded (mirrors record_report): a DeliveryError
         # below skips this, so a failed push leaves no history row and is retried later.
         record_checklist_push(
             conn,
             project.name,
-            _checklist_content_hash(payload, project.kind, sent_due_soon_days),
+            _checklist_content_hash(
+                payload, project.kind, sent_due_soon_days, sent_about
+            ),
             datetime.now(timezone.utc).isoformat(),
         )
     except DeliveryError as exc:

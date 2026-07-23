@@ -34,6 +34,7 @@ from relay.store import (
     get_active_password_credential,
     get_checklist,
     get_credential_by_key_verifier,
+    get_about,
     get_due_soon_days,
     get_project_kind,
     get_user_by_id,
@@ -60,6 +61,7 @@ from relay.store import (
     rename_user,
     set_project_visibility,
     revoke_user,
+    set_about,
     set_due_soon_days,
     set_project_kind,
     update_last_login,
@@ -1852,6 +1854,69 @@ def test_due_soon_days_and_kind_share_the_row_without_clobbering(tmp_path):
     assert get_project_kind(conn, "only-horizon") == "project"
     set_project_kind(conn, "only-horizon", "tracker")
     assert get_due_soon_days(conn, "only-horizon") == 20
+
+
+# --- set_about / get_about: the About meta column (KB surface Unit 2) -----------------
+# Mirrors set_due_soon_days: nullable column, None-until-set, last-writer-wins, an explicit
+# None clears, and independence from the sibling meta columns.
+
+
+def test_get_about_is_none_until_set(tmp_path):
+    """A project with no About set reads as None — the omit-when-unset (no-band) signal.
+
+    Why this matters: None is what tells the serializers to render no About band, so a
+    project that never observed one must read None, distinct from an empty or real value.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    assert get_about(conn, "demo") is None
+
+
+def test_set_about_roundtrips_and_last_writer_wins(tmp_path):
+    """set_about stores the line and a later push overwrites it (one row, last writer wins).
+
+    Why this matters: About is CURRENT STATE riding every push; a re-observed/edited About
+    must overwrite, never accumulate — exactly like kind and due_soon_days.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_about(conn, "apps", "Tracks job applications.")
+    assert get_about(conn, "apps") == "Tracks job applications."
+    set_about(conn, "apps", "Tracks internship applications.")
+    assert get_about(conn, "apps") == "Tracks internship applications."
+
+
+def test_set_about_none_clears_the_band(tmp_path):
+    """Passing None writes NULL, so get returns None again — the explicit-clear round-trip.
+
+    Why this matters: this is the store half of --clear-about. Once set, an explicit clear
+    must NULL the column so get_about reads None and the band disappears — not leave a stale
+    line stuck forever (KI-35: absence never clears, only an explicit None does).
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_about(conn, "apps", "An old description.")
+    assert get_about(conn, "apps") == "An old description."
+    set_about(conn, "apps", None)  # explicit clear
+    assert get_about(conn, "apps") is None
+
+
+def test_about_shares_the_meta_row_without_clobbering(tmp_path):
+    """about, kind, and due_soon_days are written independently on the shared meta row.
+
+    Why this matters: the three knobs live in one relay_project_meta row but arrive/persist
+    separately. Setting About must not reset kind or the horizon (and vice versa), or a push
+    carrying only one field would silently wipe the others.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_project_kind(conn, "apps", "tracker")
+    set_due_soon_days(conn, "apps", 14)
+    set_about(conn, "apps", "Tracks applications.")
+    # Each survives the others' unrelated upserts.
+    assert get_project_kind(conn, "apps") == "tracker"
+    assert get_due_soon_days(conn, "apps") == 14
+    assert get_about(conn, "apps") == "Tracks applications."
+    # An About-only project leaves kind/horizon at their defaults (unset).
+    set_about(conn, "only-about", "Just an about.")
+    assert get_project_kind(conn, "only-about") == "project"
+    assert get_due_soon_days(conn, "only-about") is None
 
 
 def test_latest_report_per_project_at_risk_honors_due_soon_days(tmp_path):

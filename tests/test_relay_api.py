@@ -264,6 +264,20 @@ def test_portfolio_project_row_carries_headline_progress_and_facts():
     assert row["slipping"] == 0
     assert row["next_due"] == {"due_date": "2026-06-29", "state": "due_soon"}
     assert row["updated_at"] == "2026-06-26T10:00:00+00:00"
+    # KB surface (Unit 2): no about_file set on this fixture → about is None (no sub-line).
+    assert row["about"] is None
+
+
+def test_portfolio_project_row_carries_about_when_set():
+    """A project row surfaces its stored About line for the Home sub-line (Unit 2).
+
+    Why this matters: the About band's Home half reads this field; a project whose meta row
+    carries an About must expose it so the SPA can render it under the project name.
+    """
+    row = _project_row()
+    row["about"] = "Orion turns activity into progress updates."
+    out = api.serialize_portfolio([row], None, _TODAY)
+    assert out["projects"][0]["about"] == "Orion turns activity into progress updates."
 
 
 def test_portfolio_tracker_row_carries_segments_and_ordered_chips():
@@ -362,6 +376,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
     )
     assert out["name"] == "orion" and out["kind"] == "project"
     assert out["description"] is None  # gap 5
+    assert out["about"] is None  # KB Unit 2: no About passed → the band is absent
     assert out["stats"]["progress"] == {"done": 1, "total": 3, "pct": 33}
     assert out["stats"]["reports_count"] == 1
     # next_due is the soonest open deadline across the checklist (the overdue 06-20).
@@ -404,6 +419,29 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         {"id": 2, "author_name": "orion-cli", "role": "developer", "body": "Landed.",
          "created_at": "2026-06-26T12:00:00+00:00"},
     ]
+
+
+def test_project_detail_carries_about_when_passed():
+    """serialize_project surfaces the About line under a distinct `about` key (Unit 2).
+
+    Why this matters: the project page renders About under the title, from a field DISTINCT
+    from the always-null `description` gap. Passing about must populate `about` (not
+    `description`), so the two concepts stay separate on the wire.
+    """
+    out = api.serialize_project(
+        name="orion",
+        kind="project",
+        reports=[],
+        checklist=None,
+        observations=[],
+        producer_checklists=[],
+        discussions=[],
+        disciplines=None,
+        today=_TODAY,
+        about="Orion turns activity into progress updates.",
+    )
+    assert out["about"] == "Orion turns activity into progress updates."
+    assert out["description"] is None  # unchanged: About did not leak into the gap field
 
 
 def test_project_detail_milestone_slipping_count_counts_open_slips():

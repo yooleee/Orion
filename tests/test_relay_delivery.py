@@ -146,6 +146,53 @@ def test_push_checklist_refuses_to_clear_and_set_at_once(monkeypatch):
         )
 
 
+# --- The tri-state About on the checklist carrier (mirrors due_soon_days, KI-35 rule) --
+
+
+def test_push_checklist_omits_about_when_unconfigured(monkeypatch):
+    """With no About passed, the `about` key is absent from the payload entirely.
+
+    Why this matters: absence is the relay's "leave the stored About alone" signal, the
+    same rule as due_soon_days — a producer without an about_file must send NO key so it
+    can never clobber an About another producer set.
+    """
+    payload = _capture_checklist_payload(monkeypatch)
+    assert "about" not in payload
+
+
+def test_push_checklist_sends_about_when_set(monkeypatch):
+    """A non-None `about` is sent as a plain string under the `about` key.
+
+    Why this matters: this is the set path of the tri-state — the value the relay stores
+    as the project's About line.
+    """
+    payload = _capture_checklist_payload(monkeypatch, about="A progress-update tool.")
+    assert payload["about"] == "A progress-update tool."
+
+
+def test_push_checklist_sends_explicit_null_when_clearing_about(monkeypatch):
+    """`clear_about=True` puts a literal JSON null on the wire.
+
+    Why this matters: clearing About is an explicit act whose only carrier is the null
+    (key PRESENT, value None) — indistinguishable from an omission if you only check
+    `.get()`, which is exactly the KI-35 distinction.
+    """
+    payload = _capture_checklist_payload(monkeypatch, clear_about=True)
+    assert "about" in payload
+    assert payload["about"] is None
+
+
+def test_push_checklist_refuses_to_clear_and_set_about_at_once(monkeypatch):
+    """Passing both an About value and clear_about is a caller bug, raised not resolved.
+
+    Why this matters: the two express contradictory intent; picking a winner silently
+    would make the wire depend on an arbitrary precedence. The CLI never combines them,
+    so this guards the library surface.
+    """
+    with pytest.raises(ValueError):
+        _capture_checklist_payload(monkeypatch, about="X", clear_about=True)
+
+
 def test_non_2xx_status_becomes_delivery_error(monkeypatch):
     """A non-2xx response status is translated into DeliveryError.
 

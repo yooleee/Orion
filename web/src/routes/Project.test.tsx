@@ -70,6 +70,7 @@ function detail(
     name: "demo",
     kind: "project",
     description: null,
+    about: null,
     stats: { progress: { done: 0, total: 0, pct: null }, next_due: null, reports_count: 0 },
     milestones: [],
     checklist: [],
@@ -162,5 +163,30 @@ describe("Project — Working agreements", () => {
 
     expect(await screen.findByRole("heading", { name: "demo" })).toBeInTheDocument();
     expect(screen.queryByText("Working agreements")).toBeNull();
+  });
+});
+
+// KB surface (Unit 2): the About line under the project title — what the project IS,
+// observed from its doc. A DISTINCT field from `description` (the still-null gap 5).
+describe("Project — About band", () => {
+  it("renders the About line under the title when present", async () => {
+    const d = detail([]);
+    d.about = "Orion turns project activity into progress updates.";
+    mockGet.mockResolvedValue(d);
+    renderProject();
+
+    expect(await screen.findByRole("heading", { name: "demo" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Orion turns project activity into progress updates."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no About line when the project set none (null)", async () => {
+    mockGet.mockResolvedValue(detail([])); // about defaults to null
+    const { container } = renderProject();
+
+    await screen.findByRole("heading", { name: "demo" });
+    // No page-sub renders — neither About nor the (also-null) description gap.
+    expect(container.querySelector(".page-sub")).toBeNull();
   });
 });

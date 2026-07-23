@@ -1825,3 +1825,73 @@ def test_discipline_docs_invalid_entry_raises(tmp_path):
     )
     with pytest.raises(ConfigError, match="discipline_docs"):
         load_config(path)
+
+
+def test_about_file_resolves_relative_to_repo(tmp_path):
+    """`about_file` is resolved relative to the project's repo_path, not the config dir.
+
+    Why this matters: About describes what THIS project is, so its doc lives in the
+    project's own repo — which may be nowhere near orion.toml. Resolving against
+    repo_path (not config_path.parent, as the collector files do) is the deliberate
+    difference, and getting it wrong would read the wrong file or none.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo-repo"
+        about_file = "README.md"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.about_file == Path("/tmp/demo-repo/README.md")
+
+
+def test_about_file_absent_is_none(tmp_path):
+    """Omitting `about_file` leaves it None — the band is simply off (no error).
+
+    Why this matters: presence of the key is what enables the band; its absence is the
+    common case and must never be a config error.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    project = get_project(load_config(path), "demo")
+    assert project.about_file is None
+
+
+def test_about_file_empty_string_raises(tmp_path):
+    """A present-but-empty `about_file` is a config mistake caught at load.
+
+    Why this matters: an empty path can never resolve to a doc; failing here with a
+    clear message beats a confusing "no band" the user can't explain later.
+    """
+    path = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+        about_file = ""
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="about_file"):
+        load_config(path)

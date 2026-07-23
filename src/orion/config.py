@@ -209,6 +209,14 @@ class ProjectConfig:
             int in 1..365 when set. Unlike `cadence`, this one IS sent to the relay —
             it rides both checklist carriers (the ingest blob and the /checklist
             push), omitted from the wire entirely when None (back-compatible).
+        about_file: Path to the doc whose opening prose paragraph becomes the project's
+            "About" line on the dashboard (the KB-surface About band), or None when the
+            key is absent (no band). Presence of the key enables the band — there is no
+            separate boolean. Resolved relative to `repo_path` (the project's own repo),
+            since About describes what THIS project is; the file is read at push time by
+            collectors.about.read_about (observe-not-originate, no LLM). Like
+            due_soon_days it rides both checklist carriers; unlike it, About is content,
+            so it passes redaction and joins the change-gate hash.
         discipline_docs: The instruction/design/decision docs the "disciplines"
             collector reads (absolute paths), or () when that collector is not enabled.
             Resolved absolute at load time. Unlike the single-file collectors this is a
@@ -239,6 +247,7 @@ class ProjectConfig:
     kind: str = DEFAULT_PROJECT_KIND
     cadence: str | None = None
     due_soon_days: int | None = None
+    about_file: Path | None = None
     discipline_docs: tuple[Path, ...] = ()
 
 
@@ -1008,6 +1017,10 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
     # its own resolver rather than a COLLECTOR_FILE_KEYS entry.
     discipline_docs = _parse_discipline_docs(body, collectors_raw, config_path, where)
 
+    # about_file is NOT a collector (no COLLECTOR_FILE_KEYS entry) — it is a standalone
+    # optional key whose mere presence enables the About band, resolved against the repo.
+    about_file = _parse_about_file(body, repo_path, where)
+
     return ProjectConfig(
         name=name,
         repo_path=repo_path,
@@ -1023,6 +1036,7 @@ def _parse_project(name: str, body: object, config_path: Path) -> ProjectConfig:
         kind=kind,
         cadence=cadence,
         due_soon_days=due_soon_days,
+        about_file=about_file,
         discipline_docs=discipline_docs,
     )
 
@@ -1074,6 +1088,45 @@ def _parse_collector_file(
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = (config_path.parent / path).resolve()
+    return path
+
+
+def _parse_about_file(body: dict, repo_path: Path, where: str) -> Path | None:
+    """Resolve the optional `about_file` path (the About band's source doc), if set.
+
+    Args:
+        body: The raw [projects.<name>] table.
+        repo_path: The project's resolved repo path — About docs are resolved relative
+            to it, since About describes what THIS project is (its README lives here).
+        where: A locating string for error messages.
+
+    Returns:
+        An absolute Path when `about_file` is present and non-empty, or None when the
+        key is absent (the About band is simply off for this project).
+
+    Why:
+        Unlike the *_file collector keys this is NOT tied to a collector — its presence
+        alone enables the band (explicit over clever: no separate boolean). We resolve it
+        against `repo_path` rather than the config dir (as _parse_collector_file does)
+        because a project's About doc lives in its own repo, which may be nowhere near
+        orion.toml. Like _parse_collector_file we do NOT check existence here: the doc may
+        be written later, and read_about fails soft to "no band" at run time. A present
+        but empty/non-string value is a config mistake, caught here with a clear message.
+    """
+    raw = body.get("about_file")
+    if raw is None:
+        # Key absent → band off. This is the common case and never an error.
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(
+            f"{where} has an invalid `about_file` — expected a non-empty path string, "
+            f"or omit the key to disable the About band."
+        )
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        # Relative to the project's repo root, so `about_file = "README.md"` resolves to
+        # the repo's README regardless of where orion.toml or the CWD sits.
+        path = repo_path / path
     return path
 
 

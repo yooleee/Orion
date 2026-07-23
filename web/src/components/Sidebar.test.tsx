@@ -42,6 +42,7 @@ function portfolioWithEvilNames(): Portfolio {
     next_due: null,
     updated_at: "2026-06-26T00:00:00+00:00",
     report_id: null,
+    about: null,
   };
   const tracker: TrackerSummary = {
     name: EVIL_TRACKER,

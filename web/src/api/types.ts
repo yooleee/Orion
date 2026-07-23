@@ -91,6 +91,10 @@ export interface ProjectSummary {
   next_due: NextDue | null;
   updated_at: string;
   report_id: number | null;
+  // KB surface (Unit 2): the observed "About" line (what the project is), or null when the
+  // project set no about_file. Rendered as the Home row sub-line; the headline stays the
+  // latest-report pulse. A distinct concept from a report headline.
+  about: string | null;
 }
 
 /** Segmented progress-bar breakdown for the tracker card (the four tile the total). */
@@ -227,6 +231,9 @@ export interface ProjectDetail {
   name: string;
   kind: ProjectKind;
   description: string | null; // null in 4a (gap 5)
+  // KB surface (Unit 2): the observed "About" line under the title, or null when unset. A
+  // DISTINCT field from `description` above (which stays the unfilled gap).
+  about: string | null;
   stats: ProjectStats;
   milestones: Milestone[];
   checklist: ChecklistItem[];

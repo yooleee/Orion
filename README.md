@@ -169,6 +169,8 @@ collectors  = ["git", "tasks", "notes"]   # any of: git, tasks, notes, incubator
 tasks_file  = "TODO.md"           # required when "tasks" is enabled (a Markdown checklist)
 notes_file  = "NOTES.md"          # required when "notes" is enabled (a hand-written update)
 # incubator_file = "index.md"     # required when "incubator" is enabled (an idea-pipeline table)
+# about_file = "README.md"        # optional: its first prose paragraph becomes the dashboard
+                                  # "About" line (what this project is); no LLM, path relative to repo_path
 
   [[projects.orion.recipients]]
   name            = "Alex (reviewer)"

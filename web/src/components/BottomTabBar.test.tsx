@@ -36,15 +36,18 @@ function renderAt(path: string) {
 }
 
 describe("BottomTabBar", () => {
-  it("renders all four tabs as glyph + text label", () => {
+  it("renders all three tabs as glyph + text label", () => {
     renderAt("/");
     // The text label must be present (legible without relying on the glyph or colour).
-    for (const label of ["Projects", "To-dos", "Schedule", "More"]) {
+    for (const label of ["Projects", "Schedule", "More"]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
+    // The To-dos tab retired in the KB-surface Inc 1 IA settlement — guard against it
+    // silently returning (the section was subsumed into the Projects surface).
+    expect(screen.queryByText("To-dos")).toBeNull();
   });
 
-  it("marks Schedule active on /scheduling, and Projects on a report subpage", () => {
+  it("marks Schedule active on /scheduling, and Projects on report + tracker subpages", () => {
     const { unmount } = renderAt("/scheduling");
     // The active class lands on the tab's link/button; find it via the label's ancestor.
     expect(screen.getByText("Schedule").closest(".tab")).toHaveClass("active");
@@ -53,7 +56,14 @@ describe("BottomTabBar", () => {
 
     // Projects owns the report surface too (the shared navActive rule), so /report/26
     // lights Projects, not another tab.
-    renderAt("/report/26");
+    const report = renderAt("/report/26");
+    expect(screen.getByText("Projects").closest(".tab")).toHaveClass("active");
+    expect(screen.getByText("Schedule").closest(".tab")).not.toHaveClass("active");
+    report.unmount();
+
+    // Trackers folded under Projects when the To-dos section retired, so a tracker page
+    // lights the Projects tab (not a dead/no-active-tab state) on mobile.
+    renderAt("/tracker/orion");
     expect(screen.getByText("Projects").closest(".tab")).toHaveClass("active");
     expect(screen.getByText("Schedule").closest(".tab")).not.toHaveClass("active");
   });

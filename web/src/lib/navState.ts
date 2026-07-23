@@ -11,10 +11,9 @@
 // =============================================================================
 
 /** Which primary section is active for a route. A section owns a SET of related views
- *  (e.g. Projects is active on home, a project, and a report) — the design's rule. */
+ *  (e.g. Projects is active on home, a project, a report, and a tracker) — the design's rule. */
 export interface NavActive {
   projects: boolean;
-  todos: boolean;
   scheduling: boolean;
 }
 
@@ -28,14 +27,18 @@ export interface NavActive {
  *   at most one section; routes outside any section (none today) leave all false.
  *
  * Why: both navs call this, so "what's active" is decided once. Projects deliberately owns
- *   home + project + report (one nav item, a set of views); To-dos owns the trackers list
- *   and a tracker page; Scheduling owns its single view.
+ *   home + project + report + tracker (one nav item, a set of views) — the KB subsumes the
+ *   progress views, so a tracker page reads as part of the projects surface (the standalone
+ *   To-dos section retired in the KB-surface Inc 1 IA settlement); Scheduling owns its single
+ *   view.
  */
 export function navActive(path: string): NavActive {
   return {
     projects:
-      path === "/" || path.startsWith("/project/") || path.startsWith("/report/"),
-    todos: path === "/todos" || path.startsWith("/tracker/"),
+      path === "/" ||
+      path.startsWith("/project/") ||
+      path.startsWith("/report/") ||
+      path.startsWith("/tracker/"),
     scheduling: path === "/scheduling",
   };
 }

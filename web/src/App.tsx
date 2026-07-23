@@ -22,7 +22,7 @@ import { Tracker } from "./routes/Tracker";
 import { Scheduling } from "./routes/Scheduling";
 import { Showcase } from "./routes/Showcase";
 import { ShowcaseDemo } from "./routes/ShowcaseDemo";
-import { NotFound, Todos } from "./routes/placeholders";
+import { NotFound } from "./routes/placeholders";
 
 export function App() {
   // null = still loading the initial /api/me; undefined would conflate with "anonymous".
@@ -60,7 +60,6 @@ export function App() {
         <Route index element={<Home />} />
         <Route path="project/:name" element={<Project />} />
         <Route path="report/:id" element={<Report />} />
-        <Route path="todos" element={<Todos />} />
         <Route path="tracker/:name" element={<Tracker />} />
         <Route path="scheduling" element={<Scheduling />} />
         <Route path="*" element={<NotFound />} />

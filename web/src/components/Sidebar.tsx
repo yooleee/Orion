@@ -48,13 +48,6 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
           <span>Projects</span>
           <span className="nav-count">{projects.length}</span>
         </Link>
-        {/* To-dos / Trackers — only when the viewer has any (a scoped viewer may not). */}
-        {trackers.length > 0 && (
-          <Link to="/todos" className={`nav-item${active.todos ? " active" : ""}`}>
-            <span>To-dos</span>
-            <span className="nav-count">{trackers.length}</span>
-          </Link>
-        )}
         <Link to="/scheduling" className={`nav-item${active.scheduling ? " active" : ""}`}>
           <span>Scheduling</span>
           <span className="pill-new">NEW</span>

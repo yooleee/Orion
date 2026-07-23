@@ -1,7 +1,7 @@
 // =============================================================================
 // web/src/components/TrackerCard.tsx
 // -----------------------------------------------------------------------------
-// Responsible for: The To-dos section's tracker card — styled DELIBERATELY unlike a
+// Responsible for: The Trackers section's tracker card — styled DELIBERATELY unlike a
 //                  project row (accent left-border, TRACKER pill, segmented bar, forward
 //                  chips) so the projects-vs-todos IA reads at a glance.
 // Role in project: The home's representation of a general checklist (e.g. applications).

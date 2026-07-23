@@ -730,6 +730,41 @@ Deferred).
 - **Status:** Open. Found 2026-07-21 by the DF1 sweep, on the first `detailed`-share report
   of a real repo. Relates to [[KI-3]] (the same control's false NEGATIVES).
 
+## KI-42 — Report titles render raw Markdown on the dashboard
+
+- **Detail:** report bodies are Markdown (the summarizer writes it, and `intake`/session
+  pushes carry it verbatim), but the dashboard renders a report's **title** as plain text.
+  The title is the body's first line (`api._headline`), so any Markdown notation on that
+  line reaches the reader literally. Observed live on `project-orion.fly.dev` during the
+  S2.1 close-out, in the `orion` report timeline:
+
+      **Orion — the authentication and access work is now complete, end to end**
+      **Orion progress update**
+      ## Code activity
+
+  Three distinct shapes in one timeline: bold-wrapped titles, and a heading marker where the
+  body opened with `## `. It affects the project page's REPORTS timeline and the report page
+  header — every project, not one.
+- **Why it matters:** cosmetic, not a correctness or security issue — no content is wrong or
+  missing, it is notation leaking into a destination that cannot render it. But it is the
+  supervisor-facing surface, and it undercuts the "readable progress updates" promise: a
+  reader sees syntax rather than a sentence. It is also **inconsistent within the same page**
+  now that the About band flattens its own Markdown (S2.1 Unit 2) — About reads clean while
+  the timeline directly beside it does not.
+- **Possible direction (not committed):** reuse the same conservative flattening the About
+  band already has (`collectors.about._flatten_markdown` — `**bold**`, `` `code` ``,
+  `[text](url)` → text, inline images dropped; single `_`/`*` deliberately untouched so
+  `snake_case` survives). The natural seam is relay-side in `api._headline`, so every surface
+  that derives a title gets it once. Two things to settle first: whether flattening belongs on
+  the RELAY (read time, fixes existing stored reports) or on the PRODUCER (write time, leaves
+  history as-is), and whether a leading `## ` should be stripped as a heading marker rather
+  than treated as inline notation.
+- **Severity:** low (cosmetic/UX, supervisor-facing).
+- **Status:** Open. Found 2026-07-22 by the S2.1 live close-out — the member walkthrough, not
+  a test. Recorded rather than fixed in that session because the fix touches the report
+  timeline and report page for every project, which is its own slice with its own tests and
+  deploy; the About-side fix it would mirror is already shipped and live.
+
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

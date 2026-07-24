@@ -16,8 +16,9 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import type { Me } from "../api/types";
-import { navActive } from "../lib/navState";
+import { navActive, NAV_ENTRIES } from "../lib/navState";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { AccountCard, ShowcaseLink } from "./NavSecondary";
 
 interface BottomTabBarProps {
   me: Me;
@@ -47,45 +48,29 @@ export function BottomTabBar({ me, onLogout }: BottomTabBarProps) {
       {moreOpen && (
         <>
           <div className="more-backdrop" onClick={() => setMoreOpen(false)} aria-hidden="true" />
+          {/* The sheet holds the same secondary pieces as the sidebar's bottom block
+              (NavSecondary), ordered account → showcase → theme for the mobile sheet. The
+              showcase link closes the sheet as it navigates. */}
           <div className="more-sheet" role="dialog" aria-label="More">
-            {me.identity && (
-              <div className="account more-account">
-                <div className="avatar" aria-hidden="true">
-                  {me.identity.name.charAt(0).toUpperCase()}
-                </div>
-                <div>
-                  <div className="account-name">{me.identity.name}</div>
-                  <div className="account-role">{me.identity.role}</div>
-                </div>
-                <button
-                  type="button"
-                  className="account-logout"
-                  aria-label="Log out"
-                  title="Log out"
-                  onClick={onLogout}
-                >
-                  ⏻
-                </button>
-              </div>
-            )}
-            {me.showcase_enabled && (
-              <Link
-                to="/showcase"
-                className="showcase-link"
-                onClick={() => setMoreOpen(false)}
-              >
-                <span aria-hidden="true">↗</span>
-                <span>Public showcase</span>
-              </Link>
-            )}
+            <AccountCard identity={me.identity} onLogout={onLogout} className="more-account" />
+            {me.showcase_enabled && <ShowcaseLink onNavigate={() => setMoreOpen(false)} />}
             <ThemeSwitcher />
           </div>
         </>
       )}
 
       <nav className="bottom-tabbar" aria-label="Primary">
-        <Tab to="/" glyph="◇" label="Projects" active={active.projects} />
-        <Tab to="/scheduling" glyph="◷" label="Schedule" active={active.scheduling} />
+        {/* One Tab per NAV_ENTRIES entry (the single nav source): the bottom bar uses the
+            short label + glyph. A new top-level section appears here automatically. */}
+        {NAV_ENTRIES.map((entry) => (
+          <Tab
+            key={entry.key}
+            to={entry.to}
+            glyph={entry.glyph}
+            label={entry.shortLabel}
+            active={active[entry.key]}
+          />
+        ))}
         {/* "More" is a menu, not a route — it toggles the sheet and shows active while open. */}
         <button
           type="button"

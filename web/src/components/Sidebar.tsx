@@ -30,6 +30,12 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
 
   const projects = portfolio?.projects ?? [];
   const trackers = portfolio?.trackers ?? [];
+  // S2.2: the SECTIONS count must match what clicking "Projects" actually shows — Home's
+  // live Projects section, which excludes finished work. Counting past projects here would
+  // read "2 projects" above a section listing one. The project LIST below still shows them
+  // (a past project stays fully reachable, and going through the collapsed Home section to
+  // reach one would be worse navigation), just muted so the list does not imply they are live.
+  const activeProjectCount = projects.filter((p) => p.lifecycle !== "past").length;
 
   // Active-section state (shared with the mobile bottom bar via navActive, so the two
   // navs can't disagree about which section a route belongs to).
@@ -54,7 +60,9 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
             className={`nav-item${active[entry.key] ? " active" : ""}`}
           >
             <span>{entry.label}</span>
-            {entry.key === "projects" && <span className="nav-count">{projects.length}</span>}
+            {entry.key === "projects" && (
+              <span className="nav-count">{activeProjectCount}</span>
+            )}
             {entry.key === "scheduling" && <span className="pill-new">NEW</span>}
           </Link>
         ))}
@@ -70,7 +78,7 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
               to={`/project/${encodeURIComponent(p.name)}`}
               className={`proj-item${
                 path === `/project/${encodeURIComponent(p.name)}` ? " active" : ""
-              }`}
+              }${p.lifecycle === "past" ? " past" : ""}`}
             >
               {p.name}
             </Link>

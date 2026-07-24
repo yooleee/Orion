@@ -30,6 +30,13 @@ quiet — quiet is not finished. See `plans/orion-plan.md` (row S2.2) and
   both read `"active"`: absence must mean *still running*, or deploying the column would sweep
   every existing project into the past section at once.
 - **`lifecycle` on the wire** — on each portfolio entry and on `ProjectDetail`.
+- **A collapsed "Past projects" section on Home**, holding finished projects *and* finished
+  trackers with a count beside the heading. Collapsed by default, reusing the KI-34
+  disclosure idiom: past work is reference, not attention. It renders nothing at all when
+  nothing is past.
+- **A `PAST` badge** beside a finished project's title, plus a muted "Next due" so the "—"
+  reads as *does not apply* rather than *nothing scheduled*. Shared component, so the public
+  Showcase demo inherits it.
 
 ### Changed
 
@@ -44,6 +51,11 @@ quiet — quiet is not finished. See `plans/orion-plan.md` (row S2.2) and
   expanded milestone on a past project can still show its historical at-risk state.
 - **Nothing about a project's record changes when it is marked past** — reports, checklist,
   About, discussions, progress and last-activity all stay exactly as they were.
+- **A past project row shows no forward signal at all.** With its urgency zeroed it would
+  otherwise fall through to "✓ on track", which is a claim about work still in flight.
+- **The sidebar's SECTIONS count now counts live projects only**, so it agrees with what
+  Home's Projects section actually lists. Past projects keep their own nav link (reaching one
+  should not require going through the collapsed section) but render muted.
 
 ## DR1-R — presentation-debt paydown (2026-07-24)
 

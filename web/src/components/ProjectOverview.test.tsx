@@ -78,6 +78,38 @@ describe("ProjectOverview — shared project page body", () => {
     expect(onOpenReport).toHaveBeenCalledWith(1003);
   });
 
+  // --- S2.2: the past project's header treatment -------------------------------------
+
+  it("badges a past project and marks its NEXT DUE as not-applicable", () => {
+    // The relay nulls stats.next_due for a past project, so this fixture mirrors the real
+    // payload rather than leaving a deadline the server would never have sent.
+    const { container } = render(
+      <MemoryRouter>
+        <ProjectOverview
+          data={project({
+            lifecycle: "past",
+            stats: { ...DEMO_PROJECT.stats, next_due: null },
+          })}
+          tz="UTC"
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("PAST")).toBeInTheDocument();
+    // "—" alone would read as "nothing scheduled" — a live-project statement. The muted
+    // class is what makes it read as "this no longer applies".
+    expect(container.querySelector(".stat-due.stat-na")).not.toBeNull();
+  });
+
+  it("shows no badge and a normal NEXT DUE on an active project", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <ProjectOverview data={project({ lifecycle: "active" })} tz="UTC" />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText("PAST")).toBeNull();
+    expect(container.querySelector(".stat-na")).toBeNull();
+  });
+
   it("drops the caller's discussion slot into the right column", () => {
     render(
       <MemoryRouter>

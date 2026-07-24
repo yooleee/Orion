@@ -26,6 +26,16 @@ export type Status =
 
 export type ProjectKind = "project" | "tracker";
 
+/** Whether a project is still running or finished (S2.2).
+ *
+ *  A DECLARED fact — an admin sets it with `relay-project lifecycle` — never derived from how
+ *  long a project has been quiet, because quiet is not finished. The relay defaults a missing
+ *  or NULL value to "active", so this is never null on the wire.
+ *
+ *  Distinct from the Showcase's `shipped`, which is derived from 100% completion at read time.
+ *  Completion and lifecycle are different facts and must not be conflated. */
+export type ProjectLifecycle = "active" | "past";
+
 /** The tracker's raw, first-class observed status (E2 Inc 4, gap 8). Distinct from the
  *  presentation `Status` enum: these are the producer's canonical item statuses. "submitted"
  *  and "closed" are both done; "in_progress" is the open state `state` alone could not carry. */
@@ -84,6 +94,10 @@ export interface NextDue {
 export interface ProjectSummary {
   name: string;
   kind: "project";
+  // S2.2: "past" groups this row into Home's collapsed "Past projects" section. The relay
+  // ALSO strips its forward-looking urgency (at_risk / slipping → 0, next_due → null), so
+  // the fields below are already suppressed and no consumer can reconstruct an overdue read.
+  lifecycle: ProjectLifecycle;
   headline: string;
   progress: Progress;
   at_risk: number;
@@ -115,6 +129,10 @@ export interface AtRiskItem {
 export interface TrackerSummary {
   name: string;
   kind: "tracker";
+  // S2.2, same rule as ProjectSummary. A past tracker also arrives with `at_risk_items` empty
+  // and its `segments` overdue/due_soon folded into `remaining`, so its bar carries no colour
+  // it has not earned.
+  lifecycle: ProjectLifecycle;
   item_count: number;
   progress: Progress;
   segments: Segments;
@@ -230,6 +248,11 @@ export interface ProjectDisciplines {
 export interface ProjectDetail {
   name: string;
   kind: ProjectKind;
+  // S2.2: "past" badges the page header and means `stats.next_due` arrives null. The
+  // suppression stops there BY DESIGN — `milestones` and `checklist` keep their real dates
+  // and states, because those are the record of what happened and they sit behind a
+  // collapsed group rather than in a headline.
+  lifecycle: ProjectLifecycle;
   // KB surface (Unit 2): the observed "About" line under the title, or null when unset —
   // mechanically observed from the project's doc, not an authored blurb. (The always-null
   // `description` gap-5 field retired in DR1-R U3; ShowcaseCard.description is a separate,

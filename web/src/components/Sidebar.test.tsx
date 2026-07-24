@@ -35,6 +35,7 @@ function portfolioWithEvilNames(): Portfolio {
   const project: ProjectSummary = {
     name: EVIL_PROJECT,
     kind: "project",
+    lifecycle: "active",
     headline: "",
     progress: { done: 0, total: 0, pct: null },
     at_risk: 0,
@@ -47,6 +48,7 @@ function portfolioWithEvilNames(): Portfolio {
   const tracker: TrackerSummary = {
     name: EVIL_TRACKER,
     kind: "tracker",
+    lifecycle: "active",
     item_count: 0,
     progress: { done: 0, total: 0, pct: null },
     segments: { overdue: 0, due_soon: 0, remaining: 0, done: 0 },
@@ -77,5 +79,54 @@ describe("Sidebar — untrusted names render inert", () => {
     // ...and the raw markup must be present verbatim as inert text.
     expect(container.textContent).toContain(EVIL_PROJECT);
     expect(container.textContent).toContain(EVIL_TRACKER);
+  });
+});
+
+// --- S2.2: the SECTIONS count must agree with Home's live Projects section ------------
+
+describe("Sidebar — past projects in the nav", () => {
+  /** A minimal portfolio: one live project, one finished one, no trackers. */
+  function mixedPortfolio(): Portfolio {
+    const base = {
+      kind: "project" as const,
+      headline: "",
+      progress: { done: 0, total: 0, pct: null },
+      at_risk: 0,
+      slipping: 0,
+      next_due: null,
+      updated_at: "2026-07-01T00:00:00+00:00",
+      report_id: null,
+      about: null,
+    };
+    return {
+      scope: ME.scope,
+      projects: [
+        { ...base, name: "live-one", lifecycle: "active" },
+        { ...base, name: "wrapped-one", lifecycle: "past" },
+      ],
+      trackers: [],
+    };
+  }
+
+  it("counts only live projects, but still lists the past one", () => {
+    // Why this matters: clicking "Projects" lands on Home, whose Projects section shows
+    // live work only. A count of 2 above a section listing 1 is the kind of small
+    // inconsistency that makes a reader distrust the rest of the numbers.
+    const { container } = render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <Sidebar me={ME} portfolio={mixedPortfolio()} onLogout={() => {}} />
+        </MemoryRouter>
+      </ThemeProvider>,
+    );
+
+    expect(container.querySelector(".nav-count")?.textContent).toBe("1");
+    // Reachability is not sacrificed: the past project keeps its own nav link, muted.
+    const past = container.querySelector('a[href="/project/wrapped-one"]');
+    expect(past).not.toBeNull();
+    expect(past?.className).toContain("past");
+    expect(
+      container.querySelector('a[href="/project/live-one"]')?.className,
+    ).not.toContain("past");
   });
 });

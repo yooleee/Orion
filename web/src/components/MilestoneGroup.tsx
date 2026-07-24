@@ -15,11 +15,46 @@
 // =============================================================================
 
 import { useState } from "react";
-import type { ChecklistItem, Milestone } from "../api/types";
+import type { ChecklistItem, Milestone, Status } from "../api/types";
 import { ChecklistRow } from "./ChecklistRow";
 import { ProgressBar } from "./ProgressBar";
 import { StatusSignal } from "./StatusSignal";
-import { milestoneSignals } from "./MilestoneCard";
+import { deadlineLabel, deadlineState } from "../lib/time";
+
+/**
+ * Compose a milestone's status signals: slipping and/or at-risk lead (an at-risk
+ * milestone shows both ↝ slipped and △ at risk when applicable); otherwise the nearest
+ * deadline, else not-started / on-track. Up to two, matching the design's milestone states.
+ *
+ * A module-local helper: this group's summary is the one surface that shows these signals
+ * now that the flat MilestoneCard retired (DR1-R U1). Kept as its own function (rather than
+ * inlined) so the rule reads as one named thing.
+ */
+function milestoneSignals(m: Milestone, tz: string): Array<{ state: Status; label: string }> {
+  const sigs: Array<{ state: Status; label: string }> = [];
+  // E1.2 Unit 5: surface the count only when more than one item slips ("2 slipped"). A
+  // single slip stays the bare "slipped" label (and zero shows no slip signal at all), so
+  // the common cases render exactly as before and only a multi-slip group gains the number.
+  if (m.slipping) {
+    sigs.push({
+      state: "slipping",
+      label: m.slipping_count > 1 ? `${m.slipping_count} slipped` : "slipped",
+    });
+  }
+  if (m.at_risk > 0) sigs.push({ state: "at_risk", label: "at risk" });
+  if (sigs.length === 0) {
+    if (m.nearest_due) {
+      sigs.push({ state: deadlineState(m.nearest_due, tz), label: deadlineLabel(m.nearest_due, tz) });
+    } else if (m.done === 0) {
+      sigs.push({ state: "not_started", label: "not started" });
+    } else if (m.done >= m.total) {
+      sigs.push({ state: "on_track", label: "done" });
+    } else {
+      sigs.push({ state: "on_track", label: "on track" });
+    }
+  }
+  return sigs;
+}
 
 export function MilestoneGroup({
   title,

@@ -91,8 +91,39 @@ describe("MilestoneGroup — expandable regroup (KI-34)", () => {
         tz="UTC"
       />,
     );
-    // Composed by the SHARED milestoneSignals rule, so the group and the card agree.
+    // Composed by the milestoneSignals rule (now local to this component after MilestoneCard
+    // retired in DR1-R U1). More than one item slipping surfaces the count.
     expect(screen.getByText("2 slipped")).toBeInTheDocument();
+  });
+
+  // The slipping-count label threshold (was MilestoneCard.test.tsx before U1 folded the
+  // rule into this component): the count shows only above one slip, so the overwhelmingly
+  // common single-slip case reads exactly as it did before Unit 5 added the count.
+  it("shows the bare 'slipped' for a single slip (count omitted)", () => {
+    render(
+      <MilestoneGroup
+        title="Auth"
+        milestone={milestone({ slipping: true, slipping_count: 1 })}
+        items={[item("Password reset")]}
+        tz="UTC"
+      />,
+    );
+    expect(screen.getByText("slipped")).toBeInTheDocument();
+    expect(screen.queryByText("1 slipped")).not.toBeInTheDocument();
+  });
+
+  it("shows no slip signal when nothing slips", () => {
+    const { container } = render(
+      <MilestoneGroup
+        title="Auth"
+        milestone={milestone({ slipping: false, slipping_count: 0 })}
+        items={[item("Password reset")]}
+        tz="UTC"
+      />,
+    );
+    expect(screen.queryByText("slipped")).not.toBeInTheDocument();
+    // A zero-slip on-track milestone still shows its on-track signal, just no slip label.
+    expect(container.querySelector(".status-signal")).not.toBeNull();
   });
 
   it("counts an ungrouped 'Other' group from its items and shows no invented status", () => {

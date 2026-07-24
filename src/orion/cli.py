@@ -2030,13 +2030,17 @@ def _redacted_about(project: ProjectConfig) -> tuple[str | None, int]:
 
 
 def _checklist_content_hash(
-    payload: list[dict], kind: str, due_soon_days: int | None, about: str | None
+    payload: list[dict] | None, kind: str, due_soon_days: int | None, about: str | None
 ) -> str:
     """Hash the exact checklist wire payload a push would send, for change detection.
 
     Args:
         payload: The redacted checklist items in wire shape (from _checklist_payload)
-            — the list order is meaningful and preserved.
+            — the list order is meaningful and preserved. None means the push carries NO
+            checklist at all (the about-only path, S2.2 U3), which hashes differently from
+            an empty list: "I am not talking about the checklist" and "the checklist is
+            empty" are different claims, and collapsing them here would let a switch between
+            the two slip past the change gate as "no change".
         kind: The project's kind ("project" | "tracker"), which rides the push.
         due_soon_days: The project's configured due-soon window, or None. Included even
             when None (as JSON null) so a config-only horizon change still changes the
@@ -2415,19 +2419,36 @@ def cmd_checklist_push(
             projects = list(config.projects.values())
         else:
             project = get_project(config, project_name)
-            # Single-project preconditions stay HARD errors: the user named this one, so
-            # "it has no checklist" is a mistake to surface, not a silent skip (unlike the
-            # --all sweep, where a non-checklist project is simply passed over).
-            if not project.checklist:
+            # S2.2 U3: a project that does not enable `checklist` but DOES set an about_file
+            # takes the settings-only path — it pushes its About (and kind / horizon) with no
+            # checklist on the wire, leaving any stored one untouched. This is the producer
+            # half of the About-carrier decoupling: before it, a project with no tasks_file
+            # could never get an About onto the dashboard, because the only carrier demanded
+            # an unrelated field.
+            about_only = not project.checklist and project.about_file is not None
+            # The other single-project preconditions stay HARD errors: the user named this
+            # one, so a misconfiguration is a mistake to surface, not a silent skip (unlike
+            # the --all sweep, where a non-checklist project is simply passed over).
+            if not project.checklist and not about_only:
                 raise ConfigError(
-                    f"Project {project.name!r} does not enable `checklist`. Set "
-                    f"`checklist = true` (with a 'tasks' or 'tracker' collector) to push "
-                    f"its checklist."
+                    f"Project {project.name!r} does not enable `checklist`, and has no "
+                    f"`about_file` to push on its own. Set `checklist = true` (with a "
+                    f"'tasks' or 'tracker' collector) to push its checklist, or set "
+                    f"`about_file` to push just its About line."
                 )
-            if not _checklist_source_files(project):
+            # Only meaningful when a checklist was actually asked for: `checklist = true`
+            # with nothing to read from is a real misconfiguration and stays loud.
+            if project.checklist and not _checklist_source_files(project):
                 raise ConfigError(
                     f"Project {project.name!r} has no tasks_file or tracker_file to read a "
                     f"checklist from."
+                )
+            if about_only and watch:
+                # --watch polls the checklist SOURCE FILES for changes; an about-only
+                # project has none, so the loop would have nothing to watch.
+                raise ConfigError(
+                    f"--watch polls {project.name!r}'s checklist source files, and it has "
+                    f"none. Run the push without --watch to send its About."
                 )
     except (ConfigError, SecretsError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -2449,7 +2470,9 @@ def cmd_checklist_push(
     # One-shot single project: push the current checklist once. A delivery failure is fatal
     # here (unlike the watch loop, which retries), so the user sees a non-zero exit.
     try:
-        payload = _checklist_payload(project)
+        # None (not []) on the about-only path: the relay then omits the key and leaves the
+        # stored checklist alone. An empty list would claim the checklist is now empty.
+        payload = None if about_only else _checklist_payload(project)
         # A clear sends an explicit null INSTEAD of the configured value, so the horizon we
         # actually put on the wire is None. The recorded hash must reflect what was sent,
         # not what config holds, or a later `--all --due` run would compare against a state
@@ -2477,7 +2500,12 @@ def cmd_checklist_push(
     except DeliveryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(f"Pushed checklist for {project.name!r} ({len(payload)} item(s)).")
+    if payload is None:
+        # Say what was actually sent. "Pushed checklist (0 items)" would be a small lie about
+        # a push whose entire point was to leave the checklist alone.
+        print(f"Pushed About for {project.name!r} (no checklist in this push).")
+    else:
+        print(f"Pushed checklist for {project.name!r} ({len(payload)} item(s)).")
     return 0
 
 

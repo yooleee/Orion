@@ -37,6 +37,23 @@ quiet — quiet is not finished. See `plans/orion-plan.md` (row S2.2) and
 - **A `PAST` badge** beside a finished project's title, plus a muted "Next due" so the "—"
   reads as *does not apply* rather than *nothing scheduled*. Shared component, so the public
   Showcase demo inherits it.
+- **An About-only push.** A project that sets `about_file` but does not enable `checklist`
+  now pushes its About on its own with `orion checklist-push <name>`. This closes a standing
+  gap: About only ever rode a checklist or a report, so a project with neither — a finished
+  one, typically — had no way to get an About band at all.
+
+### Fixed
+
+- **`POST /checklist` no longer requires items.** It had grown into the project's whole
+  settings carrier (kind, due-soon horizon, About) while still demanding a checklist on the
+  original reasoning that "the request exists to set it". Every field is now independently
+  optional, with a floor: a push must carry at least one settable field, or it is a 400
+  rather than a 200 that did nothing.
+  **Omitting the checklist changes nothing about it** — not the live state, not the
+  per-producer copies, and not the append-only observation history, where a false "no items
+  existed at this instant" row could not have been undone. An explicit `"checklist": null`
+  is still rejected: absence and null are different requests, and there is deliberately no
+  clearing story for a checklist.
 
 ### Changed
 

@@ -65,6 +65,7 @@ from relay.store import (
     org_visible_projects,
     observed_history,
     open_relay_store,
+    producer_checklists_for,
     producer_disciplines_for,
     project_disciplines,
     revoke_user,
@@ -826,6 +827,151 @@ def test_checklist_push_explicit_null_clears_about_and_is_idempotent(tmp_path):
         assert get_about(open_relay_store(db), "demo") is None
         assert _post(base_url, _checklist_body_with_about(clear=True), path="/checklist")[0] == 200
         assert get_about(open_relay_store(db), "demo") is None
+
+
+# --- S2.2 U3: the About-carrier decoupling (a checklist-less /checklist push) ----------
+#
+# /checklist used to REQUIRE items ("the request exists to set it"), which meant a project
+# with no tasks_file could never carry an About — the carrier demanded an unrelated field.
+# Items are now optional. The load-bearing property is that omitting them CHANGES NOTHING
+# about the checklist, on all three of its write paths.
+
+
+def _settings_only_body(project="demo", **fields):
+    """A /checklist body with NO `checklist` key — the settings-only push."""
+    return json.dumps({"project": project, **fields}).encode("utf-8")
+
+
+def test_a_settings_only_push_never_disturbs_a_stored_checklist(tmp_path):
+    """THE clobber test: an About-only push leaves live state, producer copy AND history alone.
+
+    Why this matters: this is the risk the whole unit was scoped around. A push that omits
+    items is not evidence that the checklist is empty, and three separate stores would
+    record it as such if the guard were wrong — the aggregate (wiping the dashboard's live
+    checklist), the per-producer copy (which the ≥2-producer merge reads), and the
+    observation history. That last one is APPEND-ONLY: a false "no items existed at this
+    instant" row cannot be undone, and would corrupt slippage derivation from then on.
+
+    So all three are asserted, before and after, with an identified producer so the
+    per-producer path is actually exercised.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "pusher", "pusher-key", role="contributor", projects=["demo"])
+        items = [{"text": "Wire it", "done": False}, {"text": "Ship it", "done": True}]
+        body = json.dumps({"project": "demo", "checklist": items}).encode("utf-8")
+        assert _post(base_url, body, token="pusher-key", path="/checklist")[0] == 200
+
+        conn = open_relay_store(db)
+        before_aggregate = get_checklist(conn, "demo")
+        before_producers = producer_checklists_for(conn, "demo")
+        before_history = observed_history(conn, "demo")
+        conn.close()
+        assert len(before_aggregate) == 2
+        assert len(before_producers) == 1  # the identified producer's own copy exists
+        assert len(before_history) == 2
+
+        # The About-only push, from the same producer.
+        status, resp = _post(
+            base_url,
+            _settings_only_body(about="A tool with no checklist."),
+            token="pusher-key",
+            path="/checklist",
+        )
+        assert status == 200
+        # `items` is null, NOT 0 — zero would claim the relay was told the checklist is empty.
+        assert json.loads(resp)["items"] is None
+
+        conn = open_relay_store(db)
+        assert get_about(conn, "demo") == "A tool with no checklist."  # the push did its job
+        assert get_checklist(conn, "demo") == before_aggregate        # live state untouched
+        assert producer_checklists_for(conn, "demo") == before_producers
+        assert observed_history(conn, "demo") == before_history       # nothing appended
+        conn.close()
+
+
+def test_a_checklist_less_project_can_carry_an_about(tmp_path):
+    """A project that never pushed a checklist can still be given an About.
+
+    Why this matters: this is the gap the unit closes, stated as an outcome. Before, About
+    only rode a checklist or a report, so a project with neither had no way to get one.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        # This project has no reports and no checklist — nothing but the About push.
+        status, _ = _post(
+            base_url,
+            _settings_only_body(project="barebones", about="A small experiment."),
+            path="/checklist",
+        )
+        assert status == 200
+        conn = open_relay_store(db)
+        assert get_about(conn, "barebones") == "A small experiment."
+        assert get_checklist(conn, "barebones") is None  # still genuinely checklist-less
+        conn.close()
+
+
+def test_a_null_checklist_is_still_rejected(tmp_path):
+    """An explicit `"checklist": null` is a 400 — absence and null stay different requests.
+
+    Why this matters: omitting the key means "leave it alone". There is deliberately NO
+    clearing story for a checklist (unlike about / due_soon_days), so a null must not be
+    quietly treated as either one. Accepting it would open a clobber path on live state.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        items = [{"text": "Keep me", "done": False}]
+        assert _post(
+            base_url,
+            json.dumps({"project": "demo", "checklist": items}).encode("utf-8"),
+            path="/checklist",
+        )[0] == 200
+
+        status, resp = _post(
+            base_url,
+            json.dumps({"project": "demo", "checklist": None}).encode("utf-8"),
+            path="/checklist",
+        )
+        assert status == 400 and "checklist" in json.loads(resp)["error"]
+
+        conn = open_relay_store(db)
+        assert len(get_checklist(conn, "demo")) == 1  # untouched by the rejected push
+        conn.close()
+
+
+def test_a_push_that_sets_nothing_is_a_400(tmp_path):
+    """`{project}` alone is refused rather than answered 200.
+
+    Why this matters: with every field optional, a payload carrying only the project name
+    parses fine and does nothing. Answering 200 would hide a client bug behind an apparent
+    success — the caller believes it pushed something.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, resp = _post(base_url, _settings_only_body(), path="/checklist")
+        assert status == 400
+        assert "at least one" in json.loads(resp)["error"]
+
+
+def test_a_normal_checklist_push_is_unchanged(tmp_path):
+    """The ordinary push still writes all three stores and reports its item count.
+
+    Why this matters: the guard is new code on the hot path every producer uses. This pins
+    that making items optional did not change what happens when they ARE sent.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "pusher", "pusher-key", role="contributor", projects=["demo"])
+        items = [{"text": "Wire it", "done": False}]
+        status, resp = _post(
+            base_url,
+            json.dumps({"project": "demo", "checklist": items}).encode("utf-8"),
+            token="pusher-key",
+            path="/checklist",
+        )
+        assert status == 200
+        assert json.loads(resp) == {"updated": "demo", "items": 1}
+
+        conn = open_relay_store(db)
+        assert get_checklist(conn, "demo") == [{"text": "Wire it", "done": False}]
+        assert len(producer_checklists_for(conn, "demo")) == 1
+        assert len(observed_history(conn, "demo")) == 1
+        conn.close()
 
 
 def test_ingest_blob_persists_about_set_only(tmp_path):

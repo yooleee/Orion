@@ -1783,6 +1783,110 @@ def test_checklist_push_requires_checklist_enabled(tmp_path, env_and_mocks):
     assert pushes == []
 
 
+# --- S2.2 U3: the About-only push (a project with no checklist) ----------------------
+
+
+def test_checklist_push_sends_about_alone_for_a_checklist_less_project(
+    tmp_path, env_and_mocks, capsys
+):
+    """A project with no `checklist` but an `about_file` pushes its About and NO checklist.
+
+    Why this matters: this is the producer half of the About-carrier decoupling. Before it,
+    About only rode a checklist or a report, so a project with neither could never get one
+    onto the dashboard — the carrier demanded an unrelated field. The load-bearing assertion
+    is `checklist is None`, not an empty list: None makes the transport omit the key, which
+    tells the relay to leave any stored checklist alone. An empty list would claim it is now
+    empty.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    (tmp_path / "README.md").write_text(
+        "# barebones\n\nA small experiment with no task list.\n", encoding="utf-8"
+    )
+    toml = _checklist_config(tmp_path, checklist=False, about_file="README.md")
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 0
+    assert len(pushes) == 1
+
+    _url, project, checklist, _token, _kind, _dsd, _clear, about, _clear_about = pushes[0]
+    assert project == "demo"
+    assert checklist is None  # omitted from the wire — nothing claimed about the checklist
+    assert about == "A small experiment with no task list."
+    # The output says what was actually sent, not "0 items".
+    out = capsys.readouterr().out
+    assert "Pushed About" in out and "no checklist" in out
+
+
+def test_checklist_push_still_errors_when_there_is_neither_checklist_nor_about(
+    tmp_path, env_and_mocks
+):
+    """No `checklist = true` and no `about_file` is still a clean error, pushing nothing.
+
+    Why this matters: the About-only path must not turn a genuinely unconfigured project
+    into a silent success. The message names both fixable options.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+    toml = _checklist_config(tmp_path, checklist=False)  # no about_file either
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 1
+    assert pushes == []
+
+
+def test_checklist_true_with_no_source_file_is_still_a_hard_error(tmp_path, env_and_mocks):
+    """`checklist = true` with nothing to read from stays loud (unchanged by U3).
+
+    Why this matters: that combination is a real misconfiguration — the user asked for a
+    checklist and there is no file behind it. Relaxing the About case must not quietly
+    swallow this one into an About-only push.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_checklist_pushes(mp)
+
+    toml = tmp_path / "orion.toml"
+    toml.write_text(
+        f"""
+        state_db = "state.sqlite3"
+
+        [relay]
+        enabled = true
+        url = "https://relay.test/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+
+        [projects.demo]
+        repo_path = "{tmp_path.as_posix()}"
+        collectors = ["git"]
+        checklist = true
+        about_file = "README.md"
+        """
+    )
+    (tmp_path / "README.md").write_text("# demo\n\nA thing.\n", encoding="utf-8")
+
+    code = cli.main(["checklist-push", "demo", "--config", str(toml)])
+    assert code == 1
+    assert pushes == []
+
+
+def test_checklist_content_hash_separates_no_checklist_from_an_empty_one():
+    """A None checklist hashes differently from an empty list.
+
+    Why this matters: "I am not talking about the checklist" (the About-only push) and "the
+    checklist is empty" are different claims. If they hashed the same, a project switching
+    between the two would slip past the `--all --due` change gate as "no change".
+    """
+    absent = cli._checklist_content_hash(None, "project", None, "A tool.")
+    empty = cli._checklist_content_hash([], "project", None, "A tool.")
+    assert absent != empty
+    # Still deterministic on the new input.
+    assert absent == cli._checklist_content_hash(None, "project", None, "A tool.")
+
+
 def test_checklist_push_requires_relay_enabled(tmp_path, env_and_mocks):
     """`checklist-push` with no enabled [relay] errors, pushes nothing.
 

@@ -589,6 +589,12 @@ def _about_error(value: object, *, allow_clear: bool) -> str | None:
     return None
 
 
+# The fields a /checklist push can actually SET. A request carrying none of them changes
+# nothing, so it is rejected rather than silently accepted — see the floor in
+# _validate_checklist_request.
+_CHECKLIST_SETTABLE_FIELDS = ("checklist", "kind", "due_soon_days", "about")
+
+
 def _validate_checklist_request(payload: object) -> str | None:
     """Check a parsed payload against the checklist-push contract (POST /checklist).
 
@@ -596,27 +602,49 @@ def _validate_checklist_request(payload: object) -> str | None:
         payload: The JSON-parsed request body (any type — untrusted input).
 
     Returns:
-        None when the payload is a valid `{project, checklist[, kind]}` request; otherwise
-        a short human-readable 400 reason.
+        None when the payload is a valid `{project[, checklist][, kind][, due_soon_days]
+        [, about]}` request; otherwise a short human-readable 400 reason.
 
     Why:
         The checklist-only push is an untrusted inbound surface like /ingest, so it
-        validates shape BEFORE storing. Unlike the blob's optional checklist, here the
-        checklist is REQUIRED (the request exists to set it), and `project` must be a
-        non-empty string (it is the upsert key). The item shape reuses the shared helper.
-        `kind` is OPTIONAL (a producer predating the flag omits it ⇒ the relay defaults to
-        "project"), so it is validated only WHEN PRESENT, to a known value. `due_soon_days`
-        is tri-state here (KI-35): this is the carrier that owns clearing, so an explicit
-        null is accepted and means "clear".
+        validates shape BEFORE storing. `project` must be a non-empty string (it is the
+        upsert key). The item shape reuses the shared helper.
+
+        S2.2 U3: `checklist` became OPTIONAL. It used to be required on the reasoning that
+        "the request exists to set it" — but this endpoint had already grown into the
+        project's whole settings carrier (kind, the due-soon horizon, About), and requiring
+        items meant a project with no checklist at all could never carry an About. That is
+        why `barebones-ai-village` had no About line: not a missing feature, a carrier that
+        demanded an unrelated field. Now every field on it is independently optional.
+
+        Absence and an explicit null stay DIFFERENT requests. Omitting `checklist` means
+        "leave the stored one alone"; a null is still rejected outright (the shared item
+        validator's "must be a list"), because there is no clearing story for a checklist
+        and silently accepting one would be a clobber vector on the project's live state.
+        `kind` is validated only WHEN PRESENT, to a known value. `due_soon_days` and `about`
+        are tri-state (KI-35): this is the carrier that owns clearing, so their explicit
+        nulls ARE accepted and mean "clear".
+
+        With everything optional, `{project}` alone would parse as valid and do nothing —
+        so the floor requires at least one settable field. A request that sets nothing is a
+        client bug, and answering 200 to it would hide that bug behind an apparent success.
     """
     if not isinstance(payload, dict):
         return "payload must be a JSON object"
     project = payload.get("project")
     if not isinstance(project, str) or not project.strip():
         return "field 'project' must be a non-empty string"
-    items_error = _checklist_items_error(payload.get("checklist"))
-    if items_error is not None:
-        return items_error
+    if not any(field in payload for field in _CHECKLIST_SETTABLE_FIELDS):
+        return (
+            "a push must carry at least one of "
+            f"{list(_CHECKLIST_SETTABLE_FIELDS)}"
+        )
+    # Present ⇒ validate (a null fails here, deliberately: there is no "clear the checklist"
+    # signal). Absent ⇒ skipped entirely, which is what leaves a stored checklist untouched.
+    if "checklist" in payload:
+        items_error = _checklist_items_error(payload["checklist"])
+        if items_error is not None:
+            return items_error
     kind = payload.get("kind")
     if kind is not None and kind not in _VALID_PROJECT_KINDS:
         return f"field 'kind' must be one of {_VALID_PROJECT_KINDS}"
@@ -1140,23 +1168,35 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # the current checklist and its newest observation never disagree by a second.
             received_at = _utc_now_iso()
             author_id, author_name = _author_of(principal)
-            # The AGGREGATE (last-writer-wins) always updates: it drives the badge/progress for
-            # single-producer / anonymous projects and is the effective-merge fallback (KI-30).
-            upsert_checklist(
-                conn, payload["project"], payload["checklist"], received_at
-            )
-            # C3 Inc 2: an identified producer ALSO keeps its own checklist (dual-write); a
-            # legacy push (author_id None) lands in the aggregate only.
-            if author_id is not None:
-                upsert_producer_checklist(
-                    conn, payload["project"], author_id, author_name,
-                    payload["checklist"], received_at,
+            # S2.2 U3: the checklist is OPTIONAL on this carrier now, so all THREE checklist
+            # writes are gated on the key being PRESENT. An absent checklist must leave the
+            # live state, the per-producer copy, and the observation history untouched —
+            # a settings-only push (e.g. About alone) is not evidence about the checklist,
+            # and treating it as "the checklist is now empty" would wipe a project's live
+            # state AND append a false observation that no items existed at this instant.
+            # The observation log is append-only, so that second one is not even undoable.
+            # This is the same absent-means-leave-alone rule KI-35 established for the
+            # sibling settings below.
+            has_checklist = "checklist" in payload
+            if has_checklist:
+                # The AGGREGATE (last-writer-wins) updates: it drives the badge/progress for
+                # single-producer / anonymous projects and is the effective-merge fallback
+                # (KI-30).
+                upsert_checklist(
+                    conn, payload["project"], payload["checklist"], received_at
                 )
-            # E2 Inc 3: append each item to the observed-state history (forward-store),
-            # stamping the observing producer (C3 Inc 2) for future per-producer slippage.
-            record_observations(
-                conn, payload["project"], payload["checklist"], received_at, author_id
-            )
+                # C3 Inc 2: an identified producer ALSO keeps its own checklist (dual-write);
+                # a legacy push (author_id None) lands in the aggregate only.
+                if author_id is not None:
+                    upsert_producer_checklist(
+                        conn, payload["project"], author_id, author_name,
+                        payload["checklist"], received_at,
+                    )
+                # E2 Inc 3: append each item to the observed-state history (forward-store),
+                # stamping the observing producer (C3 Inc 2) for per-producer slippage.
+                record_observations(
+                    conn, payload["project"], payload["checklist"], received_at, author_id
+                )
             # E2 Inc 4: record the project's kind (project | tracker) so the home can split
             # projects from trackers. KI-35: SET-ONLY — written only when the push actually
             # carries a kind. An absent (or null) kind leaves the stored one alone; a project
@@ -1185,10 +1225,17 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 set_about(conn, payload["project"], payload["about"])
         finally:
             conn.close()
-        count = len(payload["checklist"])
+        # `items` is null (not 0) for a settings-only push: zero would claim the relay was
+        # told the checklist is empty, which is exactly the distinction this unit exists to
+        # keep. The log line says which kind of push it was, so a tail of the relay does not
+        # read "updated checklist" for a push that deliberately left the checklist alone.
+        count = len(payload["checklist"]) if has_checklist else None
         print(
             f"[relay] updated checklist for project {payload['project']!r} "
-            f"({count} item(s))",
+            f"({count} item(s))"
+            if has_checklist
+            else f"[relay] updated settings for project {payload['project']!r} "
+            f"(no checklist in this push)",
             file=sys.stderr,
         )
         # 200 (not 201): an upsert of existing per-project state, not a created resource.

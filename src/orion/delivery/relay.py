@@ -99,7 +99,7 @@ def push(blob_json: str, url: str, token: str, *, timeout: float = 10.0) -> None
 def push_checklist(
     relay_url: str,
     project: str,
-    checklist: list,
+    checklist: list | None,
     token: str,
     *,
     kind: str = "project",
@@ -117,6 +117,11 @@ def push_checklist(
         project: The project the checklist belongs to (the upsert key on the relay).
         checklist: The current checklist as a list of {"text": str, "done": bool}
             dicts — ALREADY redacted by the caller (the privacy net runs before this).
+            None OMITS the key entirely, which tells the relay to leave the stored checklist
+            alone (S2.2 U3) — the settings-only push a project with no tasks_file needs in
+            order to carry an About. Note this is the same omit-means-leave-alone rule as
+            due_soon_days/about, but there is no null/"clear" state for a checklist: a JSON
+            null is rejected by the relay, so this argument is two-state, not three.
         token: The Bearer token authenticating the push (the SAME ingest credential),
             sent as `Authorization: Bearer <token>`.
         kind: The project's kind ("project" | "tracker"), from config. E2 Inc 4: rides
@@ -161,7 +166,13 @@ def push_checklist(
         # A caller bug, not user input — the CLI never lets these combine.
         raise ValueError("clear_about cannot be combined with an about value")
     endpoint = urllib.parse.urljoin(relay_url, "/checklist")
-    payload = {"project": project, "checklist": checklist, "kind": kind}
+    payload: dict = {"project": project, "kind": kind}
+    # S2.2 U3: omit the key when there is no checklist to send, so the relay leaves the
+    # stored one untouched. Sending [] instead would assert "this project's checklist is now
+    # empty" — wiping the live state and appending a false observation to the append-only
+    # history. The two are genuinely different claims and must stay distinguishable.
+    if checklist is not None:
+        payload["checklist"] = checklist
     # KI-35: `due_soon_days` is tri-state on this carrier. Omit the key ⇒ the relay leaves
     # the stored horizon alone (so a project without the config sends byte-identical
     # payloads to before, and can never clobber another producer's value). Explicit null ⇒

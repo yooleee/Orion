@@ -207,6 +207,9 @@ exist, then declare the result finished.
    (`orion checklist-push <name>`) carries the checklist and the About line, and
    `orion relay-backfill <name> --body-file <file>` carries a historical report body with
    the date you give it. Run the backfill once per report you want on the timeline.
+
+   A finished project often has no task list left. That is fine: set `about_file` and leave
+   `checklist` off, and `orion checklist-push <name>` sends just the About line.
 3. **Mark it finished:**
 
    ```bash

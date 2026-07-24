@@ -377,6 +377,26 @@ grouped into three time buckets, plus a summary. Scope-filtered identically to `
   `get_checklist` + `observed_history` per project → `api.serialize_scheduling`. Pure read-only
   re-aggregation — no new derivation, no producer/wire/store change.
 
+### `POST /checklist` (producer push — machine, not the SPA)
+
+The producer-side settings carrier (Bearer ingest token). Body `{"project": "<name>"}` plus **at least
+one** settable field: `checklist`, `kind`, `due_soon_days`, `about`. Returns `200 {"updated": "<name>",
+"items": <count|null>}`.
+
+- **Every field is independently optional, and OMITTING one means "leave the stored value alone"** (the
+  KI-35 rule). A producer without a given setting sends no key for it and so can never wipe a value
+  another producer set.
+- **`checklist` is two-state, not three** (S2.2 U3). Omitted ⇒ the stored checklist, the per-producer
+  copies, and the observation history are all left untouched, and `items` comes back `null` (not `0` —
+  zero would claim the relay was told the checklist is empty). A list ⇒ replaces current state and
+  appends observations. An explicit `null` is **rejected with a 400**: there is no clearing story for a
+  checklist, and accepting one would be a clobber path on live state. This is what lets a project with
+  no task list carry an About (`orion checklist-push <name>` on an `about_file`-only project).
+- **`due_soon_days` and `about` ARE tri-state**: omitted leaves, an explicit `null` clears, a value sets.
+  This endpoint is the only carrier that owns clearing — `/ingest` rejects a null on both.
+- **A payload with no settable field is a 400**, not a 200 no-op: a request that sets nothing is a client
+  bug, and an apparent success would hide it.
+
 ### `POST /disciplines` (producer push — machine, not the SPA)
 
 A producer-side machine push (Bearer ingest token, like `POST /checklist` and `/ingest`) that sets a

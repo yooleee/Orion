@@ -48,6 +48,13 @@ orion discussions pull myproject   # pull supervisor messages back to your machi
 | `orion checklist-push --all [--due]` | Push **every** checklist-enabled project (fail-soft). Add `--due` for the scheduled form: push only projects **due** under their `cadence`, skipping a due card whose content is **unchanged** since its last push (so an unattended run never re-stamps an untouched card). Relay-only, no `auto_send` gate — often the primary scheduled line (see [Scheduling](../docs/scheduling.md)). Manual `--all` without `--due` pushes unconditionally. |
 | `orion checklist-push <project> --clear-due-soon-days` | Explicitly **clear** a project's stored "due soon" horizon back to the 7-day default. Project settings are **set-only** — a push that omits a value leaves it alone rather than wiping it (KI-35) — so this flag is the only way to unset one. It bypasses the unchanged-content gate, since a clear must send even when the checklist itself did not change. Repeating it is harmless. |
 | `orion checklist-push <project> --clear-about` | Explicitly **clear** a project's stored **About** line (the dashboard "what this project is" band). Same set-only rule as `--clear-due-soon-days`: removing `about_file` from config never clears the stored About on its own, so this flag is the only way to unset it. Single-project, one-shot. |
+
+A project that sets `about_file` but does **not** enable `checklist` pushes its About on its
+own: `orion checklist-push <project>` sends the About line with no checklist on the wire,
+leaving any stored checklist untouched. That is how a project with no task list gets an About
+band. (`checklist = true` with no `tasks_file` or `tracker_file` is still an error — that
+combination is a misconfiguration, not an About-only push. `--watch` needs a checklist source
+to poll, so it does not apply here either.)
 | `orion relay-backfill <project> --generated-at <iso>` | Push an **already-sent** report onto the relay dashboard, **relay-only (no chat)** — for reports sent before the relay was scoped in (KI-36). Body from `--body-file` or stdin; `--generated-at` is the original send time (read off the delivered message). One report per invocation; two-pass redaction still runs; preview/confirm unless `--yes`. |
 | `orion bot` | **PARKED** (KI-28 Stage 2): the bot's write path (relay comments) retired, so `orion bot` prints a parked notice and exits. Its remaining blocker is delegation, not per-user keys — see below. |
 

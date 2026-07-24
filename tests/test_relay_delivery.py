@@ -501,3 +501,30 @@ def test_set_project_lifecycle_posts_to_the_derived_admin_route(monkeypatch):
     assert captured["authorization"] == "Bearer admin-secret"
     assert captured["body"] == {"name": "wrapped", "lifecycle": "past"}
     assert result == {"name": "wrapped", "lifecycle": "past"}
+
+
+def test_push_checklist_omits_the_key_entirely_when_there_is_no_checklist(monkeypatch):
+    """`checklist=None` sends a payload with NO `checklist` key (S2.2 U3).
+
+    Why this matters: this is the wire half of the About-carrier decoupling, and the
+    distinction is not cosmetic. An empty list would assert "this project's checklist is now
+    empty" — wiping the relay's live state and appending a false row to the APPEND-ONLY
+    observation history. Omission asserts nothing about the checklist at all. Asserting on
+    the parsed payload (key ABSENT, not present-and-empty) is what separates the two.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = request.data.decode("utf-8")
+        return _FakeResponse(200)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    push_checklist(
+        "https://relay.test/ingest", "barebones", None, "s3cr3t-token",
+        about="A project with no tasks_file.",
+    )
+    payload = json.loads(captured["body"])
+
+    assert "checklist" not in payload
+    assert payload["about"] == "A project with no tasks_file."
+    assert payload["project"] == "barebones"

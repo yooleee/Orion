@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from zoneinfo import ZoneInfo
 
@@ -63,6 +64,53 @@ def _resolve_due_soon_days(value: int | None) -> int:
 # so api.py owns the rule outright (it formerly lived in render.py and was imported here).
 _HEADLINE_MAX_CHARS = 100
 
+# --- Report-title Markdown flattening (KI-42) -------------------------------------------
+# The title is the body's first line, and the body is MARKDOWN — so without flattening a
+# title like "**Shipped** the parser" or "## Week 3" surfaces its raw `**`/`##` markers on
+# the timeline and report page. We strip the notation a plain-text title cannot render,
+# mirroring the About collector's CONSERVATIVE rules (src/orion/collectors/about.py): single
+# `_`/`*` are LEFT ALONE so `snake_case`, file globs and math survive; only unambiguous
+# constructs are touched. Unlike About (which skips whole heading LINES upstream), a title is
+# one already-chosen line, so a leading ATX marker is stripped inline here too.
+#
+# Kept relay-local (a handful of regexes) rather than importing the collector's helper: the
+# relay is a self-contained, separately deployed package that imports nothing from the
+# producer's src/orion, and a small duplication buys keeping that package boundary clean.
+_TITLE_HEADING_RE = re.compile(r"^#{1,6}\s+")  # leading ATX heading "## " -> dropped
+_TITLE_INLINE_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")  # ![alt](url) -> dropped
+_TITLE_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")  # [text](url) -> text
+_TITLE_BOLD_ITALIC_RE = re.compile(r"\*\*\*(.+?)\*\*\*")  # ***text*** -> text
+_TITLE_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")  # **text** -> text
+_TITLE_INLINE_CODE_RE = re.compile(r"`([^`]+)`")  # `code` -> code
+
+
+def _flatten_title(line: str) -> str:
+    """Strip the inline Markdown notation a plain-text report title cannot render.
+
+    Args:
+        line: One already-stripped line — the report body's first non-empty line.
+
+    Returns:
+        The same text with a leading heading marker and inline emphasis / link / code /
+        image notation removed, and whitespace re-collapsed. Word content is never altered,
+        and single `_`/`*` are left intact (so `snake_case` and globs survive). Can return
+        "" when the line was pure markup (e.g. a lone image).
+
+    Why:
+        The title is observed from a Markdown body and shown as plain text, so leaving `**`
+        or `##` in would surface a rendering artifact, not the author's words. Flattening
+        keeps the observed wording exact while making it legible in the medium it lands in —
+        the same medium-translation the About collector and the Slack mrkdwn path already do.
+    """
+    line = _TITLE_HEADING_RE.sub("", line)
+    line = _TITLE_INLINE_IMAGE_RE.sub("", line)
+    line = _TITLE_LINK_RE.sub(r"\1", line)
+    line = _TITLE_BOLD_ITALIC_RE.sub(r"\1", line)
+    line = _TITLE_BOLD_RE.sub(r"\1", line)
+    line = _TITLE_INLINE_CODE_RE.sub(r"\1", line)
+    # Dropping an inline image can leave a double space behind; re-collapse runs.
+    return " ".join(line.split())
+
 
 def _headline(body: str, limit: int = _HEADLINE_MAX_CHARS) -> str:
     """Extract a one-line headline from a report body for a portfolio card / title.
@@ -86,12 +134,19 @@ def _headline(body: str, limit: int = _HEADLINE_MAX_CHARS) -> str:
     """
     for line in body.splitlines():
         stripped = line.strip()
-        if stripped:
-            # Add the ellipsis only when we actually cut text (a first line exactly `limit`
-            # long is shown whole). One "…" char keeps the rendered length predictable.
-            if len(stripped) > limit:
-                return stripped[:limit].rstrip() + "…"
-            return stripped
+        if not stripped:
+            continue
+        # Flatten Markdown BEFORE measuring/truncating, so the length and the "…" cut reflect
+        # the visible title (KI-42). A line that was pure markup (e.g. a lone image) flattens
+        # to "" — skip it and take the next real line rather than showing a blank title.
+        flat = _flatten_title(stripped)
+        if not flat:
+            continue
+        # Add the ellipsis only when we actually cut text (a first line exactly `limit`
+        # long is shown whole). One "…" char keeps the rendered length predictable.
+        if len(flat) > limit:
+            return flat[:limit].rstrip() + "…"
+        return flat
     return ""
 
 
@@ -754,10 +809,10 @@ def serialize_project(
     return {
         "name": name,
         "kind": kind,
-        "description": None,  # contract gap 5: no project description field stored yet
         # KB surface (Unit 2): the project's observed About line (its doc's first paragraph),
-        # or None ⇒ no band. A DISTINCT concept from `description` above (which stays an unset
-        # gap) — About is mechanically observed, not an authored project blurb.
+        # or None ⇒ no band. Mechanically observed from the project's doc, NOT an authored
+        # project blurb. (The old always-null `description` gap-5 field retired in DR1-R U3;
+        # an authored blurb, if ever wanted, is an additive re-add.)
         "about": about,
         "stats": {
             "progress": _progress(done, len(items)),

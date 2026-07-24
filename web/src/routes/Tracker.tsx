@@ -75,7 +75,6 @@ export function Tracker() {
         <span className="tracker-caption">a general checklist, not a project</span>
       </div>
       <h1 className="page-title">{data.name}</h1>
-      {data.description && <p className="page-sub">{data.description}</p>}
 
       <div className="tracker-progress">
         <span className="tracker-done-count">

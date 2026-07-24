@@ -48,9 +48,8 @@ export const DEMO_SHOWCASE_CARD: ShowcaseCard = {
 export const DEMO_PROJECT: ProjectDetail = {
   name: DEMO_PROJECT_NAME,
   kind: "project",
-  // Gap-5 `description` stays null (it is retired in DR1-R U3); the demo's blurb now rides
-  // the About band, exactly like the real project page shows a project's observed About line.
-  description: null,
+  // The demo's blurb rides the About band, exactly like the real project page shows a
+  // project's observed About line. (The old gap-5 `description` field retired in DR1-R U3.)
   about: "A small notes-and-tagging web app, used here purely as an example.",
   stats: {
     progress: { done: 5, total: 12, pct: 42 },

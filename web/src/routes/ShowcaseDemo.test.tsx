@@ -46,6 +46,16 @@ describe("ShowcaseDemo — fabricated, read-only, no network", () => {
 
     // Overview content comes straight from the fixtures.
     expect(screen.getByRole("heading", { name: "sample-app", level: 1 })).toBeInTheDocument();
+
+    // Post-KI-34 IA (DR1-R U1): the demo now renders the SHARED ProjectOverview, so the
+    // forward look is expandable milestone GROUPS with no separate flat "Live checklist"
+    // section. The group summary is visible; its items nest inside, collapsed by default.
+    expect(screen.getByText("Accounts & auth")).toBeInTheDocument();
+    expect(screen.queryByText("Live checklist")).not.toBeInTheDocument();
+
+    // The checklist item lives inside its (collapsed) milestone group — expanding the group
+    // reveals it, proving items are reachable now the flat list is gone.
+    fireEvent.click(screen.getByRole("button", { name: /Accounts & auth/ }));
     expect(screen.getByText("Google OAuth login")).toBeInTheDocument();
 
     // The "Working agreements" section (Unit 5) now lives on the overview itself — its cards

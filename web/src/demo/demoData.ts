@@ -48,10 +48,10 @@ export const DEMO_SHOWCASE_CARD: ShowcaseCard = {
 export const DEMO_PROJECT: ProjectDetail = {
   name: DEMO_PROJECT_NAME,
   kind: "project",
-  description: "A small notes-and-tagging web app, used here purely as an example.",
-  // KB About band (Unit 2): the demo keeps using `description` as its blurb, so About is
-  // left unset here — no visual change to the showcase walkthrough.
-  about: null,
+  // Gap-5 `description` stays null (it is retired in DR1-R U3); the demo's blurb now rides
+  // the About band, exactly like the real project page shows a project's observed About line.
+  description: null,
+  about: "A small notes-and-tagging web app, used here purely as an example.",
   stats: {
     progress: { done: 5, total: 12, pct: 42 },
     next_due: { due_date: "2026-07-03", state: "due_soon" },

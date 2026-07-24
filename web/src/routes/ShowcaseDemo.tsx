@@ -4,10 +4,12 @@
 // Responsible for: The public, no-login "sample project" walkthrough reached from the
 //                  Showcase landing. A guest clicks the demo card and lands here, where
 //                  they can browse a fabricated project the way a real one looks in Orion:
-//                  the Overview (stats, working agreements, milestones, checklist, reports,
-//                  discussion) and each report in full.
+//                  the Overview (the shared ProjectOverview, read-only) and each report in
+//                  full.
 // Role in project: The drill-down half of the public Showcase. Renders ENTIRELY from
-//                  web/src/demo/demoData.ts fixtures using the real dashboard components.
+//                  web/src/demo/demoData.ts fixtures using the real dashboard components —
+//                  since DR1-R U1 that includes the SAME ProjectOverview the real project
+//                  page uses (in linkMode="none"), so the demo can no longer drift from it.
 //                  It makes NO API calls and all navigation is internal state, so it never
 //                  enters the authenticated routes and cannot read any real data.
 // Security: there is no backend path here at all — the demo is static frontend data, so a
@@ -17,11 +19,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { DEMO_PROJECT, demoReportById } from "../demo/demoData";
-import { deadlineLabel, formatDate, relativeTime } from "../lib/time";
-import { STATUS_STYLES } from "../theme/status";
-import { MilestoneCard } from "../components/MilestoneCard";
-import { ChecklistRow } from "../components/ChecklistRow";
-import { DisciplineCard } from "../components/DisciplineCard";
+import { relativeTime } from "../lib/time";
+import { ProjectOverview } from "../components/ProjectOverview";
 import { DiscussionList } from "../components/DiscussionList";
 import { ReportBody } from "../components/ReportBody";
 import { ContextRail } from "../components/ContextRail";
@@ -29,121 +28,6 @@ import { ThemeSwitcher } from "../components/ThemeSwitcher";
 
 // A fixed display timezone for the demo's relative-date labels (no logged-in user here).
 const DEMO_TZ = "UTC";
-
-/** The Overview body: header stats + forward-look milestones + checklist + reports +
- *  the (read-only) discussion thread — the same composition as a real project page,
- *  minus the live composer (a guest cannot post). `onOpenReport` switches to a report. */
-function DemoOverview({ onOpenReport }: { onOpenReport: (id: number) => void }) {
-  const data = DEMO_PROJECT;
-  const nextDue = data.stats.next_due;
-
-  return (
-    <div>
-      <header className="detail-header">
-        <div className="detail-headline">
-          <h1 className="page-title">{data.name}</h1>
-          {data.description && <p className="page-sub">{data.description}</p>}
-        </div>
-        <div className="stat-blocks">
-          <div className="stat">
-            <div className="stat-label">Progress</div>
-            <div className="stat-value">
-              {data.stats.progress.done} <span className="stat-sub">/ {data.stats.progress.total}</span>
-            </div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Next due</div>
-            <div
-              className="stat-value stat-due"
-              style={nextDue ? { color: `var(${STATUS_STYLES[nextDue.state].colorVar})` } : undefined}
-            >
-              {nextDue ? deadlineLabel(nextDue.due_date, DEMO_TZ) : "—"}
-            </div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Reports</div>
-            <div className="stat-value">{data.stats.reports_count}</div>
-          </div>
-        </div>
-      </header>
-
-      <div className="detail-grid">
-        <div className="detail-left">
-          {/* Unit 5: the same "Working agreements" section the real project page shows,
-              leading the left column (the standalone Disciplines tab retired). */}
-          {data.disciplines && data.disciplines.cards.length > 0 && (
-            <section>
-              <div className="eyebrow block-label">Working agreements</div>
-              <div className="disc-freshness">
-                Observed in your docs · updated {formatDate(data.disciplines.updated_at, DEMO_TZ)}
-              </div>
-              <div className="disc-grid">
-                {data.disciplines.cards.map((card, i) => (
-                  <DisciplineCard key={`${card.title}-${i}`} card={card} />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {data.milestones.length > 0 && (
-            <section>
-              <div className="eyebrow block-label">Forward look</div>
-              <div className="milestone-stack">
-                {data.milestones.map((m) => (
-                  <MilestoneCard key={m.group} milestone={m} tz={DEMO_TZ} />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {data.checklist.length > 0 && (
-            <section>
-              <div className="eyebrow block-label">Live checklist</div>
-              <div className="check-list">
-                {data.checklist.map((item, i) => (
-                  <ChecklistRow key={item.key ?? `${item.text}-${i}`} item={item} tz={DEMO_TZ} />
-                ))}
-              </div>
-            </section>
-          )}
-        </div>
-
-        <div className="detail-right">
-          <section>
-            <div className="eyebrow block-label">Reports</div>
-            {/* A demo-local reports list (the real ReportTimeline links into authed routes,
-                so the demo navigates by internal state instead). */}
-            <div className="timeline">
-              {data.reports.map((r, i) => (
-                <button
-                  type="button"
-                  key={r.id}
-                  className="timeline-entry demo-report-entry"
-                  onClick={() => onOpenReport(r.id)}
-                >
-                  {/* The most-recent entry (index 0) gets the accent dot; older are faint. */}
-                  <span className={`timeline-dot${i === 0 ? " latest" : ""}`} aria-hidden="true" />
-                  <div className="timeline-body">
-                    <div className="timeline-title">{r.title || `Report #${r.number}`}</div>
-                    <div className="timeline-meta">
-                      #{r.number} · {relativeTime(r.generated_at)}
-                    </div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section>
-            <div className="eyebrow block-label">Discussion</div>
-            <DiscussionList items={data.discussions} />
-            {/* No composer: the public demo is read-only. */}
-          </section>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /** One report in full, reusing the real ReportBody + ContextRail, with demo-local
  *  back / older / newer navigation (the real Report nav links into authed routes). */
@@ -241,7 +125,22 @@ export function ShowcaseDemo() {
             onOpenReport={(id) => setReportId(id)}
           />
         ) : (
-          <DemoOverview onOpenReport={(id) => setReportId(id)} />
+          // The SAME overview the real project page renders (DR1-R U1), in linkMode="none"
+          // so its report timeline opens by internal state instead of linking into an authed
+          // route. The discussion slot is a read-only thread — a guest cannot post.
+          <ProjectOverview
+            data={DEMO_PROJECT}
+            tz={DEMO_TZ}
+            linkMode="none"
+            onOpenReport={(id) => setReportId(id)}
+            discussion={
+              <section>
+                <div className="eyebrow block-label">Discussion</div>
+                <DiscussionList items={DEMO_PROJECT.discussions} />
+                {/* No composer: the public demo is read-only. */}
+              </section>
+            }
+          />
         )}
       </main>
     </div>

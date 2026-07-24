@@ -28,8 +28,14 @@ interface RowSignal {
  * and "✓ on track" (nothing pressing). This rule reproduces all three: an overdue
  * deadline is the lead signal (the count is redundant beside it); otherwise the at-risk
  * count leads and a due-soon deadline follows; nothing pressing reads "on track".
+ *
+ * S2.2: a PAST project gets no signal at all. The relay already zeroes its urgency facts,
+ * which would fall through to "✓ on track" — and "on track" is a claim about work still in
+ * flight. A finished project is neither on track nor off it; this column is the forward
+ * look, and it has none.
  */
 function rowSignals(p: ProjectSummary, tz: string): RowSignal[] {
+  if (p.lifecycle === "past") return [];
   const signals: RowSignal[] = [];
   const nd = p.next_due;
   if (nd && nd.state === "overdue") {

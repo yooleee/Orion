@@ -19,6 +19,7 @@ function row(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
   return {
     name: "orion",
     kind: "project",
+    lifecycle: "active",
     headline: "Shipped the auth revamp",
     progress: { done: 6, total: 15, pct: 40 },
     at_risk: 0,

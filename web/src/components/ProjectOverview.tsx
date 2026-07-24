@@ -41,6 +41,11 @@ export function ProjectOverview({
   discussion?: ReactNode;
 }) {
   const nextDue = data.stats.next_due;
+  // S2.2: a finished project. The relay already nulls stats.next_due, so the stat renders
+  // "—" either way — but "—" alone reads as "nothing scheduled", which is a live-project
+  // statement. The badge plus the muted treatment say the honest thing instead: this
+  // question no longer applies here.
+  const isPast = data.lifecycle === "past";
 
   // KI-34 (Unit 3): items whose group has no milestone roll-up (ungrouped, or a group the
   // server derived no milestone for) still belong somewhere — they trail in an "Other"
@@ -55,7 +60,12 @@ export function ProjectOverview({
     <div>
       <header className="detail-header">
         <div className="detail-headline">
-          <h1 className="page-title">{data.name}</h1>
+          <h1 className="page-title">
+            {data.name}
+            {/* S2.2: the past badge sits with the title, not in the stats — it qualifies
+                what the whole page is, rather than being one more measurement. */}
+            {isPast && <span className="past-badge">PAST</span>}
+          </h1>
           {/* KB surface (Unit 2): the About line under the title — what the project IS,
               observed from its doc, in the page-sub style. */}
           {data.about && <p className="page-sub">{data.about}</p>}
@@ -70,7 +80,7 @@ export function ProjectOverview({
           <div className="stat">
             <div className="stat-label">Next due</div>
             <div
-              className="stat-value stat-due"
+              className={`stat-value stat-due${isPast ? " stat-na" : ""}`}
               // Colour by the deadline's state (overdue red vs due-soon amber), not a fixed
               // hue — so an overdue NEXT DUE reads as overdue.
               style={nextDue ? { color: `var(${STATUS_STYLES[nextDue.state].colorVar})` } : undefined}

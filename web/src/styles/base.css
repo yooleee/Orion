@@ -176,6 +176,16 @@ h3 {
 .proj-item:hover {
   color: var(--thi);
 }
+/* S2.2: a finished project stays in the nav list (it must remain reachable without going
+   through Home's collapsed section) but recedes, so the list does not read as "here is
+   your live work". Hover still lifts it. Declared BEFORE .active — equal specificity, so
+   source order decides, and being past must never make the page you are on feel unselected. */
+.proj-item.past {
+  color: var(--tfaint);
+}
+.proj-item.past:hover {
+  color: var(--tmid);
+}
 .proj-item.active {
   background: var(--proj-active-bg);
   color: var(--accent);
@@ -453,6 +463,31 @@ h3 {
   background: var(--border);
 }
 
+/* S2.2: the "Past projects" section header doubles as its disclosure control, so it is a
+   real <button>. These rules only strip the button chrome — the layout still comes from
+   .section-header, so the collapsed section sits in the same rhythm as the live ones. */
+.past-summary {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* The heading row is only ~30px of text, and on mobile it is the ONLY way to open the
+     section — too small to hit reliably. The vertical padding brings the tap target to
+     ~46px; the reduced bottom margin (vs .section-header's 14px) keeps the gap to the rows
+     below unchanged, so the section still sits in the same rhythm as the live ones. */
+  padding: 8px 0;
+  margin-bottom: 6px;
+}
+/* The count beside the heading: how much is filed away, without opening it. */
+.past-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--tfaint);
+}
+
 .row-stack {
   display: flex;
   flex-direction: column;
@@ -713,6 +748,32 @@ h3 {
 .stat-due {
   color: var(--due);
   font-family: var(--font-serif);
+}
+/* S2.2: a past project's NEXT DUE is not "nothing scheduled", it is "does not apply".
+   Dropping it to the faintest text colour says that without inventing a new glyph or a
+   longer label in a stat block sized for a date. */
+.stat-na {
+  color: var(--tfaint);
+}
+
+/* S2.2: the PAST badge beside a finished project's title. Shaped like .tracker-pill (mono,
+   tiny, letter-spaced) so it reads as the same family of marker, but neutral rather than
+   accent-filled — being finished is a statement of fact, not something to draw the eye.
+   Text is --tlow, NOT the --tfaint used for the muted stat beside it. Measured on the page
+   background in all three themes, --tfaint lands at 2.5–3.2:1 — fine for a repeated,
+   predictable label like "NEXT DUE", too weak for the single element that tells a reader
+   this project is over. --tlow measures 4.5–5.1:1 across the three while still reading as
+   quiet, so the marker is legible without becoming a highlight. */
+.past-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  vertical-align: middle;
+  margin-left: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--tlow);
 }
 
 /* A mono block label above a section (FORWARD LOOK, LIVE CHECKLIST, REPORTS …). */

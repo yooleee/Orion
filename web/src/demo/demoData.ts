@@ -48,6 +48,8 @@ export const DEMO_SHOWCASE_CARD: ShowcaseCard = {
 export const DEMO_PROJECT: ProjectDetail = {
   name: DEMO_PROJECT_NAME,
   kind: "project",
+  // The demo shows a project still in flight, so no PAST badge and a live NEXT DUE.
+  lifecycle: "active",
   // The demo's blurb rides the About band, exactly like the real project page shows a
   // project's observed About line. (The old gap-5 `description` field retired in DR1-R U3.)
   about: "A small notes-and-tagging web app, used here purely as an example.",

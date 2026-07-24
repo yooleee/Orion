@@ -69,6 +69,7 @@ function detail(
   return {
     name: "demo",
     kind: "project",
+    lifecycle: "active",
     about: null,
     stats: { progress: { done: 0, total: 0, pct: null }, next_due: null, reports_count: 0 },
     milestones: [],

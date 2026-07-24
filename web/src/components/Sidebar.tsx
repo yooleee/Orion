@@ -15,8 +15,9 @@
 
 import { Link, useLocation } from "react-router-dom";
 import type { Me, Portfolio } from "../api/types";
-import { navActive } from "../lib/navState";
+import { navActive, NAV_ENTRIES } from "../lib/navState";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { AccountCard, ShowcaseLink } from "./NavSecondary";
 
 interface SidebarProps {
   me: Me;
@@ -41,17 +42,22 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
         <span>Orion</span>
       </Link>
 
-      {/* SECTIONS */}
+      {/* SECTIONS — one Link per NAV_ENTRIES entry (the single nav source). The trailing
+          adornment stays sidebar-local and keyed on the section: Projects shows a live count
+          (which needs the portfolio), Scheduling shows a NEW pill while it is still a stub. */}
       <div className="side-group">
         <div className="side-group-label">Sections</div>
-        <Link to="/" className={`nav-item${active.projects ? " active" : ""}`}>
-          <span>Projects</span>
-          <span className="nav-count">{projects.length}</span>
-        </Link>
-        <Link to="/scheduling" className={`nav-item${active.scheduling ? " active" : ""}`}>
-          <span>Scheduling</span>
-          <span className="pill-new">NEW</span>
-        </Link>
+        {NAV_ENTRIES.map((entry) => (
+          <Link
+            key={entry.key}
+            to={entry.to}
+            className={`nav-item${active[entry.key] ? " active" : ""}`}
+          >
+            <span>{entry.label}</span>
+            {entry.key === "projects" && <span className="nav-count">{projects.length}</span>}
+            {entry.key === "scheduling" && <span className="pill-new">NEW</span>}
+          </Link>
+        ))}
       </div>
 
       {/* PROJECTS list */}
@@ -90,40 +96,18 @@ export function Sidebar({ me, portfolio, onLogout }: SidebarProps) {
         </div>
       )}
 
-      {/* Bottom block: theme switcher + account card (pushed down by the spacer). */}
+      {/* Bottom block: showcase link + theme switcher + account card (pushed down by the
+          spacer). These pieces are shared with the mobile "More" sheet (NavSecondary); the
+          sidebar orders them showcase → theme → account. */}
       <div className="side-spacer" />
 
       {/* The public Showcase link only appears when the relay actually exposes it
           (--showcase). Without it the link would lead to a 404 surface. */}
-      {me.showcase_enabled && (
-        <Link to="/showcase" className="showcase-link">
-          <span aria-hidden="true">↗</span>
-          <span>Public showcase</span>
-        </Link>
-      )}
+      {me.showcase_enabled && <ShowcaseLink />}
 
       <ThemeSwitcher />
 
-      {me.identity && (
-        <div className="account">
-          <div className="avatar" aria-hidden="true">
-            {me.identity.name.charAt(0).toUpperCase()}
-          </div>
-          <div>
-            <div className="account-name">{me.identity.name}</div>
-            <div className="account-role">{me.identity.role}</div>
-          </div>
-          <button
-            type="button"
-            className="account-logout"
-            aria-label="Log out"
-            title="Log out"
-            onClick={onLogout}
-          >
-            ⏻
-          </button>
-        </div>
-      )}
+      <AccountCard identity={me.identity} onLogout={onLogout} />
     </nav>
   );
 }

@@ -194,3 +194,30 @@ the failure is just reported.
 > `relay-serve` flags: `--host` (default `127.0.0.1`), `--port` (`8787`), `--db`
 > (`orion-relay.sqlite3`), `--token-env` (`ORION_RELAY_TOKEN`). The relay's store is
 > its own SQLite file, separate from Orion's state db.
+
+## Optional: bringing a finished project onto the dashboard
+
+A project that wrapped up before you started using Orion can still go on the dashboard as
+part of the record. There is no special machinery for this. You use the paths that already
+exist, then declare the result finished.
+
+1. **Add it to your config** with `orion add-project <name>`, pointing at the repo (or at
+   nothing much, if the work lives elsewhere).
+2. **Get its content onto the relay.** Whatever it has is what it gets: a checklist push
+   (`orion checklist-push <name>`) carries the checklist and the About line, and
+   `orion relay-backfill <name> --body-file <file>` carries a historical report body with
+   the date you give it. Run the backfill once per report you want on the timeline.
+3. **Mark it finished:**
+
+   ```bash
+   orion relay-project lifecycle <name> past
+   ```
+
+The project now sits in the dashboard's collapsed "Past projects" section, badged, with its
+full record intact and none of its old deadlines counted against you. If you got the call
+wrong, `orion relay-project lifecycle <name> active` puts it straight back.
+
+Two things worth knowing. The lifecycle flag is admin-only and lives on the relay, so it
+keeps holding even after you remove the project from `orion.toml` entirely. And a project is
+past because you said so, never because it went quiet — Orion will not infer this, since a
+paused project and a finished one are different things.

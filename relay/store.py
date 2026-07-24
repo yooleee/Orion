@@ -374,10 +374,17 @@ _ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     # observed by the producer. NULLABLE with no default (omit-when-unset): NULL reads back
     # as None (get_about), which renders no About band — absent, never an empty band. Added
     # here (not in _SCHEMA) so an already-deployed relay gains it via one cheap ALTER.
+    # KB surface (S2.2): whether the project is still running ('active') or finished ('past').
+    # DECLARED by an admin, never derived from staleness — quiet is not finished. NULLABLE
+    # with no default so the column is additive AND so ABSENCE reads as ACTIVE: every project
+    # that predates the column, and every project that never had a meta row, must keep showing
+    # exactly where it showed before. (The opposite default would silently sweep the whole
+    # dashboard into a "Past projects" drawer on deploy.)
     "relay_project_meta": [
         ("due_soon_days", "INTEGER"),
         ("visibility", "TEXT"),
         ("about", "TEXT"),
+        ("lifecycle", "TEXT"),
     ],
     # Auth revamp (Unit 2a): what an account IS, and (for an agent) whose behalf it acts on.
     # `kind` is NULLABLE with no default rather than "human" NOT NULL, per this table's
@@ -1265,6 +1272,78 @@ def org_visible_projects(conn: sqlite3.Connection) -> set:
     return {row["project"] for row in rows}
 
 
+# --- Project lifecycle: active vs. past (KB surface Inc 2 / S2.2) --------------------
+#
+# A project is either still running ('active') or finished ('past'). This is DECLARED by an
+# admin (`relay-project lifecycle`), never derived from how long a project has been quiet —
+# quiet is not finished, and collapsing the two would let a paused project read as shipped.
+# It lives relay-side rather than in orion.toml because the relay must keep remembering the
+# answer after a project stops being produced and leaves the config entirely.
+#
+# 'active' is the birth state: an unset/NULL value and a missing meta row BOTH read active,
+# so a project only becomes past by a deliberate act. The flag's semantic weight is that a
+# past project is excluded from every deadline derivation (the serializers do that) — a
+# finished project must never read as overdue.
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_PAST = "past"
+LIFECYCLES = (LIFECYCLE_ACTIVE, LIFECYCLE_PAST)
+
+
+def set_project_lifecycle(
+    conn: sqlite3.Connection, project: str, lifecycle: str
+) -> None:
+    """Set a project's lifecycle ('active' | 'past'), upserting the meta row (S2.2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to set (the CALLER validates it exists — see project_exists).
+        lifecycle: One of LIFECYCLES, already validated by the server.
+
+    Why:
+        Mirrors set_project_visibility / set_project_kind / set_about exactly: one idempotent
+        upsert touching only its own column, so the meta row's now-five knobs are written
+        independently and marking a project past never disturbs its kind, horizon, About, or
+        visibility. Reversible by design — setting 'active' again restores every derivation,
+        so a mistaken flip costs one command, not a data repair.
+    """
+    conn.execute(
+        """
+        INSERT INTO relay_project_meta (project, lifecycle)
+        VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET lifecycle = excluded.lifecycle
+        """,
+        (project, lifecycle),
+    )
+    conn.commit()
+
+
+def get_project_lifecycle(conn: sqlite3.Connection, project: str) -> str:
+    """Return a project's lifecycle, defaulting to 'active' (S2.2).
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to look up.
+
+    Returns:
+        'past' only when that was explicitly stored; 'active' for a missing meta row, a row
+        predating the column (NULL), or an explicit 'active'.
+
+    Why:
+        Absence must mean ACTIVE, by exactly the same reasoning that makes absence mean
+        RESTRICTED for visibility — the default has to be what the ABSENCE of a decision
+        means, not merely what a column default says. Here the safe default is the opposite
+        direction: no project should vanish from the live sections of the dashboard because a
+        row was never written or a migration half-ran. Only an explicit, deliberate 'past'
+        moves a project out of the active view.
+    """
+    row = conn.execute(
+        "SELECT lifecycle FROM relay_project_meta WHERE project = ?", (project,)
+    ).fetchone()
+    if row is None or row["lifecycle"] != LIFECYCLE_PAST:
+        return LIFECYCLE_ACTIVE
+    return LIFECYCLE_PAST
+
+
 def record_observations(
     conn: sqlite3.Connection,
     project: str,
@@ -1419,9 +1498,11 @@ def latest_report_per_project(
         A list of dicts, one per project that has a report OR a live checklist, each:
         {"project", "kind", "report_count", "latest_generated_at", "latest_report_id",
         "latest_body", "checklist_updated_at", "checklist_done", "checklist_total",
-        "checklist_at_risk", "checklist_slipping", "nearest_milestone"}, ordered with the
-        most recently active project first. "kind" is "project" | "tracker" (E2 Inc 4),
-        defaulting to "project" when the project has no recorded meta row. For a checklist-only project (a live checklist but
+        "checklist_at_risk", "checklist_slipping", "nearest_milestone", "lifecycle"}, ordered
+        with the most recently active project first. "kind" is "project" | "tracker" (E2 Inc 4),
+        defaulting to "project" when the project has no recorded meta row. "lifecycle" is
+        "active" | "past" (S2.2), defaulting to "active" the same way — absence of a decision
+        means the project is still running. For a checklist-only project (a live checklist but
         zero reports) the latest-report fields are None and report_count is 0; for a
         report-only project checklist_updated_at and the checklist counts are None.
         "checklist_at_risk" is None when the project has no checklist OR when `today` was not
@@ -1484,7 +1565,12 @@ def latest_report_per_project(
                pm.due_soon_days AS due_soon_days,
                -- KB surface (Unit 2): the project's About line, NULL when unset. Same meta
                -- LEFT JOIN; surfaced as-is so the serializer omits the band when NULL.
-               pm.about AS about
+               pm.about AS about,
+               -- KB surface (S2.2): active vs. past. COALESCEd here (like `kind`, unlike
+               -- `about`) because absence is not "unset, decide later" — absence IS active,
+               -- so the row hands the serializer a definite answer rather than a NULL every
+               -- caller would have to re-default.
+               COALESCE(pm.lifecycle, 'active') AS lifecycle
         FROM projects p
         -- LEFT JOIN the latest report: NULL for a checklist-only project. The correlated
         -- subquery picks the exact row history() calls newest (generated_at DESC, id
@@ -1570,6 +1656,9 @@ def latest_report_per_project(
                 # KB surface (Unit 2): the project's About line (None when unset), carried so
                 # _portfolio_entry surfaces it without a second meta lookup.
                 "about": row["about"],
+                # KB surface (S2.2): "active" | "past", already COALESCEd in the query, so
+                # every consumer gets a definite answer and none has to re-default a NULL.
+                "lifecycle": row["lifecycle"],
                 "report_count": row["report_count"],
                 "latest_generated_at": row["latest_generated_at"],
                 "latest_report_id": row["latest_report_id"],

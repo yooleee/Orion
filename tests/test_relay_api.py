@@ -268,6 +268,71 @@ def test_portfolio_project_row_carries_headline_progress_and_facts():
     assert row["about"] is None
 
 
+def test_portfolio_rows_default_to_active_when_no_lifecycle_is_present():
+    """A row with no `lifecycle` key serializes as active with every deadline fact intact.
+
+    Why this matters: absence must read as active at the SERIALIZER too, not only in the
+    store — a caller that never joined the meta table (or a fixture written before S2.2)
+    must get byte-identical output to before the flag existed.
+    """
+    out = api.serialize_portfolio([_project_row(), _tracker_row()], None, _TODAY)
+    row = out["projects"][0]
+    assert row["lifecycle"] == "active"
+    assert row["at_risk"] == 2 and row["next_due"] is not None
+    tracker = out["trackers"][0]
+    assert tracker["lifecycle"] == "active"
+    assert tracker["at_risk_items"] != []
+
+
+def test_a_past_project_row_keeps_its_record_but_shows_no_urgency():
+    """Marking a project past zeroes at_risk / slipping / next_due but keeps progress + About.
+
+    Why this matters: this is the semantic point of the flag. A finished project must never
+    read as overdue, and suppressing it HERE (not in the SPA) is what makes that a guarantee
+    — no consumer of this payload can reconstruct an urgency the relay never sent. What the
+    project actually did (its progress, headline, About, last activity) is the record and
+    stays.
+    """
+    row = _project_row()
+    row["lifecycle"] = "past"
+    row["about"] = "A wrapped-up experiment."
+    out = api.serialize_portfolio([row], None, _TODAY)
+    entry = out["projects"][0]
+
+    assert entry["lifecycle"] == "past"
+    assert entry["at_risk"] == 0
+    assert entry["slipping"] == 0
+    assert entry["next_due"] is None
+    # The record survives untouched.
+    assert entry["progress"] == {"done": 6, "total": 15, "pct": 40}
+    assert entry["headline"] == "Orion progress update"
+    assert entry["about"] == "A wrapped-up experiment."
+    assert entry["updated_at"] == "2026-06-26T10:00:00+00:00"
+
+
+def test_a_past_tracker_drops_its_chips_and_folds_urgent_segments_into_remaining():
+    """A past tracker shows no at-risk chips, and its bar carries no red/amber slices.
+
+    Why this matters: the tracker card renders urgency two ways — the chip list AND the
+    segmented bar's coloured slices. Zeroing only `at_risk` would leave the bar still
+    reading "2 overdue" in red. Folding those counts into `remaining` keeps the four buckets
+    tiling the total (what a stacked bar needs) and keeps `done` exact, so only the urgency
+    CLAIM is dropped, not the record of how much is finished.
+    """
+    row = _tracker_row()
+    row["lifecycle"] = "past"
+    out = api.serialize_portfolio([row], None, _TODAY)
+    entry = out["trackers"][0]
+
+    assert entry["at_risk_items"] == []
+    assert entry["at_risk"] == 0 and entry["slipping"] == 0
+    assert entry["next_due"] is None
+    # Two of the three fixture items are at risk; all three are open. They move to remaining.
+    assert entry["segments"] == {"overdue": 0, "due_soon": 0, "remaining": 3, "done": 0}
+    # The buckets still tile the total, which is the invariant the bar depends on.
+    assert sum(entry["segments"].values()) == entry["item_count"] == 3
+
+
 def test_portfolio_project_row_carries_about_when_set():
     """A project row surfaces its stored About line for the Home sub-line (Unit 2).
 
@@ -533,6 +598,62 @@ def test_project_detail_milestone_slipping_count_counts_open_slips():
     g = next(m for m in out["milestones"] if m["group"] == "G")
     assert g["slipping"] is True
     assert g["slipping_count"] == 2  # X and Y slip; the steady Z does not
+
+
+def test_project_detail_defaults_to_active_and_keeps_its_next_due():
+    """Omitting `lifecycle` yields "active" and today's output — the pre-S2.2 behaviour."""
+    out = api.serialize_project(
+        name="orion",
+        kind="project",
+        reports=[],
+        checklist=[_item("Task X", due_date="2026-06-20")],  # overdue
+        observations=[],
+        producer_checklists=[],
+        discussions=[],
+        disciplines=None,
+        today=_TODAY,
+    )
+    assert out["lifecycle"] == "active"
+    assert out["stats"]["next_due"] == {"due_date": "2026-06-20", "state": "overdue"}
+
+
+def test_a_past_project_page_suppresses_next_due_but_keeps_the_milestone_record():
+    """A past project's header shows no NEXT DUE; its milestones and item rows keep their states.
+
+    Why this matters: this pins the SETTLED suppression line (S2.2 plan decision 3). The
+    headline read — the header stat — must never say overdue on a finished project. But the
+    milestone roll-up and the per-item rows are the RECORD of what happened, they sit behind
+    a collapsed group, and flattening them would erase real history. If a later change wants
+    to mute those too, this test is what makes that a deliberate decision rather than a
+    silent drift.
+    """
+    checklist = [
+        _item("Overdue thing", due_date="2026-06-20", group="G"),
+        _item("Done thing", done=True, group="G"),
+    ]
+    out = api.serialize_project(
+        name="wrapped",
+        kind="project",
+        reports=[],
+        checklist=checklist,
+        observations=[],
+        producer_checklists=[],
+        discussions=[],
+        disciplines=None,
+        today=_TODAY,
+        lifecycle="past",
+    )
+
+    assert out["lifecycle"] == "past"
+    assert out["stats"]["next_due"] is None
+    # Progress is the record and is untouched.
+    assert out["stats"]["progress"] == {"done": 1, "total": 2, "pct": 50}
+    # The milestone roll-up and the item row keep their real, historical urgency.
+    g = next(m for m in out["milestones"] if m["group"] == "G")
+    assert g["at_risk"] == 1
+    assert g["nearest_due"] == "2026-06-20"
+    by_text = {r["text"]: r for r in out["checklist"]}
+    assert by_text["Overdue thing"]["state"] == "overdue"
 
 
 def test_project_detail_marks_slipping_per_producer_stream():
@@ -985,6 +1106,47 @@ def test_scheduling_marks_and_counts_slipping_items():
     row = out["buckets"]["this_week"][0]
     assert row["slipping"] is True
     assert out["summary"]["slipping"] == 1
+
+
+def test_scheduling_skips_past_projects_entirely():
+    """A past project's deadlines appear in no bucket and in no summary count.
+
+    Why this matters: Scheduling is the surface a finished project's leftover deadlines would
+    be loudest on — months of red rows and an inflated "N overdue" headline. The skip is a
+    `continue` in the serializer rather than a filter in the route, so every caller inherits
+    it; this pins that, and pins that the ACTIVE project beside it is untouched.
+    """
+    projects = [
+        {
+            "name": "alpha",
+            "kind": "project",
+            "lifecycle": "active",
+            "items": [_item("Live thing", due_date="2026-06-20")],  # overdue
+            "observations": [],
+        },
+        {
+            "name": "wrapped",
+            "kind": "project",
+            "lifecycle": "past",
+            "items": [
+                _item("Finished-era deadline", due_date="2026-06-01"),  # long overdue
+                _item("Soon thing", due_date="2026-06-29"),
+                _item("Far thing", due_date="2026-08-01"),
+            ],
+            # Even a slipping stream must not leak into the summary from a past project.
+            "observations": [
+                {"item_key": "Finished-era deadline", "due_date": "2026-05-01",
+                 "done": False, "observed_at": "2026-05-02T00:00:00+00:00"},
+                {"item_key": "Finished-era deadline", "due_date": "2026-06-01",
+                 "done": False, "observed_at": "2026-06-02T00:00:00+00:00"},
+            ],
+        },
+    ]
+    out = api.serialize_scheduling(projects, _TODAY)
+
+    all_labels = [r["label"] for b in out["buckets"].values() for r in b]
+    assert all_labels == ["Live thing"]
+    assert out["summary"] == {"overdue": 1, "due_this_week": 0, "slipping": 0}
 
 
 def test_scheduling_empty_when_nothing_open_and_dated():

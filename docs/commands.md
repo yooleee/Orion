@@ -106,8 +106,18 @@ and no scheduled push silently starts failing. (This replaced a one-shot `rotate
 |---|---|
 | `orion relay-project visibility <project> org` | Make a project **org-visible**: any `member` account can read it with no per-project grant. |
 | `orion relay-project visibility <project> restricted` | Back to **grant-only** — the default every project is born with. |
+| `orion relay-project lifecycle <project> past` | Mark a project **finished**: it groups into the dashboard's "Past projects" section and drops out of every deadline view. |
+| `orion relay-project lifecycle <project> active` | Back to **still running** — the default every project is born with. Fully reversible. |
 
-Viewers and supervisors are unaffected either way: they always see only their explicit grants.
+Viewers and supervisors are unaffected by visibility either way: they always see only their
+explicit grants.
+
+A project is past because someone **says** so, never because it went quiet. Quiet is not
+finished. Marking one past changes nothing about its record (reports, checklist, About and
+discussion all stay), only how the dashboard frames it: it stops appearing in due-soon,
+at-risk, slipping and Scheduling, so a wrapped-up project can never read as overdue. The flag
+lives on the relay, not in `orion.toml`, so it keeps holding after the project stops being
+produced and leaves your config entirely. There is deliberately no producer path for it.
 
 ## Handy flags
 

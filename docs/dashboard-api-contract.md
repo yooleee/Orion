@@ -118,6 +118,7 @@ client-side.
     {
       "name": "orion",
       "kind": "project",
+      "lifecycle": "active",
       "headline": "Sectioned home in progress — splitting projects from to-dos.",
       "progress": { "done": 6, "total": 15, "pct": 40 },
       "at_risk": 2,
@@ -131,6 +132,7 @@ client-side.
     {
       "name": "applications",
       "kind": "tracker",
+      "lifecycle": "active",
       "item_count": 15,
       "progress": { "done": 0, "total": 15, "pct": 0 },
       "segments": { "overdue": 1, "due_soon": 1, "remaining": 13, "done": 0 },
@@ -164,6 +166,15 @@ client-side.
 - Tracker adds `segments` (the segmented bar, `derive.bucket_counts`: overdue / due_soon / remaining-open /
   done) and `at_risk_items` (every at-risk item, overdue-first then due_soon by date), each
   `{state, label, due_date}`. The SPA shows the first few chips and a "+N more".
+- **`lifecycle`** (S2.2) is `"active"` or `"past"` — a **declared** fact an admin sets with
+  `relay-project lifecycle`, never derived from staleness. A missing meta row and a NULL column
+  both read `"active"`, so absence means the project is still running. The SPA groups `"past"`
+  entries into a collapsed "Past projects" section.
+  **A past entry ships no forward-looking urgency**, and this is enforced here rather than in the
+  SPA so no consumer can reconstruct it: `at_risk` and `slipping` are `0`, `next_due` is `null`,
+  a tracker's `at_risk_items` is `[]`, and its `segments` fold `overdue`/`due_soon` into
+  `remaining` (the four still tile the total). What the project actually did — `progress`,
+  `headline`, `about`, `updated_at`, `segments.done` — is the record and is unchanged.
 
 ### `GET /api/projects/:name`
 
@@ -173,6 +184,7 @@ Everything observed about one project. `404` when missing or out of scope.
 {
   "name": "orion",
   "kind": "project",
+  "lifecycle": "active",
   "stats": {
     "progress": { "done": 6, "total": 15, "pct": 40 },
     "next_due": { "due_date": "2026-06-29", "state": "due_soon" },
@@ -264,6 +276,12 @@ Everything observed about one project. `404` when missing or out of scope.
   standalone cross-project `GET /api/disciplines` view retired in Unit 5.
 - `stats.next_due` is the soonest open deadline across the checklist (`derive.next_open_due` + its state),
   or `null`. `milestones[].slipping` is `true` when any open item in the group is in the slipping set.
+- **`lifecycle`** (S2.2) mirrors the portfolio field: `"active"` | `"past"`, admin-declared, absence
+  reads active. On a `"past"` project `stats.next_due` is `null` — a finished project has no forward
+  look. The suppression stops at the page level *by design*: `milestones[]` and `checklist[]` keep
+  their real dates and derived states, because those are the record of what happened and they sit
+  behind a collapsed group rather than in a headline. So a past project's expanded milestone can
+  still show "at risk" while no headline read (Home row, header stat, Scheduling) ever says overdue.
 - `checklist[].state` is `done | overdue | due_soon | in_progress | not_started`: `done` when done, else
   `overdue` / `due_soon` from `classify_item`, else `in_progress` when `status == "in_progress"`, else
   `not_started`. `checklist[].status` is the raw producer status (`not_started | in_progress | submitted |
@@ -338,6 +356,10 @@ grouped into three time buckets, plus a summary. Scope-filtered identically to `
 
 - **Only open, dated items appear.** Done items and items with no `due_date` are excluded — a timeline has
   no place for them. This is the honest reading of "every deadline."
+- **Past projects are skipped entirely** (S2.2): a project whose `lifecycle` is `"past"` contributes
+  no rows to any bucket and nothing to `summary` (including `slipping`). This is the surface a
+  finished project's leftover deadlines would be loudest on, and a finished project must never read
+  as overdue. The skip lives in `serialize_scheduling`, not the route, so every caller inherits it.
 - **Buckets** come from the same per-deadline classifier the rest of the dashboard uses
   (`_deadline_state` → `overdue` / `due_soon` / `upcoming`), mapped `overdue→overdue`,
   `due_soon→this_week`, `upcoming→later`. Each bucket is sorted by `due_date` ascending (soonest /

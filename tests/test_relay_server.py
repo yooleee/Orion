@@ -58,6 +58,7 @@ from relay.store import (
     get_checklist,
     get_due_soon_days,
     get_project_kind,
+    get_project_lifecycle,
     get_user_by_name,
     history,
     list_projects,
@@ -3105,6 +3106,140 @@ def test_visibility_mutation_validates_against_the_real_project_universe(tmp_pat
         # And an invalid visibility value is refused outright.
         status, body = _set_visibility(base_url, "open-project", "public")
         assert status == 400 and "visibility" in body["error"]
+
+
+# --- S2.2: project lifecycle (active vs. past) -----------------------------------------
+#
+# A project is marked past by an ADMIN, never by a producer and never by inference. These
+# pin the route's guards and the end-to-end property the flag exists for: a finished project
+# stops being read as if it still had deadlines.
+
+
+def _set_lifecycle(base_url, project, lifecycle):
+    """Mark a project past/active through the real admin route."""
+    return _admin_post(
+        base_url, "/api/projects/lifecycle", {"name": project, "lifecycle": lifecycle}
+    )
+
+
+def test_marking_a_project_past_removes_it_from_every_deadline_view(tmp_path):
+    """One admin command, and the project stops reading as overdue anywhere — reversibly.
+
+    Why this matters: this is the acceptance check for the whole increment, end to end
+    through the real routes. Two projects each carry an overdue deadline. After ONE
+    `lifecycle past` call — with no producer config change and no re-push — the wrapped
+    project reports lifecycle "past" with zeroed urgency on Home, its page has no NEXT DUE,
+    and it is gone from Scheduling's buckets AND its summary counts. The live project beside
+    it is untouched throughout, which is what proves the flag is per-project and not a
+    global mute. Flipping back to active restores everything.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+        overdue = [{"text": "Ship it", "done": False, "due_date": "2020-01-01"}]
+        _push_checklist(base_url, "live-project", overdue)
+        _push_checklist(base_url, "wrapped-project", overdue)
+
+        # Before: both are active, both overdue, both on the timeline.
+        _, portfolio = _get_json(base_url, "/api/portfolio")
+        by_name = {p["name"]: p for p in portfolio["projects"]}
+        assert by_name["wrapped-project"]["lifecycle"] == "active"
+        assert by_name["wrapped-project"]["next_due"]["state"] == "overdue"
+        _, sched = _get_json(base_url, "/api/scheduling")
+        assert sched["summary"]["overdue"] == 2
+
+        status, body = _set_lifecycle(base_url, "wrapped-project", "past")
+        assert status == 200
+        assert body == {"name": "wrapped-project", "lifecycle": "past"}
+
+        # Home: past, with every urgency fact zeroed. The live project is unchanged.
+        _, portfolio = _get_json(base_url, "/api/portfolio")
+        by_name = {p["name"]: p for p in portfolio["projects"]}
+        wrapped = by_name["wrapped-project"]
+        assert wrapped["lifecycle"] == "past"
+        assert wrapped["next_due"] is None
+        assert wrapped["at_risk"] == 0 and wrapped["slipping"] == 0
+        assert by_name["live-project"]["lifecycle"] == "active"
+        assert by_name["live-project"]["next_due"]["state"] == "overdue"
+
+        # Project page: badged past, no NEXT DUE.
+        _, detail = _get_json(base_url, "/api/projects/wrapped-project")
+        assert detail["lifecycle"] == "past"
+        assert detail["stats"]["next_due"] is None
+
+        # Scheduling: gone from the buckets and from the summary count.
+        _, sched = _get_json(base_url, "/api/scheduling")
+        sources = {r["source"]["name"] for b in sched["buckets"].values() for r in b}
+        assert sources == {"live-project"}
+        assert sched["summary"]["overdue"] == 1
+
+        # Reversible: flipping back restores every derivation.
+        assert _set_lifecycle(base_url, "wrapped-project", "active")[0] == 200
+        _, sched = _get_json(base_url, "/api/scheduling")
+        assert sched["summary"]["overdue"] == 2
+
+
+def test_lifecycle_mutation_validates_its_value_and_the_project_universe(tmp_path):
+    """A bad value is a 400; a typo'd project is a 404 that writes nothing.
+
+    Why this matters: the same phantom guard the visibility route has. relay_project_meta
+    rows are upserted with no existence check and never deleted, so accepting an arbitrary
+    name here would write a lifecycle row for a project that does not exist.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _push_checklist(base_url, "real-project", [{"text": "A", "done": False}])
+
+        status, body = _set_lifecycle(base_url, "real-project", "archived")
+        assert status == 400 and "lifecycle" in body["error"]
+
+        status, body = _set_lifecycle(base_url, "typo-project", "past")
+        assert status == 404 and "typo-project" in body["error"]
+
+        # Nothing was written for the phantom, and the real project is still active.
+        conn = open_relay_store(db)
+        assert get_project_lifecycle(conn, "typo-project") == "active"
+        assert get_project_lifecycle(conn, "real-project") == "active"
+        conn.close()
+
+
+def test_lifecycle_mutation_is_admin_token_gated(tmp_path):
+    """Neither an anonymous caller nor the ingest token may mark a project past.
+
+    Why this matters: lifecycle is a CURATION act on the org's view of its own work, so it
+    belongs to the separately-held admin credential — the same boundary every other
+    provisioning route sits behind. A producer's ingest token must never reach it, which is
+    what keeps "no producer path for the flag" true at the wire, not just by convention.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _push_checklist(base_url, "real-project", [{"text": "A", "done": False}])
+        payload = {"name": "real-project", "lifecycle": "past"}
+
+        assert _admin_post(base_url, "/api/projects/lifecycle", payload, token=None)[0] == 401
+        assert _admin_post(base_url, "/api/projects/lifecycle", payload, token=_TOKEN)[0] == 401
+
+        conn = open_relay_store(db)
+        assert get_project_lifecycle(conn, "real-project") == "active"
+        conn.close()
+
+
+def test_lifecycle_changes_write_an_audit_row(tmp_path):
+    """Marking a project past appends an admin-audit row naming the project and the value.
+
+    Why this matters: lifecycle changes what the whole org sees on the dashboard, so "who
+    decided this project was finished" has to be answerable later.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _push_checklist(base_url, "real-project", [{"text": "A", "done": False}])
+        _set_lifecycle(base_url, "real-project", "past")
+
+        conn = open_relay_store(db)
+        rows = conn.execute(
+            "SELECT actor, action, target_user, role FROM relay_admin_audit ORDER BY id"
+        ).fetchall()
+        conn.close()
+        # The generic `role` column carries the action's value, exactly as the visibility
+        # route uses it — the audit table is deliberately one shape for every admin act.
+        assert [(r["actor"], r["action"], r["target_user"], r["role"]) for r in rows] == [
+            ("admin-token", "set_project_lifecycle", "real-project", "past")
+        ]
 
 
 def test_viewer_and_supervisor_scope_is_unchanged_by_visibility(tmp_path):

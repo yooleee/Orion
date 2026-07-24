@@ -230,9 +230,10 @@ export interface ProjectDisciplines {
 export interface ProjectDetail {
   name: string;
   kind: ProjectKind;
-  description: string | null; // null in 4a (gap 5)
-  // KB surface (Unit 2): the observed "About" line under the title, or null when unset. A
-  // DISTINCT field from `description` above (which stays the unfilled gap).
+  // KB surface (Unit 2): the observed "About" line under the title, or null when unset —
+  // mechanically observed from the project's doc, not an authored blurb. (The always-null
+  // `description` gap-5 field retired in DR1-R U3; ShowcaseCard.description is a separate,
+  // real field and is unaffected.)
   about: string | null;
   stats: ProjectStats;
   milestones: Milestone[];

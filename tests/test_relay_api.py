@@ -280,6 +280,58 @@ def test_portfolio_project_row_carries_about_when_set():
     assert out["projects"][0]["about"] == "Orion turns activity into progress updates."
 
 
+# --- _headline: Markdown flattening in report titles (KI-42) -----------------
+
+
+def test_headline_flattens_markdown_notation_in_titles():
+    """A report title (the body's first line) is flattened so raw Markdown never shows.
+
+    Why: the title is observed from a Markdown body and rendered as plain text on the
+    timeline and report page, so emphasis/heading/link/code markers are rendering artifacts,
+    not the author's words. Flattening drops the notation while keeping the wording exact.
+    """
+    # Inline emphasis markers are removed, the words kept.
+    assert api._headline("**Shipped** the parser") == "Shipped the parser"
+    # A leading ATX heading marker is stripped (About skips heading LINES upstream; a title
+    # is one already-chosen line, so it is stripped here).
+    assert api._headline("## Week 3 update") == "Week 3 update"
+    # A link reduces to its text; inline code drops its backticks.
+    assert api._headline("[docs](https://x) and `make build`") == "docs and make build"
+
+
+def test_headline_leaves_snake_case_and_single_marks_intact():
+    """Conservative flattening: single `_`/`*` survive so identifiers and math are unmangled.
+
+    Why: single-underscore/asterisk are ambiguous (they appear in `snake_case`, file globs,
+    and multiplication), so — mirroring the About collector — only the unambiguous `**`/`***`/
+    `` ` ``/heading/link/image constructs are touched.
+    """
+    assert api._headline("Refactored parse_report_body and a*b math") == (
+        "Refactored parse_report_body and a*b math"
+    )
+
+
+def test_headline_skips_a_pure_markup_first_line():
+    """A first line that is ONLY markup flattens to empty, so the next real line wins.
+
+    Why: a body opening with a bare image/badge line would otherwise yield a blank title;
+    skipping it keeps the title honest (the first line with actual words).
+    """
+    assert api._headline("![banner](img.png)\nReal progress this week") == (
+        "Real progress this week"
+    )
+
+
+def test_headline_truncates_on_the_visible_length_after_flattening():
+    """Flattening happens BEFORE truncation, so the cap counts visible characters, not markers.
+
+    Why: a bolded long title should truncate to `limit` visible chars + "…", not waste the
+    budget on `**` markers that never render.
+    """
+    out = api._headline("**" + "x" * 150 + "**")
+    assert out == "x" * 100 + "…"  # _HEADLINE_MAX_CHARS visible chars, then the ellipsis
+
+
 def test_portfolio_tracker_row_carries_segments_and_ordered_chips():
     """A tracker row adds the segmented-bar buckets and overdue-first at-risk chips."""
     out = api.serialize_portfolio([_tracker_row()], None, _TODAY)
@@ -375,7 +427,7 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
         today=_TODAY,
     )
     assert out["name"] == "orion" and out["kind"] == "project"
-    assert out["description"] is None  # gap 5
+    assert "description" not in out  # the always-null gap-5 field retired in DR1-R U3
     assert out["about"] is None  # KB Unit 2: no About passed → the band is absent
     assert out["stats"]["progress"] == {"done": 1, "total": 3, "pct": 33}
     assert out["stats"]["reports_count"] == 1
@@ -422,11 +474,11 @@ def test_project_detail_assembles_stats_milestones_checklist_reports_discussions
 
 
 def test_project_detail_carries_about_when_passed():
-    """serialize_project surfaces the About line under a distinct `about` key (Unit 2).
+    """serialize_project surfaces the About line under its own `about` key (Unit 2).
 
-    Why this matters: the project page renders About under the title, from a field DISTINCT
-    from the always-null `description` gap. Passing about must populate `about` (not
-    `description`), so the two concepts stay separate on the wire.
+    Why this matters: the project page renders About under the title. Passing about must
+    populate `about` on the wire (and nothing else) — the retired `description` field must
+    not reappear, so About stays the single observed-blurb concept.
     """
     out = api.serialize_project(
         name="orion",
@@ -441,7 +493,7 @@ def test_project_detail_carries_about_when_passed():
         about="Orion turns activity into progress updates.",
     )
     assert out["about"] == "Orion turns activity into progress updates."
-    assert out["description"] is None  # unchanged: About did not leak into the gap field
+    assert "description" not in out  # the retired gap-5 field must not reappear
 
 
 def test_project_detail_milestone_slipping_count_counts_open_slips():

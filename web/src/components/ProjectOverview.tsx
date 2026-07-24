@@ -57,10 +57,8 @@ export function ProjectOverview({
         <div className="detail-headline">
           <h1 className="page-title">{data.name}</h1>
           {/* KB surface (Unit 2): the About line under the title — what the project IS,
-              observed from its doc. Reuses the page-sub style; a DISTINCT field from
-              `description` (the still-unfilled gap 5, below). */}
+              observed from its doc, in the page-sub style. */}
           {data.about && <p className="page-sub">{data.about}</p>}
-          {data.description && <p className="page-sub">{data.description}</p>}
         </div>
         <div className="stat-blocks">
           <div className="stat">

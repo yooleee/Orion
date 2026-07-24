@@ -173,7 +173,6 @@ Everything observed about one project. `404` when missing or out of scope.
 {
   "name": "orion",
   "kind": "project",
-  "description": null,
   "stats": {
     "progress": { "done": 6, "total": 15, "pct": 40 },
     "next_due": { "due_date": "2026-06-29", "state": "due_soon" },
@@ -510,7 +509,10 @@ backend scope). Each is shown above with its 4a value.
    `role: null`. Closing it needs richer participants on the blob.
 4. **Report / project `source_tags`** ("git history · checklist · session") — the relay does not store the
    originating collector set. 4a ships `source_tags: []`. Closing it needs `collectors` on the blob.
-5. **Project `description`** — none stored. 4a ships `description: null`.
+5. **Project `description`** — **RETIRED** (DR1-R U3). The always-null gap-5 field was removed from
+   the `ProjectDetail` contract rather than filled: the observed About line (`about`) covers the
+   concept, and an authored project blurb, if ever wanted, is an additive re-add. (The separate,
+   populated `ShowcaseCard.description` is unaffected.)
 6. **Report `title`** — no separate title field. 4a uses the first section title, else the body headline.
 7. **Conversation author `role`** — **CLOSED** (E2 Inc 5 + KI-28 Stage 2). The one conversation surface
    is now the discussion thread, whose `discussions[]` (on `GET /api/projects/:name`) and

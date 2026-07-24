@@ -1567,35 +1567,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
             would silently change who can log in), so the UNIQUE(name) collision is
             surfaced as a 409, not a clobber.
         """
-        # 1) Admin auth FIRST — validate nothing until authorized; only the admin token
-        # passes (the ingest token does not), and a missing admin config is refused.
-        auth_error = self._auth_admin_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
+        # 1-2) Admin auth + read a 1 MB JSON-object body with a validated non-empty `name`,
+        # via the shared helper — the SAME front matter (and ordering) the other admin-write
+        # handlers use, so create can't drift from them.
+        got = self._admin_read_named()
+        if got is None:
             return
+        payload, name = got
 
-        # 2) Read + JSON-parse the body (1 MB cap inside _read_raw_body).
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-        if not isinstance(payload, dict):
-            self._send_json(400, {"error": "payload must be a JSON object"})
-            return
-
-        # 3) Validate. name required non-empty; role allowlisted; projects a list of str.
-        name = payload.get("name")
-        if not isinstance(name, str) or not name.strip():
-            self._send_json(400, {"error": "field 'name' must be a non-empty string"})
-            return
-        name = name.strip()
+        # 3) Validate the remaining fields. role allowlisted; projects a list of str.
         role = payload.get("role", "viewer")
         if role not in _PROVISIONABLE_ROLES:
             self._send_json(
@@ -1748,29 +1728,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             logins are denied and any cookie already in a browser stops working on its
             next request — instant, stateless force-logout. Audited like creation.
         """
-        auth_error = self._auth_admin_error()
-        if auth_error is not None:
-            self._send_json(
-                401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
-            )
+        # Admin auth + a JSON-object body with a validated non-empty `name` — the same shared
+        # front matter as the grant/rotate/delete handlers. revoke needs only the name.
+        got = self._admin_read_named()
+        if got is None:
             return
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
-            return
-        if not isinstance(payload, dict):
-            self._send_json(400, {"error": "payload must be a JSON object"})
-            return
-        name = payload.get("name")
-        if not isinstance(name, str) or not name.strip():
-            self._send_json(400, {"error": "field 'name' must be a non-empty string"})
-            return
-        name = name.strip()
+        _payload, name = got
         conn = open_relay_store(self.server.db_path)
         try:
             user = get_user_by_name(conn, name)
@@ -1795,9 +1758,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         Why:
             The grant/rotate/delete handlers share the exact same front matter as revoke
-            (admin token → 1 MB JSON object → a non-empty `name`). Factoring it here keeps the
-            three new handlers to just their own action, and keeps that security ordering in ONE
-            place so it can't drift between them. (create/revoke predate this and still inline it.)
+            (admin token → 1 MB JSON object → a non-empty `name`). Factoring it here keeps each
+            handler to just its own action, and keeps that security ordering in ONE place so it
+            can't drift between them. (create/revoke predated this and inlined the same block;
+            DR1-R U3 folded them in too, so every admin-write handler now shares this one gate.)
         """
         auth_error = self._auth_admin_error()
         if auth_error is not None:

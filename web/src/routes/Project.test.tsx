@@ -69,7 +69,6 @@ function detail(
   return {
     name: "demo",
     kind: "project",
-    description: null,
     about: null,
     stats: { progress: { done: 0, total: 0, pct: null }, next_due: null, reports_count: 0 },
     milestones: [],
@@ -167,7 +166,7 @@ describe("Project — Working agreements", () => {
 });
 
 // KB surface (Unit 2): the About line under the project title — what the project IS,
-// observed from its doc. A DISTINCT field from `description` (the still-null gap 5).
+// observed from its doc. (The old always-null `description` gap field retired in DR1-R U3.)
 describe("Project — About band", () => {
   it("renders the About line under the title when present", async () => {
     const d = detail([]);
@@ -186,7 +185,7 @@ describe("Project — About band", () => {
     const { container } = renderProject();
 
     await screen.findByRole("heading", { name: "demo" });
-    // No page-sub renders — neither About nor the (also-null) description gap.
+    // No page-sub renders when the project set no About line.
     expect(container.querySelector(".page-sub")).toBeNull();
   });
 });

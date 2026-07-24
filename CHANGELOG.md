@@ -14,6 +14,45 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## DR1-R — presentation-debt paydown (2026-07-24)
+
+DR1's *targeted refactor* verdict, paid down in three units (one PR each) — no architecture
+change, no new features. See `plans/orion-plan.md` (rows DR1, DR1-R) for the review evidence.
+
+### Fixed
+
+- **KI-42 — raw Markdown reached report titles.** A report's title is its body's first line,
+  which is Markdown, so a title like `**Shipped** the parser` or `## Week 3` showed its literal
+  `**`/`##` markers on the timeline and report page. `relay/api.py:_headline` now flattens the
+  chosen line first (strip a leading ATX heading marker, then drop inline emphasis / link / code
+  / image notation), mirroring the About collector's conservative rules — single `_`/`*` are left
+  intact so `snake_case`, file globs and math survive. Kept relay-local (a handful of regexes)
+  rather than importing the collector, so the separately-deployed relay stays import-free of
+  `src/orion`.
+
+### Removed
+
+- **The always-null `ProjectDetail.description` field (contract gap 5).** The relay always sent
+  `description: null` and the SPA's only consumer was a never-true conditional. Removed from the
+  serializer, `types.ts`, the shared `ProjectOverview`, the demo fixture, and the API contract
+  doc. The observed About line (`about`) covers the concept; an authored blurb, if ever wanted, is
+  an additive re-add. (The separate, populated `ShowcaseCard.description` is unaffected.)
+
+### Changed
+
+- **The Showcase demo no longer forks the project page.** The presentational project overview was
+  extracted into `web/src/components/ProjectOverview.tsx` and is rendered by both the real route
+  and the public demo (via a `linkMode` seam), so the demo can't drift from the real page. The
+  demo caught up to the post-KI-34 IA (expandable milestone groups, no flat "Live checklist");
+  `MilestoneCard` was deleted at parity, its `milestoneSignals` rule folded into `MilestoneGroup`.
+- **Primary nav de-duplicated.** A single `NAV_ENTRIES` source in `navState.ts`, plus a shared
+  secondary block (`AccountCard` / `ShowcaseLink`), replace the near-verbatim copies across
+  `Sidebar` and `BottomTabBar`; `navActive()` now derives from that list. A new top-level section
+  costs a route + one entry.
+- **Admin write handlers share one gate.** `create` and `revoke` now use the `_admin_read_named`
+  front-matter helper (admin auth → JSON body → validated `name`) that the other 11 admin-write
+  handlers already used — behavior identical.
+
 ## DF1 dogfood sweep — producer-path fixes (2026-07-21)
 
 Findings from the **DF1 progressive-dogfood sweep** (`plans/orion-plan.md`, row DF1): working

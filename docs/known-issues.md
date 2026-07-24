@@ -734,6 +734,13 @@ Deferred).
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 
+- **KI-42** — Report titles showed raw Markdown: a title is the report body's first line, which is
+  Markdown, so `**bold**` or `## heading` reached the timeline and report page verbatim (filed in the
+  DR1 review). **Resolved 2026-07-24** (DR1-R U3) by flattening the chosen line in
+  `relay/api.py:_headline` — strip a leading ATX heading marker + inline emphasis/link/code/image
+  marks, leaving single `_`/`*` so `snake_case` survives. Kept relay-local (a few regexes) so the
+  separately-deployed relay stays import-free of `src/orion`. See CHANGELOG →
+  *"DR1-R — presentation-debt paydown"*.
 - **KI-39** — `orion report` aborted with `Unknown collector 'disciplines'` for any project that
   enabled the `disciplines` capability, because `collectors` conflated report collectors (which have
   a `_collect_for` branch) with push-only capability flags (which deliberately do not). Total

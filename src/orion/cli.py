@@ -78,6 +78,7 @@ from orion.delivery.relay import (
     add_user_key as relay_add_user_key,
     list_user_keys as relay_list_user_keys,
     rename_user as relay_rename_user,
+    set_project_lifecycle as relay_set_project_lifecycle,
     set_project_visibility as relay_set_project_visibility,
     set_user_operator as relay_set_user_operator,
     revoke_user_key as relay_revoke_user_key,
@@ -1158,7 +1159,10 @@ def main(argv: list[str] | None = None) -> int:
     # not an account — mixing them would make `relay-user visibility` read as a user setting.
     relay_project_parser = subparsers.add_parser(
         "relay-project",
-        help="Manage relay project settings: who inside the org may read a project.",
+        help=(
+            "Manage relay project settings: who inside the org may read a project, and "
+            "whether it is still running or finished."
+        ),
     )
     relay_project_subs = relay_project_parser.add_subparsers(
         dest="relay_project_command", required=True
@@ -1178,6 +1182,28 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     rp_visibility.add_argument(
+        "--config", default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+    # S2.2: a project's lifecycle is DECLARED here, on the relay, and never pushed by a
+    # producer — the relay has to keep remembering it after the project leaves orion.toml.
+    rp_lifecycle = relay_project_subs.add_parser(
+        "lifecycle",
+        help="Mark a project finished (past) or still running (active).",
+    )
+    rp_lifecycle.add_argument("name", help="The project to set.")
+    rp_lifecycle.add_argument(
+        "lifecycle",
+        choices=("past", "active"),
+        help=(
+            "'past': the project is finished — it groups into the dashboard's 'Past "
+            "projects' section and drops out of every deadline view (due-soon, at-risk, "
+            "slipping, Scheduling), so it can never read as overdue. 'active' (the default "
+            "every project is born with): the normal live state. Fully reversible."
+        ),
+    )
+    rp_lifecycle.add_argument(
         "--config", default=default_config,
         help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
     )
@@ -1329,6 +1355,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.relay_project_command == "visibility":
             return cmd_relay_project_visibility(
                 args.name, args.visibility, Path(args.config)
+            )
+        if args.relay_project_command == "lifecycle":
+            return cmd_relay_project_lifecycle(
+                args.name, args.lifecycle, Path(args.config)
             )
     return 1  # Unreachable: subparsers are required.
 
@@ -4889,6 +4919,49 @@ def cmd_relay_project_visibility(name: str, visibility: str, config_path: Path) 
     else:
         print(f"{name!r} is now restricted: only accounts granted it can read it.")
     print("  Viewers and supervisors are unaffected — they always see only their grants.")
+    return 0
+
+
+def cmd_relay_project_lifecycle(name: str, lifecycle: str, config_path: Path) -> int:
+    """Mark a project finished or still running (`relay-project lifecycle`).
+
+    Args:
+        name: The project to set.
+        lifecycle: "past" (finished) or "active" (still running).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success; 1 on a config/secrets error or a failed request (an unknown
+        project → the relay's 404).
+
+    Why:
+        The KB's curation act (S2.2): a project is finished because someone SAYS so, never
+        because it went quiet — quiet is not finished, and inferring it would let a paused
+        project read as shipped. The flag lives on the relay (not in orion.toml) so the
+        dashboard keeps remembering after the project stops being produced, which is why
+        this is an admin command rather than something a producer pushes.
+
+        Nothing about the project's record changes — reports, checklist, About and
+        discussions all stay exactly as they are. What changes is how the dashboard frames
+        it, and that a finished project stops being read as if it still had deadlines.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        relay_set_project_lifecycle(relay_url, admin_token, name, lifecycle)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if lifecycle == "past":
+        print(f"{name!r} is now marked past: finished, and framed as history.")
+        print("  It groups into the dashboard's 'Past projects' section.")
+        print(
+            "  It is excluded from every deadline view — due-soon, at-risk, slipping and "
+            "Scheduling — so it can never read as overdue."
+        )
+        print("  Its full record (reports, checklist, About, discussion) is unchanged.")
+    else:
+        print(f"{name!r} is active again: back in the live sections, deadlines and all.")
     return 0
 
 

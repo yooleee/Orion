@@ -66,9 +66,11 @@ from .store import (
     get_active_password_credential,
     get_credential_by_key_verifier,
     VISIBILITIES,
+    LIFECYCLES,
     get_about,
     get_due_soon_days,
     get_project_kind,
+    get_project_lifecycle,
     get_project_visibility,
     get_user_by_id,
     get_user_by_name,
@@ -96,6 +98,7 @@ from .store import (
     org_visible_projects,
     project_exists,
     set_project_kind,
+    set_project_lifecycle,
     set_project_visibility,
     touch_credential,
     update_last_login,
@@ -968,6 +971,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/projects/visibility":
             self._handle_set_project_visibility()
+            return
+        if path == "/api/projects/lifecycle":
+            self._handle_set_project_lifecycle()
             return
 
         # E2 Inc 4: the SPA's JSON auth siblings (the cookie-session login / logout).
@@ -2196,6 +2202,57 @@ class _RelayHandler(BaseHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"name": name, "visibility": visibility})
 
+    def _handle_set_project_lifecycle(self) -> None:
+        """Set a project's lifecycle (POST /api/projects/lifecycle).
+
+        Body: name (required, the PROJECT), lifecycle (required, 'active' | 'past').
+        Admin-token gated; 404 unknown project; 400 bad lifecycle; 200 {name, lifecycle}.
+
+        Why:
+            The KB's curation act (S2.2): marking a project past groups it out of the live
+            dashboard sections and removes it from every deadline derivation. It is DECLARED
+            here rather than pushed by a producer — the relay must keep the answer after a
+            project leaves `orion.toml` — and it is admin-token gated like the rest of the
+            provisioning surface, so a cookie session (even an admin's) cannot reach it.
+
+            Curating a project's STATE is not authoring its content, so observe-don't-originate
+            is untouched: nothing about the project's record changes, only how the dashboard
+            frames it. The act is fully reversible ('active' restores every derivation).
+
+            The project is validated against the CANONICAL UNIVERSE (a real report or a live
+            checklist) for exactly the reason the visibility route is: a typo'd name would
+            otherwise write a meta row for a project that does not exist, and a phantom in
+            that table is a project name a later reader could surface.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        lifecycle = payload.get("lifecycle")
+        if lifecycle not in LIFECYCLES:
+            self._send_json(
+                400, {"error": f"field 'lifecycle' must be one of {list(LIFECYCLES)}"}
+            )
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            if not project_exists(conn, name):
+                self._send_json(404, {"error": f"no project named {name!r}"})
+                return
+            set_project_lifecycle(conn, name, lifecycle)
+            record_admin_audit(
+                conn,
+                _ADMIN_ACTOR,
+                "set_project_lifecycle",
+                name,
+                lifecycle,
+                [],
+                _utc_now_iso(),
+            )
+        finally:
+            conn.close()
+        self._send_json(200, {"name": name, "lifecycle": lifecycle})
+
     def _handle_set_user_operator(self) -> None:
         """Repoint an agent account at a different operating human (set-operator).
 
@@ -2942,6 +2999,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         # KB surface (Unit 2): the project's About line under the title,
                         # or None ⇒ no band.
                         about=get_about(conn, name),
+                        # S2.2: active | past. Drives the header badge and suppresses the
+                        # page's NEXT DUE — a finished project has no forward look.
+                        lifecycle=get_project_lifecycle(conn, name),
                     ),
                 )
                 return
@@ -2982,6 +3042,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                     {
                         "name": r["project"],
                         "kind": r["kind"],
+                        # S2.2: the serializer skips past projects entirely — a finished
+                        # project's leftover deadlines have no place on a forward timeline.
+                        # The flag rides the portfolio row's existing meta LEFT JOIN.
+                        "lifecycle": r["lifecycle"],
                         "items": effective_checklist(conn, r["project"]),
                         "observations": observed_history(conn, r["project"]),
                         # E1.2: the Scheduling timeline deliberately does NOT take a per-project

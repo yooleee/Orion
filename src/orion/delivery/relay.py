@@ -808,6 +808,33 @@ def set_project_visibility(
     )
 
 
+def set_project_lifecycle(
+    relay_url: str, admin_token: str, name: str, lifecycle: str, *, timeout: float = 10.0
+) -> dict:
+    """Set a project's lifecycle, for `relay-project lifecycle` (S2.2).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The project to set.
+        lifecycle: "past" (finished — grouped away and excluded from deadline views) or
+            "active" (the default state every project is born in).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "lifecycle"}.
+
+    Why:
+        The KB's curation act, and the exact sibling of set_project_visibility — a project's
+        state is admin-declared on the relay, never pushed by a producer, because the relay
+        must keep the answer after the project leaves the local config.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/projects/lifecycle")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "lifecycle": lifecycle}, timeout
+    )
+
+
 def delete_user(
     relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
 ) -> dict:

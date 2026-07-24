@@ -3191,6 +3191,80 @@ def test_relay_user_works_with_relay_only_config_no_projects(tmp_path, monkeypat
     assert seen == ["https://relay.test/ingest"]
 
 
+# --- S2.2: `relay-project lifecycle` ------------------------------------------
+
+
+def test_relay_project_lifecycle_past_calls_the_client_and_says_what_changes(
+    tmp_path, monkeypatch, capsys
+):
+    """`relay-project lifecycle <name> past` threads the value and explains the consequences.
+
+    Why this matters: this is a curation act with real, non-obvious effects — the project
+    leaves the live sections AND drops out of every deadline view — while its record is
+    untouched. An operator running it once, months apart, should not have to remember which
+    of those it does, so the command says so at the moment it takes effect.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_set_project_lifecycle",
+        lambda url, token, name, lifecycle: calls.append((url, token, name, lifecycle))
+        or {"name": name, "lifecycle": lifecycle},
+    )
+    code = cli.main(["relay-project", "lifecycle", "demo", "past", "--config", str(toml)])
+
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "demo", "past")]
+    out = capsys.readouterr().out
+    assert "past" in out and "Past projects" in out
+    assert "overdue" in out          # names the deadline exclusion
+    assert "unchanged" in out        # and that the record survives
+
+
+def test_relay_project_lifecycle_active_reads_as_the_reverse(tmp_path, monkeypatch, capsys):
+    """Setting `active` reports the project back in the live view — the act is reversible."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli, "relay_set_project_lifecycle", lambda *a: {"name": "demo", "lifecycle": "active"}
+    )
+    code = cli.main(["relay-project", "lifecycle", "demo", "active", "--config", str(toml)])
+    assert code == 0
+    assert "active again" in capsys.readouterr().out
+
+
+def test_relay_project_lifecycle_reports_a_relay_failure_as_exit_1(
+    tmp_path, monkeypatch, capsys
+):
+    """An unknown project (the relay's 404 → DeliveryError) exits 1 with the message.
+
+    Why this matters: the relay refuses a project it has never heard of, and a silent exit 0
+    would let an operator believe a typo'd name was marked past.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    from orion.delivery import DeliveryError
+
+    def _boom(*a):
+        raise DeliveryError("relay returned 404: no project named 'typo'")
+
+    monkeypatch.setattr(cli, "relay_set_project_lifecycle", _boom)
+    code = cli.main(["relay-project", "lifecycle", "typo", "past", "--config", str(toml)])
+    assert code == 1
+    assert "404" in capsys.readouterr().err
+
+
 def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys):
     """With $ORION_CONFIG set and --config omitted, commands resolve the env-pointed config.
 

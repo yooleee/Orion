@@ -14,6 +14,37 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## S2.2 — KB surface Increment 2: past projects (2026-07-24)
+
+Finished projects become a first-class state instead of sitting in the live view forever,
+reading as overdue. A project is **past because an admin says so**, never because it went
+quiet — quiet is not finished. See `plans/orion-plan.md` (row S2.2) and
+`docs/dr1-refactor-and-kb-inc2-kickoff.md`.
+
+### Added
+
+- **`orion relay-project lifecycle <project> past|active`** — the declaring act. Admin-token
+  gated (a producer has no path to it) and audited, mirroring `relay-project visibility` end
+  to end. Fully reversible.
+- **`relay_project_meta.lifecycle`**, a nullable additive column. NULL and a missing meta row
+  both read `"active"`: absence must mean *still running*, or deploying the column would sweep
+  every existing project into the past section at once.
+- **`lifecycle` on the wire** — on each portfolio entry and on `ProjectDetail`.
+
+### Changed
+
+- **A past project ships no forward-looking urgency**, suppressed in the serializers rather
+  than the SPA so no consumer can reconstruct it: `at_risk` / `slipping` zeroed and `next_due`
+  nulled on the portfolio row, `stats.next_due` nulled on the project page, a past tracker's
+  at-risk chips emptied and its bar's overdue/due-soon segments folded into `remaining`.
+  `serialize_scheduling` skips past projects entirely, buckets and summary alike.
+- **The suppression deliberately stops at page level.** Milestone roll-ups and per-item rows
+  keep their real dates and states — that is the record of what happened, and it sits behind a
+  collapsed group rather than in a headline. So no headline read ever says overdue, while an
+  expanded milestone on a past project can still show its historical at-risk state.
+- **Nothing about a project's record changes when it is marked past** — reports, checklist,
+  About, discussions, progress and last-activity all stay exactly as they were.
+
 ## DR1-R — presentation-debt paydown (2026-07-24)
 
 DR1's *targeted refactor* verdict, paid down in three units (one PR each) — no architecture

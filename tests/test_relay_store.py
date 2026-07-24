@@ -37,6 +37,7 @@ from relay.store import (
     get_about,
     get_due_soon_days,
     get_project_kind,
+    get_project_lifecycle,
     get_user_by_id,
     get_user_by_name,
     history,
@@ -64,6 +65,7 @@ from relay.store import (
     set_about,
     set_due_soon_days,
     set_project_kind,
+    set_project_lifecycle,
     update_last_login,
     upsert_checklist,
     upsert_producer_checklist,
@@ -991,6 +993,88 @@ def test_org_visible_projects_never_surfaces_a_phantom(tmp_path):
     # project_exists agrees, and is what the mutation validates against.
     assert project_exists(conn, "real") is True
     assert project_exists(conn, "ghost") is False
+
+
+# --- S2.2: project lifecycle (active vs. past) ----------------------------------------
+
+
+def test_project_lifecycle_defaults_to_active_in_every_absent_case(tmp_path):
+    """A missing meta row, a NULL column, and an explicit 'active' all read 'active'.
+
+    Why this matters: absence must mean ACTIVE. Every project that predates the column has a
+    NULL there, and many have no meta row at all — if absence read as 'past', deploying this
+    column would sweep the entire dashboard into the collapsed "Past projects" drawer. Only a
+    deliberate act moves a project out of the live view.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    # No meta row at all.
+    assert get_project_lifecycle(conn, "never-touched") == "active"
+    # A meta row that exists for another reason (kind), leaving lifecycle NULL.
+    set_project_kind(conn, "demo", "tracker")
+    assert get_project_lifecycle(conn, "demo") == "active"
+    # And an explicit active.
+    set_project_lifecycle(conn, "demo", "active")
+    assert get_project_lifecycle(conn, "demo") == "active"
+
+
+def test_marking_a_project_past_round_trips_and_is_reversible(tmp_path):
+    """past → active → past, each read back exactly.
+
+    Why this matters: the flag is a curation call a human makes, so a mistaken flip must cost
+    one command to undo, not a data repair. Pinning reversibility here keeps any future
+    "past is terminal" shortcut from slipping in unnoticed.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_project_lifecycle(conn, "demo", "past")
+    assert get_project_lifecycle(conn, "demo") == "past"
+    set_project_lifecycle(conn, "demo", "active")
+    assert get_project_lifecycle(conn, "demo") == "active"
+    set_project_lifecycle(conn, "demo", "past")
+    assert get_project_lifecycle(conn, "demo") == "past"
+
+
+def test_setting_lifecycle_leaves_the_other_project_meta_knobs_alone(tmp_path):
+    """Lifecycle upserts touch only their own column — kind, horizon, About, visibility survive.
+
+    The meta row now holds five knobs written independently by different carriers (two of
+    them producer pushes). Marking a project past is an admin act on a row a producer also
+    writes, so it must not reset anything the producer set.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    set_project_kind(conn, "demo", "tracker")
+    set_due_soon_days(conn, "demo", 14)
+    set_about(conn, "demo", "A small tool.")
+    set_project_visibility(conn, "demo", "org")
+
+    set_project_lifecycle(conn, "demo", "past")
+
+    assert get_project_kind(conn, "demo") == "tracker"
+    assert get_due_soon_days(conn, "demo") == 14
+    assert get_about(conn, "demo") == "A small tool."
+    assert get_project_visibility(conn, "demo") == "org"
+    assert get_project_lifecycle(conn, "demo") == "past"
+
+
+def test_the_portfolio_query_carries_lifecycle_defaulting_to_active(tmp_path):
+    """latest_report_per_project returns 'active' for a project with no meta row, 'past' once set.
+
+    Why this matters: the portfolio row is the ONE place the flag reaches Home and Scheduling
+    (it rides the existing meta LEFT JOIN rather than a per-project lookup), and it is
+    COALESCEd in SQL — so a project that never had a meta row must still come back with a
+    definite "active", not a NULL every caller would have to re-default.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    upsert_checklist(conn, "fresh", _items(("A", False)), "2026-07-01T00:00:00+00:00")
+    upsert_checklist(conn, "wrapped", _items(("B", True)), "2026-07-01T00:00:00+00:00")
+
+    by_name = {r["project"]: r for r in latest_report_per_project(conn)}
+    assert by_name["fresh"]["lifecycle"] == "active"
+    assert by_name["wrapped"]["lifecycle"] == "active"
+
+    set_project_lifecycle(conn, "wrapped", "past")
+    by_name = {r["project"]: r for r in latest_report_per_project(conn)}
+    assert by_name["fresh"]["lifecycle"] == "active"
+    assert by_name["wrapped"]["lifecycle"] == "past"
 
 
 def test_producer_checklists_for_unknown_project_is_empty(tmp_path):

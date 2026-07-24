@@ -39,6 +39,11 @@ from .derive import (
     slipping_item_keys_by_author,
 )
 
+# The lifecycle vocabulary (S2.2). Imported rather than re-declared so the wire value and the
+# stored value can never drift apart — these are plain string constants, so this module stays
+# free of I/O and of any store behaviour.
+from .store import LIFECYCLE_ACTIVE, LIFECYCLE_PAST
+
 
 def _resolve_due_soon_days(value: int | None) -> int:
     """Map a project's stored due-soon horizon (int, or None when unset) to a concrete int.
@@ -384,6 +389,12 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
         next_due, time); a tracker only ADDS the segmented-bar buckets and the chip list.
         Building the common part once and extending it for trackers keeps the two in sync
         and the projects-vs-todos split a single `kind` branch.
+
+        S2.2: a PAST project carries its record (progress, About, headline, last activity)
+        but no forward-looking urgency — at_risk / slipping / next_due are zeroed and a
+        tracker's chip list emptied. Suppressing at the SERIALIZER, not in the SPA, is what
+        makes the guarantee real: no consumer of this payload can reconstruct an "overdue"
+        read of a finished project, because the facts that would say so never leave here.
     """
     done = row["checklist_done"] or 0
     total = row["checklist_total"] or 0
@@ -391,13 +402,18 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
     # it to row["checklist_at_risk"]; we re-apply the SAME value to the item-level derivations
     # below (next_due, segments, chips) so the badge and the detail agree on the window.
     due_soon_days = _resolve_due_soon_days(row.get("due_soon_days"))
+    # S2.2: absence reads as active, matching store.get_project_lifecycle — so a row from a
+    # pre-column DB (or any caller that did not join the meta table) behaves exactly as before.
+    past = row.get("lifecycle") == LIFECYCLE_PAST
     entry = {
         "name": row["project"],
         "kind": row["kind"],
+        # S2.2: 'active' | 'past'. The SPA groups on this; it is a declared fact, not derived.
+        "lifecycle": row.get("lifecycle") or LIFECYCLE_ACTIVE,
         "progress": _progress(done, total),
-        "at_risk": row["checklist_at_risk"] or 0,
-        "slipping": row["checklist_slipping"] or 0,
-        "next_due": _next_due(items, today, due_soon_days),
+        "at_risk": 0 if past else (row["checklist_at_risk"] or 0),
+        "slipping": 0 if past else (row["checklist_slipping"] or 0),
+        "next_due": None if past else _next_due(items, today, due_soon_days),
         # Last activity: a report's time when there is one, else the checklist's receive
         # clock — the same fallback the old portfolio card used.
         "updated_at": row["latest_generated_at"] or row["checklist_updated_at"],
@@ -409,8 +425,21 @@ def _portfolio_entry(row: dict, items: list | None, today: date) -> dict:
     if row["kind"] == "tracker":
         # A general checklist: the segmented bar + the chip list, plus an item count.
         entry["item_count"] = total
-        entry["segments"] = bucket_counts(items, today, due_soon_days)
-        entry["at_risk_items"] = _at_risk_items(items, today, due_soon_days)
+        segments = bucket_counts(items, today, due_soon_days)
+        if past:
+            # The segmented bar colours its overdue/due-soon slices red and amber, so leaving
+            # them populated would let a finished tracker read as overdue through the bar even
+            # with at_risk zeroed. Fold both into `remaining` (open, not urgent): the four
+            # buckets still tile the total and `done` is untouched, so the record survives —
+            # only the urgency CLAIM is dropped, which is the same edit at_risk gets above.
+            segments = {
+                "overdue": 0,
+                "due_soon": 0,
+                "remaining": segments["remaining"] + segments["overdue"] + segments["due_soon"],
+                "done": segments["done"],
+            }
+        entry["segments"] = segments
+        entry["at_risk_items"] = [] if past else _at_risk_items(items, today, due_soon_days)
     else:
         # A software project: the one-line headline from the latest report + its id.
         entry["headline"] = _headline(row["latest_body"]) if row["latest_body"] else ""
@@ -540,9 +569,9 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
 
     Args:
         projects: Scope-FILTERED per-project data, each a dict with "name", "kind",
-            "items" (that project's checklist, or None), and "observations" (its
-            observed_history, for slippage). The server fetches + filters before calling,
-            mirroring serialize_portfolio.
+            "lifecycle" ("active" | "past"; absent reads as active), "items" (that project's
+            checklist, or None), and "observations" (its observed_history, for slippage).
+            The server fetches + filters before calling, mirroring serialize_portfolio.
         today: The reference date (display zone).
 
     Returns:
@@ -560,12 +589,22 @@ def serialize_scheduling(projects: list[dict], today: date) -> dict:
         slippage reuses slipping_item_keys so the count matches the project page. The label
         is `key ?? text` (the clean title with any embedded status stripped), the same rule
         the tracker page uses. No new derivation — this is pure re-aggregation.
+
+        S2.2: PAST projects are skipped entirely. A finished project's leftover deadlines are
+        history, and a timeline is the one surface where they would be loudest ("14 overdue"
+        in the summary, months of red rows). The skip lives HERE rather than in the route so
+        the rule is unit-testable against fixed inputs, and so every future caller of this
+        serializer inherits it instead of having to remember to filter first.
     """
     buckets: dict[str, list] = {"overdue": [], "this_week": [], "later": []}
     summary = {"overdue": 0, "due_this_week": 0, "slipping": 0}
     # _deadline_state's three open-deadline states → the design's three time buckets.
     bucket_of = {OVERDUE: "overdue", "due_soon": "this_week", _UPCOMING: "later"}
     for proj in projects:
+        # Absence reads as active (store.get_project_lifecycle's rule), so a caller that does
+        # not supply the key gets today's behaviour unchanged.
+        if proj.get("lifecycle") == LIFECYCLE_PAST:
+            continue
         items = proj.get("items") or []
         slipping = slipping_item_keys(proj.get("observations") or [], today)
         # E1.2: the Scheduling timeline uses the FIXED default week (_deadline_state's default
@@ -682,6 +721,7 @@ def serialize_project(
     due_soon_days: int | None = None,
     attributions: dict | None = None,
     about: str | None = None,
+    lifecycle: str = LIFECYCLE_ACTIVE,
 ) -> dict:
     """Serialize one project's full detail (/api/projects/:name).
 
@@ -715,6 +755,9 @@ def serialize_project(
             gets today's output unchanged.
         about: The project's About line (store.get_about), or None ⇒ no About band. Rendered
             under the title on the project page (KB surface Unit 2).
+        lifecycle: "active" | "past" (store.get_project_lifecycle). Defaults to "active" so a
+            caller that does not pass it gets today's output unchanged. When "past", the
+            page's forward-looking NEXT DUE is suppressed — see below.
 
     Returns:
         The project-detail shape: stats, milestones, checklist, producer_checklists, reports,
@@ -814,9 +857,20 @@ def serialize_project(
         # project blurb. (The old always-null `description` gap-5 field retired in DR1-R U3;
         # an authored blurb, if ever wanted, is an additive re-add.)
         "about": about,
+        # S2.2: 'active' | 'past' — a declared fact (an admin marked it), never derived from
+        # staleness. The SPA badges the header on 'past'.
+        "lifecycle": lifecycle,
         "stats": {
             "progress": _progress(done, len(items)),
-            "next_due": _next_due(checklist, today, resolved_due_soon_days),
+            # S2.2: a past project has no NEXT DUE — its deadlines are history, not a
+            # forward look. Suppressed at the PAGE level only: the milestone roll-ups and the
+            # per-item rows below keep their real dates and states, because that is the record
+            # of what happened, and it sits behind a collapsed group rather than in a headline.
+            "next_due": (
+                None
+                if lifecycle == LIFECYCLE_PAST
+                else _next_due(checklist, today, resolved_due_soon_days)
+            ),
             "reports_count": len(reports),
         },
         "milestones": milestone_rows,

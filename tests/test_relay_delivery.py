@@ -26,6 +26,7 @@ from orion.delivery.relay import (
     push,
     push_checklist,
     revoke_user,
+    set_project_lifecycle,
 )
 
 
@@ -468,3 +469,35 @@ def test_admin_connection_error_becomes_delivery_error(monkeypatch):
 
     with pytest.raises(DeliveryError):
         list_users("https://relay.test/ingest", "admin-secret")
+
+
+def test_set_project_lifecycle_posts_to_the_derived_admin_route(monkeypatch):
+    """set_project_lifecycle derives /api/projects/lifecycle and sends {name, lifecycle}.
+
+    Why this matters: the configured relay URL is an ".../ingest" URL, so every admin route
+    is derived from it by urljoin — a client that concatenated instead would POST to
+    ".../ingest/api/...". The admin Bearer token (not the ingest token) is what gates this
+    route, so the header is asserted too: lifecycle is a curation act, never a producer push.
+    """
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeReadResponse(
+            json.dumps({"name": "wrapped", "lifecycle": "past"}).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = set_project_lifecycle(
+        "https://relay.test/ingest", "admin-secret", "wrapped", "past"
+    )
+
+    assert captured["url"] == "https://relay.test/api/projects/lifecycle"
+    assert captured["method"] == "POST"
+    assert captured["authorization"] == "Bearer admin-secret"
+    assert captured["body"] == {"name": "wrapped", "lifecycle": "past"}
+    assert result == {"name": "wrapped", "lifecycle": "past"}

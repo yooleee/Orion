@@ -21,6 +21,12 @@ reading as overdue. A project is **past because an admin says so**, never becaus
 quiet — quiet is not finished. See `plans/orion-plan.md` (row S2.2) and
 `docs/dr1-refactor-and-kb-inc2-kickoff.md`.
 
+**Deployed 2026-07-25 (Fly release v26)** and closed out live: the additive migration ran with
+report, account, discussion and checklist counts unchanged and `integrity_check` ok, every
+project read `active` on first read, `sar_hackathon` became the first project marked past, and
+`barebones-ai-village` got its About line through the new About-only push. Close-out record:
+`docs/s22-closeout-kickoff.md` and `docs/plan-deviations.md`.
+
 ### Added
 
 - **`orion relay-project lifecycle <project> past|active`** — the declaring act. Admin-token

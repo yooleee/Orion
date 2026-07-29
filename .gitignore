@@ -91,3 +91,4 @@ SECURITY.md
 # Design-process artifacts: mockup HTML, explorations, and screenshots that render real
 # example names/projects as image text. The shipped product UI lives in web/.
 design/
+docs/paydown-production-floor-kickoff.md

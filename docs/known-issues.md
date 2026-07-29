@@ -404,9 +404,15 @@ Deferred).
   than inventing data, as designed. No change; recorded so the next producer-wire extension
   knows these are still the open three.
 - **Severity:** low
-- **Status:** Partly closed. Gap 8 (item status) closed in the Tracker slice (see below); gaps 3/4/5/7
+- **Status:** Partly closed. Gap 8 (item status) closed in the Tracker slice (see below); gaps 3/4
   remain by-design for 4a (graceful degradation), closed incrementally when the producer wire is next
   extended; tracked against the contract doc's "Data gaps" list.
+- **Update (audit, 2026-07-28): gap 5 is CLOSED — by retirement, not by filling.** DR1-R U3
+  (2026-07-24) removed the always-null `description` from the serializer, `types.ts`, the one
+  never-true `Project.tsx` conditional, and the contract doc: the observed **About** band (S2.1
+  Unit 2) covers the concept, and an *authored* blurb would be a distinct, additive later choice.
+  The DF1 line above predates that removal. Gaps **3** (participant roles) and **4**
+  (`source_tags`) are now the open remainder.
 - **Update (Tracker slice, E2 Inc 4):** gap 8 closed. The producer now ships a first-class semantic
   `status` field (`not_started|in_progress|submitted|closed`) additively (the text embed stays for legacy
   `render.py`/reports), the relay folds `in_progress` into `state` and passes raw `status` through, and the
@@ -692,6 +698,14 @@ Deferred).
   **command overhaul / revamp slice** (with the sibling wording and lifecycle-ergonomics
   findings) rather than a one-off patch, by user decision — the whole `relay-user` surface
   grew additively across three arcs and deserves one considered pass.
+- **Audit (2026-07-28):** re-confirmed live (the `sliptest` grant is still on `macos`, still
+  unremovable), and the fix is now **mapped**: a store `ungrant_projects` (one parameterized
+  DELETE, idempotent), a `POST /api/users/ungrant` route on the existing `_admin_read_named`
+  gate reusing `grant`'s project-list validation and returning the remaining scope, an audit
+  action string, and the CLI verb. **No session invalidation is needed** — scope is re-read
+  from the DB per request (`_allowed_projects`), the same mechanism visibility flips already
+  ride. One semantic to document: ungranting a `member` from an org-visible project changes
+  nothing (the org-visible union re-adds it) — correct, but the CLI should say so.
 
 
 ## KI-41 — Redaction's catch-all matches ordinary prose, so reports go out mangled
@@ -729,6 +743,94 @@ Deferred).
 - **Severity:** low (correctness/UX now, with a slow erosion of the preview control).
 - **Status:** Open. Found 2026-07-21 by the DF1 sweep, on the first `detailed`-share report
   of a real repo. Relates to [[KI-3]] (the same control's false NEGATIVES).
+- **Audit (2026-07-28):** `redact.py` unchanged since filing — both candidate narrowings remain
+  unimplemented and the entry's calibration requirement stands. Structurally both are edits to
+  the one catch-all tuple entry (redact.py:88–109), with `tests/test_redact.py`'s 13 pins as
+  the regression floor and `test_benign_prose_is_not_redacted` as the natural home for a
+  false-positive corpus.
+
+## KI-43 — `graduate-idea` duplicated `add-project`'s flags and has drifted (live functional gap)
+
+- **Detail:** `graduate-idea` was built by copying `add-project`'s argparse flags verbatim
+  (cli.py:616–676 vs 490–581). `add-project` later grew `--tracker-file`, `--incubator-file`,
+  and `--seed-tasks-from`; `graduate-idea` never did. Consequence, verified by tracing:
+  `orion graduate-idea <name> --collectors git,tracker` reaches `render_project_stanza`, which
+  hard-fails with *"enables the 'tracker' collector but no tracker_file was given"*
+  (scaffold.py:246–248) — and the command has **no flag to supply one**. Graduating an idea
+  into a tracker-carrying project is impossible without falling back to `add-project` by hand.
+- **Why it matters:** it is the textbook failure mode of flag duplication — the copies drift,
+  and the drift is invisible until someone walks the untraveled path (found by the 2026-07-28
+  audit's producer-side pass, not by any test or real use). The durable fix is structural, not
+  additive: share the parser via argparse `parents=[...]` so the drift class dies, rather than
+  copying the three missing flags (which would just re-arm it).
+- **Severity:** medium-low (a real broken path on a shipped command, but on a rarely-walked
+  lane — `graduate-idea` has no recorded real use since D-era).
+- **Status:** Open. Found 2026-07-28 (audit). Natural home: the producer-side paydown slice,
+  where the shared-parser fix pairs with the sibling CLI DRY items.
+
+## KI-44 — Relay HTTP server: no socket timeout and unbounded request threads
+
+- **Detail:** `_RelayHandler` never sets a socket `timeout` (BaseHTTPRequestHandler defaults
+  to None) and `_read_raw_body` does a blocking `rfile.read(length)`, so a client that sends
+  headers and then stalls the body holds its thread indefinitely. `ThreadingHTTPServer`
+  spawns one thread per request with no pool or cap. Together: a trivial slowloris-style
+  client can accumulate stuck threads until memory or scheduling degrades the relay. The
+  Argon2 semaphore (S2.0 Unit 3) bounds *hashing* memory but not thread count; Fly's proxy in
+  front softens but does not eliminate the exposure.
+- **Why it matters:** it is a denial-of-service shape, not a disclosure or bypass — same class
+  as [[KI-38]], and like it, the severity rises the moment the relay serves people beyond the
+  operator. Unlike KI-38 it needs no trust-boundary decision to fix: a class-level
+  `timeout = 30` on the handler is a two-line hardening (BaseHTTPRequestHandler honors it),
+  and a bounded-thread server subclass is a small, self-contained follow-on.
+- **Severity:** low-medium (reachable today; cheap to close; no design fork involved).
+- **Status:** Open. Found 2026-07-28 (audit, relay-side pass). The timeout half should ride
+  the next relay-touching slice; the thread cap is optional hardening behind it.
+
+## KI-45 — The web suite, type-check, and build are not in CI
+
+- **Detail:** `.github/workflows/ci.yml` runs `python -m pytest` only — there is no Node
+  setup and no `vitest` / `tsc` / `vite build` step on any trigger. The 88 web tests and the
+  SPA's strict TypeScript run only when someone runs them locally. A web regression can land
+  on `main` with CI green; a TypeScript compile error would surface only when the next
+  `fly deploy` fails mid-Docker-build, which is the latest and worst possible moment.
+- **Why it matters:** the SPA is the product's primary surface and roughly a third of its
+  code. Everything the backend suite enjoys (regressions caught at PR time, a green-suite
+  claim that means what it says) simply does not apply to `web/`. The gap is invisible
+  precisely because local discipline has been good — every recorded slice ran the web suite
+  by hand — but CI exists so the guarantee does not depend on discipline. The fix is one
+  additional CI job (~20 lines: setup-node with cache, `npm ci`, `vitest run`, `tsc -b`,
+  `vite build`), cheap on the Actions quota since it is Linux-only.
+- **Severity:** medium-low (no known regression has shipped through the gap; the gap itself
+  is structural).
+- **Status:** Open. Found 2026-07-29 (AU1 external-lens addendum — the professional-QA
+  re-grade). Natural home: the production-floor half of the paydown/hardening slice.
+
+## KI-46 — No operational floor: backups, health checks, logging, and release provenance are manual or absent
+
+- **Detail:** four related absences on the deployed relay, found together because they are
+  one posture: **(a) backups are manual and per-session** — no schedule, no stated RPO, no
+  offsite copy, no tested restore; the S2.2 close-out's backups did not survive their session,
+  leaving production's newest restore point three days behind the live schema until the AU1
+  audit re-pulled one. **(b) No health checks** — the relay exposes no health endpoint and
+  `fly.toml` defines no `[[http_service.checks]]`, so the platform cannot tell a healthy
+  relay from a wedged one. **(c) No logging** — zero `import logging` across `relay/` and
+  `src/orion/`; output is print-to-stderr, so production failures leave little evidence and
+  no structure to search. **(d) No release provenance** — one git tag in the repo's history,
+  no version identifier queryable from the running service, and `fly deploy` ships the
+  working tree, so "what code is running?" has no authoritative answer after the fact.
+- **Why it matters:** these are the items a release engineer declines to sign off without,
+  and they share a failure mode the code-quality work cannot compensate for: **operational
+  gaps fail silently in production**, not loudly in review. At one operator and five trusted
+  users the operator *is* the monitoring, which has genuinely sufficed — but stage 2 widens
+  the audience by design, and the backup half has already bitten once (the S2.2 loss). Each
+  item is individually cheap: a scheduled pull or volume snapshot + a documented restore, a
+  health endpoint + Fly checks, stdlib `logging` with one formatter, and a tag-on-deploy
+  convention + a version constant on the wire.
+- **Severity:** medium for the backup half (real data, one volume, no drill); low-medium for
+  the rest, rising with audience.
+- **Status:** Open. Found 2026-07-29 (AU1 external-lens addendum). Slotted as the
+  "production floor" band of the proposed paydown/hardening slice. Relates to [[KI-44]]
+  (same posture, server-side) and [[KI-38]] (same audience-widening severity curve).
 
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

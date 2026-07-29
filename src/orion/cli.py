@@ -221,6 +221,114 @@ def _ensure_utf8_output() -> None:
     _reconfigure_stream_utf8(sys.stderr)
 
 
+def _project_registration_parser(default_config: str) -> argparse.ArgumentParser:
+    """Build the parser holding every flag `add-project` and `graduate-idea` share.
+
+    Args:
+        default_config: The config path to show as the `--config` default (resolved in
+            main() from $ORION_CONFIG or DEFAULT_CONFIG).
+
+    Returns:
+        An ArgumentParser with `add_help=False`, meant only to be passed as
+        `parents=[...]` to the two real subparsers — never parsed on its own.
+
+    Why:
+        `graduate-idea` was built by copying `add-project`'s flags. `add-project` then grew
+        `--tracker-file` and `--seed-tasks-from` and the copy did not, which made
+        `graduate-idea --collectors git,tracker` an impossible command: the tracker
+        collector requires a path and there was no flag to supply one (KI-43). Copying the
+        two missing flags across would fix this instance and leave the drift CLASS armed for
+        the next flag. One shared parent means a flag can only be added to both at once.
+
+        `--incubator-file` is deliberately NOT here even though both commands accept it: on
+        `add-project` it names the incubator collector's file for the new project's config,
+        while on `graduate-idea` it names the source index to READ. Same option string, same
+        dest, genuinely different meanings — so each parser declares its own, and argparse
+        would raise "conflicting option string" if this parent tried to own it.
+
+        Note for the later cli.py DRY pass: `--config` lives here for these two commands, so
+        a repo-wide `add_config_arg(parser)` helper must skip them or it will collide.
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--repo-path",
+        dest="repo_path",
+        default=None,
+        help="Path to the git repo (default: the current repo's top level, else cwd).",
+    )
+    shared.add_argument(
+        "--like",
+        default=None,
+        metavar="PROJECT",
+        help="Copy recipients from this existing project (combine with or use instead of --recipient).",
+    )
+    shared.add_argument(
+        "--recipient",
+        dest="recipients",
+        action="append",
+        default=[],
+        metavar='"Name:channel:ENV_VAR"',
+        help='Add a recipient (repeatable). Channel is "discord" or "slack"; the last field NAMES a .env variable.',
+    )
+    shared.add_argument(
+        "--share-level",
+        dest="share_level",
+        choices=SHARE_LEVELS,
+        default="high_level",
+        help="How much git detail to expose (default: high_level — no code diff).",
+    )
+    shared.add_argument(
+        "--collectors",
+        default="git",
+        help="Comma-separated signals to enable (default: git). Any of: git,tasks,notes,incubator,tracker.",
+    )
+    shared.add_argument(
+        "--tasks-file",
+        dest="tasks_file",
+        default=None,
+        help="Path to the tasks checklist. If 'tasks' is enabled and this is omitted, "
+        "defaults to <repo>/TODO.md and creates a starter checklist there.",
+    )
+    shared.add_argument(
+        "--notes-file",
+        dest="notes_file",
+        default=None,
+        help="Path to the notes file (required if 'notes' is in --collectors).",
+    )
+    shared.add_argument(
+        "--tracker-file",
+        dest="tracker_file",
+        default=None,
+        help="Path to the status-aware tracker doc (required if 'tracker' is in --collectors).",
+    )
+    shared.add_argument(
+        "--seed-tasks-from",
+        dest="seed_tasks_from",
+        default=None,
+        metavar="DOC",
+        help="When a tasks_file is being created (no --tasks-file given), seed its "
+        "checklist from this doc's Markdown tables instead of an empty starter.",
+    )
+    shared.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+    shared.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="Print the stanza that would be written, and write nothing (review first).",
+    )
+    shared.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Write without the preview confirmation (for non-interactive callers).",
+    )
+    return shared
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch to the requested command.
 
@@ -484,11 +592,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Overwrite an existing hook of the same name.",
     )
 
+    # Both config-writing commands draw their common flags from ONE parent parser, so the
+    # two flag sets cannot drift apart again (KI-43). See _project_registration_parser for
+    # why --incubator-file is excluded from it.
+    registration_flags = _project_registration_parser(default_config)
+
     # The ONE config-writing command. It is explicit, append-only, and previews
     # before writing — so the "config is never written as a side effect of a run"
     # invariant holds (see config.py header).
     add_parser = subparsers.add_parser(
         "add-project",
+        parents=[registration_flags],
         help="Register a new project in orion.toml (the only command that writes config).",
     )
     add_parser.add_argument(
@@ -498,92 +612,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Project name (default: the repo directory's name).",
     )
     add_parser.add_argument(
-        "--repo-path",
-        dest="repo_path",
-        default=None,
-        help="Path to the git repo (default: the current repo's top level, else cwd).",
-    )
-    add_parser.add_argument(
-        "--like",
-        default=None,
-        metavar="PROJECT",
-        help="Copy recipients from this existing project (combine with or use instead of --recipient).",
-    )
-    add_parser.add_argument(
-        "--recipient",
-        dest="recipients",
-        action="append",
-        default=[],
-        metavar='"Name:channel:ENV_VAR"',
-        help='Add a recipient (repeatable). Channel is "discord" or "slack"; the last field NAMES a .env variable.',
-    )
-    add_parser.add_argument(
-        "--share-level",
-        dest="share_level",
-        choices=SHARE_LEVELS,
-        default="high_level",
-        help="How much git detail to expose (default: high_level — no code diff).",
-    )
-    add_parser.add_argument(
-        "--collectors",
-        default="git",
-        help="Comma-separated signals to enable (default: git). Any of: git,tasks,notes,incubator,tracker.",
-    )
-    add_parser.add_argument(
-        "--tasks-file",
-        dest="tasks_file",
-        default=None,
-        help="Path to the tasks checklist. If 'tasks' is enabled and this is omitted, "
-        "defaults to <repo>/TODO.md and creates a starter checklist there.",
-    )
-    add_parser.add_argument(
-        "--notes-file",
-        dest="notes_file",
-        default=None,
-        help="Path to the notes file (required if 'notes' is in --collectors).",
-    )
-    add_parser.add_argument(
-        "--tracker-file",
-        dest="tracker_file",
-        default=None,
-        help="Path to the status-aware tracker doc (required if 'tracker' is in --collectors).",
-    )
-    add_parser.add_argument(
         "--incubator-file",
         dest="incubator_file",
         default=None,
         help="Path to the incubator index.md (required if 'incubator' is in --collectors).",
     )
-    add_parser.add_argument(
-        "--seed-tasks-from",
-        dest="seed_tasks_from",
-        default=None,
-        metavar="DOC",
-        help="When a tasks_file is being created (no --tasks-file given), seed its "
-        "checklist from this doc's Markdown tables instead of an empty starter.",
-    )
-    add_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
-    add_parser.add_argument(
-        "--print",
-        dest="print_only",
-        action="store_true",
-        help="Print the stanza that would be written, and write nothing (review first).",
-    )
-    add_parser.add_argument(
-        "--yes",
-        "-y",
-        action="store_true",
-        help="Write without the preview confirmation (for non-interactive callers).",
-    )
 
     # graduate-idea (D4 follow-on): register a graduated incubator idea as a project.
-    # It shares add-project's flags (it delegates to it) plus idea-specific ones.
+    # It shares add-project's flags via the parent above (it delegates to it) and adds
+    # the idea-specific ones below.
     graduate_parser = subparsers.add_parser(
         "graduate-idea",
+        parents=[registration_flags],
         help="Register a graduated incubator idea as a new project (delegates to add-project).",
     )
     graduate_parser.add_argument(
@@ -601,6 +641,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PROJECT",
         help="Which incubator project's index to read (needed only if several exist).",
     )
+    # NOT the same flag as add-project's --incubator-file: here it names the index to READ,
+    # there it names the new project's incubator collector file. Hence each parser owns its
+    # own declaration rather than sharing one via the parent.
     graduate_parser.add_argument(
         "--incubator-file",
         dest="incubator_file",
@@ -611,68 +654,6 @@ def main(argv: list[str] | None = None) -> int:
         "--force",
         action="store_true",
         help="Graduate even if the idea's status is not 'graduated'.",
-    )
-    # The remaining flags mirror add-project (graduate-idea passes them straight through).
-    graduate_parser.add_argument(
-        "--repo-path",
-        dest="repo_path",
-        default=None,
-        help="Path to the git repo (default: the current repo's top level, else cwd).",
-    )
-    graduate_parser.add_argument(
-        "--like",
-        default=None,
-        metavar="PROJECT",
-        help="Copy recipients from this existing project.",
-    )
-    graduate_parser.add_argument(
-        "--recipient",
-        dest="recipients",
-        action="append",
-        default=[],
-        metavar='"Name:channel:ENV_VAR"',
-        help="Add a recipient (repeatable).",
-    )
-    graduate_parser.add_argument(
-        "--share-level",
-        dest="share_level",
-        choices=SHARE_LEVELS,
-        default="high_level",
-        help="How much git detail to expose (default: high_level).",
-    )
-    graduate_parser.add_argument(
-        "--collectors",
-        default="git",
-        help="Comma-separated signals to enable (default: git).",
-    )
-    graduate_parser.add_argument(
-        "--tasks-file",
-        dest="tasks_file",
-        default=None,
-        help="Path to the tasks checklist (required if 'tasks' is in --collectors).",
-    )
-    graduate_parser.add_argument(
-        "--notes-file",
-        dest="notes_file",
-        default=None,
-        help="Path to the notes file (required if 'notes' is in --collectors).",
-    )
-    graduate_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
-    graduate_parser.add_argument(
-        "--print",
-        dest="print_only",
-        action="store_true",
-        help="Print the stanza that would be written, and write nothing.",
-    )
-    graduate_parser.add_argument(
-        "--yes",
-        "-y",
-        action="store_true",
-        help="Write without the preview confirmation (for non-interactive callers).",
     )
 
     # Read-only inspect commands (B6). They print config; they never write it.
@@ -1267,6 +1248,8 @@ def main(argv: list[str] | None = None) -> int:
             collectors_csv=args.collectors,
             tasks_file=args.tasks_file,
             notes_file=args.notes_file,
+            tracker_file=args.tracker_file,
+            seed_tasks_from=args.seed_tasks_from,
             print_only=args.print_only,
             assume_yes=args.yes,
         )
@@ -3552,6 +3535,8 @@ def cmd_graduate_idea(
     collectors_csv: str,
     tasks_file: str | None,
     notes_file: str | None,
+    tracker_file: str | None,
+    seed_tasks_from: str | None,
     print_only: bool,
     assume_yes: bool,
 ) -> int:
@@ -3566,9 +3551,12 @@ def cmd_graduate_idea(
         incubator_file: Explicit index path override (wins over config lookup).
         force: Graduate even if the idea's status is not "graduated".
         repo_path, like, recipient_specs, share_level, collectors_csv, tasks_file,
-            notes_file, print_only, assume_yes: passed straight through to
-            cmd_add_project (graduate-idea only resolves the NAME; registration is
-            identical to add-project).
+            notes_file, tracker_file, seed_tasks_from, print_only, assume_yes: passed
+            straight through to cmd_add_project (graduate-idea only resolves the NAME;
+            registration is identical to add-project). These are exactly the flags the
+            shared parent parser declares — this signature must accept all of them, or
+            the parser accepting a flag that the handler then discards is precisely the
+            KI-43 bug in a new place.
 
     Returns:
         Exit code: 0 on success or a declined preview; 1 on any error.
@@ -3636,6 +3624,8 @@ def cmd_graduate_idea(
         collectors_csv=collectors_csv,
         tasks_file=tasks_file,
         notes_file=notes_file,
+        tracker_file=tracker_file,
+        seed_tasks_from=seed_tasks_from,
         print_only=print_only,
         assume_yes=assume_yes,
     )

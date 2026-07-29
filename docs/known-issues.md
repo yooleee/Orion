@@ -765,8 +765,28 @@ Deferred).
   copying the three missing flags (which would just re-arm it).
 - **Severity:** medium-low (a real broken path on a shipped command, but on a rarely-walked
   lane — `graduate-idea` has no recorded real use since D-era).
-- **Status:** Open. Found 2026-07-28 (audit). Natural home: the producer-side paydown slice,
-  where the shared-parser fix pairs with the sibling CLI DRY items.
+- **Status:** **CLOSED** by AU1-R F4 (2026-07-29), structurally rather than additively. Both
+  commands now draw their shared flags from one `_project_registration_parser` passed as
+  `parents=[...]` (the first use of argparse `parents` in the codebase), so a flag cannot be
+  added to one without the other. A `--help`-diff test asserts the two flag sets differ only
+  by graduate-idea's intentional three (`--name`, `--incubator`, `--force`) and fails with a
+  readable diff naming the shared parent as the fix. That guard was itself verified by
+  injecting a flag on `add-project` alone and watching it fail.
+- **Two things the filing did not capture, found while fixing:**
+  1. **`parents=[...]` alone would not have fixed the bug.** Three more sites dropped the
+     values even once the parser accepted them: main's dispatch, `cmd_graduate_idea`'s
+     signature, and its delegation call to `cmd_add_project`. The parser accepting a flag
+     whose value is then discarded is the same bug in a new place, which is why the
+     regression test asserts against the *written config* rather than the exit code.
+  2. **`--incubator-file` cannot be shared and must stay duplicated.** It exists on both
+     commands with the same `dest` and genuinely different meanings — on `add-project` the
+     new project's incubator collector file, on `graduate-idea` the source index to read.
+     Putting it on the parent raises `conflicting option string` at parser-build time. Each
+     parser declares its own, with the reason recorded at both sites, and the anti-drift test
+     documents why it appears in neither direction of the diff.
+- **Verified for real,** not only in tests: `graduate-idea "Photo Overlay" --collectors
+  git,tracker --tracker-file ROADMAP.md` now registers cleanly in a throwaway repo and writes
+  `tracker_file = "ROADMAP.md"` into the stanza.
 
 ## KI-44 — Relay HTTP server: no socket timeout and unbounded request threads
 

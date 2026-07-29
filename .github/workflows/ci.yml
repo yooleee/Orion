@@ -1,12 +1,16 @@
 # =============================================================================
 # .github/workflows/ci.yml
 # -----------------------------------------------------------------------------
-# Responsible for: Running the test suite on every push to main and every pull
-#                  request, and the FULL OS/Python matrix on a weekly schedule
-#                  (and on demand), across everything Orion claims to support.
-# Role in project: The automated proof of two promises — that the suite stays
-#                  green, and that Orion "runs natively on Linux, macOS, and
-#                  Windows" (README) on Python 3.11-3.13.
+# Responsible for: Running the test suites on every push to main and every pull
+#                  request — the Python suite (`test`) and the frontend's
+#                  type-check/tests/build (`web`) — plus the FULL OS/Python matrix
+#                  on a weekly schedule (and on demand).
+# Role in project: The automated proof of three promises — that the Python suite
+#                  stays green, that the SPA type-checks/tests/builds (added
+#                  2026-07-29, AU1-R F1, closing KI-45: the web suite existed but
+#                  nothing ran it outside a developer's terminal), and that Orion
+#                  "runs natively on Linux, macOS, and Windows" (README) on
+#                  Python 3.11-3.13.
 # Cost note (why the matrix is event-dependent): this is a PRIVATE repo, so
 #                  Actions minutes are metered, and GitHub bills per-OS at very
 #                  different rates — Linux 1x, Windows 2x, macOS 10x. Running the
@@ -23,6 +27,11 @@
 #                  no longer pile up full job sets); the per-push/PR path runs ONE
 #                  Python (the 3.11 floor), not three; and docs-only changes skip CI
 #                  via `paths-ignore`. The full weekly/manual matrix is unchanged.
+# Coverage: deliberately NOT collected here (AU1-R F1 decision). Reporting it would
+#                  add two dev-only dependencies (`pytest-cov`, `@vitest/coverage-v8`)
+#                  to produce a number nothing gates on, and thresholds are ceremony at
+#                  one-developer scale. Revisit when a second contributor lands code, or
+#                  when a bug turns out to have hidden on an untested path.
 # =============================================================================
 
 name: CI
@@ -91,3 +100,48 @@ jobs:
       # against real repos exactly as they do locally.
       - name: Run tests
         run: python -m pytest -q
+
+  # The frontend job (AU1-R F1, closes KI-45). Deliberately NOT matrixed: unlike the
+  # Python producer, the SPA has no cross-platform promise to prove — it is built once
+  # inside a `node:20-slim` Docker stage and served by the relay, so the only build
+  # environment that ships is Linux + Node 20. One 1x-cost job on every PR/push is the
+  # whole cost, which is why this runs on the cheap path rather than the weekly matrix.
+  web:
+    name: web (tsc + vitest + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Every `run` step below is a web/ command (the SPA has its own package.json
+        # and lockfile); `uses` steps are unaffected by this.
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 20 matches the `node:20-slim` build stage in the Dockerfile, so CI
+      # type-checks and builds on the same major the deployed bundle is built with.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `npm ci` (not `npm install`) installs exactly the lockfile — the same
+      # reproducibility the Dockerfile's build stage relies on.
+      - name: Install
+        run: npm ci
+
+      # Type-check as its own step so a TS error reports as a type failure rather than
+      # a build failure. `npm run build` below re-runs `tsc -b`, but incrementally
+      # (tsconfig.tsbuildinfo is already written), so the duplication is ~free.
+      - name: Type-check
+        run: npx tsc -b
+
+      - name: Run tests
+        run: npx vitest run
+
+      # The build is its own signal: a bundle can fail (an unresolved import, a Vite
+      # config problem) while types and tests are green.
+      - name: Build
+        run: npm run build

@@ -19,6 +19,11 @@
 #                  sqlite connection cannot be shared across threads, so the handler
 #                  opens a fresh store connection per request (cheap for sqlite; the
 #                  store's busy-timeout covers concurrent writes).
+# Operability (AU1-R F2): this module owns the relay's operational floor — an
+#                  unauthenticated GET /healthz carrying the build stamp, stdlib `logging`
+#                  to stderr (levelled, timestamped, `[relay]`-prefixed) in place of the
+#                  former bare prints and no-op log_message, and a request-read timeout on
+#                  the handler. The thread count remains unbounded (KI-44, half-open).
 # =============================================================================
 
 from __future__ import annotations
@@ -28,7 +33,9 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import mimetypes
+import os
 import secrets
 import sqlite3
 import sys
@@ -107,6 +114,105 @@ from .store import (
     upsert_disciplines,
     upsert_producer_disciplines,
 )
+
+# --- Logging & build provenance (AU1-R F2) ------------------------------------
+# This is the FIRST use of stdlib `logging` in the repo; everything else (the CLI, the
+# one-off migration scripts) writes with print(). The relay is the one component that
+# runs unattended on a host nobody is watching, so it is the one that needs levelled,
+# timestamped lines an operator can grep after the fact. Before this, log_message was a
+# no-op and a 4xx/5xx/timeout produced literally zero output — a wedged relay and a
+# healthy one looked identical from outside (KI-44/KI-46).
+_log = logging.getLogger("orion.relay")
+
+
+class _StderrHandler(logging.Handler):
+    """A log handler that writes to whatever `sys.stderr` is at emit time.
+
+    Args:
+        (none beyond logging.Handler's own.)
+
+    Returns:
+        Nothing; `emit` writes one formatted line per record.
+
+    Why:
+        logging.StreamHandler binds its stream once, at construction. The prints this
+        replaces resolved `sys.stderr` at CALL time, and that late binding is load-bearing
+        in two places: pytest swaps sys.stderr per test (the capfd-based log assertions
+        depend on it), and an embedder may redirect stderr after import. Resolving the
+        stream per record preserves the exact behaviour of the code being replaced.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stderr.write(self.format(record) + "\n")
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001 - logging must never raise into a request
+            self.handleError(record)
+
+
+def _configure_logging() -> None:
+    """Attach the relay's single stderr handler, once.
+
+    Args:
+        (none.)
+
+    Returns:
+        None. Idempotent: a second call is a no-op.
+
+    Why:
+        Configured at import rather than in serve() so the same lines appear whether the
+        relay is started by `relay-serve` or driven directly by a test's create_server().
+        The level is env-tunable (`ORION_RELAY_LOG_LEVEL`) so an operator can raise
+        verbosity on a misbehaving deploy without shipping code; anything unparseable
+        falls back to INFO rather than silencing the log.
+    """
+    if _log.handlers:
+        return
+    level_name = os.environ.get("ORION_RELAY_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        level = logging.INFO
+    handler = _StderrHandler()
+    # The "[relay]" prefix is kept from the print era so existing operator habits (and
+    # any log filter built on it) keep working; the timestamp and level are new.
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [relay] %(levelname)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    _log.addHandler(handler)
+    _log.setLevel(level)
+    # Don't also hand records to the root logger: an embedding app's own root handler
+    # would double-print every relay line.
+    _log.propagate = False
+
+
+_configure_logging()
+
+
+def _build_version() -> str:
+    """Report which build of the relay is running.
+
+    Args:
+        (none.)
+
+    Returns:
+        The build stamp baked in at image build (`ORION_BUILD_SHA`), or "unknown".
+
+    Why:
+        "What code is running?" had no queryable answer (KI-46). The value is injected as
+        a Docker build arg rather than kept as a constant in the source, because a
+        hand-maintained constant goes stale silently while a build arg cannot. Read per
+        call, not cached at import, so a test can set the environment and so an operator
+        can correct a bad value by restarting rather than rebuilding.
+
+        It degrades to "unknown" when the deploy omitted the build arg — an honest "I
+        don't know" is the only safe failure mode here, since a WRONG version is worse
+        than an absent one when you are deciding whether a fix is live.
+    """
+    return os.environ.get("ORION_BUILD_SHA") or "unknown"
+
 
 # The default IANA zone the dashboard renders timestamps in (the SPA reads it from
 # GET /api/me and formats relative time client-side). Defaulted so an omitted
@@ -835,15 +941,39 @@ class _RelayHandler(BaseHTTPRequestHandler):
         per-server state without globals.
     """
 
-    # Silence the default one-line-per-request stderr logging (noisy, and it
-    # pollutes test output). We emit our own concise line on a successful ingest.
+    # Drop a request that stops sending mid-read after this many seconds (KI-44).
+    # StreamRequestHandler.setup() applies this to the connection socket, so a client
+    # that opens a socket and dribbles (or stalls forever) can no longer pin a thread
+    # indefinitely. Scope, stated precisely: protocol_version is unset, so this server
+    # speaks HTTP/1.0 and closes after each response — the timeout therefore guards a
+    # STALLED REQUEST READ (Slowloris-shaped), not an idle keep-alive connection, of
+    # which there are none. The thread count itself is still unbounded; KI-44 stays
+    # half-open on that, deliberately, until there is load evidence to size a cap with.
+    timeout = 30
+
+    # Request logging (AU1-R F2). This used to be a no-op — chosen when the relay was a
+    # loopback toy, kept as the relay became an internet-facing service, with the result
+    # that nothing was recorded: no request lines, no 4xx/5xx, and (worse) no sign of a
+    # fired socket timeout, since BaseHTTPRequestHandler reports that through log_error.
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
-        pass
+        """Log one access line per request (client, request line, status, size)."""
+        _log.info("%s %s", self.address_string(), format % args)
+
+    def log_error(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
+        """Log a request-level failure at WARNING so it sorts above the access lines.
+
+        Why: the stdlib routes send_error() and a fired socket timeout through here. Kept
+        distinct from log_message so "something went wrong" is greppable by level, not by
+        having to recognise status codes in the access log.
+        """
+        _log.warning("%s %s", self.address_string(), format % args)
 
     def do_GET(self) -> None:
         """Route a GET request.
 
-        Three GET surfaces remain after the server-rendered views retired (KI-23):
+        Four GET surfaces after the server-rendered views retired (KI-23):
+          0. "/healthz" — unauthenticated liveness + build stamp, routed before everything
+             so it depends on neither the auth spine nor the store (AU1-R F2).
           1. The machine-JSON API ("/api/discussions", "/api/users") — Bearer/admin-token
              authed, routed FIRST so a browser never reaches it and the CLI never trips
              the session gate.
@@ -867,6 +997,20 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # Strip any query string; routing is by path only (the /api/ handler re-reads
         # the query itself, since it — unlike the dashboard — takes parameters).
         path = urllib.parse.urlparse(self.path).path
+
+        # Health check (AU1-R F2), routed FIRST and deliberately so. Two properties depend
+        # on this position: it returns before _handle_spa_api, so it never touches the auth
+        # spine or opens a store connection (liveness must not depend on sqlite); and it
+        # returns before the --web-dir block below, which serves index.html for ANY
+        # unmatched path — a health probe that silently got a 200 HTML page back would
+        # report "healthy" for a relay whose API was broken.
+        #
+        # Unauthenticated by design, and safe to be: the body carries the build stamp and
+        # nothing else. No project names, no counts, no account facts — so the
+        # existence-hiding rule (a viewer must not learn a project exists) is not in play.
+        if path == "/healthz":
+            self._send_json(200, {"status": "ok", "version": _build_version()})
+            return
 
         # Machine-JSON API routes are Bearer-authed and bypass the browser session gate.
         # E2 Inc 5: the developer's Bearer-authed discussion pull (?project=&since_id=).
@@ -1111,10 +1255,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 set_about(conn, payload["project"], payload["about"])
         finally:
             conn.close()
-        print(
-            f"[relay] ingested report {new_id} for project {payload['project']!r}",
-            file=sys.stderr,
-        )
+        _log.info("ingested report %s for project %r", new_id, payload["project"])
         self._send_json(201, {"id": new_id})
 
     def _handle_checklist_push(self) -> None:
@@ -1230,14 +1371,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
         # keep. The log line says which kind of push it was, so a tail of the relay does not
         # read "updated checklist" for a push that deliberately left the checklist alone.
         count = len(payload["checklist"]) if has_checklist else None
-        print(
-            f"[relay] updated checklist for project {payload['project']!r} "
-            f"({count} item(s))"
-            if has_checklist
-            else f"[relay] updated settings for project {payload['project']!r} "
-            f"(no checklist in this push)",
-            file=sys.stderr,
-        )
+        if has_checklist:
+            _log.info(
+                "updated checklist for project %r (%s item(s))", payload["project"], count
+            )
+        else:
+            _log.info(
+                "updated settings for project %r (no checklist in this push)",
+                payload["project"],
+            )
         # 200 (not 201): an upsert of existing per-project state, not a created resource.
         self._send_json(200, {"updated": payload["project"], "items": count})
 
@@ -1303,10 +1445,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         count = len(payload["disciplines"])
-        print(
-            f"[relay] updated disciplines for project {payload['project']!r} "
-            f"({count} card(s))",
-            file=sys.stderr,
+        _log.info(
+            "updated disciplines for project %r (%s card(s))", payload["project"], count
         )
         # 200 (not 201): an upsert of existing per-project state, not a created resource.
         self._send_json(200, {"updated": payload["project"], "disciplines": count})
@@ -2731,10 +2871,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if not self.server.disable_legacy_ingest and hmac.compare_digest(
             token, self.server.token
         ):
-            print(
-                f"[relay] legacy shared ingest token used (anonymous): "
-                f"{self.command} {self.path}",
-                file=sys.stderr,
+            # WARNING, not INFO: this is the operator's signal that a producer has not
+            # migrated to its own key yet, and it should stand out from the access lines.
+            _log.warning(
+                "legacy shared ingest token used (anonymous): %s %s",
+                self.command,
+                self.path,
             )
             return {"user_id": None, "role": None, "name": None, "legacy": True}
         # 3) Generic miss — the caller sends one indistinguishable 401.
@@ -2883,7 +3025,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
         except PasswordsUnavailable as exc:
             # Fail closed and make it diagnosable: this is an operator misconfiguration
             # (the relay deployed without its hashing dependency), not a user error.
-            print(f"[relay] password login unavailable: {exc}", file=sys.stderr)
+            _log.error("password login unavailable: %s", exc)
             return None
 
         if not ok or user is None:
@@ -2900,7 +3042,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             try:
                 set_password_credential_verifier(conn, credential["id"], new_hash)
             except sqlite3.Error as exc:  # never fail a valid login over an upgrade
-                print(f"[relay] could not rehash password for {name!r}: {exc}", file=sys.stderr)
+                _log.warning("could not rehash password for %r: %s", name, exc)
         update_last_login(conn, user["id"], _utc_now_iso())
         return user["id"], user["session_version"], {
             "name": user["name"],
@@ -3666,10 +3808,16 @@ def serve(
     # world-reachable bind is gated (the fail-closed guard guarantees it is).
     auth_state = "login required" if view_token else "open (loopback only)"
     frontend = f"SPA from {web_dir}" if web_dir is not None else "API only (no SPA dir)"
-    print(
-        f"[relay] listening on http://{bound_host}:{bound_port}  "
-        f"(db: {db_path}; dashboard: {auth_state}; frontend: {frontend})",
-        file=sys.stderr,
+    # The build stamp goes in the startup line as well as /healthz: the log answers
+    # "what code did this process start as?" even after the process is gone.
+    _log.info(
+        "listening on http://%s:%s  (db: %s; dashboard: %s; frontend: %s; build: %s)",
+        bound_host,
+        bound_port,
+        db_path,
+        auth_state,
+        frontend,
+        _build_version(),
     )
     try:
         server.serve_forever()

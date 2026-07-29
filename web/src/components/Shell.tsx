@@ -23,6 +23,16 @@ import { BottomTabBar } from "./BottomTabBar";
 export interface ShellContext {
   me: Me;
   portfolio: Portfolio | null;
+  /**
+   * Why the portfolio is absent, when it is absent.
+   *
+   * `portfolio === null` alone is ambiguous: it means never-started, in-flight, OR failed,
+   * because the fetch's .catch used to write the initial value back. That collapse made a
+   * relay outage render "Loading…" forever with no error and no retry. Keeping the reason
+   * separate is the same three-state shape the rest of the app already uses (Async<T> in
+   * lib/useApiData.ts) — absent and failed-to-load are different states and must stay so.
+   */
+  portfolioError: Error | null;
 }
 
 interface ShellProps {
@@ -33,6 +43,7 @@ interface ShellProps {
 
 export function Shell({ me, onAuthChange }: ShellProps) {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [portfolioError, setPortfolioError] = useState<Error | null>(null);
   const navigate = useNavigate();
   // A gated relay with no valid session sends the viewer to /login. Computed before the
   // early return, but hooks above stay unconditional (rules-of-hooks safe).
@@ -42,8 +53,16 @@ export function Shell({ me, onAuthChange }: ShellProps) {
     if (gatedOut) return; // nothing to load until authenticated
     let alive = true;
     getPortfolio()
-      .then((p) => alive && setPortfolio(p))
-      .catch(() => alive && setPortfolio(null));
+      .then((p) => {
+        if (!alive) return;
+        setPortfolio(p);
+        setPortfolioError(null);
+      })
+      // Record WHY it failed rather than resetting to the initial value: writing null back
+      // made a failure indistinguishable from still-loading, which is how an outage came to
+      // look like an eternal spinner. The ApiError carries .status for any caller that
+      // wants to branch on it.
+      .catch((err: Error) => alive && setPortfolioError(err));
     return () => {
       alive = false;
     };
@@ -61,7 +80,7 @@ export function Shell({ me, onAuthChange }: ShellProps) {
     navigate("/login");
   };
 
-  const context: ShellContext = { me, portfolio };
+  const context: ShellContext = { me, portfolio, portfolioError };
 
   return (
     <div className="shell">

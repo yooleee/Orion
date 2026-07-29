@@ -119,6 +119,7 @@ client-side.
       "name": "orion",
       "kind": "project",
       "lifecycle": "active",
+      "about": "A local-first knowledge base that observes your real project activity.",
       "headline": "Sectioned home in progress — splitting projects from to-dos.",
       "progress": { "done": 6, "total": 15, "pct": 40 },
       "at_risk": 2,
@@ -204,9 +205,11 @@ Everything observed about one project. `404` when missing or out of scope.
         "group": null, "state": "in_progress", "status": null, "slipping": false } ] }
   ],
   "reports": [
-    { "id": 26, "title": "Orion progress update", "generated_at": "2026-06-26T10:00:00+00:00",
+    { "id": 26, "number": 12, "title": "Orion progress update",
+      "generated_at": "2026-06-26T10:00:00+00:00",
       "lane": "structured", "share_level": "high_level", "section_count": 4,
-      "author_name": "Teammate B", "source_tags": [] }
+      "author_name": "Teammate B", "author_kind": "human", "operated_by_name": null,
+      "source_tags": [] }
   ],
   "discussions": [
     { "id": 1, "author_name": "Supervisor A", "role": "supervisor", "body": "How's the auth slice?",
@@ -296,6 +299,7 @@ One progress report in full. `404` when missing or out of scope (scope resolved 
 ```json
 {
   "id": 26,
+  "number": 12,
   "project": "orion",
   "title": "Orion progress update",
   "sections": [["SHIPPED", "…"], ["DIRECTION", "…"], ["NOTES", "…"]],
@@ -306,13 +310,15 @@ One progress report in full. `404` when missing or out of scope (scope resolved 
   "ingested_at": "2026-06-26T10:01:00+00:00",
   "orion_version": "0.0.0",
   "author_name": "Teammate B",
-  "participants": [ { "name": "Alex", "role": null }, { "name": "Sam", "role": null } ],
+  "author_kind": "human",
+  "operated_by_name": null,
+  "participants": [ { "name": "Supervisor A", "role": null }, { "name": "Supervisor B", "role": null } ],
   "source_tags": [],
   "checklist_snapshot": {
     "done": 6, "total": 15,
     "rows": [ { "text": "…", "done": true, "state": "done", "due_date": null } ]
   },
-  "nav": { "prev_id": 25, "next_id": null }
+  "nav": { "prev_id": 25, "prev_number": 11, "next_id": null, "next_number": null }
 }
 ```
 
@@ -327,6 +333,19 @@ One progress report in full. `404` when missing or out of scope (scope resolved 
   the `sections` titles, distinct from this.
 - `nav.prev_id` / `next_id` are the neighbouring report ids in `generated_at DESC, id DESC` order
   (the same ordering as `history`), `null` at the ends.
+- **`prev_*` is the OLDER neighbour and `next_*` the NEWER one.** The naming reads inverted
+  against the `DESC` ordering above, so it is worth stating outright: "prev" means earlier in
+  time, not earlier in the list.
+- **`number` is the per-project ordinal** (`#1` is that project's oldest report), while `id`
+  remains the stable identity. Both are needed because `id` is a single **global**
+  autoincrement across every project, so read per project it is gappy and meaningless as a
+  count. The dashboard labels with `number` and links with `id`. `nav.prev_number` /
+  `next_number` are the same ordinal for the neighbours, so a link can read "← Report #11"
+  without a second fetch. Source: `_report_numbers` in `relay/api.py`, which derives the map
+  from the project's `history`.
+- `author_kind` is `"human"` or `"agent"`, and `operated_by_name` names the person an agent
+  pushed on behalf of (`null` for a human, or for an agent with no recorded operator) — the
+  same attribution fields the timeline entry carries.
 
 ### `GET /api/scheduling`
 

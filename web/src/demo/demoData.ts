@@ -15,8 +15,12 @@
 // Assumptions: shapes mirror web/src/api/types.ts exactly, so a contract change surfaces
 //              here as a TypeScript error rather than a silent drift. Numbers are kept
 //              coherent: checklist done/total == stats.progress == the card == report count.
-//              Dates are fixed; relative-time labels ("3 days ago") drift over real time,
-//              which is acceptable for a rarely-updated demo.
+//              DEADLINES are derived from today (see daysFromNow) so a due_date can never
+//              contradict the `state` sitting beside it. TIMESTAMPS (generated_at,
+//              created_at) stay fixed: their relative-time labels ("3 days ago") drift, which
+//              is merely stale rather than self-contradictory, and acceptable for a
+//              rarely-updated demo. The distinction is the point — a drifting LABEL is
+//              cosmetic, a label that disagrees with its own colour and glyph is a bug.
 // =============================================================================
 
 import type {
@@ -28,6 +32,49 @@ import type {
 
 /** The demo project's route key and display name (kept in one place). */
 export const DEMO_PROJECT_NAME = "sample-app";
+
+/**
+ * A YYYY-MM-DD date `days` from today.
+ *
+ * Args:
+ *   days: offset in days from today; positive is future.
+ *
+ * Returns: the date as "YYYY-MM-DD", the same shape the relay sends for a due_date.
+ *
+ * Why:
+ *   The demo's deadlines used to be hardcoded calendar dates sitting NEXT TO a hardcoded
+ *   `state`. Once those dates fell into the past the two disagreed: the chip's label comes
+ *   from the date (deadlineLabel -> "26d overdue") while its colour and glyph come from the
+ *   state (STATUS_STYLES.due_soon -> amber "◷"). The public demo was rendering "◷ 26d
+ *   overdue" in due-soon amber — three signals contradicting each other on Orion's one
+ *   anonymous, internet-facing surface. Deriving the dates from today keeps the pair
+ *   coherent forever, with no maintenance.
+ *
+ *   Built from LOCAL date components rather than toISOString(), which would render in UTC
+ *   and could shift the day. The app compares in the project's display zone, so a one-day
+ *   shift is possible either way — harmless here because every offset below clears the
+ *   due-soon boundary by several days (see DUE_SOON_WINDOW_DAYS).
+ */
+function daysFromNow(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// The relay classifies a dated item as due_soon within this many days (relay/derive.py's
+// DUE_SOON_DAYS, overridable per project). The frontend never classifies — the server owns
+// `state` (see docs/dashboard-api-contract.md, "Conventions"). These fixtures stand in for
+// the server, so they must honour the same rule by construction: an item carrying
+// state "due_soon" needs an offset INSIDE this window, and "upcoming" needs one outside it.
+const DUE_SOON_WINDOW_DAYS = 7;
+
+// One constant per demo item with a deadline, named for the item so the state each one has
+// to stay consistent with is easy to check. Offsets are chosen with margin on both sides:
+// none is close to 0 (nothing should read overdue) or to DUE_SOON_WINDOW_DAYS.
+const DUE_OAUTH = daysFromNow(3); // in_progress, and the project's NEXT DUE (due_soon)
+const DUE_TAGGING = daysFromNow(5); // due_soon — comfortably inside the window
+const DUE_MOBILE = daysFromNow(DUE_SOON_WINDOW_DAYS + 38); // upcoming — well outside it
 
 /** Small typed helper so each report section is a [title, body] TUPLE (not string[]). */
 const section = (title: string, body: string): Section => [title, body];
@@ -55,7 +102,7 @@ export const DEMO_PROJECT: ProjectDetail = {
   about: "A small notes-and-tagging web app, used here purely as an example.",
   stats: {
     progress: { done: 5, total: 12, pct: 42 },
-    next_due: { due_date: "2026-07-03", state: "due_soon" },
+    next_due: { due_date: DUE_OAUTH, state: "due_soon" },
     reports_count: 3,
   },
   milestones: [
@@ -64,7 +111,7 @@ export const DEMO_PROJECT: ProjectDetail = {
       done: 3,
       total: 4,
       at_risk: 1,
-      nearest_due: "2026-07-03",
+      nearest_due: DUE_OAUTH,
       slipping: false,
       slipping_count: 0,
     },
@@ -73,7 +120,7 @@ export const DEMO_PROJECT: ProjectDetail = {
       done: 2,
       total: 5,
       at_risk: 1,
-      nearest_due: "2026-07-05",
+      nearest_due: DUE_TAGGING,
       slipping: false,
       slipping_count: 0,
     },
@@ -82,7 +129,7 @@ export const DEMO_PROJECT: ProjectDetail = {
       done: 0,
       total: 3,
       at_risk: 0,
-      nearest_due: "2026-08-15",
+      nearest_due: DUE_MOBILE,
       slipping: false,
       slipping_count: 0,
     },
@@ -92,16 +139,16 @@ export const DEMO_PROJECT: ProjectDetail = {
     { text: "Email + password sign-up", done: true, due_date: null, key: "a1", group: "Accounts & auth", state: "done", status: "closed", slipping: false },
     { text: "Session cookies + CSRF", done: true, due_date: null, key: "a2", group: "Accounts & auth", state: "done", status: "closed", slipping: false },
     { text: "Password reset flow", done: true, due_date: null, key: "a3", group: "Accounts & auth", state: "done", status: "submitted", slipping: false },
-    { text: "Google OAuth login", done: false, due_date: "2026-07-03", key: "a4", group: "Accounts & auth", state: "in_progress", status: "in_progress", slipping: false },
+    { text: "Google OAuth login", done: false, due_date: DUE_OAUTH, key: "a4", group: "Accounts & auth", state: "in_progress", status: "in_progress", slipping: false },
     // Core features (2/5 done)
     { text: "Create / edit / delete entries", done: true, due_date: null, key: "c1", group: "Core features", state: "done", status: "closed", slipping: false },
     { text: "Search & filters", done: true, due_date: null, key: "c2", group: "Core features", state: "done", status: "closed", slipping: false },
-    { text: "Tagging", done: false, due_date: "2026-07-05", key: "c3", group: "Core features", state: "due_soon", status: "not_started", slipping: false },
+    { text: "Tagging", done: false, due_date: DUE_TAGGING, key: "c3", group: "Core features", state: "due_soon", status: "not_started", slipping: false },
     { text: "Export to CSV", done: false, due_date: null, key: "c4", group: "Core features", state: "not_started", status: "not_started", slipping: false },
     { text: "Bulk actions", done: false, due_date: null, key: "c5", group: "Core features", state: "not_started", status: "not_started", slipping: false },
     // Polish & launch (0/3 done)
     { text: "Empty & error states", done: false, due_date: null, key: "p1", group: "Polish & launch", state: "not_started", status: "not_started", slipping: false },
-    { text: "Mobile layout pass", done: false, due_date: "2026-08-15", key: "p2", group: "Polish & launch", state: "upcoming", status: "not_started", slipping: false },
+    { text: "Mobile layout pass", done: false, due_date: DUE_MOBILE, key: "p2", group: "Polish & launch", state: "upcoming", status: "not_started", slipping: false },
     { text: "Launch checklist", done: false, due_date: null, key: "p3", group: "Polish & launch", state: "not_started", status: "not_started", slipping: false },
   ],
   // Single-producer demo: no per-contributor cards (the section shows only at 2+ producers).
@@ -194,8 +241,8 @@ export const DEMO_REPORTS: ReportDetail[] = [
       rows: [
         { text: "Create / edit / delete entries", done: true, state: "done", due_date: null },
         { text: "Search & filters", done: true, state: "done", due_date: null },
-        { text: "Tagging", done: false, state: "due_soon", due_date: "2026-07-05" },
-        { text: "Google OAuth login", done: false, state: "in_progress", due_date: "2026-07-03" },
+        { text: "Tagging", done: false, state: "due_soon", due_date: DUE_TAGGING },
+        { text: "Google OAuth login", done: false, state: "in_progress", due_date: DUE_OAUTH },
       ],
     },
     nav: { prev_id: 1001, prev_number: 1, next_id: 1003, next_number: 3 },
@@ -226,9 +273,9 @@ export const DEMO_REPORTS: ReportDetail[] = [
       total: 12,
       rows: [
         { text: "Search & filters", done: true, state: "done", due_date: null },
-        { text: "Google OAuth login", done: false, state: "in_progress", due_date: "2026-07-03" },
-        { text: "Tagging", done: false, state: "due_soon", due_date: "2026-07-05" },
-        { text: "Mobile layout pass", done: false, state: "upcoming", due_date: "2026-08-15" },
+        { text: "Google OAuth login", done: false, state: "in_progress", due_date: DUE_OAUTH },
+        { text: "Tagging", done: false, state: "due_soon", due_date: DUE_TAGGING },
+        { text: "Mobile layout pass", done: false, state: "upcoming", due_date: DUE_MOBILE },
       ],
     },
     nav: { prev_id: 1002, prev_number: 2, next_id: null, next_number: null },

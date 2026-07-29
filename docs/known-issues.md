@@ -802,8 +802,16 @@ Deferred).
   `vite build`), cheap on the Actions quota since it is Linux-only.
 - **Severity:** medium-low (no known regression has shipped through the gap; the gap itself
   is structural).
-- **Status:** Open. Found 2026-07-29 (AU1 external-lens addendum — the professional-QA
-  re-grade). Natural home: the production-floor half of the paydown/hardening slice.
+- **Status:** **CLOSED** by AU1-R F1 (2026-07-29). `.github/workflows/ci.yml` gained a `web`
+  job — setup-node 20 (matching the Dockerfile's build stage) with the npm cache, then
+  `npm ci`, `npx tsc -b`, `npx vitest run`, `npm run build` — running on every push and PR.
+  Verified by the job's own first run on the PR that introduced it: green in 36s. Two shapes
+  of the fix were deliberately declined and recorded in the workflow header: it is **not
+  matrixed** (the SPA has no cross-platform promise to prove — it is built once in a Linux
+  Docker stage, so Linux + Node 20 is the only build environment that ships), and **coverage
+  is not collected** (two dev-only dependencies for a number nothing gates on; revisit when a
+  second contributor lands code, or when a bug turns out to have hidden on an untested path).
+  Full write-up moves to `CHANGELOG.md` at the AU1-R arc close-out.
 
 ## KI-46 — No operational floor: backups, health checks, logging, and release provenance are manual or absent
 

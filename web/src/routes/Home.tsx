@@ -18,8 +18,15 @@ import { ScopeBanner } from "../components/ScopeBanner";
 import { EmptyState } from "../components/EmptyState";
 
 export function Home() {
-  const { me, portfolio } = useOutletContext<ShellContext>();
+  const { me, portfolio, portfolioError } = useOutletContext<ShellContext>();
 
+  // Failed and still-loading are different states and must read differently. Before this,
+  // both rendered "Loading…", so a relay outage showed an eternal spinner and the viewer had
+  // no way to tell "wait a moment" from "this is broken, reload". Error is checked FIRST:
+  // portfolio is null in both cases, so the order is what makes the distinction visible.
+  if (portfolioError !== null) {
+    return <div className="center-note">Could not load your portfolio. Is the relay running?</div>;
+  }
   if (portfolio === null) {
     return <div className="center-note">Loading…</div>;
   }

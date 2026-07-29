@@ -87,7 +87,16 @@ function renderProject() {
   return render(
     <MemoryRouter initialEntries={["/project/demo"]}>
       <Routes>
-        <Route element={<Outlet context={{ me: ME, portfolio: null } satisfies ShellContext} />}>
+        {/* portfolioError is required (not optional) on purpose: every place that builds a
+            ShellContext must say whether the portfolio FAILED or is merely absent, which is
+            what stops the two states collapsing back together. Project ignores both. */}
+        <Route
+          element={
+            <Outlet
+              context={{ me: ME, portfolio: null, portfolioError: null } satisfies ShellContext}
+            />
+          }
+        >
           <Route path="/project/:name" element={<Project />} />
         </Route>
       </Routes>

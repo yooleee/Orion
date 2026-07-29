@@ -185,9 +185,8 @@ therefore miss committed data — **do not back up a live relay with `cp`.** Tak
   # via the sqlite3 CLI (atomic .backup):
   sqlite3 /data/orion-relay.sqlite3 ".backup '/data/orion-relay.backup.sqlite3'"
   ```
-- **Pull a copy to your machine** — on Fly, `fly ssh console` then the `.backup` above, or
-  `fly sftp get /data/orion-relay.sqlite3` (checkpoint first with
-  `sqlite3 … "PRAGMA wal_checkpoint(TRUNCATE);"` so the pulled file is complete).
+- **Pull a copy to your machine** — the preferred form is below (it does not write to the
+  volume and does not modify the live database at all).
 
 **Always take one before a destructive maintenance step** (a one-time migration or table
 drop). The repo's maintenance tools bake this in: both `relay.migrate_comments` and
@@ -195,6 +194,146 @@ drop). The repo's maintenance tools bake this in: both `relay.migrate_comments` 
 `sqlite3.Connection.backup()` copy *before* it drops anything (`--drop` writes
 `<db>.before-skills-drop.bak` and refuses to overwrite an existing one). Keep an operator-side
 copy as well — belt and braces.
+
+### Pull a backup to your machine
+
+Two commands. The first makes a consistent copy inside the container, the second brings it
+down with a dated name:
+
+```bash
+fly ssh console -a project-orion -C "python3 -c \"import sqlite3; s=sqlite3.connect('file:/data/orion-relay.sqlite3?mode=ro', uri=True); d=sqlite3.connect('/tmp/orion-pull.sqlite3'); s.backup(d); d.close(); s.close(); print('BACKUP_OK')\""
+fly sftp get /tmp/orion-pull.sqlite3 ~/orion-backups/orion-relay.$(date +%Y%m%d).bak -a project-orion
+fly ssh console -a project-orion -C "rm -f /tmp/orion-pull.sqlite3"
+```
+
+Three deliberate choices here, each avoiding a way the obvious version is worse:
+
+- **`mode=ro` on the source.** SQLite's online backup API reads a consistent snapshot
+  including the WAL, so opening the live database **read-only** is enough. That makes the
+  pull provably incapable of altering production. The older advice of running
+  `PRAGMA wal_checkpoint(TRUNCATE)` first is a *write* to the live database, taken purely to
+  make a plain file copy safe. With the backup API you do not need it, so do not do it.
+- **`/tmp`, not `/data`.** `/tmp` is the container's ephemeral layer; `/data` is the mounted
+  volume. Writing the temp copy to the volume would consume the same 1 GB the store lives on
+  and leave a stale duplicate of every project's data sitting in production.
+- **A dated filename in `~/orion-backups/`.** Never a session scratch directory. The one time
+  a set of backups was written somewhere temporary, they did not survive the session, which
+  is the failure this whole section exists to prevent.
+
+Note that `fly ssh console` **wakes a scaled-to-zero machine**, so a pull briefly starts the
+app. It stops again on its own.
+
+### The two backup layers, and the actual RPO
+
+**Layer 1 — Fly volume snapshots (the platform's, free, already on).** Fly snapshots the
+volume daily. Verified 2026-07-29 on `orion_data`: five snapshots present, newest 20 hours
+old, **retention 5 days**.
+
+```bash
+fly volumes list -a project-orion                    # find the volume id
+fly volumes snapshots list <volume-id>               # dates + RETENTION DAYS
+```
+
+**Layer 2 — your own weekly pull (the schedule below).** This is the layer that exists
+because layer 1 has a 5-day horizon and lives in the same account as the thing it protects.
+
+So, stated plainly:
+
+| Failure | Worst-case data loss |
+| --- | --- |
+| Volume lost, noticed within 5 days | **≤ 24 hours** (restore the newest snapshot) |
+| Noticed after 5 days, or the Fly account itself is lost | **≤ 7 days** (your newest weekly pull) |
+
+If a 7-day outer window is too loose for you, change `Weekday` in the schedule below to run
+daily — it is a one-line edit. Retention needs no pruning policy: a backup is well under a
+megabyte, so a weekly pull kept forever costs on the order of 30 MB a year. Revisit that if
+the store ever grows by orders of magnitude.
+
+### Restore (tested 2026-07-29, against real production data)
+
+Restoring is a file copy. There is no import step, no schema step, and nothing to
+re-provision, because the backup *is* the database.
+
+```bash
+# 1. Take the relay down (or deploy over it afterwards). Then put the file in place.
+cp ~/orion-backups/orion-relay.20260729.bak ./orion-relay.sqlite3
+
+# 2. Prove the copy before trusting it.
+python3 -c "import sqlite3; print(sqlite3.connect('file:orion-relay.sqlite3?mode=ro', uri=True).execute('PRAGMA integrity_check').fetchone()[0])"
+
+# 3. Serve it locally and read it back before pushing it anywhere near production.
+orion relay-serve --db ./orion-relay.sqlite3 --web-dir web/dist --port 8793
+curl -s http://127.0.0.1:8793/healthz
+
+# 4. To put it back on Fly, upload it to the volume and restart:
+fly sftp shell -a project-orion      # then: put orion-relay.sqlite3 /data/orion-relay.sqlite3
+fly apps restart project-orion
+```
+
+Alternatively, restore layer 1 directly: `fly volumes snapshots list <volume-id>`, then
+create a new volume from a snapshot and attach it. That is the faster path for a genuine
+volume failure, and the weekly pull is the fallback for everything the 5-day window misses.
+
+**What "tested" means here.** This procedure was walked end to end on 2026-07-29 against a
+real production pull (not a synthetic fixture): the copy passed `integrity_check`, a relay
+started against it, a login succeeded, the portfolio read back all 5 projects/trackers with
+their lifecycle states intact, and an individual report fetched with its per-project number
+and prev/next navigation working. Step 4 (writing back to the volume) is the one step **not**
+exercised, because doing so would have meant overwriting live production data to test a
+backup. It is the documented inverse of the `fly sftp get` above.
+
+### Schedule the weekly pull (macOS / launchd)
+
+Same idiom as the report schedule in [`docs/scheduling.md`](scheduling.md), which has the
+Linux (`cron` / systemd timer) and Windows (Task Scheduler) equivalents — use those on those
+platforms rather than porting this file. Create
+`~/Library/LaunchAgents/com.orion.relay-backup.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.orion.relay-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <!-- One line so launchd needs no wrapper script. `set -e` matters: without it a failed
+         pull would still run the cleanup and report success, and you would believe you had a
+         backup you do not have. Use the absolute path to fly — launchd jobs get a minimal
+         PATH, which is the classic reason a scheduled job works in a terminal and not here. -->
+    <string>set -e; /opt/homebrew/bin/fly ssh console -a project-orion -C "python3 -c \"import sqlite3; s=sqlite3.connect('file:/data/orion-relay.sqlite3?mode=ro', uri=True); d=sqlite3.connect('/tmp/orion-pull.sqlite3'); s.backup(d); d.close(); s.close()\""; /opt/homebrew/bin/fly sftp get /tmp/orion-pull.sqlite3 "$HOME/orion-backups/orion-relay.$(date +%Y%m%d).bak" -a project-orion; /opt/homebrew/bin/fly ssh console -a project-orion -C "rm -f /tmp/orion-pull.sqlite3"</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>0</integer>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/abs/path/to/orion/orion-backup-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/abs/path/to/orion/orion-backup-launchd.log</string>
+</dict>
+</plist>
+```
+
+```bash
+mkdir -p ~/orion-backups
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.orion.relay-backup.plist
+launchctl kickstart -p gui/$(id -u)/com.orion.relay-backup   # run it once now, don't wait a week
+launchctl print gui/$(id -u)/com.orion.relay-backup          # inspect status
+# launchctl bootout gui/$(id -u)/com.orion.relay-backup      # to unload
+```
+
+Two things to know before trusting it. It needs a **`fly` token that does not expire** with
+your interactive login (`fly tokens create deploy` and export `FLY_API_TOKEN` in the plist's
+environment if the scheduled run 401s). And a schedule you have never seen succeed is not a
+backup: run the `kickstart` line above, then confirm a dated file actually landed in
+`~/orion-backups/`.
 
 ---
 

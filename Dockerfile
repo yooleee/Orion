@@ -49,6 +49,17 @@ ENV PYTHONPATH=/app
 # static output is copied; no Node toolchain reaches the runtime image.
 COPY --from=web-build /web/dist ./web/dist
 
+# Build provenance (AU1-R F2). Baked in at image build so the running relay can answer
+# "what code is this?" via GET /healthz and its startup log line. Declared LAST of the
+# build-affecting instructions on purpose: the value changes on every deploy, so putting
+# it here means a new SHA invalidates no pip/npm layer above it.
+# Supply it at deploy time (it defaults to "unknown", never to a wrong value):
+#   fly deploy --build-arg ORION_BUILD_SHA=$(git describe --always --dirty)
+# The --dirty suffix matters: `fly deploy` ships the WORKING TREE, not a commit, so a
+# bare SHA on a dirty tree would name code that is not what shipped.
+ARG ORION_BUILD_SHA=unknown
+ENV ORION_BUILD_SHA=${ORION_BUILD_SHA}
+
 # The sqlite store must persist across restarts/redeploys — keep it on a mounted
 # volume, not the container's ephemeral layer. Owned by the non-root user.
 RUN mkdir -p /data && chown orion:orion /data

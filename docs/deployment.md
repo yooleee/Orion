@@ -262,7 +262,7 @@ Here the relay binds `0.0.0.0` inside the container and the platform gives you H
 fail-closed guard **enforces** the view secret automatically (non-loopback bind).
 
 ```
-docker build -t orion-relay .
+docker build -t orion-relay --build-arg ORION_BUILD_SHA=$(git describe --always --dirty) .
 docker run -d --name orion-relay \
   -p 8787:8787 \
   -v orion-data:/data \
@@ -286,9 +286,59 @@ fly launch --no-deploy        # uses the committed fly.toml; decline the Postgre
 fly volumes create orion_data --size 1 --region <your-region>   # ONE volume — see Gotchas below
 fly secrets set ORION_RELAY_TOKEN=… ORION_RELAY_VIEW_TOKEN=… \
   ORION_RELAY_SESSION_KEY=… ORION_RELAY_USER_PEPPER=… ORION_RELAY_ADMIN_TOKEN=…  # private terminal
-fly deploy
+fly deploy --build-arg ORION_BUILD_SHA=$(git describe --always --dirty)
 ```
 Fly terminates TLS; the dashboard is at `https://<app>.fly.dev`.
+
+### Deploy convention: stamp the build, tag the deploy
+
+Two habits, both cheap, that together answer "what code is running?" after the fact.
+
+**Pass the build stamp on every deploy.** `--build-arg ORION_BUILD_SHA=$(git describe --always --dirty)`
+bakes the stamp into the image, and the relay serves it at `GET /healthz` and logs it at startup.
+The `--dirty` suffix is not decoration: `fly deploy` ships your **working tree**, not a commit, so
+on a dirty tree a bare SHA would name code that never shipped. Omitting the flag is safe but
+lossy, `/healthz` then reports `"version": "unknown"`. That is deliberate. An absent answer is
+recoverable, a confidently wrong one is not.
+
+**Tag the release.** After a deploy that you would ever want to identify again, tag it:
+`git tag v27 && git push --tags`, incrementing from the last one. Fly's own release numbers
+(`fly releases`) are the platform's counter, the tag is yours, and the two line up through the
+stamp `/healthz` reports.
+
+### Health check
+
+`GET /healthz` is unauthenticated and returns `{"status": "ok", "version": "<build stamp>"}`. It
+touches neither the auth spine nor SQLite, so it answers even when the store is the broken part.
+That makes it a **liveness** check, not a readiness one, which is the right shape for the failure
+this exists to catch (a wedged process still accepting traffic). It carries no project names, no
+counts, and no account facts, so it is safe to leave open.
+
+`fly.toml` ships an `[[http_service.checks]]` block pointing at it.
+
+> **One thing to confirm on your first deploy with the check enabled.** This app scales to zero.
+> Fly's documentation does not state whether health checks run against a stopped machine, can wake
+> one, or count as the traffic that defeats autostop. The reasonable expectation is that checks run
+> only while the machine runs and so leave scale-to-zero intact, but that is inference rather than
+> a documented guarantee. So after deploying, leave the app idle and run `fly status`: the machine
+> should return to `stopped`. If it stays awake, delete the checks block, an always-on machine
+> costs more than the check is worth.
+
+### Reading the logs
+
+The relay logs to stderr, which is what `fly logs` streams. Lines look like:
+
+```
+2026-07-29 14:51:35 [relay] INFO listening on http://0.0.0.0:8787  (db: /data/orion-relay.sqlite3; dashboard: login required; frontend: SPA from /app/web/dist; build: cd30bd2)
+2026-07-29 14:51:39 [relay] INFO 127.0.0.1 "GET /healthz HTTP/1.1" 200 -
+2026-07-29 14:51:39 [relay] WARNING 127.0.0.1 "POST /ingest HTTP/1.1" 401 -
+```
+
+INFO covers the access log (one line per request, with the status) plus ingest, checklist, and
+disciplines writes. WARNING and above covers request failures, use of the retired shared ingest
+token, and password-hashing problems. Set `ORION_RELAY_LOG_LEVEL` (for example `WARNING` to quiet
+the access log, `DEBUG` to widen it) if the default is wrong for your host. An unrecognized value
+falls back to INFO rather than silencing the log.
 
 **Render**: a Docker service; add a **Disk** mounted at `/data`; set the relay env vars (the table above); Render
 provides HTTPS at `https://<service>.onrender.com`. (Free instances sleep — fine for
@@ -354,6 +404,8 @@ secret lives only on the **server**, never in your project config.
 
 ## Verify end to end
 
+0. `curl https://relay.example.com/healthz` — the relay is up, and the `version` it reports is
+   the build you meant to deploy. No credential needed.
 1. `orion check <project>` — confirms the local ingest token is set.
 2. `orion report <project>` (or `orion intake …`) — pushes a real report.
 3. Open `https://relay.example.com` — the browser prompts for the dashboard login; enter

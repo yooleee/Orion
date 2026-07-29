@@ -35,6 +35,28 @@ primary_region = "sjc"   # pick one near you / your supervisors: `fly platform r
   auto_start_machines = true
   min_machines_running = 0   # scale to zero when idle; set to 1 to stay warm (no cold start)
 
+# Health check against the relay's unauthenticated GET /healthz (AU1-R F2). Before this,
+# Fly had no way to tell a serving relay from a wedged one — a hung process kept taking
+# traffic. /healthz touches neither auth nor sqlite, so it answers even when the store is
+# the thing that is broken (liveness, not readiness — that distinction is deliberate).
+#
+# UNVERIFIED INTERACTION, read this before trusting it: the app scales to zero
+# (min_machines_running = 0 above). Fly's docs — the configuration reference, the
+# autostop/autostart page, and the health-checks reference — do not state whether checks
+# run against a STOPPED machine, whether they can wake one, or whether they count as the
+# traffic that defeats autostop. Machine checks are believed to be run by flyd on a
+# RUNNING machine and not to be proxy requests, which would leave scale-to-zero intact,
+# but that is inference, not documented fact. So: after the first deploy that includes
+# this block, confirm with `fly status` that the machine still returns to `stopped` after
+# the idle window. If it stays awake, delete this block — the cost of an always-on machine
+# is not worth the check.
+[[http_service.checks]]
+  grace_period = "10s"   # the Python import + sqlite migration run before the first 200
+  interval = "30s"
+  timeout = "5s"
+  method = "GET"
+  path = "/healthz"
+
 # Persist the sqlite store across restarts/redeploys (it lives at /data in the image).
 # Create the volume first, in the SAME region:
 #   fly volumes create orion_data --size 1 --region iad

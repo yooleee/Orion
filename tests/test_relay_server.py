@@ -3857,6 +3857,95 @@ def test_no_web_dir_is_api_only(tmp_path):
         assert _get_json(base_url, "/api/me")[0] == 200
 
 
+# --- AU1-R F2: the operational floor (/healthz, build provenance, request logging) ---
+#
+# KI-44/KI-46 recorded that the relay had no health check, no logging, and no answer to
+# "what code is running?". These tests pin the three properties that make the floor real:
+# /healthz answers without auth, is NOT swallowed by the SPA's catch-all index.html
+# fallback, and leaks nothing about the projects on the relay.
+
+
+def test_healthz_answers_unauthenticated_on_a_gated_relay(tmp_path):
+    """GET /healthz returns 200 {"status": "ok", ...} with no credential, on a GATED relay.
+
+    Why this matters: a health probe is a platform process with no session and no token. If
+    /healthz sat behind the auth spine it would report "unhealthy" for a perfectly healthy
+    relay, which is worse than having no check at all. The gated relay (view_token set) is
+    the case that matters — an ungated loopback relay would pass trivially.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        status, body = _get_json(base_url, "/healthz")
+        assert status == 200
+        assert body["status"] == "ok"
+
+
+def test_healthz_is_not_swallowed_by_the_spa_fallback(tmp_path):
+    """With --web-dir, /healthz still answers JSON rather than the SPA's index.html.
+
+    Why this matters: under --web-dir ANY unmatched GET path falls through to index.html
+    with a 200 (that is how client-side routing works). A health check pointed at a route
+    that quietly resolved to the SPA shell would report 200 forever — including while the
+    API and the store were completely broken. This is the test that keeps the route ordered
+    ahead of the static fallback.
+    """
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        status, body = _get_json(base_url, "/healthz")
+        assert status == 200
+        assert body["status"] == "ok"  # parsed as JSON, so it was not the HTML shell
+
+
+def test_healthz_reveals_no_project_facts(tmp_path):
+    """The /healthz body names no project and carries only status + version.
+
+    Why this matters: /healthz is the one unauthenticated, unscoped read on the relay, so it
+    is exactly where existence-hiding (a viewer must not learn a project exists) would leak
+    if the payload ever grew a count or a name for "operational convenience". A report is
+    ingested first so the assertion is made against a relay that actually HAS a project to
+    leak.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        _post(base_url, _blob_for("secret-skunkworks"))
+        status, text = _get(base_url, "/healthz")
+        assert status == 200
+        assert "secret-skunkworks" not in text
+        assert set(json.loads(text)) == {"status", "version"}
+
+
+def test_healthz_version_reports_the_build_stamp(tmp_path, monkeypatch):
+    """`version` echoes ORION_BUILD_SHA, and says "unknown" when it is unset.
+
+    Why this matters: this is the "what code is running?" answer. Both halves are asserted
+    because the failure modes differ in kind — a stale or wrong SHA would make an operator
+    conclude a fix is live when it is not, whereas "unknown" is a truthful admission that
+    the deploy did not pass the build arg. The value is read per request (not cached at
+    import), which is what makes it patchable here.
+    """
+    monkeypatch.setenv("ORION_BUILD_SHA", "abc1234-dirty")
+    with _running_relay(tmp_path) as (base_url, _db):
+        assert _get_json(base_url, "/healthz")[1]["version"] == "abc1234-dirty"
+
+    monkeypatch.delenv("ORION_BUILD_SHA")
+    with _running_relay(tmp_path) as (base_url, _db):
+        assert _get_json(base_url, "/healthz")[1]["version"] == "unknown"
+
+
+def test_a_failed_request_leaves_a_log_line(tmp_path, capfd):
+    """A 404 emits a stderr log line naming the method, path, and status.
+
+    Why this matters: log_message used to be a no-op, so a relay returning 404s or 500s
+    produced ZERO output — an operator debugging "the dashboard is broken" had nothing to
+    grep. This is the acceptance bar "a failed request leaves a searchable log line".
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        capfd.readouterr()  # drain startup noise
+        assert _get_json(base_url, "/no-such-route")[0] == 404
+        err = capfd.readouterr().err
+        assert "GET /no-such-route" in err
+        assert "404" in err
+        assert "[relay]" in err  # the prefix operator habits and log filters rely on
+
+
 def test_api_scheduling_buckets_deadlines_across_sources(tmp_path):
     """/api/scheduling returns {summary, buckets} and time-buckets open dated items.
 

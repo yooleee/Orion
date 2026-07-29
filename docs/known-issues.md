@@ -884,8 +884,35 @@ Deferred).
     (`--build-arg … $(git describe --always --dirty)`, plus tag-on-deploy) in
     `docs/deployment.md`. Verified end to end in a real image build: with the arg it reports
     the stamp, without it reports `"unknown"` — an absent answer rather than a wrong one.
-  Gap **(a), the backup half — the one rated medium and the one that has actually bitten — is
-  still open**, and is AU1-R F3's subject.
+  Gap **(a), the backup half**, is closed on the build side by AU1-R F3 (2026-07-29), with one
+  operator action outstanding:
+  - **A tested restore path now exists.** `docs/deployment.md` documents restore end to end,
+    and the procedure was **walked against a real production pull**, not a synthetic fixture:
+    `integrity_check` ok, a relay started against the restored file, login succeeded, the
+    portfolio read back every project/tracker with lifecycle states intact, and an individual
+    report fetched with its per-project number and prev/next nav working. The one unexercised
+    step is writing the file back to the volume, which could only be tested by overwriting
+    live data.
+  - **A current dated backup exists** at `~/orion-backups/orion-relay.20260729-f3drill.bak`,
+    so the "newest restore point is days behind the live schema" condition that opened this
+    gap is cleared as of today.
+  - **A finding that partly re-rates the original entry: Fly volume snapshots were already
+    running.** Verified on `orion_data` — daily, five present, **5-day retention**. The filing
+    said backups were "manual and per-session" with "no offsite copy", which was true of the
+    *operator-owned* layer but understated the platform's. The real gap was always the horizon
+    (nothing survives past 5 days) and the single-account risk, not the absence of any copy.
+    The documented RPO now states both layers honestly: ≤ 24 hours inside the 5-day window,
+    ≤ 7 days outside it.
+  - **A safer pull method replaces the one previously documented.** The old advice ran
+    `PRAGMA wal_checkpoint(TRUNCATE)` on the live database before a file copy — a *write* to
+    production taken only to make `cp` safe. The runbook now uses SQLite's online backup API
+    with a `mode=ro` source, which is consistent under WAL and provably cannot alter
+    production, and writes the temp copy to the container's `/tmp` rather than onto the mounted
+    volume.
+  - **Still outstanding (deliberately):** the weekly `launchd` job is *documented*, not
+    *installed*. Installing it is an operator act, so "a current backup exists without a human
+    remembering" is not yet true. Until that `launchctl bootstrap` runs, the operator-owned
+    layer is manual and this gap stays half-open.
   One item is deliberately **not** claimed: whether Fly's health check defeats scale-to-zero
   is **unverified**. Three Fly docs pages are silent on whether checks run against, or wake, a
   stopped machine. The block ships with the confirmation step (`fly status` after an idle

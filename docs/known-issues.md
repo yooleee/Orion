@@ -783,8 +783,20 @@ Deferred).
   `timeout = 30` on the handler is a two-line hardening (BaseHTTPRequestHandler honors it),
   and a bounded-thread server subclass is a small, self-contained follow-on.
 - **Severity:** low-medium (reachable today; cheap to close; no design fork involved).
-- **Status:** Open. Found 2026-07-28 (audit, relay-side pass). The timeout half should ride
-  the next relay-touching slice; the thread cap is optional hardening behind it.
+- **Status:** **HALF-OPEN** as of AU1-R F2 (2026-07-29). The **timeout half is closed**:
+  `_RelayHandler.timeout = 30`, so a client that stalls mid-body no longer holds a thread
+  indefinitely. The **thread cap is still open, by decision rather than by omission** — the
+  bounded-thread subclass was weighed and deferred, because the memory-heavy path (the Argon2
+  semaphore) already bounds the resource that actually bit, and sizing a thread cap wants
+  observed load rather than a guessed constant. **Revisit trigger:** any observed memory
+  pressure or connection pile-up on the relay, or the serving-layer re-litigation already
+  scheduled at stage-3/oracle scoping.
+- **Scope note worth keeping** (found while fixing, not in the original filing): the relay
+  leaves `protocol_version` unset, so it speaks HTTP/1.0 and closes after each response. The
+  timeout therefore guards a **stalled request read** and not an idle keep-alive connection,
+  of which there are none. A second interaction: a fired timeout is reported by the stdlib
+  through `log_error`, which was routed into the no-op `log_message` — so before F2's logging
+  change a timeout would have fired **invisibly**. The two bands had to land together.
 
 ## KI-45 — The web suite, type-check, and build are not in CI
 
@@ -828,9 +840,30 @@ Deferred).
   convention + a version constant on the wire.
 - **Severity:** medium for the backup half (real data, one volume, no drill); low-medium for
   the rest, rising with audience.
-- **Status:** Open. Found 2026-07-29 (AU1 external-lens addendum). Slotted as the
-  "production floor" band of the proposed paydown/hardening slice. Relates to [[KI-44]]
-  (same posture, server-side) and [[KI-38]] (same audience-widening severity curve).
+- **Status:** **Partly closed** by AU1-R F2 (2026-07-29). Gaps **(b)**, **(c)**, and **(d)**
+  are closed on the build side:
+  - **(b) health checks** — an unauthenticated `GET /healthz` returning `{status, version}`,
+    routed ahead of both the auth spine and the SPA's catch-all `index.html` fallback (that
+    ordering is the whole trick: under `--web-dir` an unmatched path returns the SPA shell
+    with a 200, so a check on a mis-ordered route would have reported healthy forever), plus
+    an `[[http_service.checks]]` block in `fly.toml`.
+  - **(c) logging** — stdlib `logging` on one stderr handler, levelled and timestamped,
+    replacing the seven bare prints AND the no-op `log_message`, so request lines, 4xx/5xx,
+    auth failures, and fired timeouts all leave greppable evidence. Level is env-tunable via
+    `ORION_RELAY_LOG_LEVEL`.
+  - **(d) release provenance** — `ORION_BUILD_SHA` baked at image build and served by
+    `/healthz` + logged at startup, with the deploy convention
+    (`--build-arg … $(git describe --always --dirty)`, plus tag-on-deploy) in
+    `docs/deployment.md`. Verified end to end in a real image build: with the arg it reports
+    the stamp, without it reports `"unknown"` — an absent answer rather than a wrong one.
+  Gap **(a), the backup half — the one rated medium and the one that has actually bitten — is
+  still open**, and is AU1-R F3's subject.
+  One item is deliberately **not** claimed: whether Fly's health check defeats scale-to-zero
+  is **unverified**. Three Fly docs pages are silent on whether checks run against, or wake, a
+  stopped machine. The block ships with the confirmation step (`fly status` after an idle
+  window) recorded in both `fly.toml` and the deploy doc, and reverting is a five-line
+  deletion. Relates to [[KI-44]] (same posture, server-side; its timeout half landed in the
+  same unit) and [[KI-38]] (same audience-widening severity curve).
 
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

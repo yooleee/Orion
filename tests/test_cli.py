@@ -4104,3 +4104,80 @@ def test_add_project_and_graduate_idea_flag_sets_cannot_drift(capsys):
         "(_project_registration_parser), not on add-project alone. This is KI-43 recurring."
     )
     assert graduate_flags - add_flags == {"--name", "--incubator", "--force"}
+
+
+# --- AU1-R P3: the --config flag is declared once, and still reaches every command ------
+
+# Every LEAF command (the ones that actually run, not the grouping parsers). Written out
+# rather than discovered, so ADDING a command is a deliberate edit here too — a new command
+# that forgets --config should fail this test, which is the whole point.
+_LEAF_COMMANDS = [
+    ["report"], ["checklist-push"], ["disciplines-push"], ["intake"], ["relay-backfill"],
+    ["install-hook"], ["add-project"], ["graduate-idea"], ["projects"], ["show"], ["check"],
+    ["status"], ["baseline"], ["discussions", "pull"], ["discussions", "reply"], ["bot"],
+    ["relay-serve"],
+    ["relay-user", "add"], ["relay-user", "list"], ["relay-user", "revoke"],
+    ["relay-user", "grant"], ["relay-user", "key", "add"], ["relay-user", "key", "list"],
+    ["relay-user", "key", "revoke"], ["relay-user", "password", "set"],
+    ["relay-user", "password", "unlock"], ["relay-user", "role"], ["relay-user", "rename"],
+    ["relay-user", "set-operator"], ["relay-user", "delete"],
+    ["relay-project", "visibility"], ["relay-project", "lifecycle"],
+]
+
+
+def _help_text(capsys, command):
+    """Return a leaf command's --help output (the only way to reach main()'s inline parser)."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(command + ["--help"])
+    assert exc.value.code == 0, f"{' '.join(command)} --help did not exit 0"
+    return capsys.readouterr().out
+
+
+def test_every_leaf_command_still_offers_config(capsys):
+    """All 32 leaf commands expose --config, and the 30 standard ones share one help text.
+
+    Why this matters: P3 replaced 30 byte-identical --config blocks with one
+    `_add_config_arg` helper. The risk of that kind of collapse is a command silently LOSING
+    the flag (a missed call site), which no other test would notice because nothing else
+    asserts the flag exists per command. This walks every leaf command and checks it.
+
+    It also pins the ONE deliberate exception: `relay-serve` keeps its own wording, because
+    that command reads no project list and its config is used only to locate .env. That is a
+    real distinction, not a copy that drifted, so the test asserts the difference SURVIVES
+    rather than treating uniformity as the goal.
+    """
+    standard = "Path to the config file (default:"
+    for command in _LEAF_COMMANDS:
+        out = _help_text(capsys, command)
+        label = " ".join(command)
+        assert "--config" in out, f"{label} lost its --config flag"
+        if command == ["relay-serve"]:
+            assert "used only to locate .env" in out, (
+                "relay-serve's --config help lost its command-specific wording; it reads no "
+                "project list, so the standard 'path to the config file' text understates it."
+            )
+        else:
+            assert standard in out, f"{label} has non-standard --config help text"
+
+
+def test_the_two_registration_commands_build_without_an_argparse_collision(capsys):
+    """add-project and graduate-idea get --config from the shared parent, exactly once.
+
+    Why this matters: this is the trap the kickoff warned would "fail loudly at parser-build
+    time". `_project_registration_parser` owns --config for these two commands via
+    `parents=[...]`, so ALSO calling `_add_config_arg` on either subparser raises
+    `conflicting option string: --config` — and because the parser is built inside main(),
+    that would break EVERY invocation of the CLI, not just these two commands. The flag
+    appearing once in each help output is the observable form of "the helper composed with
+    the shared parent instead of duplicating it".
+    """
+    for command in (["add-project"], ["graduate-idea"]):
+        out = _help_text(capsys, command)
+        # argparse prints an option in the usage line and again in the options list, so a
+        # correctly-declared flag appears exactly twice; a duplicate declaration cannot get
+        # this far (it raises at build time), which is what makes reaching here the check.
+        occurrences = len(re.findall(r"(?<![\w-])--config(?![\w-])", out))
+        assert occurrences == 2, (
+            f"{command[0]} shows --config {occurrences}× in --help; expected 2 "
+            "(usage line + options list)"
+        )

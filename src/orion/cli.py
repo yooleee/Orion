@@ -221,6 +221,42 @@ def _ensure_utf8_output() -> None:
     _reconfigure_stream_utf8(sys.stderr)
 
 
+def _add_config_arg(parser: argparse.ArgumentParser, default_config: str) -> None:
+    """Add the standard `--config` flag to one subparser (AU1-R P3).
+
+    Args:
+        parser: The subparser to add the flag to.
+        default_config: The config path to show as the default (resolved in main() from
+            $ORION_CONFIG or DEFAULT_CONFIG).
+
+    Returns:
+        None. Mutates `parser`, matching argparse's own add_argument style.
+
+    Why:
+        Thirty subparsers declared a byte-identical four-line `--config` block (AU1's 31×
+        finding, one of which is not identical — see below). One definition means the flag's
+        default and its help text cannot drift between commands, which is the drift a reader
+        cannot see because the copies are hundreds of lines apart.
+
+        TWO deliberate non-users, both of which would be bugs to "fix":
+
+        1. `add-project` and `graduate-idea` get `--config` from
+           `_project_registration_parser` via `parents=[...]`. Calling this helper on them as
+           well would raise `argparse.ArgumentError: conflicting option string: --config` at
+           parser-BUILD time — i.e. on every single invocation of the CLI, not just theirs.
+           This helper is called on the shared parent instead, which is where it belongs.
+        2. `relay-serve` keeps its own `--config` with different help text ("used only to
+           locate .env"). That is an accurate statement about that command specifically —
+           relay-serve reads no project list — so it is a real distinction, not a copy that
+           drifted, and collapsing it into the standard wording would make the help WRONG.
+    """
+    parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
+    )
+
+
 def _project_registration_parser(default_config: str) -> argparse.ArgumentParser:
     """Build the parser holding every flag `add-project` and `graduate-idea` share.
 
@@ -309,11 +345,7 @@ def _project_registration_parser(default_config: str) -> argparse.ArgumentParser
         help="When a tasks_file is being created (no --tasks-file given), seed its "
         "checklist from this doc's Markdown tables instead of an empty starter.",
     )
-    shared.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(shared, default_config)
     shared.add_argument(
         "--print",
         dest="print_only",
@@ -379,11 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report on every project in the config (for scheduled --all --yes runs).",
     )
-    report_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(report_parser, default_config)
     report_parser.add_argument(
         "--yes",
         "-y",
@@ -423,11 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Push every checklist-enabled project in the config (for scheduled --all --due runs).",
     )
-    checklist_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(checklist_parser, default_config)
     checklist_parser.add_argument(
         "--due",
         action="store_true",
@@ -484,11 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         "project",
         help="Project name as defined in orion.toml (must enable the 'disciplines' collector).",
     )
-    disciplines_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(disciplines_parser, default_config)
     disciplines_parser.add_argument(
         "--clear",
         action="store_true",
@@ -505,11 +525,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Send a pushed/hand-written update for a project (skips collectors & LLM).",
     )
     intake_parser.add_argument("project", help="Project name as defined in orion.toml.")
-    intake_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(intake_parser, default_config)
     intake_parser.add_argument(
         "--message",
         "-m",
@@ -532,11 +548,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Push an already-sent report onto the relay dashboard (relay-only, no chat) — for reports sent before the relay was scoped in.",
     )
     backfill_parser.add_argument("project", help="Project name as defined in orion.toml.")
-    backfill_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(backfill_parser, default_config)
     backfill_parser.add_argument(
         "--generated-at",
         required=True,
@@ -575,11 +587,7 @@ def main(argv: list[str] | None = None) -> int:
             "push — less noisy than post-commit, which fires on every commit)."
         ),
     )
-    hook_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(hook_parser, default_config)
     hook_parser.add_argument(
         "--print",
         dest="print_only",
@@ -661,42 +669,26 @@ def main(argv: list[str] | None = None) -> int:
         "projects",
         help="List the projects defined in the config (read-only).",
     )
-    projects_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(projects_parser, default_config)
 
     show_parser = subparsers.add_parser(
         "show",
         help="Show one project's resolved config (read-only).",
     )
     show_parser.add_argument("project", help="Project name as defined in orion.toml.")
-    show_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(show_parser, default_config)
 
     check_parser = subparsers.add_parser(
         "check",
         help="Validate the config and report send-readiness (read-only).",
     )
-    check_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(check_parser, default_config)
 
     status_parser = subparsers.add_parser(
         "status",
         help="Show which projects have unreported activity across the config (read-only).",
     )
-    status_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(status_parser, default_config)
 
     baseline_parser = subparsers.add_parser(
         "baseline",
@@ -706,11 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     baseline_parser.add_argument("project", help="Project name as defined in orion.toml.")
-    baseline_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(baseline_parser, default_config)
 
     # `discussions` is a command GROUP (pull/reply) — the two-way supervisor-interaction
     # loop (E2 Inc 5) and the single CLI conversation surface (KI-28 Stage 2 retired the
@@ -728,11 +716,7 @@ def main(argv: list[str] | None = None) -> int:
         "pull", help="Pull new supervisor messages on a project's discussion thread."
     )
     disc_pull.add_argument("project", help="Project name as defined in orion.toml.")
-    disc_pull.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(disc_pull, default_config)
     disc_pull.add_argument(
         "--json",
         dest="as_json",
@@ -764,21 +748,13 @@ def main(argv: list[str] | None = None) -> int:
             "\"developer\". The role is always 'developer' regardless of this name."
         ),
     )
-    disc_reply.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(disc_reply, default_config)
 
     bot_parser = subparsers.add_parser(
         "bot",
         help="Run the Slack bot (PARKED since KI-28 Stage 2; revived with per-user keys).",
     )
-    bot_parser.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(bot_parser, default_config)
 
     relay_parser = subparsers.add_parser(
         "relay-serve",
@@ -964,31 +940,19 @@ def main(argv: list[str] | None = None) -> int:
             "is never lost."
         ),
     )
-    ru_add.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_add, default_config)
 
     ru_list = relay_user_subs.add_parser(
         "list", help="List the relay's users (no credential material is shown)."
     )
-    ru_list.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_list, default_config)
 
     ru_revoke = relay_user_subs.add_parser(
         "revoke",
         help="Revoke a user: deactivate their key and force-log-out any live session.",
     )
     ru_revoke.add_argument("name", help="The user to revoke (by name).")
-    ru_revoke.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_revoke, default_config)
 
     ru_grant = relay_user_subs.add_parser(
         "grant",
@@ -1003,11 +967,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PROJECT",
         help="A project to grant (repeatable: --project a --project b). At least one required.",
     )
-    ru_grant.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_grant, default_config)
 
     # `key` is a command GROUP (add/list/revoke) — an account holds N credentials, so the
     # verbs act on a credential, not on the account. This REPLACES the retired `rotate`:
@@ -1027,19 +987,13 @@ def main(argv: list[str] | None = None) -> int:
         "--label", required=True,
         help="A short label for where this key lives, e.g. 'mac' or 'wsl2' (unique per account).",
     )
-    ru_key_add.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_key_add, default_config)
 
     ru_key_list = ru_key_subs.add_parser(
         "list", help="List an account's credentials (never shows the key material itself)."
     )
     ru_key_list.add_argument("name", help="The account whose credentials to list.")
-    ru_key_list.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_key_list, default_config)
 
     ru_key_revoke = ru_key_subs.add_parser(
         "revoke", help="Revoke ONE credential by id; the account's other keys keep working."
@@ -1049,10 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
         "--id", required=True, type=int,
         help="The credential id to revoke (from `key list` — labels are reusable, ids are not).",
     )
-    ru_key_revoke.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_key_revoke, default_config)
 
     # `password` is a command GROUP (set/unlock). A password is NEVER accepted as an
     # argument: argv lands in shell history, `ps` output, and CI logs. It is either typed
@@ -1072,20 +1023,14 @@ def main(argv: list[str] | None = None) -> int:
         "--generate", action="store_true",
         help="Have the relay mint a strong password and print it ONCE, instead of prompting.",
     )
-    ru_pw_set.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_pw_set, default_config)
 
     ru_pw_unlock = ru_pw_subs.add_parser(
         "unlock",
         help="Clear a login lockout after failed attempts (does not change the password).",
     )
     ru_pw_unlock.add_argument("name", help="The account to unlock.")
-    ru_pw_unlock.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_pw_unlock, default_config)
 
     ru_role = relay_user_subs.add_parser(
         "role",
@@ -1096,10 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
         "role",
         help="The new role: admin | viewer | supervisor | member | contributor.",
     )
-    ru_role.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_role, default_config)
 
     ru_rename = relay_user_subs.add_parser(
         "rename",
@@ -1107,10 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ru_rename.add_argument("name", help="The account to rename.")
     ru_rename.add_argument("new_name", help="The new (unique) name.")
-    ru_rename.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_rename, default_config)
 
     ru_set_operator = relay_user_subs.add_parser(
         "set-operator",
@@ -1120,21 +1059,14 @@ def main(argv: list[str] | None = None) -> int:
     ru_set_operator.add_argument(
         "operator", help="The human account this agent should act on behalf of."
     )
-    ru_set_operator.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_set_operator, default_config)
 
     ru_delete = relay_user_subs.add_parser(
         "delete",
         help="Hard-delete a user, freeing their name to be reused (revoke keeps the name).",
     )
     ru_delete.add_argument("name", help="The user to delete (by name).")
-    ru_delete.add_argument(
-        "--config",
-        default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(ru_delete, default_config)
 
     # Project-level admin ops. Separate from relay-user because the subject is a PROJECT,
     # not an account — mixing them would make `relay-user visibility` read as a user setting.
@@ -1162,10 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
             "supervisors are unaffected either way — they always see only their grants."
         ),
     )
-    rp_visibility.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(rp_visibility, default_config)
 
     # S2.2: a project's lifecycle is DECLARED here, on the relay, and never pushed by a
     # producer — the relay has to keep remembering it after the project leaves orion.toml.
@@ -1184,10 +1113,7 @@ def main(argv: list[str] | None = None) -> int:
             "every project is born with): the normal live state. Fully reversible."
         ),
     )
-    rp_lifecycle.add_argument(
-        "--config", default=default_config,
-        help=f"Path to the config file (default: {default_config}; or set $ORION_CONFIG).",
-    )
+    _add_config_arg(rp_lifecycle, default_config)
 
     args = parser.parse_args(argv)
     if args.command == "report":
@@ -4471,6 +4397,52 @@ def _load_relay_admin(config_path: Path) -> tuple[str, str]:
     return relay_cfg.url, admin_token
 
 
+# AU1-R P3: a sentinel meaning "the admin call failed and its message is already on stderr".
+# A distinct object rather than None because several admin client calls legitimately return
+# None (the ones whose success carries no payload — revoke, unlock, rename), so None cannot
+# also mean failure. Its ONLY correct use is `if result is _ADMIN_CALL_FAILED: return 1`.
+_ADMIN_CALL_FAILED = object()
+
+
+def _run_admin_command(config_path: Path, call) -> object:
+    """Load the relay admin credentials, run one admin API call, and report any failure.
+
+    Args:
+        config_path: Path to orion.toml (its sibling .env holds the admin token).
+        call: A callable taking (relay_url, admin_token) and performing exactly one admin
+            API request. Written as a lambda at each call site so the `relay_*` client
+            function is looked up at CALL time — which is what keeps the tests'
+            `monkeypatch.setattr(cli, "relay_...", ...)` patch points working.
+
+    Returns:
+        Whatever `call` returned (often a dict, sometimes None for the verbs whose success
+        carries no payload), or `_ADMIN_CALL_FAILED` when the credentials could not be
+        loaded or the request failed — in which case "Error: ..." is ALREADY on stderr and
+        the caller should return 1.
+
+    Why:
+        All fifteen `relay-user` / `relay-project` commands opened with the same six lines:
+        load the admin credentials, make one call, and turn ConfigError / SecretsError /
+        DeliveryError into one "Error: ..." line plus exit 1 (AU1's 15× finding). That
+        ceremony is not where any of those commands differ, and copying it is how the
+        sixteenth verb would have acquired a subtly different error path.
+
+        The three exception types are caught TOGETHER on purpose: from the operator's seat a
+        misconfigured relay, a missing secret and a rejected request are all "this did not
+        happen, here is why", all fixable locally, and none of them a bug worth a traceback.
+
+        Each command's own pre-flight validation (argument pairings, empty-list checks) stays
+        in the command — that is per-command intent, not ceremony, and it must keep running
+        BEFORE any credential is loaded.
+    """
+    try:
+        relay_url, admin_token = _load_relay_admin(config_path)
+        return call(relay_url, admin_token)
+    except (ConfigError, SecretsError, DeliveryError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _ADMIN_CALL_FAILED
+
+
 def _member_scope_sentence(scope: list[str]) -> str:
     """Describe what a `member` account can read, given its explicit grants.
 
@@ -4537,19 +4509,19 @@ def cmd_relay_user_add(
         print("Error: --operated-by is only valid with --kind agent.", file=sys.stderr)
         return 1
 
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_create_user(
-            relay_url,
-            admin_token,
+    result = _run_admin_command(
+        config_path,
+        lambda url, token: relay_create_user(
+            url,
+            token,
             name,
             role,
             projects,
             account_kind="agent" if is_agent else None,
             operated_by=operated_by if is_agent else None,
-        )
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        ),
+    )
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"Provisioned user {result['name']!r} (role: {result['role']}).")
@@ -4587,11 +4559,8 @@ def cmd_relay_user_list(config_path: Path) -> int:
         It calls GET /api/users, which returns NO credential material (no verifier, no
         key), so a listing can never surface a secret.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_list_users(relay_url, admin_token)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    result = _run_admin_command(config_path, lambda url, token: relay_list_users(url, token))
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     users = result.get("users", [])
@@ -4636,11 +4605,9 @@ def cmd_relay_user_revoke(name: str, config_path: Path) -> int:
         the user and bumps their session_version atomically — so the key stops logging in
         AND any cookie already in a browser dies on its next request.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_revoke_user(relay_url, admin_token, name)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path, lambda url, token: relay_revoke_user(url, token, name)
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     print(
@@ -4673,11 +4640,10 @@ def cmd_relay_user_grant(name: str, projects: list[str], config_path: Path) -> i
             file=sys.stderr,
         )
         return 1
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_grant_projects(relay_url, admin_token, name, projects)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    result = _run_admin_command(
+        config_path, lambda url, token: relay_grant_projects(url, token, name, projects)
+    )
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     scope = result.get("projects") or []
@@ -4705,11 +4671,10 @@ def cmd_relay_user_key_add(name: str, label: str, config_path: Path) -> int:
         working until the new one is confirmed, with no silent-401 window on a scheduled
         push and no way to strand yourself if this output is lost.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_add_user_key(relay_url, admin_token, name, label)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    result = _run_admin_command(
+        config_path, lambda url, token: relay_add_user_key(url, token, name, label)
+    )
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"Added key {label!r} (id {result['id']}) to {name!r}. Existing keys still work.")
@@ -4736,11 +4701,10 @@ def cmd_relay_user_key_list(name: str, config_path: Path) -> int:
         once an account holds several keys. Key material is never shown: the relay's listing
         excludes verifiers by construction.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_list_user_keys(relay_url, admin_token, name)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    result = _run_admin_command(
+        config_path, lambda url, token: relay_list_user_keys(url, token, name)
+    )
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     credentials = result.get("credentials", [])
@@ -4773,11 +4737,10 @@ def cmd_relay_user_key_revoke(name: str, credential_id: int, config_path: Path) 
         It deliberately does not log the person out of the dashboard: a machine key and a
         browser session are different credentials with different lifecycles.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_revoke_user_key(relay_url, admin_token, name, credential_id)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path,
+        lambda url, token: relay_revoke_user_key(url, token, name, credential_id),
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"Revoked credential {credential_id} for {name!r}. Their other credentials still work.")
@@ -4824,11 +4787,10 @@ def cmd_relay_user_password_set(name: str, generate: bool, config_path: Path) ->
             print("Error: the two passwords did not match.", file=sys.stderr)
             return 2
 
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_set_user_password(relay_url, admin_token, name, password)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    result = _run_admin_command(
+        config_path, lambda url, token: relay_set_user_password(url, token, name, password)
+    )
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"Password set for {name!r}. Any live session was logged out.")
@@ -4856,11 +4818,9 @@ def cmd_relay_user_password_unlock(name: str, config_path: Path) -> int:
         it is what makes online password guessing hopeless — so the counterweight is an
         instant admin unlock that does NOT require changing a password the person still knows.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_unlock_user(relay_url, admin_token, name)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path, lambda url, token: relay_unlock_user(url, token, name)
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"Cleared the login lockout for {name!r}. Their password is unchanged.")
@@ -4884,11 +4844,10 @@ def cmd_relay_user_role(name: str, role: str, config_path: Path) -> int:
         below is the operationally important part: demoting an admin to a scoped role makes
         default-deny apply, so the account sees NOTHING until it is granted projects.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        result = relay_set_user_role(relay_url, admin_token, name, role)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    result = _run_admin_command(
+        config_path, lambda url, token: relay_set_user_role(url, token, name, role)
+    )
+    if result is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"{name!r} is now a {role}. Any live session was logged out.")
@@ -4925,11 +4884,10 @@ def cmd_relay_project_visibility(name: str, visibility: str, config_path: Path) 
         deliberate — which is the property that keeps default-deny meaningful as the org's
         project list grows.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_set_project_visibility(relay_url, admin_token, name, visibility)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path,
+        lambda url, token: relay_set_project_visibility(url, token, name, visibility),
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     if visibility == "org":
@@ -4963,11 +4921,10 @@ def cmd_relay_project_lifecycle(name: str, lifecycle: str, config_path: Path) ->
         discussions all stay exactly as they are. What changes is how the dashboard frames
         it, and that a finished project stops being read as if it still had deadlines.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_set_project_lifecycle(relay_url, admin_token, name, lifecycle)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path,
+        lambda url, token: relay_set_project_lifecycle(url, token, name, lifecycle),
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     if lifecycle == "past":
@@ -5002,11 +4959,9 @@ def cmd_relay_user_set_operator(name: str, operator: str, config_path: Path) -> 
         holding it would need re-issued. Reassignment moves DISPLAY GROUPING only — stored
         reports keep the agent's real author id, so no history moves and provenance holds.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_set_user_operator(relay_url, admin_token, name, operator)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path, lambda url, token: relay_set_user_operator(url, token, name, operator)
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"{name!r} is now operated by {operator!r}.")
@@ -5032,11 +4987,9 @@ def cmd_relay_user_rename(name: str, new_name: str, config_path: Path) -> int:
         the name they were written with — `author_name` is denormalized precisely so history
         survives the account changing or being deleted — so this is not a retroactive edit.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_rename_user(relay_url, admin_token, name, new_name)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path, lambda url, token: relay_rename_user(url, token, name, new_name)
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     print(f"Renamed {name!r} to {new_name!r}. Past reports keep the name they were sent under.")
@@ -5059,11 +5012,9 @@ def cmd_relay_user_delete(name: str, config_path: Path) -> int:
         (KI-31). `delete` removes the user + grants + live per-producer checklists and frees the
         name, while their past reports/replies keep the author name already recorded on them.
     """
-    try:
-        relay_url, admin_token = _load_relay_admin(config_path)
-        relay_delete_user(relay_url, admin_token, name)
-    except (ConfigError, SecretsError, DeliveryError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    if _run_admin_command(
+        config_path, lambda url, token: relay_delete_user(url, token, name)
+    ) is _ADMIN_CALL_FAILED:
         return 1
 
     print(

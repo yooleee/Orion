@@ -455,13 +455,23 @@ counts, and no account facts, so it is safe to leave open.
 
 `fly.toml` ships an `[[http_service.checks]]` block pointing at it.
 
-> **One thing to confirm on your first deploy with the check enabled.** This app scales to zero.
-> Fly's documentation does not state whether health checks run against a stopped machine, can wake
-> one, or count as the traffic that defeats autostop. The reasonable expectation is that checks run
-> only while the machine runs and so leave scale-to-zero intact, but that is inference rather than
-> a documented guarantee. So after deploying, leave the app idle and run `fly status`: the machine
-> should return to `stopped`. If it stays awake, delete the checks block, an always-on machine
-> costs more than the check is worth.
+**Checks and scale-to-zero (verified, because Fly's docs do not say).** None of Fly's
+configuration reference, autostop/autostart page, or health-checks reference states whether a
+check runs against a stopped machine, can wake one, or counts as the traffic that defeats
+autostop. Measured on release v27, 2026-07-29: with the checks block deployed and the app left
+idle for about 26 minutes, the machine **returned to `stopped` on its own**. Checks do not defeat
+scale-to-zero.
+
+If you want to re-confirm it after a Fly platform change, the method is: deploy, send one request
+to wake the machine, then leave it alone and poll `fly status` (a control-plane call, so it does
+not itself count as traffic and will not reset the idle timer).
+
+> **Do not wire alerting to this check on a scaled-to-zero app.** On a stopped machine Fly
+> reports the check as `warning`, with output "the machine hasn't started" — it neither fails nor
+> wakes the machine. So idle-and-healthy is indistinguishable from genuinely broken if you are
+> only watching check state. What the check *does* tell you is whether a **running** machine is
+> actually serving, which is the wedged-process case it was added for. A real uptime alarm would
+> need to probe `/healthz` from outside and accept the cold-start latency as a normal response.
 
 ### Reading the logs
 

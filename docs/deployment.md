@@ -220,8 +220,12 @@ Three deliberate choices here, each avoiding a way the obvious version is worse:
   a set of backups was written somewhere temporary, they did not survive the session, which
   is the failure this whole section exists to prevent.
 
-Note that `fly ssh console` **wakes a scaled-to-zero machine**, so a pull briefly starts the
-app. It stops again on its own.
+**`fly ssh console` does NOT wake a stopped machine.** It fails with *"app <name> has no
+started VMs."* Since this app scales to zero, that is its normal state, so send one request
+first to start it — `curl -sf https://project-orion.fly.dev/healthz > /dev/null` is the
+cheapest wake (no auth, no DB read), and `curl` returns only once the cold start has finished.
+The machine stops again on its own afterwards. `relay-backup.sh` does this for you; the manual
+commands above assume you have woken it.
 
 ### The two backup layers, and the actual RPO
 
@@ -284,9 +288,8 @@ backup. It is the documented inverse of the `fly sftp get` above.
 
 ### Schedule the weekly pull (macOS / launchd)
 
-Same idiom as the report schedule in [`docs/scheduling.md`](scheduling.md), which has the
-Linux (`cron` / systemd timer) and Windows (Task Scheduler) equivalents — use those on those
-platforms rather than porting this file. Create
+The pull logic lives in **`relay-backup.sh`** at the repo root, so the scheduler entry stays a
+one-liner and the logic is version-controlled and reviewable. Create
 `~/Library/LaunchAgents/com.orion.relay-backup.plist`:
 
 ```xml
@@ -300,13 +303,16 @@ platforms rather than porting this file. Create
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>-c</string>
-    <!-- One line so launchd needs no wrapper script. `set -e` matters: without it a failed
-         pull would still run the cleanup and report success, and you would believe you had a
-         backup you do not have. Use the absolute path to fly — launchd jobs get a minimal
-         PATH, which is the classic reason a scheduled job works in a terminal and not here. -->
-    <string>set -e; /opt/homebrew/bin/fly ssh console -a project-orion -C "python3 -c \"import sqlite3; s=sqlite3.connect('file:/data/orion-relay.sqlite3?mode=ro', uri=True); d=sqlite3.connect('/tmp/orion-pull.sqlite3'); s.backup(d); d.close(); s.close()\""; /opt/homebrew/bin/fly sftp get /tmp/orion-pull.sqlite3 "$HOME/orion-backups/orion-relay.$(date +%Y%m%d).bak" -a project-orion; /opt/homebrew/bin/fly ssh console -a project-orion -C "rm -f /tmp/orion-pull.sqlite3"</string>
+    <string>/abs/path/to/orion/relay-backup.sh</string>
   </array>
+  <!-- launchd jobs get a minimal PATH, so `fly` is not on it. This is the classic reason a
+       scheduled job works in a terminal and not here. Passed as an env var rather than
+       hardcoded in the script, so the script stays portable. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FLY_BIN</key>
+    <string>/opt/homebrew/bin/fly</string>
+  </dict>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key><integer>0</integer>
@@ -325,15 +331,43 @@ platforms rather than porting this file. Create
 mkdir -p ~/orion-backups
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.orion.relay-backup.plist
 launchctl kickstart -p gui/$(id -u)/com.orion.relay-backup   # run it once now, don't wait a week
-launchctl print gui/$(id -u)/com.orion.relay-backup          # inspect status
+launchctl print gui/$(id -u)/com.orion.relay-backup          # status; check `last exit code`
 # launchctl bootout gui/$(id -u)/com.orion.relay-backup      # to unload
 ```
 
-Two things to know before trusting it. It needs a **`fly` token that does not expire** with
-your interactive login (`fly tokens create deploy` and export `FLY_API_TOKEN` in the plist's
-environment if the scheduled run 401s). And a schedule you have never seen succeed is not a
-backup: run the `kickstart` line above, then confirm a dated file actually landed in
-`~/orion-backups/`.
+**`launchctl bootstrap` needs the domain target** (`gui/$(id -u)`) before the path. Given the
+path alone it answers "Unrecognized target specifier."
+
+Linux and Windows: point their native scheduler at the same script — see
+[`docs/scheduling.md`](scheduling.md) for the `cron` / systemd-timer / Task Scheduler idioms.
+The script is POSIX `sh` and takes its settings from the environment
+(`ORION_FLY_APP`, `ORION_HEALTH_URL`, `ORION_BACKUP_DIR`, `FLY_BIN`).
+
+**Two things the script handles that a naive version gets wrong** — both found by actually
+running it, not by reading it:
+
+1. **It wakes the machine first.** `fly ssh console` does **not** auto-start a stopped machine;
+   it fails outright with *"app <name> has no started VMs."* Because this app runs
+   `min_machines_running = 0`, the machine is stopped most of the time, so an unattended job
+   without a wake step fails on nearly every run. The script curls `/healthz` first — the
+   cheapest wake target, and `curl` returns only once the cold start finishes.
+2. **It pulls to a `.part` file and then moves it into place.** `fly sftp get` **refuses to
+   overwrite an existing file** ("doesn't override existing files for safety"), so a same-day
+   manual pull, or any retry, would otherwise make the run fail. More importantly, a partial
+   transfer must never clobber a known-good backup — the `mv` runs only after a successful
+   pull, so the previous file survives any failure.
+
+It also re-opens each finished backup and runs `integrity_check` before reporting success,
+because a backup that has never been read back is a guess.
+
+**A `fly` token that does not expire** with your interactive login is the remaining
+prerequisite for a truly unattended run (`fly tokens create deploy`, then add `FLY_API_TOKEN`
+to the plist's `EnvironmentVariables` if a scheduled run starts failing on auth).
+
+**Verified working 2026-07-29:** bootstrapped, `kickstart`ed, `last exit code = 0`, and the
+dated file in `~/orion-backups/` was rewritten by launchd itself with
+`integrity_check ok, 74 reports`. A schedule you have never seen succeed is not a backup — run
+the `kickstart` line and confirm the same.
 
 ---
 

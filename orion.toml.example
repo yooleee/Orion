@@ -73,11 +73,15 @@ state_db = "orion.sqlite3"
 # token_env_var       = "ORION_RELAY_TOKEN"
 # admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
 
-# OPTIONAL native Slack bot (C2-bots) — two-way in chat. When enabled and run with
-# `orion bot`, a supervisor's reply in a mapped Slack channel is relayed into that
-# project's LATEST report as a comment (visible on the dashboard AND via
-# `orion comments`, exactly like a dashboard comment). This is opt-in: omit the
-# table (or set enabled = false) and no bot runs. The choice is GLOBAL (one bot
+# OPTIONAL native Slack bot (C2-bots) — two-way in chat. CURRENTLY PARKED: `orion bot`
+# reports that it is parked and exits, because the per-report comment it used to write
+# into was retired (KI-28 Stage 2) and its replacement, the per-project discussion
+# thread, needs per-user keys before a bot may write to it. The config shape below is
+# kept so the table does not have to be re-invented when the bot is unparked.
+#
+# When it runs again, a supervisor's reply in a mapped Slack channel will land in that
+# project's discussion thread (the same thread the dashboard shows). It is opt-in: omit
+# the table (or set enabled = false) and no bot runs. The choice is GLOBAL (one bot
 # process serves every project). The bot writes INTO the [relay] above — it reuses
 # the relay's `url` and `token_env_var`, so [relay] must ALSO be enabled.
 #

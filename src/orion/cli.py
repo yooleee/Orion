@@ -3996,29 +3996,35 @@ def cmd_baseline(project_name: str, config_path: Path) -> int:
     return 0
 
 
-def _format_pacific(iso: str) -> str:
-    """Render a stored UTC ISO-8601 timestamp as human Pacific wall-clock time.
+def _format_display_time(iso: str, display_timezone: str) -> str:
+    """Render a stored UTC ISO-8601 timestamp as human wall-clock time in a chosen zone.
 
     Args:
         iso: An ISO-8601 timestamp with an offset (as the relay stores it, e.g.
             "2026-06-19T19:30:00+00:00").
+        display_timezone: The IANA zone name to render in — `config.display_timezone`,
+            already validated at config load (see config._parse_display_timezone).
 
     Returns:
-        A human string in America/Los_Angeles, e.g. "2026-06-19 12:30 PDT".
+        A human string in that zone, e.g. "2026-06-19 12:30 PDT" for America/Los_Angeles
+        or "2026-06-19 19:30 UTC" for UTC.
 
     Why:
-        Discussion items are shown in a fixed Pacific zone (matching the dashboard's
-        display choice) so timestamps read consistently regardless of the machine's local
-        timezone. ZoneInfo is internally cached, so constructing it per call is cheap;
-        doing it HERE rather than at module import keeps a missing tzdata from breaking
-        every other command — only the `discussions` listing depends on it. This is its own
-        small formatter rather than a shared one: orion/ shares no code with relay/, the
-        same independence the duplicated busy-timeout constant reflects.
+        The zone is a CONFIGURED choice (KI-20), not a property of this command. Every
+        delivered message already honors `display_timezone`; this listing used to hardcode
+        America/Los_Angeles, so a user who set the knob got their zone everywhere except
+        here — the one surface that reads back what a supervisor wrote (AU1-R P4).
+
+        ZoneInfo is internally cached, so constructing it per call is cheap; doing it HERE
+        rather than at module import keeps a missing tzdata from breaking every other
+        command — only the `discussions` listing depends on it. This stays its own small
+        formatter rather than a shared one: orion/ shares no code with relay/, the same
+        independence the duplicated busy-timeout constant reflects.
     """
     # fromisoformat parses the stored "+00:00" offset; astimezone converts that absolute
-    # instant to California wall-clock time (zoneinfo applies DST -> PDT/PST).
-    pacific = datetime.fromisoformat(iso).astimezone(ZoneInfo("America/Los_Angeles"))
-    return pacific.strftime("%Y-%m-%d %H:%M %Z")
+    # instant to wall-clock time in the configured zone (zoneinfo applies DST -> PDT/PST).
+    local = datetime.fromisoformat(iso).astimezone(ZoneInfo(display_timezone))
+    return local.strftime("%Y-%m-%d %H:%M %Z")
 
 
 def cmd_discussions_pull(
@@ -4079,7 +4085,7 @@ def cmd_discussions_pull(
     if as_json:
         print(json.dumps(response))
     else:
-        _print_discussions(items, project.name, show_all)
+        _print_discussions(items, project.name, show_all, config.display_timezone)
 
     # Advance the watermark ONLY on a normal run — --all is an explicit re-read. Advancing
     # to latest_id is idempotent (it echoes since_id when nothing is new).
@@ -4147,13 +4153,18 @@ def cmd_discussions_reply(
     return 0
 
 
-def _print_discussions(items: list[dict], project_name: str, show_all: bool) -> None:
+def _print_discussions(
+    items: list[dict], project_name: str, show_all: bool, display_timezone: str
+) -> None:
     """Print a project's pulled discussion items as a human-readable listing.
 
     Args:
         items: The item dicts from pull_discussions (role, author_name, body, created_at).
         project_name: The project the thread belongs to (for the header/empty line).
         show_all: Whether this was an --all pull, which only changes the empty-state wording.
+        display_timezone: The configured IANA zone to render timestamps in (KI-20), passed
+            down from the caller's loaded config rather than read here — this function does
+            no I/O, which is what keeps it trivially testable.
 
     Returns:
         None. Writes to stdout.
@@ -4174,7 +4185,7 @@ def _print_discussions(items: list[dict], project_name: str, show_all: bool) -> 
         # role tags the turn (supervisor/developer); author_name is server-derived.
         print(
             f"  [{item['role']}] {item['author_name']} · "
-            f"{_format_pacific(item['created_at'])} · {item['body']}"
+            f"{_format_display_time(item['created_at'], display_timezone)} · {item['body']}"
         )
 
 

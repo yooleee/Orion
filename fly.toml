@@ -20,7 +20,7 @@ primary_region = "sjc"   # pick one near you / your supervisors: `fly platform r
   dockerfile = "Dockerfile"
 
 # Non-secret config. ORION_RELAY_PUBLIC_ORIGIN is the canonical public URL the dashboard is
-# reached at; the relay checks the comment form's Origin/Referer against it (CSRF), instead of
+# reached at; the relay checks a browser write's Origin/Referer against it (CSRF), instead of
 # trusting the proxy-rewritten Host header. CHANGE this to match your own `app` name above.
 [env]
   ORION_RELAY_PUBLIC_ORIGIN = "https://project-orion.fly.dev"

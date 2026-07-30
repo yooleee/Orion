@@ -4468,6 +4468,54 @@ def test_api_discussion_post_unknown_project_is_404(tmp_path):
         assert status == 404
 
 
+def test_api_discussion_post_404s_are_byte_identical(tmp_path):
+    """Missing, out-of-scope, and missing-to-an-admin all answer the SAME 404 body.
+
+    Why this matters: this is the existence-hiding property the handler's step 4/5 comments
+    claim, stated as a test. A scoped contributor must not be able to tell "there is no such
+    project" from "that project exists but is not yours" — if the two answers differed by even
+    a word, the ungranted project's NAME would be confirmed, which is the one thing scope
+    checking exists to prevent. Three cases are compared because two different code paths
+    produce these 404s (the scope check and the existence check), so a change to either one
+    alone would break the property.
+
+    AU1-R P2 note: these bodies previously echoed the project name back ("no project 'x'"),
+    which made them differ from every other existence-hiding 404 in the file. Nothing
+    surfaced that detail — the CLI's discussion client reports only the status line — so
+    normalizing to "not found" cost no diagnostics.
+    """
+    with _running_relay(tmp_path) as (base_url, db):
+        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
+        _ingest_project(base_url, "demo")
+        _ingest_project(base_url, "secret-proj")  # real, but not granted to this contributor
+
+        def reply(project, token):
+            return _post(
+                base_url,
+                json.dumps({"project": project, "body": "peek"}).encode(),
+                token=token,
+                path="/api/discussions",
+            )
+
+        # A scoped contributor: a project that does not exist, and one that does but is
+        # ungranted. These are the two answers an attacker would try to tell apart.
+        missing_to_contributor = reply("ghost", "contrib-key")
+        ungranted_to_contributor = reply("secret-proj", "contrib-key")
+        # And the unrestricted (legacy/admin) principal hitting the EXISTENCE check, which is
+        # the other code path that can produce this 404.
+        missing_to_unrestricted = reply("ghost", _TOKEN)
+
+        assert missing_to_contributor[0] == 404
+        assert ungranted_to_contributor == missing_to_contributor
+        assert missing_to_unrestricted == missing_to_contributor
+        assert json.loads(missing_to_contributor[1]) == {"error": "not found"}
+
+        # Nothing was stored for any of them — a refused reply must not create a thread.
+        conn = open_relay_store(db)
+        assert discussion_items_for_project(conn, "ghost") == []
+        assert discussion_items_for_project(conn, "secret-proj") == []
+
+
 def test_api_discussion_post_empty_body_is_400(tmp_path):
     """A whitespace-only body is 400 and stores nothing."""
     with _running_relay(tmp_path) as (base_url, db):

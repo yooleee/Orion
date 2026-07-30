@@ -555,22 +555,28 @@ def test_build_summarizer_local_with_key_fetches_named_var():
 # and we assert on what WOULD have been pushed.
 
 
-def _write_relay_config(tmp_path, repo, *, enabled=True):
+def _write_relay_config(tmp_path, repo, *, enabled=True, display_timezone=None):
     """Write an orion.toml with a [relay] table pointing at a fake relay URL.
 
     Args:
         tmp_path: per-test temp dir (also where the state db lives).
         repo: path to the git repo (used by the git collector).
         enabled: whether the [relay] table is enabled.
+        display_timezone: optional IANA zone for the top-level `display_timezone` key. None
+            omits it, so the config keeps the Pacific default (KI-20).
 
     Why:
         The relay tests need a project plus a [relay] table; this keeps each test to
         the enabled/disabled case it cares about instead of repeating TOML (DRY).
     """
     toml = tmp_path / "orion.toml"
+    # An omitted display_timezone leaves the config on its Pacific default (KI-20), so
+    # every existing caller of this helper keeps the config it had.
+    tz_line = f'display_timezone = "{display_timezone}"' if display_timezone else ""
     toml.write_text(
         f"""
         state_db = "state.sqlite3"
+        {tz_line}
 
         [relay]
         enabled = {str(enabled).lower()}
@@ -2669,6 +2675,60 @@ def test_discussions_disabled_relay_is_clean_error(tmp_path, monkeypatch, capsys
     assert cli.main(["discussions", "reply", "demo", "x", "--config", str(toml)]) == 1
     assert pulls == [] and posts == []
     assert "no relay" in capsys.readouterr().err.lower()
+
+
+# AU1-R P4: the listing renders timestamps in the CONFIGURED zone (KI-20). It used to
+# hardcode America/Los_Angeles, so a user who set `display_timezone` got their zone
+# everywhere except here — the one surface that reads back what a supervisor wrote.
+
+
+def test_discussion_listing_renders_in_the_configured_timezone(capsys):
+    """The same stored instant prints in whatever zone display_timezone names.
+
+    Why this matters: the bug was invisible to the suite because the default config IS
+    Pacific — which is exactly why this pins NON-default zones. One instant, three zones:
+    19:30 UTC on the 19th is 12:30 the same day in California (PDT, UTC-7 in June) and 04:30
+    the NEXT day in Tokyo, so this pins the date rollover too, not just the clock time.
+
+    Calls the printer directly (it does no I/O) so the zone is the only variable.
+    """
+    item = {
+        "role": "supervisor",
+        "author_name": "Supervisor A",
+        "body": "Looks good.",
+        "created_at": "2026-06-19T19:30:00+00:00",
+    }
+
+    cli._print_discussions([item], "demo", False, "UTC")
+    assert "2026-06-19 19:30 UTC" in capsys.readouterr().out
+
+    cli._print_discussions([item], "demo", False, "America/Los_Angeles")
+    assert "2026-06-19 12:30 PDT" in capsys.readouterr().out
+
+    cli._print_discussions([item], "demo", False, "Asia/Tokyo")
+    out = capsys.readouterr().out
+    assert "2026-06-20 04:30 JST" in out, out
+
+
+def test_discussions_pull_uses_the_configured_timezone(tmp_path, monkeypatch, capsys):
+    """`discussions pull` reaches the formatter with the config's zone, not a hardcoded one.
+
+    Why this matters: the test above proves the formatter can render any zone; this proves
+    the COMMAND passes the configured value in. Without it, threading the parameter through
+    and then forgetting to pass it at the single call site would still pass.
+
+    The canned thread's supervisor message is stamped 19:30 UTC on 2026-06-28, which is 04:30
+    the NEXT day in Tokyo — so this also catches a zone applied to the wrong field.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_config(tmp_path, repo, display_timezone="Asia/Tokyo")
+    _capture_pull_discussions(monkeypatch, _two_discussions())
+
+    assert cli.main(["discussions", "pull", "demo", "--config", str(toml)]) == 0
+    out = capsys.readouterr().out
+    assert "2026-06-29 04:30 JST" in out, out
 
 
 # --- `orion relay-user` admin CLI (C3 / PR B) ---------------------------------

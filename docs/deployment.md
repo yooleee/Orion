@@ -26,7 +26,8 @@ nothing else in the local pipeline changes.
 - **Ingest (`POST /ingest`)** — authenticated by a shared **Bearer token**
   (`ORION_RELAY_TOKEN`), constant-time compared. This is the push credential your local
   side sends.
-- **Dashboard (GET routes + commenting)** — authenticated by a **per-user login session**.
+- **Dashboard (GET routes + posting to a discussion)** — authenticated by a **per-user login
+  session**.
   Each person signs in at `/login` with their own name and password and receives a signed,
   `HttpOnly` session cookie (`Secure` when hosted). The cookie carries only an id, a
   version, and an expiry. The viewer's role and project scope are re-read from the
@@ -68,14 +69,14 @@ admin token is named by your local `[relay].admin_token_env_var`. Keep all five 
 
 **Also set `ORION_RELAY_PUBLIC_ORIGIN` when you deploy behind a TLS proxy (Fly, Caddy, any
 reverse proxy).** This is NOT a secret. It is the canonical public URL the dashboard is
-reached at, for example `https://project-orion.fly.dev`. The relay uses it for the
-comment form's CSRF origin check: with it set, the check compares the browser's Origin (or
-Referer) against this exact value, instead of falling back to the request's `Host` header,
-which a proxy can rewrite. Because it is not a secret it can go straight in `fly.toml` under
-`[env]` (it already is in this repo's `fly.toml`), or be passed with `-e` on `docker run`.
-If you leave it unset, comments still work on a direct loopback bind, but a proxied deploy is
-more robust with it set. (The comment CSRF guard also accepts a same-origin `Referer` when a
-browser omits `Origin`, so omitting this no longer breaks comments on browsers like Safari.)
+reached at, for example `https://project-orion.fly.dev`. The relay uses it for the CSRF origin
+check on browser writes (posting to a discussion): with it set, the check compares the browser's
+Origin (or Referer) against this exact value, instead of falling back to the request's `Host`
+header, which a proxy can rewrite. Because it is not a secret it can go straight in `fly.toml`
+under `[env]` (it already is in this repo's `fly.toml`), or be passed with `-e` on `docker run`.
+If you leave it unset, discussion posts still work on a direct loopback bind, but a proxied deploy
+is more robust with it set. (The CSRF guard also accepts a same-origin `Referer` when a browser
+omits `Origin`, so omitting this no longer breaks posting on browsers like Safari.)
 
 ### Provision the first users
 

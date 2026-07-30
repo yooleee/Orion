@@ -1460,6 +1460,15 @@ def list_projects(conn: sqlite3.Connection) -> list[dict]:
         latest report puts the freshest activity at the top — what a supervisor
         glancing at the dashboard wants to see first. generated_at is an ISO-8601
         UTC string, so a lexical MAX is also the chronological latest.
+
+        NOTE (AU1-R P2): the dashboard index it was written for now uses
+        latest_report_per_project, so this has NO production caller. It is KEPT on purpose,
+        as a test-and-diagnostic probe: nine assertions across tests/test_relay_server.py and
+        tests/test_relay_store.py use it to prove "no report row was written" after a rejected
+        push, which is exactly the kind of negative check a reports-only summary answers
+        cleanly. AU1 flagged it as dead code; it is unused-in-production, which is not the
+        same thing. Deleting it would mean rewriting those nine probes for no gain — so if a
+        future audit flags it again, this note is the answer.
     """
     rows = conn.execute(
         """

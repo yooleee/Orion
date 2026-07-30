@@ -69,7 +69,6 @@ from .store import (
     discussion_items_for_project,
     effective_checklist,
     get,
-    get_checklist,
     get_active_password_credential,
     get_credential_by_key_verifier,
     VISIBILITIES,
@@ -605,6 +604,13 @@ _MAX_DUE_SOON_DAYS = 365
 # object() is the standard Python idiom for a sentinel that can never collide with a JSON
 # value (json.loads only ever produces dict/list/str/int/float/bool/None).
 _ABSENT = object()
+
+# AU1-R P2: a sentinel meaning "the body was unusable and the 400 has already been sent".
+# _read_json_body returns it instead of None because a literal `null` body is VALID JSON that
+# decodes to None, and the push handlers hand whatever they decoded to a validator that has
+# its own opinion about it — so None cannot double as the failure signal without changing what
+# a `null` body reports. Same object() idiom, same reason, as _ABSENT above.
+_BAD_BODY = object()
 
 
 def _due_soon_days_error(value: object, *, allow_clear: bool) -> str | None:
@@ -1165,6 +1171,59 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "not found"})
 
+    def _bearer_push_preamble(self, conn, validate) -> tuple[dict, dict] | None:
+        """Run the guard sequence EVERY Bearer producer push shares, in order (AU1-R P2).
+
+        Args:
+            conn: The request's open store connection — the same one the caller writes on,
+                so the identity, its project scope, and the write all read from one
+                consistent snapshot.
+            validate: This endpoint's payload validator (`_validate_blob`,
+                `_validate_checklist_request`, `_validate_disciplines_request`). Called with
+                the decoded payload; returns an error string, or None when the payload is
+                valid.
+
+        Returns:
+            `(principal, payload)` when every guard passed, or None when a response has
+            ALREADY been sent and the caller must return immediately.
+
+        Why:
+            /ingest, /checklist and /disciplines carry three different payloads behind one
+            IDENTICAL four-step gate, and that gate was written out three times (AU1's
+            finding). The steps are ordered for security rather than convenience, and that
+            ORDER is the part worth having in exactly one place:
+
+              1. Authenticate BEFORE touching the payload, so an unauthenticated push never
+                 reaches any parsing or validation code. Every failure is one generic 401 —
+                 named contributor keys exist, so there is nothing to enumerate.
+              2. Read + JSON-decode (the 1 MB cap lives in _read_raw_body).
+              3. Validate the payload shape BEFORE storing anything. This helper does NOT
+                 pre-check that the payload is a dict: all three validators own that case and
+                 all three answer "payload must be a JSON object" for it, so delegating keeps
+                 one message rather than adding a second, earlier one.
+              4. Scope LAST: a scoped producer (contributor) may write only its granted
+                 projects, and an out-of-scope project 404s BYTE-IDENTICALLY to a missing one,
+                 so a push can never confirm the existence of a project the caller may not
+                 touch. Legacy/admin principals are unrestricted (`allowed` is None).
+        """
+        principal = self._resolve_bearer_principal(conn)
+        if principal is None:
+            self._bearer_unauthorized()
+            return None
+        payload = self._read_json_body()
+        if payload is _BAD_BODY:
+            return None
+        error = validate(payload)
+        if error is not None:
+            self._send_json(400, {"error": error})
+            return None
+        # Safe to index: every validator above guarantees a dict with a "project" string.
+        allowed = self._allowed_projects(conn, principal)
+        if allowed is not None and payload["project"] not in allowed:
+            self._send_json(404, {"error": "not found"})
+            return None
+        return principal, payload
+
     def _handle_ingest(self) -> None:
         """Authenticate, validate, and store a pushed report blob (POST /ingest).
 
@@ -1173,42 +1232,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             local Orion. Kept as its own handler so do_POST stays a short route table as
             other write surfaces (the discussion writes) were added alongside it.
         """
-        # 1) Authenticate FIRST — resolve the pushing principal before touching the
-        # payload. One connection serves the whole request so the identity, its project
-        # scope, and the write all read from one consistent snapshot. Every auth failure is
-        # one generic 401 (named contributor keys now exist to enumerate).
         conn = open_relay_store(self.server.db_path)
         try:
-            principal = self._resolve_bearer_principal(conn)
-            if principal is None:
-                self._bearer_unauthorized()
+            # 1-4) Auth, body, blob validation, and project scope — one shared gate, in a
+            # security-significant order. See _bearer_push_preamble.
+            accepted = self._bearer_push_preamble(conn, _validate_blob)
+            if accepted is None:
                 return
-
-            # 2) Read and JSON-parse the body.
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-                return
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
-                return
-
-            # 3) Validate the blob shape/version.
-            error = _validate_blob(payload)
-            if error is not None:
-                self._send_json(400, {"error": error})
-                return
-
-            # 4) Scope: a scoped producer (contributor) may write only its granted
-            # projects; an out-of-scope project 404s byte-identical to a missing one, so a
-            # push never confirms a project the caller cannot touch. Legacy/admin are
-            # unrestricted (allowed is None).
-            allowed = self._allowed_projects(conn, principal)
-            if allowed is not None and payload["project"] not in allowed:
-                self._send_json(404, {"error": "not found"})
-                return
+            principal, payload = accepted
 
             # 5) Store and report 201 with the new id. The report + observations are
             # attributed to the resolved producer (C3 Inc 2); a legacy push is anonymous.
@@ -1270,38 +1301,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             report row. The flow mirrors _handle_ingest's guard sequence; the payload is
             the smaller `{project, checklist}` instead of a full blob.
         """
-        # 1) Authenticate first — resolve the principal on the request connection before
-        # any payload is touched. One generic 401 on any failure.
         conn = open_relay_store(self.server.db_path)
         try:
-            principal = self._resolve_bearer_principal(conn)
-            if principal is None:
-                self._bearer_unauthorized()
+            # 1-4) The shared Bearer-push gate; the payload here is the smaller
+            # {project, checklist}. See _bearer_push_preamble.
+            accepted = self._bearer_push_preamble(conn, _validate_checklist_request)
+            if accepted is None:
                 return
-
-            # 2) Read and JSON-parse the body.
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-                return
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
-                return
-
-            # 3) Validate the {project, checklist} shape BEFORE storing.
-            error = _validate_checklist_request(payload)
-            if error is not None:
-                self._send_json(400, {"error": error})
-                return
-
-            # 4) Scope: a contributor may write only its granted projects (out-of-scope
-            # 404s as missing); legacy/admin are unrestricted.
-            allowed = self._allowed_projects(conn, principal)
-            if allowed is not None and payload["project"] not in allowed:
-                self._send_json(404, {"error": "not found"})
-                return
+            principal, payload = accepted
 
             # 5) Upsert this project's live checklist, stamped with the relay's receive
             # clock (same provenance meaning as a report's ingested_at).
@@ -1394,38 +1401,14 @@ class _RelayHandler(BaseHTTPRequestHandler):
             replaced per push). The guard sequence mirrors _handle_checklist_push; the
             payload is the small `{project, disciplines}`.
         """
-        # 1) Authenticate first — resolve the principal on the request connection. One
-        # generic 401 on any failure.
         conn = open_relay_store(self.server.db_path)
         try:
-            principal = self._resolve_bearer_principal(conn)
-            if principal is None:
-                self._bearer_unauthorized()
+            # 1-4) The shared Bearer-push gate; the payload here is the small
+            # {project, disciplines}. See _bearer_push_preamble.
+            accepted = self._bearer_push_preamble(conn, _validate_disciplines_request)
+            if accepted is None:
                 return
-
-            # 2) Read and JSON-parse the body.
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-                return
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
-                return
-
-            # 3) Validate the {project, disciplines} shape BEFORE storing.
-            error = _validate_disciplines_request(payload)
-            if error is not None:
-                self._send_json(400, {"error": error})
-                return
-
-            # 4) Scope: a contributor may write only its granted projects (out-of-scope
-            # 404s as missing); legacy/admin are unrestricted.
-            allowed = self._allowed_projects(conn, principal)
-            if allowed is not None and payload["project"] not in allowed:
-                self._send_json(404, {"error": "not found"})
-                return
+            principal, payload = accepted
 
             # 5) Store this project's disciplines, stamped with the relay's receive clock.
             received_at = _utc_now_iso()
@@ -1511,14 +1494,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # 4) Read + JSON-parse + validate the body (1 MB cap inside _read_raw_body).
             # Only `body` is read; author_id/author_name/role are all server-derived, so a
             # client-supplied attribution in the payload is ignored, not honored.
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-                return
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
+            payload = self._read_json_body()
+            if payload is _BAD_BODY:
                 return
             if not isinstance(payload, dict):
                 self._send_json(400, {"error": "payload must be a JSON object"})
@@ -1541,7 +1518,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             if allowed is not None and project not in allowed:
                 self._send_json(404, {"error": "not found"})
                 return
-            if not history(conn, project) and get_checklist(conn, project) is None:
+            # store.project_exists asks the canonical "does this project exist" question
+            # (a report row OR a checklist row) with one indexed lookup. It replaces an
+            # inline `not history(...) and get_checklist(...) is None`, which decoded EVERY
+            # one of the project's report rows just to find out whether there was at least
+            # one — and which restated the definition of "exists" in a third place.
+            if not project_exists(conn, project):
                 self._send_json(404, {"error": "not found"})
                 return
 
@@ -1662,14 +1644,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 return
 
             # 2) Read + JSON-parse the body (1 MB cap inside _read_raw_body).
-            raw = self._read_raw_body()
-            if raw is None:
-                self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-                return
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
+            payload = self._read_json_body()
+            if payload is _BAD_BODY:
                 return
             if not isinstance(payload, dict):
                 self._send_json(400, {"error": "payload must be a JSON object"})
@@ -1702,15 +1678,22 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # 4) Scope: a scoped contributor may post only to its granted threads; an
             # out-of-scope project 404s identically to a genuinely missing one (checked
             # before existence, so an out-of-scope EXISTING project still reads as missing).
+            #
+            # AU1-R P2: both 404s below now carry the same "not found" body every other
+            # existence-hiding 404 in this file uses. They previously echoed the project name
+            # back ("no project 'x'"), which made this the ONE write surface whose 404 body
+            # differed from its cookie-authed sibling — a difference with no reason behind it,
+            # and one that had to be re-derived by anyone checking the two paths agree.
             allowed = self._allowed_projects(conn, principal)
             if allowed is not None and project not in allowed:
-                self._send_json(404, {"error": f"no project {project!r}"})
+                self._send_json(404, {"error": "not found"})
                 return
 
             # 5) Existence: the thread anchors on a real project (reports or a checklist),
-            # else 404 — the same definition the project read + the cookie write use.
-            if not history(conn, project) and get_checklist(conn, project) is None:
-                self._send_json(404, {"error": f"no project {project!r}"})
+            # else 404 — the same definition, and now the same function, the project read and
+            # the cookie write use (see the note at the cookie handler's existence check).
+            if not project_exists(conn, project):
+                self._send_json(404, {"error": "not found"})
                 return
             # 6) Append. Role is always "developer" on this producer channel. Attribution
             # splits by principal: an IDENTIFIED producer is stamped with its real, server-
@@ -1962,14 +1945,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 401, {"error": auth_error}, extra_headers={"WWW-Authenticate": "Bearer"}
             )
             return None
-        raw = self._read_raw_body()
-        if raw is None:
-            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
-            return None
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self._send_json(400, {"error": "body is not valid JSON"})
+        payload = self._read_json_body()
+        if payload is _BAD_BODY:
             return None
         if not isinstance(payload, dict):
             self._send_json(400, {"error": "payload must be a JSON object"})
@@ -3333,6 +3310,35 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if length <= 0 or length > _MAX_BLOB_BYTES:
             return None
         return self.rfile.read(length)
+
+    def _read_json_body(self) -> object:
+        """Read + JSON-decode the request body, answering 400 itself on either failure.
+
+        Returns:
+            The decoded JSON value, or `_BAD_BODY` when the body was missing/oversized/
+            unreadable or was not valid JSON. In the `_BAD_BODY` case the 400 has ALREADY
+            been sent, so the caller must simply return.
+
+        Why:
+            This read-then-decode pair, with these two exact error messages, was written out
+            six times across the POST handlers (AU1's finding). Having one copy means the
+            next write surface cannot invent a seventh phrasing of "bad body", and the 1 MB
+            cap cannot be forgotten on a new endpoint.
+
+            NOT used by _handle_api_login, deliberately: that handler tolerates an absent or
+            unreadable body on purpose (it treats the fields as empty and falls through to
+            one generic 401), so routing it through here would turn a malformed login attempt
+            into a 400 and leak that the request shape, rather than the credential, was wrong.
+        """
+        raw = self._read_raw_body()
+        if raw is None:
+            self._send_json(400, {"error": "missing, oversized, or unreadable body"})
+            return _BAD_BODY
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body is not valid JSON"})
+            return _BAD_BODY
 
     def _security_headers(self) -> dict:
         """Return the standard security response headers common to every response.

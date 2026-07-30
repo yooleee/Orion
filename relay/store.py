@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -979,6 +980,144 @@ def producer_disciplines_for(conn: sqlite3.Connection, project: str) -> list[dic
     ]
 
 
+# --- Project meta knobs: ONE accessor pair behind five per-knob specs (AU1-R P1) -----
+#
+# relay_project_meta carries five independent per-project knobs — kind, due_soon_days,
+# about, visibility, lifecycle. Each arrived as its own set/get pair, and the five pairs
+# were near-identical copies: the same single-column upsert, the same one-column SELECT.
+# Five copies is where the paydown trigger fires (AU1): a sixth knob would have been a
+# sixth copy, and copies are where defaults quietly drift apart.
+#
+# What is NOT shared is each knob's DEFAULT, and those differ by INTENT, not by accident:
+#
+#   visibility     fails CLOSED to 'restricted' — absence must never open a project up
+#   lifecycle      fails OPEN   to 'active'     — absence must never hide a live project
+#   kind           defaults 'project'           — the safe, overwhelmingly common case
+#   about          defaults None                — the deliberate "render no band" signal
+#   due_soon_days  defaults None                — the deliberate "use the 7-day default"
+#
+# So the SQL and the shape are shared; the default (and, for the two enum knobs, which
+# single stored value is honored) is a per-knob _MetaKnob spec. Each spec sits beside the
+# accessors it drives, inside the section whose comment block explains its semantics.
+#
+# Every public function name survives as a thin wrapper: they are called 26× in server.py,
+# 6× in api.py and 137× in the tests, and this change is about removing duplication
+# WITHOUT disturbing that surface.
+
+
+@dataclass(frozen=True)
+class _MetaKnob:
+    """One relay_project_meta column plus how a read resolves when it is not set.
+
+    Args:
+        column: The relay_project_meta column this knob stores. Always a module-private
+            constant, never anything derived from a request — see _get_meta_column.
+        default: What a read returns when the project has no meta row, and (for an enum
+            knob) when the stored value is anything other than `only_value`.
+        only_value: For an ENUM knob, the ONE stored value that is honored — anything else
+            (SQL NULL, an unrecognized string, a missing row) resolves to `default`. None
+            marks the knob a PASSTHROUGH: whatever is stored comes back as-is.
+
+    Why:
+        A frozen dataclass rather than a tuple so each field is named where it is used:
+        `only_value=VISIBILITY_ORG` states the fail-closed rule outright, where `spec[2]`
+        would hide it. Frozen because a knob's default is a settled decision, not state.
+    """
+
+    column: str
+    default: object
+    only_value: object | None = None
+
+
+def _set_meta_column(
+    conn: sqlite3.Connection, project: str, knob: _MetaKnob, value: object
+) -> None:
+    """Upsert ONE column of a project's meta row, leaving that project's other knobs alone.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project whose meta row to write (created if it does not exist).
+        knob: The knob being written — supplies the column name.
+        value: The value to store. None writes SQL NULL, which is how every "clear it back
+            to unset" path works.
+
+    Returns:
+        None. Commits before returning, as every setter in this module does.
+
+    Why:
+        The one upsert all five knobs shared verbatim. Each knob is CURRENT STATE (one row
+        per project, last-writer-wins across producers), so ON CONFLICT(project) DO UPDATE
+        makes each write a single idempotent statement.
+
+        Naming ONE column in both halves is what keeps the knobs independent: on INSERT the
+        unnamed columns take their schema defaults (`kind` becomes "project", the additive
+        columns NULL), and on UPDATE they are not mentioned at all — so a scheduled producer
+        push writing About can never reset an admin's visibility or lifecycle decision.
+    """
+    # knob.column comes from a module-private _MetaKnob constant and never from request
+    # data, so interpolating it is safe. `project` and `value` remain bound parameters —
+    # the same split the _PROJECT_UNIVERSE_SQL f-strings below rely on.
+    conn.execute(
+        f"""
+        INSERT INTO relay_project_meta (project, {knob.column})
+        VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET {knob.column} = excluded.{knob.column}
+        """,
+        (project, value),
+    )
+    conn.commit()
+
+
+def _get_meta_column(
+    conn: sqlite3.Connection, project: str, knob: _MetaKnob
+) -> object:
+    """Read ONE column of a project's meta row, resolving "not set" to the knob's default.
+
+    Args:
+        conn: An open relay-store connection.
+        project: The project to look up.
+        knob: The knob being read — supplies the column, the default, and (for an enum
+            knob) the single honored value.
+
+    Returns:
+        For a PASSTHROUGH knob: the stored value, or `knob.default` when the project has no
+        meta row. For an ENUM knob: `knob.only_value` when exactly that was stored, else
+        `knob.default`.
+
+    Why:
+        Two read shapes, because the knobs mean two different things by "not set". A
+        passthrough knob treats SQL NULL as a REAL answer (None is its deliberate "unset"
+        signal, which callers map to "no band" / the 7-day default), so NULL comes back as
+        None rather than being replaced.
+
+        An enum knob must NOT trust anything it does not recognize: a missing row, a row
+        predating the column, a half-run migration and a typo'd value all have to collapse
+        to the default. Comparing against ONE honored value makes that true by construction,
+        instead of by remembering to enumerate the failure cases at each call site — and it
+        is why the default stays per-knob, since visibility must fail closed where lifecycle
+        must fail open.
+    """
+    row = conn.execute(
+        # Same safety split as _set_meta_column: private column name interpolated, the
+        # untrusted project name bound.
+        f"SELECT {knob.column} FROM relay_project_meta WHERE project = ?", (project,)
+    ).fetchone()
+    if row is None:
+        return knob.default
+    value = row[knob.column]
+    if knob.only_value is not None:
+        return knob.only_value if value == knob.only_value else knob.default
+    return value
+
+
+# Whether a project is a plain project or a status-aware tracker. An explicit flag in the
+# user's orion.toml that rides each push (observe-not-originate: the relay records what
+# config says, it does not guess). Passthrough with a 'project' default — anything not
+# explicitly marked a tracker is a project, so an old push or a missing row reads as a
+# plain project rather than an error.
+_KNOB_KIND = _MetaKnob(column="kind", default="project")
+
+
 def set_project_kind(conn: sqlite3.Connection, project: str, kind: str) -> None:
     """Record a project's kind ("project" | "tracker"), upserting the meta row.
 
@@ -988,23 +1127,12 @@ def set_project_kind(conn: sqlite3.Connection, project: str, kind: str) -> None:
         kind: The project kind, already validated by the server to be a known value.
 
     Why:
-        The home splits projects from trackers, and that distinction is an explicit flag in
-        the user's orion.toml that rides each push (observe-not-originate: the relay records
-        what config says, it does not guess). Like upsert_checklist this is CURRENT STATE —
-        one row per project, REPLACED on each push — so ON CONFLICT(project) DO UPDATE makes
-        it a single idempotent statement: first push inserts, later pushes overwrite. Stored
-        separately from the checklist (its own table) so an already-deployed relay needs no
-        column migration.
+        The home splits projects from trackers, and that distinction rides each push from
+        the user's config. Stored in relay_project_meta rather than beside the checklist so
+        an already-deployed relay needed no new table. See _set_meta_column for the upsert
+        and why it cannot disturb this project's other knobs.
     """
-    conn.execute(
-        """
-        INSERT INTO relay_project_meta (project, kind)
-        VALUES (?, ?)
-        ON CONFLICT(project) DO UPDATE SET kind = excluded.kind
-        """,
-        (project, kind),
-    )
-    conn.commit()
+    _set_meta_column(conn, project, _KNOB_KIND, kind)
 
 
 def get_project_kind(conn: sqlite3.Connection, project: str) -> str:
@@ -1019,15 +1147,18 @@ def get_project_kind(conn: sqlite3.Connection, project: str) -> str:
         row (a report-only project, or one pushed by a producer predating the flag).
 
     Why:
-        The default is the safe, common case: anything that has not been explicitly marked a
-        tracker is a project, so an old push or a missing row reads as a plain project rather
-        than an error. Backs the per-project serializer (the portfolio query reads kind via a
-        LEFT JOIN instead, to stay one round-trip).
+        The default is the safe, common case — see _KNOB_KIND. Backs the per-project
+        serializer; the portfolio query reads kind via a LEFT JOIN instead, to stay one
+        round-trip.
     """
-    row = conn.execute(
-        "SELECT kind FROM relay_project_meta WHERE project = ?", (project,)
-    ).fetchone()
-    return row["kind"] if row is not None else "project"
+    return _get_meta_column(conn, project, _KNOB_KIND)
+
+
+# The per-project "due soon" horizon in days (E1.2), overriding derive.DUE_SOON_DAYS (7).
+# Passthrough with a None default: None is the deliberate "unset" signal, distinct from any
+# real value, and the caller maps it to the 7-day default. So an explicit clear (writing
+# NULL) genuinely restores the default rather than leaving a stale horizon behind.
+_KNOB_DUE_SOON_DAYS = _MetaKnob(column="due_soon_days", default=None)
 
 
 def set_due_soon_days(
@@ -1044,25 +1175,18 @@ def set_due_soon_days(
             7-day default — so clearing genuinely restores the default (not a stale value).
 
     Why:
-        The due-soon horizon is a per-project knob (from the user's orion.toml) that rides
-        each checklist push — the forward-look sibling of `kind`. Like set_project_kind this is
-        CURRENT STATE (last-writer-wins across producers), so ON CONFLICT(project) DO UPDATE
-        makes it a single idempotent upsert. Passing None writes NULL so a producer that stops
-        setting the knob resets to the default rather than leaving a stale horizon behind (the
-        set→unset round-trip). It touches ONLY the due_soon_days column: a bare INSERT lets
-        `kind` take its schema default ("project") for a project that has never pushed a kind,
-        and the DO UPDATE leaves any existing kind untouched — the two knobs share the meta row
-        but are written independently, so setting one never clobbers the other.
+        The forward-look sibling of `kind`: a per-project knob from the user's orion.toml
+        that rides each checklist push. Passing None resets the knob so a producer that
+        stops setting it does not leave a stale horizon behind (the set→unset round-trip).
     """
-    conn.execute(
-        """
-        INSERT INTO relay_project_meta (project, due_soon_days)
-        VALUES (?, ?)
-        ON CONFLICT(project) DO UPDATE SET due_soon_days = excluded.due_soon_days
-        """,
-        (project, due_soon_days),
-    )
-    conn.commit()
+    _set_meta_column(conn, project, _KNOB_DUE_SOON_DAYS, due_soon_days)
+
+
+# The project's About line — its own doc's first paragraph, observed by the producer (KB
+# surface Unit 2). Passthrough with a None default: None is the deliberate "render no About
+# band at all" signal, distinct from a real (even empty-looking) string, so a project that
+# never set one renders exactly as it did before the band existed.
+_KNOB_ABOUT = _MetaKnob(column="about", default=None)
 
 
 def set_about(conn: sqlite3.Connection, project: str, about: str | None) -> None:
@@ -1076,23 +1200,11 @@ def set_about(conn: sqlite3.Connection, project: str, about: str | None) -> None
             which get_about reads back as None and the serializers render as no About band.
 
     Why:
-        About is a per-project observed value (its own doc's first paragraph) that rides the
-        checklist carriers — the KB-content sibling of due_soon_days. Like set_due_soon_days
-        this is CURRENT STATE (last-writer-wins), so ON CONFLICT(project) DO UPDATE makes it a
-        single idempotent upsert touching ONLY the `about` column: the two knobs share the meta
-        row but are written independently, so setting About never clobbers kind/due_soon_days
-        (or vice versa). Passing None writes NULL so an explicit clear genuinely restores "no
-        band" rather than leaving a stale line behind.
+        The KB-content sibling of due_soon_days: a per-project observed value that rides the
+        checklist carriers. Passing None writes NULL so an explicit clear genuinely restores
+        "no band" rather than leaving a stale line behind.
     """
-    conn.execute(
-        """
-        INSERT INTO relay_project_meta (project, about)
-        VALUES (?, ?)
-        ON CONFLICT(project) DO UPDATE SET about = excluded.about
-        """,
-        (project, about),
-    )
-    conn.commit()
+    _set_meta_column(conn, project, _KNOB_ABOUT, about)
 
 
 def get_about(conn: sqlite3.Connection, project: str) -> str | None:
@@ -1107,15 +1219,10 @@ def get_about(conn: sqlite3.Connection, project: str) -> str | None:
         the column (NULL) — the omit-when-unset case, rendered as no About band.
 
     Why:
-        None is the deliberate "no band" signal, distinct from a real (even empty-looking)
-        value: the serializers omit About entirely when None so a project that never set it
-        renders exactly as before the band existed. Kept a separate one-column lookup beside
-        get_due_soon_days; the portfolio query reads the column via its existing LEFT JOIN.
+        None is the deliberate "no band" signal — see _KNOB_ABOUT. Kept a separate
+        one-column lookup; the portfolio query reads the column via its existing LEFT JOIN.
     """
-    row = conn.execute(
-        "SELECT about FROM relay_project_meta WHERE project = ?", (project,)
-    ).fetchone()
-    return row["about"] if row is not None else None
+    return _get_meta_column(conn, project, _KNOB_ABOUT)
 
 
 def get_due_soon_days(conn: sqlite3.Connection, project: str) -> int | None:
@@ -1130,16 +1237,12 @@ def get_due_soon_days(conn: sqlite3.Connection, project: str) -> int | None:
         predates the column (NULL) — the omit-when-unset case.
 
     Why:
-        None is the deliberate "unset" signal, distinct from any real value: the caller maps
-        it to derive.DUE_SOON_DAYS (7) so a project that never set the knob keeps today's
-        default behavior byte-identically. Kept a separate one-column lookup beside
-        get_project_kind; the portfolio query reads the column via its existing LEFT JOIN
-        instead, to stay one round-trip.
+        None is the deliberate "unset" signal — see _KNOB_DUE_SOON_DAYS; the caller maps it
+        to derive.DUE_SOON_DAYS (7) so a project that never set the knob keeps today's
+        behavior byte-identically. Kept a separate one-column lookup; the portfolio query
+        reads the column via its existing LEFT JOIN instead, to stay one round-trip.
     """
-    row = conn.execute(
-        "SELECT due_soon_days FROM relay_project_meta WHERE project = ?", (project,)
-    ).fetchone()
-    return row["due_soon_days"] if row is not None else None
+    return _get_meta_column(conn, project, _KNOB_DUE_SOON_DAYS)
 
 
 # --- Project visibility: the KB scoping primitive (auth revamp, Unit 5) --------------
@@ -1192,6 +1295,15 @@ def project_exists(conn: sqlite3.Connection, project: str) -> bool:
     return row is not None
 
 
+# The scoping primitive as a knob spec. An ENUM knob (only_value): ONLY an explicitly stored
+# 'org' is honored, so a missing row, a pre-Unit-5 NULL, a half-run migration and a typo'd
+# value ALL resolve to 'restricted'. That is the fail-closed rule expressed as data rather
+# than as a condition someone has to remember to write correctly.
+_KNOB_VISIBILITY = _MetaKnob(
+    column="visibility", default=VISIBILITY_RESTRICTED, only_value=VISIBILITY_ORG
+)
+
+
 def set_project_visibility(
     conn: sqlite3.Connection, project: str, visibility: str
 ) -> None:
@@ -1203,19 +1315,10 @@ def set_project_visibility(
         visibility: One of VISIBILITIES, already validated by the server.
 
     Why:
-        Mirrors set_project_kind / set_due_soon_days exactly: one idempotent upsert touching
-        only its own column, so the three project-meta knobs are written independently and a
-        visibility flip never disturbs a project's kind or due-soon horizon.
+        One idempotent single-column upsert (see _set_meta_column), so a visibility flip
+        never disturbs a project's kind, horizon, About, or lifecycle.
     """
-    conn.execute(
-        """
-        INSERT INTO relay_project_meta (project, visibility)
-        VALUES (?, ?)
-        ON CONFLICT(project) DO UPDATE SET visibility = excluded.visibility
-        """,
-        (project, visibility),
-    )
-    conn.commit()
+    _set_meta_column(conn, project, _KNOB_VISIBILITY, visibility)
 
 
 def get_project_visibility(conn: sqlite3.Connection, project: str) -> str:
@@ -1232,15 +1335,10 @@ def get_project_visibility(conn: sqlite3.Connection, project: str) -> str:
     Why:
         Fail-closed by construction: every way of "not being told this is org-visible"
         collapses to restricted, so no project becomes readable through absence, a failed
-        migration, or a row that was never written. Only an explicit, deliberate 'org'
-        opens a project up.
+        migration, or a row that was never written. Only an explicit, deliberate 'org' opens
+        a project up. _KNOB_VISIBILITY's `only_value` is what encodes that.
     """
-    row = conn.execute(
-        "SELECT visibility FROM relay_project_meta WHERE project = ?", (project,)
-    ).fetchone()
-    if row is None or row["visibility"] != VISIBILITY_ORG:
-        return VISIBILITY_RESTRICTED
-    return VISIBILITY_ORG
+    return _get_meta_column(conn, project, _KNOB_VISIBILITY)
 
 
 def org_visible_projects(conn: sqlite3.Connection) -> set:
@@ -1289,6 +1387,27 @@ LIFECYCLE_PAST = "past"
 LIFECYCLES = (LIFECYCLE_ACTIVE, LIFECYCLE_PAST)
 
 
+# The active/past flag as a knob spec. Also an ENUM knob, and the instructive counterpart to
+# _KNOB_VISIBILITY: identical machinery, OPPOSITE default. Only an explicitly stored 'past' is
+# honored, so every form of absence resolves to 'active'. Sharing the accessor while keeping
+# the default per-knob is the whole point — one hardcoded "safe default" would have to pick a
+# side, and the safe side is different for these two knobs.
+_KNOB_LIFECYCLE = _MetaKnob(
+    column="lifecycle", default=LIFECYCLE_ACTIVE, only_value=LIFECYCLE_PAST
+)
+
+# Every knob on the meta row, for the tests that assert the shared properties (defaults on a
+# missing row, defaults on a NULL column, and mutual independence) across ALL knobs. A sixth
+# knob added to its section belongs here too, and then inherits that coverage.
+_META_KNOBS = (
+    _KNOB_KIND,
+    _KNOB_DUE_SOON_DAYS,
+    _KNOB_ABOUT,
+    _KNOB_VISIBILITY,
+    _KNOB_LIFECYCLE,
+)
+
+
 def set_project_lifecycle(
     conn: sqlite3.Connection, project: str, lifecycle: str
 ) -> None:
@@ -1300,21 +1419,12 @@ def set_project_lifecycle(
         lifecycle: One of LIFECYCLES, already validated by the server.
 
     Why:
-        Mirrors set_project_visibility / set_project_kind / set_about exactly: one idempotent
-        upsert touching only its own column, so the meta row's now-five knobs are written
-        independently and marking a project past never disturbs its kind, horizon, About, or
-        visibility. Reversible by design — setting 'active' again restores every derivation,
-        so a mistaken flip costs one command, not a data repair.
+        One idempotent single-column upsert (see _set_meta_column), so marking a project past
+        never disturbs its kind, horizon, About, or visibility. Reversible by design — setting
+        'active' again restores every derivation, so a mistaken flip costs one command, not a
+        data repair.
     """
-    conn.execute(
-        """
-        INSERT INTO relay_project_meta (project, lifecycle)
-        VALUES (?, ?)
-        ON CONFLICT(project) DO UPDATE SET lifecycle = excluded.lifecycle
-        """,
-        (project, lifecycle),
-    )
-    conn.commit()
+    _set_meta_column(conn, project, _KNOB_LIFECYCLE, lifecycle)
 
 
 def get_project_lifecycle(conn: sqlite3.Connection, project: str) -> str:
@@ -1334,14 +1444,9 @@ def get_project_lifecycle(conn: sqlite3.Connection, project: str) -> str:
         means, not merely what a column default says. Here the safe default is the opposite
         direction: no project should vanish from the live sections of the dashboard because a
         row was never written or a migration half-ran. Only an explicit, deliberate 'past'
-        moves a project out of the active view.
+        moves a project out of the active view. See _KNOB_LIFECYCLE.
     """
-    row = conn.execute(
-        "SELECT lifecycle FROM relay_project_meta WHERE project = ?", (project,)
-    ).fetchone()
-    if row is None or row["lifecycle"] != LIFECYCLE_PAST:
-        return LIFECYCLE_ACTIVE
-    return LIFECYCLE_PAST
+    return _get_meta_column(conn, project, _KNOB_LIFECYCLE)
 
 
 def record_observations(

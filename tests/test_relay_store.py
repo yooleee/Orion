@@ -1077,6 +1077,131 @@ def test_the_portfolio_query_carries_lifecycle_defaulting_to_active(tmp_path):
     assert by_name["wrapped"]["lifecycle"] == "past"
 
 
+# --- AU1-R P1: the properties EVERY meta knob shares, driven off the spec table --------
+#
+# The five knobs now run through one accessor pair (_set_meta_column / _get_meta_column) with
+# a per-knob _MetaKnob spec carrying the default. The per-knob tests above still pin each
+# knob's own behavior; these pin the properties that must hold for ALL of them, and they read
+# store._META_KNOBS so a SIXTH knob inherits the coverage instead of needing three new tests.
+
+# Each knob's public accessors, its EXPECTED default written out as a literal, and two
+# distinct sample values (the second proves a write to one knob cannot disturb another).
+# Keyed by column so it can be matched against store._META_KNOBS.
+#
+# The default is spelled literally here ON PURPOSE. Asserting `getter(...) == knob.default`
+# alone would be circular — it would pass however the spec table was edited, including a
+# visibility default flipped to 'org'. These literals are the independent statement of what
+# each default MUST be, so a wrong spec fails rather than redefining the expectation.
+_KNOB_ACCESSORS = {
+    "kind": (set_project_kind, get_project_kind, "project", "tracker", "project"),
+    "due_soon_days": (set_due_soon_days, get_due_soon_days, None, 14, 30),
+    "about": (set_about, get_about, None, "A small tool.", "A smaller tool."),
+    "visibility": (
+        set_project_visibility, get_project_visibility, "restricted", "org", "restricted",
+    ),
+    "lifecycle": (
+        set_project_lifecycle, get_project_lifecycle, "active", "past", "active",
+    ),
+}
+
+
+def test_every_meta_knob_is_covered_by_these_shared_tests():
+    """Each spec in store._META_KNOBS has accessors registered here, and vice versa.
+
+    Why this matters: this is the guard that makes the three tests below self-extending. A
+    sixth knob added to _META_KNOBS without an entry in _KNOB_ACCESSORS would otherwise slip
+    past the default / NULL / independence checks silently — the exact "the copy drifted"
+    failure mode P1 exists to remove. Failing HERE names the omission directly.
+    """
+    assert {knob.column for knob in store._META_KNOBS} == set(_KNOB_ACCESSORS)
+
+
+def test_every_meta_knob_returns_its_documented_default_with_no_meta_row(tmp_path):
+    """With no relay_project_meta row at all, each getter returns the default named above.
+
+    Why this matters: the defaults differ BY INTENT — visibility fails closed to 'restricted',
+    lifecycle fails open to 'active', kind is 'project', About and the horizon are None. Now
+    that one accessor serves all five, a single wrong default in the spec table would change a
+    security decision (visibility) or hide every live project (lifecycle). This pins all five
+    at once, against a project the store has never heard of, AND pins the spec table itself
+    against the literals in _KNOB_ACCESSORS.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    for knob in store._META_KNOBS:
+        _setter, getter, expected_default, _first, _second = _KNOB_ACCESSORS[knob.column]
+        assert knob.default == expected_default, knob.column
+        assert getter(conn, "never-touched") == expected_default
+
+
+def test_every_nullable_meta_knob_defaults_when_its_column_is_null(tmp_path):
+    """A meta row that EXISTS but holds NULL in a knob's column still reads as the default.
+
+    Why this matters: this is the migration case, and it is distinct from "no row". Every one
+    of these columns was added by a later ALTER, so every pre-existing row holds NULL — and a
+    half-run migration leaves the same state. The row's existence must not be mistaken for the
+    knob having been decided. For visibility that is what keeps a project from falling OPEN;
+    for lifecycle it is what keeps a live project from vanishing.
+
+    Setup note: the row is created by writing a DIFFERENT knob, then the column under test is
+    NULLed with raw SQL — that is the only way to reproduce a pre-ALTER row, since the public
+    setters cannot produce one for the non-nullable `kind`.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    nullable = {col for col, _type in store._ADDITIVE_COLUMNS["relay_project_meta"]}
+
+    for knob in store._META_KNOBS:
+        if knob.column not in nullable:
+            continue
+        _setter, getter, expected_default, _first, _second = _KNOB_ACCESSORS[knob.column]
+        project = f"row-exists-{knob.column}"
+        # Create the meta row via a knob that is NOT the one under test, so the column under
+        # test is left exactly as an old row would leave it.
+        set_project_kind(conn, project, "tracker")
+        conn.execute(
+            f"UPDATE relay_project_meta SET {knob.column} = NULL WHERE project = ?",
+            (project,),
+        )
+        conn.commit()
+        assert getter(conn, project) == expected_default
+
+    # `kind` is the one non-nullable column (NOT NULL DEFAULT 'project' in _SCHEMA), which is
+    # WHY it is absent from the loop: the NULL state it would be tested for cannot exist.
+    assert "kind" not in nullable
+    set_project_kind(conn, "kind-is-not-nullable", "tracker")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE relay_project_meta SET kind = NULL WHERE project = ?",
+            ("kind-is-not-nullable",),
+        )
+
+
+def test_writing_one_meta_knob_never_disturbs_the_other_four(tmp_path):
+    """For every knob: rewriting it leaves all the others at their existing values.
+
+    Why this matters: the five knobs share one row but are written by different carriers — two
+    of them producer pushes on a schedule, two of them admin acts. A write that named more than
+    its own column would let a scheduled push silently reset an admin's visibility or lifecycle
+    decision. The existing tests check this pairwise for the knobs that shipped together; this
+    checks the whole matrix, so the property holds for combinations nobody wrote a test for.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    for knob in store._META_KNOBS:
+        setter, _getter, _default, first, _second = _KNOB_ACCESSORS[knob.column]
+        setter(conn, "demo", first)
+
+    for knob in store._META_KNOBS:
+        setter, getter, _default, first, second = _KNOB_ACCESSORS[knob.column]
+        setter(conn, "demo", second)
+        assert getter(conn, "demo") == second
+        for other in store._META_KNOBS:
+            if other.column == knob.column:
+                continue
+            _s, other_getter, _d, other_first, _ = _KNOB_ACCESSORS[other.column]
+            assert other_getter(conn, "demo") == other_first
+        # Restore, so the next knob's check runs against the same known baseline.
+        setter(conn, "demo", first)
+
+
 def test_producer_checklists_for_unknown_project_is_empty(tmp_path):
     """A project with no per-producer checklists returns [] (legacy-only / never pushed).
 

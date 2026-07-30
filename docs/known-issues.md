@@ -909,10 +909,25 @@ Deferred).
     with a `mode=ro` source, which is consistent under WAL and provably cannot alter
     production, and writes the temp copy to the container's `/tmp` rather than onto the mounted
     volume.
-  - **Still outstanding (deliberately):** the weekly `launchd` job is *documented*, not
-    *installed*. Installing it is an operator act, so "a current backup exists without a human
-    remembering" is not yet true. Until that `launchctl bootstrap` runs, the operator-owned
-    layer is manual and this gap stays half-open.
+  - **The weekly job is now INSTALLED AND VERIFIED (2026-07-29), so gap (a) is CLOSED.**
+    `com.orion.relay-backup` is bootstrapped in the user's `gui` domain and was kickstarted to
+    prove it: `last exit code = 0`, launchd itself rewrote the dated file in `~/orion-backups/`,
+    and the job's own `integrity_check` reported ok with 74 reports. "A current backup exists
+    without a human remembering" is true as of today.
+  - **Installing it found two bugs in the runbook that reading it had not** — worth recording as
+    a *type*, since both were confidently documented and both were wrong:
+    1. **`fly ssh console` does NOT wake a stopped machine** (it fails: "app has no started
+       VMs"). The runbook had claimed the opposite, from a session where the machine had been
+       woken by a separate `curl` moments earlier — the wake was mis-attributed to `ssh`. With
+       `min_machines_running = 0` the machine is stopped most of the time, so the scheduled job
+       would have failed on nearly every run. A `/healthz` wake step now leads the script, which
+       is a neat closing of the loop: F2's health endpoint is F3's wake probe.
+    2. **`fly sftp get` refuses to overwrite an existing file**, so any same-day manual pull or
+       retry broke the run. Now pulls to `.part` and `mv`s into place, which also means a
+       partial transfer can never clobber a known-good backup.
+    The pull logic moved out of the plist into a committed `relay-backup.sh`, reversing the
+    inline-one-liner choice recorded as `PD-AU1F-5` — once it needed a wake step, a temp-file
+    dance, and a verification pass, a version-controlled script was plainly the right shape.
   **Deployed and confirmed live 2026-07-29 (Fly release v27).** `/healthz` answers on production
   reporting `f56a544` — `main`'s HEAD, no `-dirty` suffix — so "what code is running?" has a real
   answer for the first time; the logs show the format change at the deploy boundary, including

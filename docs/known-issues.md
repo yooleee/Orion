@@ -913,11 +913,16 @@ Deferred).
     *installed*. Installing it is an operator act, so "a current backup exists without a human
     remembering" is not yet true. Until that `launchctl bootstrap` runs, the operator-owned
     layer is manual and this gap stays half-open.
-  One item is deliberately **not** claimed: whether Fly's health check defeats scale-to-zero
-  is **unverified**. Three Fly docs pages are silent on whether checks run against, or wake, a
-  stopped machine. The block ships with the confirmation step (`fly status` after an idle
-  window) recorded in both `fly.toml` and the deploy doc, and reverting is a five-line
-  deletion. Relates to [[KI-44]] (same posture, server-side; its timeout half landed in the
+  **Deployed and confirmed live 2026-07-29 (Fly release v27).** `/healthz` answers on production
+  reporting `f56a544` — `main`'s HEAD, no `-dirty` suffix — so "what code is running?" has a real
+  answer for the first time; the logs show the format change at the deploy boundary, including
+  access lines for Fly's internal checkers. The **scale-to-zero question, which shipped
+  explicitly unverified, is now VERIFIED in Orion's favour**: with the checks block live and the
+  app idle ~26 minutes, the machine returned to `stopped` on its own, so checks do not defeat
+  autostop. A nuance found while confirming it, now documented: a stopped machine reports the
+  check as `warning` ("the machine hasn't started"), so on a scale-to-zero app this check must
+  **not** be used as an uptime alarm — idle-healthy and broken read alike. Its value is
+  "is a *running* machine serving?". Relates to [[KI-44]] (same posture, server-side; its timeout half landed in the
   same unit) and [[KI-38]] (same audience-widening severity curve).
 
 

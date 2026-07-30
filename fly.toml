@@ -40,16 +40,18 @@ primary_region = "sjc"   # pick one near you / your supervisors: `fly platform r
 # traffic. /healthz touches neither auth nor sqlite, so it answers even when the store is
 # the thing that is broken (liveness, not readiness — that distinction is deliberate).
 #
-# UNVERIFIED INTERACTION, read this before trusting it: the app scales to zero
-# (min_machines_running = 0 above). Fly's docs — the configuration reference, the
-# autostop/autostart page, and the health-checks reference — do not state whether checks
-# run against a STOPPED machine, whether they can wake one, or whether they count as the
-# traffic that defeats autostop. Machine checks are believed to be run by flyd on a
-# RUNNING machine and not to be proxy requests, which would leave scale-to-zero intact,
-# but that is inference, not documented fact. So: after the first deploy that includes
-# this block, confirm with `fly status` that the machine still returns to `stopped` after
-# the idle window. If it stays awake, delete this block — the cost of an always-on machine
-# is not worth the check.
+# SCALE-TO-ZERO INTERACTION — VERIFIED 2026-07-29 on release v27, since Fly's docs (the
+# configuration reference, the autostop/autostart page, and the health-checks reference) do
+# not state it. Observed: with this block deployed and the app left idle ~26 minutes, the
+# machine returned to `stopped` on its own, so **checks do NOT defeat scale-to-zero** — they
+# run only while the machine runs and are not the proxy traffic autostop keys on.
+#
+# Consequence worth knowing before wiring any alerting to this: on a STOPPED machine Fly
+# reports the check as `warning` with output "the machine hasn't started" — it neither fails
+# nor wakes the machine. So on a scale-to-zero app this check is NOT an uptime alarm: idle
+# (perfectly healthy) and genuinely broken both read as not-passing. What it does give you is
+# "while this machine is running, is it actually serving?", which is the wedged-process case
+# it was added for.
 [[http_service.checks]]
   grace_period = "10s"   # the Python import + sqlite migration run before the first 200
   interval = "30s"

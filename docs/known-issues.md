@@ -103,6 +103,26 @@ Deferred).
   sweep did not test the pattern set against a corpus of *deliberately planted* secret
   shapes, so "no false negative observed" here means "none in one real diff", not
   "confirmed complete". The entry's premise stands.
+- **A concrete false negative, found and closed 2026-08-06** — the first one this entry has ever
+  had by name, and it came from pinning the catch-all's behavior rather than from hunting leaks.
+  `Authorization: Bearer <opaque-token>` was matched by the catch-all, but its value matcher
+  stops at whitespace, so it redacted the word `Bearer` and left the credential in the clear
+  **while reporting a hit_count of 1**. An opaque bearer token matches none of the specific
+  patterns, so the catch-all was its only cover. Fixed by skipping an optional `Bearer`/`Basic`
+  scheme word; see CHANGELOG → *"Redaction: `Authorization: Bearer <token>` leaked the token"*.
+  Two things worth carrying from it: a miss that still increments `hit_count` is strictly worse
+  than a plain miss, because it defeats the human check as well as the automatic one — so
+  "the count went up" is not evidence a line was handled. And it was found by writing a test
+  for what the pattern *currently* did, not by reviewing what it was *meant* to do.
+- **A sibling of that leak is STILL OPEN, and is named here rather than left implicit.** A quoted
+  *name* defeats the catch-all outright: `headers={"Authorization": "Bearer <token>"}` is not
+  redacted, because a `"` before the name breaks the name-then-separator match (`[\w.\-]*`
+  cannot cross a quote). Never covered, before or after the scheme fix. Any source file that
+  builds a headers dict has this shape, so it is not exotic. Not fixed with the scheme skip
+  because it is a property of the **name** matcher, and widening that is its own calibrated
+  change — the same discipline KI-41's three rejected designs earned the hard way. Asserted in
+  `tests/test_redact.py` against current behavior so it cannot pass silently; that test is meant
+  to FAIL when someone closes the gap.
 - **Severity:** ongoing / by-design
 - **Status:** Monitored. See [[KI-41]] for the over-matching sibling.
 
@@ -743,6 +763,44 @@ Deferred).
 - **Severity:** low (correctness/UX now, with a slow erosion of the preview control).
 - **Status:** Open. Found 2026-07-21 by the DF1 sweep, on the first `detailed`-share report
   of a real repo. Relates to [[KI-3]] (the same control's false NEGATIVES).
+- **Three narrowing designs were built and REJECTED 2026-08-06. The entry stays open, and this
+  record exists so the next attempt does not re-walk them.** All three were calibrated against
+  27 real `detailed` collector windows (17.6 MB).
+  1. **A word boundary** — require the keyword to end at a non-letter, which is what this
+     entry's own "Note on the fix" proposes below. Removed 236 false-positive occurrences and
+     **silently stopped redacting ~25 real credential names**, because it cannot distinguish
+     `tokenizer` from `tokenValue`: `secretKey` (the AWS SDK field), `TS_AUTHKEY` (Tailscale's
+     env var), `MINIO_SECRETKEY`, `passwordHash`, `privateKeyPem`, `tokenValue`.
+  2. **A stem list** (`author(?!i)`, `authentic`, `authorit`, `tokeniz`). A stem says nothing
+     about what follows it, so it swallowed `authentication_string` — MySQL's
+     `mysql.user.authentication_string`, which stores a password hash — and `AuthenticatorKey`,
+     ASP.NET Identity's TOTP shared secret.
+  3. **A word-form list plus a credential-noun veto.** Survived an adversarial pass over 136
+     sourceable credential names, a 6,214-file external corpus and a 2,184-name sweep. Rejected
+     on cost/benefit rather than on a leak — see the measurement below.
+- **The measurement that stopped it, and the metric error it exposed.** The 19% false-positive
+  reduction that justified design 3 was measured with the collector's **400-line diff cap
+  lifted** — appropriate for *finding* false positives, but it is not what an operator sees. At
+  the production cap, across the same 27 windows: **7 previews showed a warning before, 5 after;
+  two previews became clean; the median count was 0 both ways and the maximum was 4 both ways.**
+  The whole apparatus — 451 regex characters, 9 lookarounds, 21 vocabulary words — moved two
+  previews out of twenty-seven. Aggregate hit reduction is not a proxy for reduced warning
+  habituation, and reporting it as one was the mistake.
+- **Direction now: restructure, do not tune.** The agreed next attempt replaces the monolithic
+  regex with a candidate extractor plus a Python classifier as the `re.sub` callback: split the
+  identifier on delimiters *and* camelCase, judge the **whole** name so evidence before and
+  after a benign word is treated alike (design 3 could not — `author_key` redacted but
+  `hash_author` did not, Python having no variable-length lookbehind), exempt only on exact
+  benign tokens with no credential evidence anywhere, and default to redacting. Each rule
+  carries a named reason, which is more auditable than nested lookaheads, and `hit_count` is
+  preserved by counting accepted replacements in the callback. Roughly 50-100 lines of plain
+  Python. This shape came out of a cross-model second opinion and is recorded in
+  `docs/plan-deviations.md`.
+- **A framing correction from the same review, worth keeping:** a hit *count* can never evidence
+  a false negative — a missed secret produces no replacement and so no warning. The count shows
+  the detector fired, not that it caught everything. The preview does print the full outgoing
+  payload every run (`cli.py`), so the real human control is intact; but any doc that leans on
+  the count as the safety story overstates it. See the concrete case now recorded under [[KI-3]].
 - **Audit (2026-07-28):** `redact.py` unchanged since filing — both candidate narrowings remain
   unimplemented and the entry's calibration requirement stands. Structurally both are edits to
   the one catch-all tuple entry (redact.py:88–109), with `tests/test_redact.py`'s 13 pins as
@@ -939,6 +997,67 @@ Deferred).
   **not** be used as an uptime alarm — idle-healthy and broken read alike. Its value is
   "is a *running* machine serving?". Relates to [[KI-44]] (same posture, server-side; its timeout half landed in the
   same unit) and [[KI-38]] (same audience-widening severity curve).
+
+## KI-47 — Redaction fires on secret-ish NAMES assigned CODE, not secrets
+
+- **Detail:** the catch-all's largest false-positive class is not prose (that is [[KI-41]]) but
+  source code: a name that genuinely is secret-ish, assigned something plainly not a secret
+  because it is an expression, a type annotation, or a keyword argument. Measured over 27 real
+  `detailed` collector windows (17.6 MB), these are the top hits *today*:
+
+      auth=_admin_auth())                          125x
+      admin_token = _load_relay_admin(config_path)  55x
+      view_token=_VIEW)                             44x
+      admin_token: str,                             30x
+      token: str,                                   24x
+
+  1212 hits across that corpus, a large majority of this shape.
+- **Why it matters:** it is the same cost as KI-41 — it inflates the *"N potential secret(s)"*
+  preview count with routine noise — and it is the bigger contributor. A developer reporting on
+  a codebase that is *about* auth (which Orion is) meets it constantly. Fail-safe direction: it
+  over-redacts, it never leaks.
+- **Why it is separate from KI-41:** KI-41 is a question about the *name*; this is a question
+  about the *value*. Distinguishing an opaque credential from a Python expression has no
+  arguable-free heuristic — reject values containing `(`/`)`/`,`, require minimum entropy,
+  reject bare identifiers — each trades directly against false negatives with no safe line.
+- **Where it should be solved:** in the classifier restructure recorded under [[KI-41]], not as
+  another lookahead. A value-shape rule expressed as a named Python predicate can be read,
+  tested and reasoned about; the same rule crammed into the regex cannot.
+- **Scope note:** the corpus is Orion-weighted and Orion's own source is *about* tokens, so this
+  density is a worst case. But the report that opened KI-41 was of Orion's own repo, so the
+  worst case is a recurring one.
+- **Severity:** low (correctness/UX, with the same slow erosion of the preview count that KI-41
+  describes).
+- **Status:** Open. Filed 2026-08-06 from the KI-41 calibration corpus, not from a report anyone
+  read. Relates to [[KI-3]] and [[KI-41]].
+
+## KI-48 — The redaction catch-all backtracks superlinearly on pathological input
+
+- **Detail:** the catch-all's name group is `[\w.\-]*` on both sides of the keyword alternation
+  with no atomic grouping, so input that repeatedly *almost* completes the match explores
+  quadratically many prefix splits. Measured on `main`: `("secret_token_auth_" * 100) + "Z"`
+  (1.8 KB) takes **1.9 s**; doubling it to 3.6 KB takes **15 s**. `"authorization" * 400`
+  (5.2 KB) takes **20 s**. Ordinary input is unaffected — 17.6 MB of real collector output
+  scans in about 4 s.
+- **Why it matters:** `redact()` runs on collector output, which is attacker-adjacent in
+  principle — a commit message or diff hunk in a collected repository is text someone else may
+  have written. CPU exhaustion, never a disclosure. Same class as [[KI-44]].
+- **What bounds it today:** the git collector caps the diff at 400 lines and denylists whole
+  file classes, so realistic input is tens of KB. No slow run has been observed. That is a
+  *containment* argument depending on a constant in another module, not a fix.
+- **Note on the fix:** not obvious. Python's possessive quantifier (`[\w.\-]*+`, 3.11+) is the
+  *wrong* tool — it would stop the prefix giving ground, so `AUTH_TOKEN=…` would cease to match
+  at all. The real directions are anchoring the name match on the keyword instead of searching
+  for it, or bounding name length — both of which the classifier restructure under [[KI-41]]
+  would naturally provide.
+- **Severity:** low (reachable only through content Orion is pointed at, bounded by the diff
+  cap, never a disclosure).
+- **Status:** Open, **pre-existing**. Found 2026-08-06 by an independent verification pass that
+  timed adversarial inputs. Recorded rather than fixed because the fix belongs with the
+  restructure. Worth noting for whoever does it: one rejected KI-41 design incidentally improved
+  this (`"authorization" * 400`: 20 s → 0.4 s) and another made it reachable with half the input,
+  so the restructure should measure this explicitly rather than discover it. Relates to
+  [[KI-44]].
 
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

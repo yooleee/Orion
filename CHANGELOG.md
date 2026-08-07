@@ -14,6 +14,69 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## Redaction: `Authorization: Bearer <token>` leaked the token (2026-08-06)
+
+A false negative in the redactor's generic catch-all, found while pinning that pattern's
+current behavior for the KI-41 calibration work. Not a KI-41 fix — KI-41 is about the same
+pattern matching *too much*. This is the opposite failure, and the one that matters.
+
+### Fixed
+
+- **The catch-all redacted the word `Bearer` and left the credential after it in the clear.**
+  Its value matcher stops at whitespace, so on an HTTP auth header it consumed the scheme word
+  and stopped:
+
+      Authorization: Bearer aB3x…  ->  Authorization: [REDACTED_SECRET] aB3x…
+
+  An opaque bearer token matches none of the specific patterns — it is not a JWT, not `sk-`,
+  not `ghp_` — so the catch-all was its only cover. Worse than a plain miss: the line reported
+  a `hit_count` of 1, so the preview counted it as a catch. A false negative wearing the
+  costume of a catch is the worst shape this bug can take, because it defeats the human check
+  as well as the automatic one.
+
+  The pattern now skips an optional `Bearer`/`Basic` scheme word before reading the value, and
+  accepts a quote on either side of it — so the quoted header form
+  `Authorization="Bearer <token>"`, which is the same bug one character to the left, is covered
+  too. (That one was found by review after the first version of the fix.)
+
+  Verified as a coverage increase and never a reduction: across 200,000 generated inputs there
+  is no case where the new pattern redacts less of a line than the old one. It cannot create a
+  new match either, because the scheme word is optional and both `Bearer` and `Basic`
+  independently satisfy the value matcher — wherever the skip applies, the old pattern already
+  matched at the same place with a shorter span. On 27 real `share_level = "detailed"` collector
+  windows the total hit count was 1212 before and after. That last figure is a **local
+  measurement over the developer's own repositories, not reproducible in CI**, and it is a
+  property of that corpus rather than an invariant: a line carrying a scheme word *and* a second
+  assignment can legitimately merge two hits into one (`token: Bearer secret=abcd1234` goes from
+  2 hits to 1, over-redacting the text while under-reporting the count — the fail-safe
+  direction).
+
+  Two looser forms were built and rejected: `\s+` instead of `[ \t]+` spans a newline and
+  redacts the *next* line's value, and adding `Token` to the alternation makes an
+  already-matching prose line swallow one more word (`OAuth: token exchange` loses `exchange`
+  as well). Both are pinned by tests. Note the second reason precisely — `Token` does not cause
+  a new line to match, and an earlier draft of this note said it did.
+
+  **Still not covered, now pinned as a known gap:** a quoted *name*, as in
+  `headers={"Authorization": "Bearer <token>"}`. A quote before the name breaks the
+  name-then-separator match entirely, so this shape was never covered and still is not. It is a
+  property of the name matcher rather than the scheme skip, and widening the name matcher is its
+  own calibrated change. Recorded under KI-3 and asserted in the suite so it cannot pass
+  silently.
+
+### Tests
+
+`tests/test_redact.py` 13 → 15. Both new pins were mutation-checked: each fails against a
+mutant that removes exactly the property it claims.
+
+### Also filed, not fixed here
+
+Three issue records from the same calibration work, all documentation-only: **KI-47** (the
+catch-all fires on secret-ish *names* assigned plainly non-secret *code* — the largest
+remaining false-positive class), **KI-48** (the catch-all backtracks superlinearly on
+pathological input, pre-existing), and a status note on **KI-41** recording three narrowing
+designs that were built and rejected, so the next attempt does not re-walk them.
+
 ## S2.2 — KB surface Increment 2: past projects (2026-07-24)
 
 Finished projects become a first-class state instead of sitting in the live view forever,

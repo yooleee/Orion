@@ -186,3 +186,82 @@ def test_single_secret_is_counted_once_not_double():
     assert result.hit_count == 1                       # counted exactly once
     assert "[REDACTED_API_KEY]" in result.text         # precise token preserved
     assert "[REDACTED_SECRET]" not in result.text      # NOT re-redacted/mangled
+
+
+# --- A false negative found while pinning the catch-all's behavior for KI-41 ---
+# Not a KI-41 fix: KI-41 is about over-matching. This is the opposite failure, and
+# the one that matters -- a credential that reached a supervisor unredacted.
+
+
+def test_bearer_scheme_word_does_not_shield_the_token_behind_it():
+    """`Authorization: Bearer <opaque>` redacts the TOKEN, not just the word `Bearer`.
+
+    Why this matters: this was a live leak. The catch-all's value matcher stops at
+    whitespace, so on an `Authorization:` header it consumed the word `Bearer` and
+    left the credential after it untouched:
+
+        Authorization: Bearer aB3x...  ->  Authorization: [REDACTED_SECRET] aB3x...
+
+    An opaque bearer token matches none of the specific patterns (it is not a JWT,
+    not `sk-`, not `ghp_`), so the catch-all was its only cover — and it reported a
+    hit_count of 1, which made the line look handled in the preview. That is the
+    worst shape a redaction bug can take: a false negative wearing the costume of a
+    catch.
+    """
+    token = "aB3xQ9zLmNp0RtVwYs2K"
+    result = redact(f"Authorization: Bearer {token}")
+    assert token not in result.text
+    assert result.text == "Authorization: [REDACTED_SECRET]"
+    assert result.hit_count == 1
+
+    # Basic auth carries a base64 user:pass -- same shape, same cover.
+    result = redact("Authorization: Basic dXNlcjpodW50ZXIy")
+    assert "dXNlcjpodW50ZXIy" not in result.text
+    assert result.hit_count == 1
+
+    # The QUOTED header form. This is the same bug one character to the left: the
+    # optional quote used to sit after the scheme word, so a quote before `Bearer`
+    # ended the name-and-separator match and the token walked out. Found by review
+    # after the first version of this fix, which is why it has its own assertions
+    # rather than riding along in the loop above.
+    for line in (f'Authorization="Bearer {token}"', f"Authorization='Bearer {token}'",
+                 f'Authorization: Bearer "{token}"'):
+        result = redact(line)
+        assert token not in result.text, f"LEAKED from: {line}"
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+
+def test_a_quoted_header_NAME_is_a_known_gap_not_a_silent_pass():
+    """`headers={"Authorization": "Bearer <token>"}` is NOT redacted. Pinned as known.
+
+    Why this matters: a quote before the NAME breaks the name-then-separator match
+    entirely (`[\\w.\\-]*` cannot cross `"`), so this shape has never been covered --
+    not before the scheme fix and not after it. It is a real shape (any Python or
+    JS source that builds a headers dict) and it is a genuine hole in the catch-all.
+
+    This test asserts the CURRENT behavior deliberately, so the gap is recorded in
+    the suite rather than living only in a doc. It is out of scope for a fix here:
+    quoted names are a property of the name matcher, not of the scheme skip, and
+    widening the name matcher is its own calibrated change. If someone closes it,
+    this test SHOULD fail -- and its failure is the signal to delete it, not to
+    restore the gap. Tracked under KI-3.
+    """
+    token = "aB3xQ9zLmNp0RtVwYs2K"
+    result = redact(f'headers={{"Authorization": "Bearer {token}"}}')
+    assert token in result.text  # known gap, asserted so it cannot regress silently
+    assert result.hit_count == 0
+
+
+def test_the_scheme_skip_never_reaches_across_a_line():
+    """A scheme word at end-of-line does not pull the NEXT line's value into the match.
+
+    Why this matters: the first version of the scheme skip used `\\s+`, which matches
+    newlines, so a line ending in `Bearer` swallowed the line break and redacted
+    whatever followed on the next line — silently deleting content that was never a
+    secret. `[ \\t]+` confines it. The property worth holding is broader than this
+    one bug: the catch-all is line-oriented by construction (its value matcher stops
+    at whitespace), and nothing added to it should quietly make it span lines.
+    """
+    text = "auth = Bearer\nnext_line_value_here"
+    result = redact(text)
+    assert "next_line_value_here" in result.text, "redaction crossed a line boundary"

@@ -94,7 +94,30 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
                  private[_\-]?key|auth|credential)
               [\w.\-]* )                            # optional name suffix
             ( \s*[:=]\s* )                          # the assignment operator (kept)
-            ['"]?                                   # optional opening quote (dropped)
+            ['"]?                                   # optional opening quote (dropped) -- BEFORE
+                                                    # the scheme word, so `Authorization="Bearer
+                                                    # <token>"` is covered as well as the
+                                                    # unquoted form.
+            (?:(?:Bearer|Basic)[ \t]+)?              # An HTTP auth scheme word, skipped so the
+                                                    # CREDENTIAL after it is what gets redacted.
+                                                    # Without this, the value matcher below stops
+                                                    # at the first space, eats the word "Bearer",
+                                                    # and leaves the token itself in the clear --
+                                                    # while reporting a hit, so the line looks
+                                                    # covered.
+                                                    #
+                                                    # Two looser forms were built and rejected.
+                                                    # `\s+` instead of `[ \t]+` spans a newline
+                                                    # and redacts the NEXT line's value. Adding
+                                                    # `Token` to the alternation makes an
+                                                    # already-matching prose line eat one more
+                                                    # word ("OAuth: token exchange" loses
+                                                    # "exchange" too) -- note it does NOT create
+                                                    # a new match; nothing here can, since the
+                                                    # scheme word is optional and both spellings
+                                                    # already satisfy the value matcher.
+            ['"]?                                   # ...and a quote after it, for the rarer
+                                                    # `Authorization: Bearer "<token>"`.
             (?!\[REDACTED_)                         # don't re-redact a token an earlier
                                                     # pattern already inserted (e.g. a
                                                     # 'token = sk-...' caught by the sk-

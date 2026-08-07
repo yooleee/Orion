@@ -14,6 +14,123 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## KI-41 — calibrated narrowing of the redaction catch-all (2026-08-06)
+
+The redactor's generic catch-all accepted its secret-ish keyword anywhere inside a name, so
+ordinary English words matched: `auth` inside `authenticated` and `author`. Both hits on the
+first real `detailed`-share report of the DF1 sweep were false positives on documentation
+prose. The cost was never a leak (the mechanism over-redacts), it was that
+`authenticated: [REDACTED_SECRET]` silently changed the meaning of text a supervisor reads,
+and that routine noise inflated the *"N potential secret(s) were redacted"* warning, which is
+the human control KI-3 names the guaranteeing layer. See `plans/orion-plan.md` (row KI-41) and
+`docs/ki41-redaction-narrowing-kickoff.md`.
+
+Calibrated against a corpus of real `share_level = "detailed"` collector output — **27 windows
+over 14 repos, 17.9 MB**, measured 2026-08-06 — with hit sets diffed before and after:
+**1212 hits → 990**. All 87 distinct lost hits were read individually and every one is a false
+positive; **zero true positives lost**. (The corpus is built from live local repositories, so
+the absolute counts drift slightly between runs.)
+
+### Changed
+
+- **A secret-ish keyword no longer counts when it starts one of five English word forms**:
+  `author` (not `authoriz…`), `authenticat(ed|es|ing|e)`, bare `authentic`, `authoritative`,
+  and `tokeniz(er|ers|ed|es|e|ing)`. That kills the observed false-positive population —
+  `author_name`, `author_kind`, `Co-Authored-By`, `authenticated`, `isAuthenticated`,
+  `WWW-Authenticate`, `NonAuthoritative…`, `tokenizer`.
+  **The mechanism nouns built on the same stems are deliberately NOT exempt** —
+  `authentication`, `authenticator`, `authorization`, `authority`, `tokenization` — because
+  every one of them is a real credential field name. `authenticated` is a state something is
+  in; `authentication` is a thing that has a value. One letter apart, opposite answers.
+- **Any credential noun in the name voids the exemption outright** (`key`, `secret`, `token`,
+  `password`, `passwd`, `credential`, `hash`, `salt`, `signature`, `sig`, `cert`, `pem`, `jwt`,
+  `otp`, `pin`). `author` is prose; `author_key` is a credential, and no reading of `author`
+  changes that. This also means the word-form list can grow later without each new entry
+  re-opening the hole.
+- **A value that is exactly `true`, `false`, `null` or `none` is no longer redacted.** No real
+  secret is literally the word `false`, and `token: null` in a config dump is a fact about the
+  config that redaction was destroying for no gain. Exact-match only, so `token: nullish4char`
+  still redacts. Anything added to that list needs the same argument these four have: it
+  *cannot plausibly be a secret*.
+
+### Fixed
+
+- **`Authorization: Bearer <opaque-token>` leaked the token.** Found while pinning current
+  behavior, and not what the issue predicted: the catch-all did match the line, but its value
+  matcher stops at whitespace, so it redacted the *word* `Bearer` and left the credential
+  after it in the clear — reporting a `hit_count` of 1 that made the line look covered. An
+  opaque bearer token matches none of the specific patterns (not a JWT, not `sk-`, not `ghp_`),
+  so the catch-all was its only cover. The pattern now skips an optional `Bearer`/`Basic`
+  scheme word, over spaces and tabs only. Two looser versions were tried and rejected against
+  the corpus: `\s+` spans a newline and eats the *next* line's value, and adding `Token` to the
+  alternation makes prose like `OAuth: token exchange` match.
+
+### Two earlier versions of this fix leaked, and the corpus caught neither
+
+The most useful thing this entry records is the method, not the regex. Three designs were
+built; the first two were rejected by an independent verification pass, and **both had passed
+the corpus with zero losses and passed every test that existed when they were written.**
+
+1. **A word boundary** — require the keyword to end at a non-letter. Measured 1188 → 952,
+   zero corpus losses. It cannot tell `tokenizer` from `tokenValue`, and had silently stopped
+   redacting roughly 25 real credential names: `secretKey` (the AWS SDK field), `TS_AUTHKEY`
+   (Tailscale's env var), `MINIO_SECRETKEY`, `passwordHash`, `passwordValue`, `privateKeyPem`,
+   `tokenValue`, `authkey`.
+2. **A stem list** — `author(?!i)`, `authentic`, `authorit`, `tokeniz`. A stem says nothing
+   about what follows it, so it swallowed `authentication_string` (MySQL's
+   `mysql.user.authentication_string`, which stores the password hash) and `AuthenticatorKey`
+   (ASP.NET Identity's TOTP shared secret), along with `AUTHENTICATION_KEY`, `tokenization_key`,
+   `author_key` and `authority_key`.
+
+**Why the corpus could not catch either.** 17.9 MB of a developer's own repositories contains
+almost no real secrets, so a corpus can demonstrate that a false positive was *removed* and can
+never demonstrate that a true positive *survived*. The check that found both was constructing
+credential names by hand and diffing old against new. That requirement is now written into the
+pattern's header comment rather than left in one session's memory, and
+`tests/test_redact.py` carries pins built from names that are actually shipped
+(`test_keyword_prefix_credential_names_still_redact`,
+`test_mechanism_nouns_are_not_exempted_only_prose_forms_are`).
+
+Worth naming the pattern in the failures: each rejected version was **simpler and read
+better** than what replaced it. A boundary is tidier than a word list; a stem is tidier than a
+list of forms. Both collapsed a distinction that turned out to be real, which is the one place
+this codebase's bias toward simplicity has to yield.
+
+### Known limitations
+
+- **A second false-positive class survives, and it is the larger one** — a genuinely secret-ish
+  *name* assigned something that is plainly code (`auth=_admin_auth())` 125×, `admin_token: str,`
+  30×, `token: str,` 24×). 990 corpus hits remain, mostly of that shape. It is a *value*-shape
+  problem where KI-41 was a *name*-shape one, with no arguable-free heuristic, so it is filed as
+  **KI-47** for its own calibration slice rather than guessed at here. The kickoff's acceptance
+  criterion asked for "zero known false positives remain"; that is not what shipped, and the
+  criterion is restated honestly in `docs/plan-deviations.md` (PD-KI41-5).
+- **The credential-noun rule scans forward from the keyword only.** `author_key` redacts;
+  `hash_author` does not, because the noun sits before the prose word and Python's `re` has no
+  variable-length lookbehind. This affects only the nouns that are not themselves keywords
+  (`hash`, `salt`, `signature`, `sig`, `cert`, `pem`, `jwt`, `otp`, `pin`) — `secret_author`
+  is fine, since `secret` is a keyword in its own right. No such name was found in a
+  6,214-file external corpus, and the fix would add a third mechanism to a control that has
+  already been over-simplified twice, so it is recorded rather than patched.
+- **camelCase prose that continues past a listed form still over-redacts** —
+  `authenticatedUser`, `isAuthenticatedUser`, `authenticatedAt` — as do British spellings
+  (`tokeniser`, `authorised`) and names carrying an incidental `sig`/`pin` substring. All
+  fail-safe direction, all part of KI-47's territory.
+- **KI-48's pre-existing superlinear backtracking needs about half the input to stall.** Same
+  complexity class, worse constant on the worst shape. Recorded in that entry.
+- Redaction lanes and scope are untouched: this changed one pattern's precision, nothing about
+  where or when redaction runs, and nothing about preview semantics.
+
+### Tests
+
+`tests/test_redact.py` grows from 13 pins to 23. The 13 originals are unchanged — they are the
+regression floor. Each of the 10 new pins was **mutation-checked**: confirmed to fail against a
+mutant that removes exactly the property it claims, including the two that encode a rejected
+design (collapsing the word forms back to a stem, and re-introducing the boundary). Worth
+stating plainly given how this slice went: mutation-checking proves a test fails when its own
+property breaks. It says nothing about properties no test names, and that is precisely how both
+rejected versions passed.
+
 ## S2.2 — KB surface Increment 2: past projects (2026-07-24)
 
 Finished projects become a first-class state instead of sitting in the live view forever,

@@ -741,13 +741,86 @@ Deferred).
   risk-free since no real secret is literally `false`. Any change needs a corpus check
   against real diffs, plus tests pinning that every currently-caught secret shape still is.
 - **Severity:** low (correctness/UX now, with a slow erosion of the preview control).
-- **Status:** Open. Found 2026-07-21 by the DF1 sweep, on the first `detailed`-share report
-  of a real repo. Relates to [[KI-3]] (the same control's false NEGATIVES).
+- **Status:** **CLOSED** 2026-08-06 by the calibrated narrowing described below. Found
+  2026-07-21 by the DF1 sweep, on the first `detailed`-share report of a real repo. Relates
+  to [[KI-3]] (the same control's false NEGATIVES) and to [[KI-47]], the *other* false-positive
+  class this fix deliberately did not touch.
 - **Audit (2026-07-28):** `redact.py` unchanged since filing — both candidate narrowings remain
   unimplemented and the entry's calibration requirement stands. Structurally both are edits to
   the one catch-all tuple entry (redact.py:88–109), with `tests/test_redact.py`'s 13 pins as
   the regression floor and `test_benign_prose_is_not_redacted` as the natural home for a
   false-positive corpus.
+- **Resolved 2026-08-06** by the calibrated narrowing (kickoff:
+  `docs/ki41-redaction-narrowing-kickoff.md`). Two edits to the one catch-all tuple:
+  **N1**, a keyword does not count when it starts one of five English *word forms* (`author`
+  but not `authoriz…`, `authenticat(ed|es|ing|e)`, bare `authentic`, `authoritative`,
+  `tokeniz(er|ers|ed|es|e|ing)`) — and even then only if the name carries no credential noun
+  (`key`, `secret`, `hash`, `salt`, `pem`, `jwt`, …); **N2**, a value that is exactly
+  `true`/`false`/`null`/`none` is not a secret. Calibrated against **27 windows over 14 real
+  repos, 17.9 MB** of `share_level = "detailed"` collector output (measured 2026-08-06):
+  **1212 hits → 990**, all 87 distinct lost hits read individually and every one a false
+  positive, **zero true positives lost**. Eyes-on: a real `orion report` preview of
+  `instruction-debugger` now shows no redaction warning where it previously warned of 2
+  secrets, both `Co-Authored-By:Fake`.
+- **TWO EARLIER VERSIONS OF THIS FIX LEAKED, BOTH PASSED THE CORPUS, AND BOTH PASSED EVERY
+  TEST THAT EXISTED WHEN THEY WERE WRITTEN. That is the transferable content of this entry.**
+  1. **A word boundary** — require the keyword to end at a non-letter, which is what this
+     entry's own "Note on the fix" proposed and the kickoff specified. Measured 1188 → 952
+     with zero corpus losses. It cannot distinguish `tokenizer` from `tokenValue`, and had
+     silently stopped redacting ~25 real credential shapes: `secretKey` (the AWS SDK field
+     name), `TS_AUTHKEY` (Tailscale's env var), `MINIO_SECRETKEY`, `authkey`/`authKey`,
+     `passwordHash`, `passwordValue`, `privateKeyPem`, `tokenValue`, `secretString`. The
+     reasoning that justified it — *"no English word ENDS in one of these keywords"* — was
+     true and irrelevant: it argued about false positives while the damage was on the
+     false-negative side.
+  2. **A stem list** (`author(?!i)`, `authentic`, `authorit`, `tokeniz`). A stem is
+     unconditional on what follows it, so it swallowed `authentication_string` — MySQL's
+     `mysql.user.authentication_string`, which stores the password hash — and
+     `AuthenticatorKey`, ASP.NET Identity's TOTP shared secret, plus `AUTHENTICATION_KEY`,
+     `tokenization_key`, `authenticationSalt`, `author_key` and `authority_key`.
+  **Why the corpus caught neither, which is the part worth carrying forward:** 17.9 MB of a
+  developer's own repositories contains almost no real secrets, so "zero true positives lost
+  on the corpus" is a statement about the corpus, not about the pattern. A real-diff corpus can
+  prove a false positive was *removed*; it can never prove a true positive *survived*. Both
+  rejections came from **constructing credential names by hand and diffing old against new**,
+  and that requirement now lives in `redact.py`'s header comment.
+  **And the shape of the failures is worth naming:** each rejected version was *simpler and
+  read better* than what replaced it. A boundary is tidier than a word list; a stem is tidier
+  than a list of forms. Both collapsed a distinction that was real — `authenticated` (a state)
+  versus `authentication` (a thing with a value), one letter apart and opposite answers. This
+  is the one place the project's bias toward simplicity has to yield, and it yielded twice
+  before the design held.
+- **Three more things the filing did not capture, all found by building rather than reading:**
+  1. **`Authorization: Bearer <opaque>` was a live LEAK, not a catch.** The kickoff assumed the
+     catch-all covered it via `auth` inside `authorization`. It matched — but the value matcher
+     stops at whitespace, so it redacted the *word* `Bearer` and left the credential after it in
+     the clear, with a `hit_count` of 1 that made it look covered. An opaque bearer token matches
+     none of the specific patterns, so the catch-all was its only cover. Closed here by skipping
+     an optional scheme word; this was a **widening**, which the kickoff's hard lines forbade, so
+     it was put to the user before acting (`docs/plan-deviations.md`, PD-KI41-2).
+  2. **`authorization` needs no keyword of its own, but it does need a carve-out.** N1's
+     `author` entry is written `author(?!i)` precisely so `Authorization:` keeps redacting while
+     `author_name:` does not.
+  3. **The exemption is anchored at the keyword, not searched across the name.** Searching the
+     whole name would exempt `admin_token_author_x`, which carries a real keyword and a benign
+     word at once. Pinned, and mutation-checked against the searching variant.
+- **Residual limitations, stated rather than discovered later:**
+  - **The credential-noun rule scans forward from the keyword only.** `author_key` redacts;
+    `hash_author` does not, because the noun precedes the prose word and Python's `re` has no
+    variable-length lookbehind. Affects only nouns that are not themselves keywords (`hash`,
+    `salt`, `signature`, `sig`, `cert`, `pem`, `jwt`, `otp`, `pin`). No such name was found in
+    a 6,214-file external corpus, and closing it means a third mechanism on a control already
+    over-simplified twice — so it is recorded, not patched.
+  - **camelCase prose continuing past a listed form still over-redacts** (`authenticatedUser`,
+    `isAuthenticatedUser`), as do British spellings (`tokeniser`, `authorised`) and names with
+    an incidental `sig`/`pin` substring. Fail-safe direction; [[KI-47]]'s territory.
+- **Every pin added here was mutation-checked**, per the Session P practice: each of the ten new
+  tests fails against a mutant that removes the property it claims, including two mutants that
+  re-create a rejected design. But note what that did and did not buy: the rejected versions
+  passed every test that existed when they were written. Mutation-checking proves a test fails
+  when its own property breaks. It says nothing about properties no test names.
+- **Related finding, filed separately:** the catch-all backtracks superlinearly on pathological
+  input, and this design roughly halves the input needed to stall → [[KI-48]].
 
 ## KI-43 — `graduate-idea` duplicated `add-project`'s flags and has drifted (live functional gap)
 
@@ -939,6 +1012,80 @@ Deferred).
   **not** be used as an uptime alarm — idle-healthy and broken read alike. Its value is
   "is a *running* machine serving?". Relates to [[KI-44]] (same posture, server-side; its timeout half landed in the
   same unit) and [[KI-38]] (same audience-widening severity curve).
+
+## KI-47 — Redaction still fires on secret-ish names assigned CODE, not secrets
+
+- **Detail:** [[KI-41]] fixed the catch-all's *name* matching — `author` and `authenticated`
+  no longer look like secrets. A second false-positive class survives, and it is the larger
+  one: a name that genuinely is secret-ish, assigned something that is plainly not a secret
+  because it is source code. Measured on the same 17.9 MB corpus, these are the top survivors
+  after KI-41 closed:
+
+      auth=_admin_auth())                          125x
+      admin_token = _load_relay_admin(config_path)  55x
+      view_token=_VIEW)                             44x
+      admin_token: str,                             30x
+      token: str,                                   24x
+
+  990 hits remain across the corpus, and a large majority are of this shape — function calls,
+  type annotations, keyword arguments, and identifier-to-identifier assignments.
+- **Why it matters:** exactly the reason KI-41 mattered, and the reason KI-41's closing did not
+  finish the job. Every one of these inflates the *"N potential secret(s) were redacted"*
+  preview warning, which [[KI-3]] names **the guaranteeing layer** — the human control that
+  redaction's known incompleteness is backstopped by. A developer reporting on a codebase that
+  is *about* auth (which Orion is) sees a large count on every run and learns it means nothing.
+  The direction is still fail-safe: this over-redacts, it never leaks.
+- **Why it was not fixed with KI-41:** it is a different problem in the same pattern. KI-41 was
+  a *name*-shape question and had a clean, arguable-free answer. This is a *value*-shape
+  question — distinguishing an opaque credential from a Python expression — and every heuristic
+  that suggests itself (reject values containing `(`, `)`, `,`, or ending in `:`; require some
+  minimum entropy; reject bare identifiers) trades directly against false negatives with no
+  obvious safe line. It wants its own calibration slice, not a rider on this one.
+- **Honest scope note on the number:** the corpus is Orion-weighted, and Orion's own source is
+  *about* tokens and auth, so its density of these names is unusually high. A typical project's
+  diff would show far fewer. But the DF1 report that opened KI-41 was of Orion's own repo, so
+  the worst case is a real and recurring one, not a hypothetical.
+- **Severity:** low (correctness/UX, with the same slow erosion of the preview control that
+  KI-41 described — the mechanism over-redacts rather than leaks).
+- **Status:** Open. Filed 2026-08-06 while closing [[KI-41]], from that slice's corpus
+  measurement rather than from a report anyone read. Relates to [[KI-3]] (the same control's
+  false NEGATIVES) and [[KI-41]] (the name-shape half, closed).
+
+## KI-48 — The redaction catch-all backtracks superlinearly on pathological input
+
+- **Detail:** the generic catch-all's name group is `[\w.\-]*` on both sides of the keyword
+  alternation, with no atomic grouping, so an input that repeatedly *almost* completes the match
+  makes the engine explore quadratically many prefix splits. Measured on `main` and on the
+  KI-41 branch alike: `("secret_token_auth_" * 100) + "Z"` (1.8 KB) takes **1.9 s**;
+  doubling the input to 3.6 KB takes **15.2 s**. `"authorization" * 400` (5.2 KB) takes
+  **20 s**. Ordinary input is unaffected — the whole 17.9 MB KI-41 corpus scans in about 6 s.
+- **Why it matters:** `redact()` runs on collector output, which is *attacker-adjacent in
+  principle*: a commit message, a file name, or a diff hunk in a repository Orion collects from
+  is text someone else may have written. This is a CPU-exhaustion shape, not a disclosure —
+  same class as [[KI-44]], and like it, the severity is currently held down by who can reach it
+  rather than by the code.
+- **What bounds it today:** the git collector caps the diff at 400 lines and the denylist keeps
+  whole file classes out, so the realistic input is tens of KB of ordinary text. No slow run has
+  ever been observed in practice. That is a *containment* argument, not a fix, and it is worth
+  writing down that it depends on a constant in a different module.
+- **Note on the fix:** not obvious, which is why this is a filing and not a patch. Python's
+  possessive quantifier (`[\w.\-]*+`) is available on 3.11+ but is the *wrong* fix here — it
+  would stop the prefix giving ground, so `AUTH_TOKEN=…` would cease to match at all. The
+  plausible directions are restructuring the name match so the keyword anchors it rather than
+  being searched for, or bounding the name length. Either wants the same treatment KI-41 got:
+  a corpus, constructed credential names, and mutation-checked pins.
+- **Severity:** low (reachable only through content Orion is pointed at, bounded by the diff cap,
+  never a disclosure).
+- **Status:** Open. Found 2026-08-06 by the independent verifier pass on the KI-41 diff, which
+  timed adversarial inputs against both the old and new patterns. **Pre-existing on `main`: the
+  complexity class is unchanged by KI-41, but the constant is worse on the worst shape.** The
+  shortest input that stalls for a second on a repeated `author_` prefix went from ~1950
+  characters to ~990 — KI-41's exemption moves those names from "matches fast" into "fails to
+  match", which is the expensive bucket the pattern already had. Recorded honestly rather than
+  as "unchanged": KI-41 did not introduce this, and it did make it cheaper to trigger. Its first
+  (rejected) design would incidentally have improved it instead (`"authorization" * 400`:
+  20 s → 0.4 s), so the trade is knowing rather than accidental. Relates to [[KI-44]] (same
+  denial-of-service class, relay side).
 
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

@@ -84,16 +84,100 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     #   group 1: the name (e.g. DATABASE_PASSWORD)
     #   group 2: the separator and surrounding space (e.g. " = ")  -- preserved
     # The value is everything up to whitespace or a quote, min 4 chars to skip
-    # trivial/empty values. ---
+    # trivial/empty values.
+    #
+    # KI-41 (2026-08-06) narrowed this. It used to accept its keyword ANYWHERE
+    # inside the name, so English words matched -- `auth` inside `authenticated`
+    # and `author` both fired on real documentation prose, which changed the
+    # meaning of text a supervisor reads and padded the preview's "N potential
+    # secret(s)" count with noise. The two narrowings are marked N1 and N2 below;
+    # the scheme skip beside them fixes a leak found while pinning the old
+    # behavior, not a false positive.
+    #
+    # N1 TOOK THREE ATTEMPTS AND TWO OF THEM LEAKED. Read this before editing it.
+    #   1. A word BOUNDARY (keyword must end at a non-letter) -- REJECTED. It
+    #      cannot tell `tokenizer` from `tokenValue`, and silently stopped
+    #      redacting `secretKey` (the AWS SDK field), `TS_AUTHKEY` (Tailscale's
+    #      env var), `MINIO_SECRETKEY`, `passwordHash`, `privateKeyPem`.
+    #   2. A STEM list (`authentic`, `tokeniz`, ...) -- REJECTED. A stem is
+    #      unconditional on what follows it, so it swallowed
+    #      `authentication_string` (MySQL's password-hash column) and
+    #      `AuthenticatorKey` (ASP.NET Identity's TOTP secret).
+    #   3. What is here: a list of word FORMS, plus a rule that any credential
+    #      noun in the name voids the exemption outright.
+    # The through-line is that each rejected version was SIMPLER and read better,
+    # and each one leaked. Simplicity is the right instinct almost everywhere in
+    # this codebase; here it kept collapsing a distinction that is real.
+    #
+    # Calibrated against a corpus of real `share_level = "detailed"` collector
+    # output (27 windows, 14 repos, 17.9 MB, measured 2026-08-06): 1212 hits ->
+    # 990. All 87 distinct lost hits were read individually and every one is a
+    # false positive; zero true positives were lost. The counts drift a little
+    # between runs because the corpus is built from live local repos.
+    #
+    # HOW TO CHECK THE NEXT NARROWING, because the corpus alone will not do it.
+    # A corpus of real diffs contains almost no real secrets, so it can show that
+    # a false positive was removed and can NEVER show that a true positive
+    # survived. Both rejected versions passed the corpus with zero losses. What
+    # caught them was CONSTRUCTING credential names by hand -- `secretKey`,
+    # `authentication_string` -- and diffing old against new. Do that. ---
     (
         re.compile(
             r"""
             ( [\w.\-]*                              # optional name prefix
+              (?!                                   # N1: the keyword does not count when
+                (?: author(?!i)                     # it starts one of these PROSE WORD
+                  | authenticat(?:ed|es|ing|e)(?![a-z])   # FORMS. Each was observed matching
+                  | authentic(?![a-z])              # real documentation prose:
+                  | authoritative                   #   author/authors/Co-Authored-By,
+                  | tokeniz(?:ers|er|ed|es|e|ing)(?![a-z])  # authenticated, isAuthenticated,
+                )                                   #   WWW-Authenticate, NonAuthoritative,
+                                                    #   tokenizer/tokenizers.
+                                                    #
+                                                    # ONLY verb/participle/adjective forms are
+                                                    # listed. The MECHANISM NOUNS built on the
+                                                    # same stems are deliberately absent --
+                                                    # `authentication` (MySQL's
+                                                    # authentication_string holds a password
+                                                    # hash), `authenticator` (ASP.NET's
+                                                    # AuthenticatorKey is a TOTP secret),
+                                                    # `authorization`, `authority`,
+                                                    # `tokenization` are all real credential
+                                                    # field names. `authenticated` is a state;
+                                                    # `authentication` is a thing that has a
+                                                    # value. One letter apart, opposite
+                                                    # answers -- which is why this is a list
+                                                    # of word forms and not a stem match.
+                (?! [\w.\-]* (?: key|secret|token|password|passwd|credential
+                               | hash|salt|signature|sig|cert|pem|jwt|otp|pin ) )
+                                                    # ...and even a listed prose form loses
+                                                    # its exemption if the name carries a
+                                                    # credential noun anywhere: `author_key`
+                                                    # and `authorKey` are credentials, whatever
+                                                    # `author` alone means.
+              )
               (?:api[_\-]?key|secret|token|         # the secret-ish keywords
                  password|passwd|access[_\-]?key|
                  private[_\-]?key|auth|credential)
-              [\w.\-]* )                            # optional name suffix
+              [\w.\-]* )                            # optional name suffix -- left wide open
+                                                    # ON PURPOSE. `secretKey`, `TS_AUTHKEY`,
+                                                    # `passwordHash` and `tokenValue` are
+                                                    # credential names that continue past
+                                                    # the keyword, and a boundary here would
+                                                    # leak every one of them.
             ( \s*[:=]\s* )                          # the assignment operator (kept)
+            (?:(?:Bearer|Basic)[ \t]+)?              # skip an auth scheme word, so
+                                                    # `Authorization: Bearer <opaque>`
+                                                    # redacts the TOKEN and not the word
+                                                    # "Bearer" (which is what the value
+                                                    # matcher below reached first, leaving
+                                                    # the credential in the clear). Two
+                                                    # ways a looser version misfires, both
+                                                    # observed: `\s+` instead of `[ \t]+`
+                                                    # spans a newline and eats the NEXT
+                                                    # line's value, and adding `Token` to
+                                                    # the alternation makes prose like
+                                                    # "OAuth: token exchange" match.
             ['"]?                                   # optional opening quote (dropped)
             (?!\[REDACTED_)                         # don't re-redact a token an earlier
                                                     # pattern already inserted (e.g. a
@@ -101,6 +185,17 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
                                                     # rule first): prevents double-counting
                                                     # and the [REDACTED_API_KEY] ->
                                                     # [REDACTED_SECRET] mangling.
+            (?!(?:true|false|null|none)(?![^\s'"])) # N2: a value that is EXACTLY one of
+                                                    # these literals is not a secret --
+                                                    # `token: null` is a fact about the
+                                                    # config, and redacting it destroyed
+                                                    # that fact for no gain. Exact-match
+                                                    # only (the trailing lookahead pins the
+                                                    # value's end), so `token: nullish4char`
+                                                    # still redacts. Anything added to this
+                                                    # list needs the same argument these
+                                                    # four have: it CANNOT plausibly be a
+                                                    # secret.
             [^\s'"]{4,}                             # the secret value (redacted)
             """,
             re.IGNORECASE | re.VERBOSE,

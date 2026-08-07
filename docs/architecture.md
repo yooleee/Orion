@@ -289,7 +289,23 @@ choices to know:
   GitHub/Slack tokens, `sk-` keys, JWTs) run first so a known shape gets a precise token.
   A generic "a variable whose *name* looks secret-ish, assigned a value" catch-all runs
   **last**, for anything the specific patterns miss. It keeps the name (signal) and
-  redacts only the value.
+  redacts only the value. Its precision is **calibrated against real diffs, not guessed**
+  (KI-41): a keyword does not count when it starts one of five English *word forms*
+  (`author` but not `authoriz…`, `authenticat(ed|es|ing|e)`, bare `authentic`,
+  `authoritative`, `tokeniz(er|…)`) and the name carries no credential noun; and a value that
+  is exactly `true`/`false`/`null`/`none` is left alone. Both narrowings were measured over
+  17.9 MB of real collector output before landing, because narrowing a redactor trades
+  visible false positives for invisible false negatives.
+- **That narrowing took three attempts and the first two leaked** — worth knowing before
+  editing it. A word *boundary* ("the keyword must end at a non-letter") cannot tell
+  `tokenizer` from `tokenValue`, and dropped `secretKey` and `TS_AUTHKEY`. A *stem* list
+  (`authentic…`) says nothing about what follows, and dropped `authentication_string`
+  (MySQL's password-hash column) and `AuthenticatorKey`. Both were simpler and read better
+  than what replaced them; both collapsed a real distinction. **What this implies for
+  verifying any future narrowing:** a corpus of real diffs can show a false positive was
+  removed, but it contains almost no real secrets, so it cannot show a true positive
+  survived — both rejected versions passed the corpus cleanly. Constructed credential names
+  are how that half gets checked.
 - **Regex, not an ML/entropy detector.** Deliberate: regex is explicit, auditable, fast,
   and dependency-free. For a *safety control* you want to be able to read exactly what is
   and isn't caught. `re.subn` (not `re.sub`) is used so it returns a **hit count** for

@@ -186,3 +186,273 @@ def test_single_secret_is_counted_once_not_double():
     assert result.hit_count == 1                       # counted exactly once
     assert "[REDACTED_API_KEY]" in result.text         # precise token preserved
     assert "[REDACTED_SECRET]" not in result.text      # NOT re-redacted/mangled
+
+
+# --- KI-41: calibrated narrowing of the generic catch-all ---------------------
+# The catch-all used to accept its secret-ish keyword ANYWHERE inside the name,
+# so ordinary words matched (`auth` inside `authenticated`, `author`). These pins
+# draw the line between "a name that means a secret" and "an English word that
+# happens to contain one", in BOTH directions — the false-positive tests below
+# are only safe to keep because the true-positive tests beside them still pass.
+#
+# Read those two groups as a pair. The first attempt at this narrowing passed
+# every false-positive test here and was still wrong: it required the keyword to
+# end at a non-letter, which quietly stopped redacting `secretKey`, `TS_AUTHKEY`
+# and `passwordHash`. No test failed, because no test asked. That is why
+# test_keyword_prefix_credential_names_still_redact exists and why it is written
+# from real-world credential names rather than invented ones.
+
+
+def test_prose_words_containing_a_keyword_are_not_redacted():
+    """Words that merely BEGIN with a secret keyword survive untouched.
+
+    Why this matters: the first two lines are verbatim from the DF1 sweep
+    (2026-07-21), where both were false positives on documentation prose in a
+    real report a supervisor read. `authenticated: [REDACTED_SECRET]` gives no
+    hint the value was `false` — the redactor silently changed the meaning of
+    the text. Worse, each one inflated the "N potential secret(s) were redacted"
+    preview count, which is the human control KI-3 calls the guaranteeing layer;
+    routine noise there trains the operator to scroll past it.
+    """
+    text = (
+        "authenticated: false\n"
+        "author: yoolee committed the change\n"
+        "unauthorized: true\n"
+        "tokenizer: gpt2neox\n"
+        "co-authored-by: Teammate B\n"
+        "author_name: Supervisor A"
+    )
+    result = redact(text)
+    assert result.text == text
+    assert result.hit_count == 0
+
+
+def test_keyword_delimited_within_a_name_still_redacts():
+    """A keyword delimited by `_`, `-`, `.` or the name's edge is still a secret.
+
+    Why this matters: this is the other half of the line drawn above, and the
+    half that carries the security risk. Narrowing a redaction pattern trades
+    false positives for false NEGATIVES, so every shape the narrowing was NOT
+    meant to touch needs its own pin. `authorization` earns its place here: the
+    exemption list carves it out explicitly (`author(?!i)`, so `author` is prose
+    but `authoriz...` is not), and getting that carve-out wrong would leak a real
+    HTTP credential name while looking like a tidy simplification.
+    """
+    secret = "aB3xQ9zLmNp0RtVwYs2K"
+    for line in (
+        f"AUTH_TOKEN={secret}",
+        f"x-api-key: {secret}",
+        f"oauth: {secret}",
+        f"oauth_token: {secret}",
+        f"authorization = {secret}",
+        f"my.private-key={secret}",
+    ):
+        result = redact(line)
+        assert secret not in result.text, f"leaked from: {line}"
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+
+def test_plural_keyword_names_still_redact():
+    """A pluralized keyword (`secrets`, `TOKENS`, `CREDENTIALS`) is still caught.
+
+    Why this matters: an early version of this narrowing required the keyword to
+    end at a non-letter, which would have killed every plural since `s` is a
+    letter. That version carried an explicit `s?` to compensate, so plurals never
+    actually broke — but the compensation was load-bearing and easy to drop. The
+    shipped exemption-list design has no such edge (a plural is simply not one of
+    the listed word forms), and the pin stays because plurals are common in real
+    config and this is the cheapest possible guard on a whole class.
+    """
+    secret = "aB3xQ9zLmNp0RtVwYs2K"
+    for line in (
+        f"secrets: {secret}",
+        f"API_TOKENS={secret}",
+        f"AWS_CREDENTIALS={secret}",
+        f"passwords: {secret}",
+    ):
+        result = redact(line)
+        assert secret not in result.text, f"leaked from: {line}"
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+
+def test_camel_case_secret_names_still_redact():
+    """`clientSecret` / `accessToken` — a keyword PRECEDED by letters — still go.
+
+    Why this matters: camelCase is how this repo's own TypeScript names things,
+    and the keyword sits at the end of the name with letters in front of it. Any
+    narrowing that reasons about where a keyword starts has to leave this family
+    alone. Its mirror image lives in the next test.
+    """
+    for line in (
+        'clientSecret: "GOCSPX-aB3xQ9zLmNp0RtVwYs2K"',
+        "accessToken = aB3xQ9zLmNp0RtVwYs2K",
+        "dbpassword: hunter2supersecret",
+    ):
+        result = redact(line)
+        assert "aB3xQ9zLmNp0RtVwYs2K" not in result.text
+        assert "hunter2supersecret" not in result.text
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+
+def test_keyword_prefix_credential_names_still_redact():
+    """`secretKey`, `TS_AUTHKEY`, `passwordHash` — keyword FIRST, letters after.
+
+    Why this matters: this is the mirror of the camelCase test above, and it is
+    the one that caught a real regression. The first version of KI-41's narrowing
+    required the keyword to end at a non-letter, which reads as a clean rule and
+    passes every false-positive test in this file — while silently emitting all
+    of these in the clear. A blanket boundary cannot tell `tokenizer` from
+    `tokenValue`; only naming the English words can.
+
+    Every name below is one somebody actually ships, not one invented to make the
+    test pass: `secretKey` is the AWS SDK field, `TS_AUTHKEY` is Tailscale's env
+    var, `MINIO_SECRETKEY` is a MinIO deployment variable. If a future narrowing
+    breaks this test, the right response is to narrow differently — these are
+    credentials, and nothing about them is arguable.
+    """
+    secret = "aB3xQ9zLmNp0RtVwYs2K"
+    for line in (
+        f"TS_AUTHKEY=tskey-{secret}",
+        f"secretKey: {secret}",
+        f"SECRETKEY={secret}",
+        f"MINIO_SECRETKEY={secret}",
+        f"authkey = {secret}",
+        f"authKey: {secret}",
+        f"privateKeyPem={secret}",
+        f'passwordValue = "{secret}"',
+        f"passwordHash: {secret}",
+        f'String tokenValue = "{secret}";',
+        f"secretString={secret}",
+        f"credentialValue={secret}",
+    ):
+        result = redact(line)
+        assert secret not in result.text, f"LEAKED from: {line}"
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+    # A name carrying BOTH a real keyword and an exempted word is still a secret:
+    # the exemption is anchored at the keyword, not searched across the whole name.
+    result = redact(f"admin_token_author_x: {secret}")
+    assert secret not in result.text
+    assert result.hit_count == 1
+
+
+def test_mechanism_nouns_are_not_exempted_only_prose_forms_are():
+    """`authentication_string` and `AuthenticatorKey` redact; `authenticated` does not.
+
+    Why this matters: this is the sharpest edge in the whole pattern, and it was
+    found by review rather than by reasoning. `authenticated` and `authentication`
+    are one letter apart and want opposite answers — the first is a state a
+    document reports, the second is a thing that HAS a value. MySQL's
+    `mysql.user.authentication_string` holds a password hash; ASP.NET Identity's
+    `AuthenticatorKey` is a TOTP shared secret. An exemption written as a stem
+    match (`authentic…`) silently swallows both.
+
+    So the exemption lists word FORMS, not stems, and the mechanism nouns built
+    on the same stems are deliberately absent. If someone later "simplifies" this
+    to a stem, that is what this test is here to stop.
+    """
+    secret = "aB3xQ9zLmNp0RtVwYs2K"
+    for line in (
+        f"authentication_string: {secret}",
+        f"AuthenticatorKey = {secret}",
+        f"AUTHENTICATION_KEY={secret}",
+        f"authenticationSalt: {secret}",
+        f"authentication: {secret}",
+        f"tokenization_key = {secret}",
+        f"authority_key: {secret}",
+        f"authenticity_token: {secret}",
+    ):
+        result = redact(line)
+        assert secret not in result.text, f"LEAKED from: {line}"
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+
+def test_a_prose_word_plus_a_credential_noun_is_a_credential():
+    """`author_key` redacts even though `author` alone is exempt prose.
+
+    Why this matters: the exemption list is about what a word means on its own.
+    `author` is prose; `author_key` is a credential, and no reading of `author`
+    changes that. So a listed prose form loses its exemption whenever the name
+    carries a credential noun anywhere — which also means the list can grow later
+    without each new entry re-opening this hole.
+    """
+    secret = "aB3xQ9zLmNp0RtVwYs2K"
+    for line in (
+        f"author_key: {secret}",
+        f"authorKey = {secret}",
+        f"authenticated_secret: {secret}",
+        f"tokenizer_password={secret}",
+        f"authoritative_cert: {secret}",
+    ):
+        result = redact(line)
+        assert secret not in result.text, f"LEAKED from: {line}"
+        assert result.hit_count == 1, f"not caught once: {line}"
+
+    # ...but a prose word plus an ORDINARY noun stays prose.
+    for line in ("author_name: Supervisor A", "authenticated_at: yesterdayish"):
+        result = redact(line)
+        assert result.text == line, f"over-redacted: {line}"
+
+
+def test_literal_non_secret_values_are_not_redacted():
+    """A value that is exactly true/false/null/none passes through.
+
+    Why this matters: `token: null` in a config dump is a fact about the config,
+    not a secret, and redacting it both destroys that fact and inflates the
+    preview count. The exemption is EXACT-match only — `nullish4char` is not the
+    literal `null`, so it still redacts. That narrowness is the point: the list
+    is safe precisely because no real secret is literally the word `false`, and
+    a prefix match would have given away far more than that argument covers.
+    """
+    for line in ("token: null", "secret = None", "api_key: TRUE", "password: false"):
+        result = redact(line)
+        assert result.text == line
+        assert result.hit_count == 0
+
+    # ...but a value that merely STARTS with an exempt literal is still a secret.
+    result = redact("token: nullish4char")
+    assert "nullish4char" not in result.text
+    assert result.hit_count == 1
+
+
+def test_bearer_scheme_word_does_not_shield_the_token_behind_it():
+    """`Authorization: Bearer <opaque>` redacts the TOKEN, not just 'Bearer'.
+
+    Why this matters: this was a live leak, found while pinning current behavior
+    for KI-41. The value matcher stops at whitespace, so the catch-all consumed
+    the word `Bearer` and left the credential after it in the clear:
+
+        Authorization: Bearer aB3x...  ->  Authorization: [REDACTED_SECRET] aB3x...
+
+    An opaque bearer token matches none of the specific patterns (it is not a
+    JWT, not `sk-`, not `ghp_`), so the catch-all was its only cover, and the
+    hit_count of 1 made it look covered. Skipping an optional scheme word closes
+    it. Only `Bearer` and `Basic` are skipped, and only over spaces/tabs — see
+    the pattern comment for the two ways a looser version misfires.
+    """
+    token = "aB3xQ9zLmNp0RtVwYs2K"
+    result = redact(f"Authorization: Bearer {token}")
+    assert token not in result.text
+    assert result.text == "Authorization: [REDACTED_SECRET]"
+    assert result.hit_count == 1
+
+    # Basic auth carries a base64 user:pass — same shape, same cover.
+    result = redact("Authorization: Basic dXNlcjpodW50ZXIy")
+    assert "dXNlcjpodW50ZXIy" not in result.text
+    assert result.hit_count == 1
+
+
+def test_the_scheme_skip_never_reaches_across_a_line():
+    """A scheme word at end-of-line does not pull the NEXT line's value into the match.
+
+    Why this matters: the first version of the scheme skip used `\\s+`, which
+    matches newlines, so a line ending in `Bearer` swallowed the line break and
+    redacted whatever followed on the next line — silently deleting content that
+    was never a secret. `[ \\t]+` confines it. The property worth holding is
+    broader than this one bug: the catch-all is line-oriented by construction
+    (its value matcher stops at whitespace), and nothing added to it should
+    quietly make it span lines.
+    """
+    text = "auth = Bearer\nnext_line_value_here"
+    result = redact(text)
+    assert "next_line_value_here" in result.text, "redaction crossed a line boundary"

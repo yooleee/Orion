@@ -819,17 +819,24 @@ Deferred).
   somewhere to go — a rule above the fail-safe default, with a stated reason, testable on its
   own. `redact.py` anchors in the bullets above are superseded: `redact.py:88–109` no longer
   exists as described, and the catch-all now lives below `_PATTERNS` rather than inside it.
-- **Two PRE-EXISTING regression-floor gaps in `tests/test_redact.py`, found by the Unit 1 verifier
-  pass and deliberately NOT fixed here** (they are identical on `main` and unrelated to the
-  restructure, so closing them belongs in its own change). Recorded so they are not re-discovered:
-  1. **Deleting the `(?!\[REDACTED_)` lookahead survives the whole suite**, and it is behaviourally
-     live: `token = sk-…` unquoted then becomes `[REDACTED_SECRET]` with `hit_count` 2 instead of
-     `[REDACTED_API_KEY]` with 1. `test_single_secret_is_counted_once_not_double` misses it because
-     its input is **quoted** (`token = "sk-…"`), and the quote independently blocks the re-match —
-     so the test passes for a reason other than the one its docstring names. An unquoted case would
-     close it.
-  2. **Relaxing the value matcher from `{4,}` to `{1,}` survives the suite.** The 4-character
-     minimum is the thing that keeps `x = ab` out of the preview count, and nothing pins it.
+- **One PRE-EXISTING regression-floor gap in `tests/test_redact.py`, deliberately NOT fixed here**
+  (it is identical on `main` and unrelated to the restructure, so closing it belongs in its own
+  change). **Relaxing the value matcher from `{4,}` to `{1,}` survives the whole suite.** The
+  4-character minimum is what keeps `token = abc` out of both the output and the preview count,
+  and nothing pins it. Confirmed by mutation.
+- **A second reported gap turned out NOT to be real, and the way it got here is the point.** The
+  Unit 1 verifier pass reported that deleting the `(?!\[REDACTED_)` lookahead also survives the
+  suite, reasoning that `test_single_secret_is_counted_once_not_double` passes for the wrong
+  reason because its input is quoted (`token = "sk-…"`) and the quote blocks the re-match on its
+  own. **The quote does not block it.** The catch-all's optional `['\"]?` consumes the opening
+  quote, so the just-inserted `[REDACTED_API_KEY]` matches the value matcher in the quoted form
+  exactly as in the unquoted one — measured: without the lookahead, `token = "sk-…"` becomes
+  `token = [REDACTED_SECRET]"` with `hit_count` 2. Deleting the lookahead **fails** that test, which
+  pins its property precisely as its docstring claims. **I published this claim here and in PR
+  #153 without running it**, having verified every other finding in the same report — the one that
+  sounded least surprising went unchecked. Recorded rather than quietly deleted because it is the
+  same failure this entry keeps documenting from the other side: an independent reader is a
+  corrective, not an oracle, and a claim about a security control is worth a command either way.
 - **One record correction, found by re-verifying the anchors before building.** The restructure
   kickoff carried "`hash_author` does not redact on `main`" forward as a delta to be fixed.
   **It is wrong about `main`.** Measured: `hash_author = value1234` → `hash_author =

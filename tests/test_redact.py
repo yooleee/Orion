@@ -191,6 +191,35 @@ def test_single_secret_is_counted_once_not_double():
     assert "[REDACTED_SECRET]" not in result.text      # NOT re-redacted/mangled
 
 
+
+def test_a_value_shorter_than_four_characters_is_not_redacted():
+    """`token = abc` survives; `token = abcd` does not. Pins the 4-character minimum.
+
+    Why this matters: the catch-all's value matcher requires 4+ characters, which is what
+    keeps trivially short assignments — a truncated flag, an index, an empty-ish default —
+    out of both the output and the "N potential secret(s)" preview count. Nothing pinned
+    it: relaxing `{4,}` to `{1,}` leaves the entire suite green.
+
+    The threshold is a fail-safe tradeoff worth stating rather than assuming. It is
+    deliberately permissive in the leaking direction — a real 3-character secret would
+    escape — on the reasoning that no credential worth protecting is three characters
+    long, while short non-secret assignments are common in ordinary diffs. Both sides of
+    the boundary are asserted so the constant cannot drift silently in either direction.
+
+    Pre-existing gap in the regression floor, present since the catch-all was written and
+    unrelated to any behaviour change. Confirmed real by mutation: relaxing `{4,}` to
+    `{1,}` leaves every other test in this file passing.
+    """
+    for short in ("token = abc", "password: ab", "api_key=x"):
+        result = redact(short)
+        assert result.text == short, f"a sub-4-character value was redacted: {short!r}"
+        assert result.hit_count == 0
+
+    # ...and exactly at the boundary, redaction does fire.
+    result = redact("token = abcd")
+    assert result.text == "token = [REDACTED_SECRET]"
+    assert result.hit_count == 1
+
 # --- A false negative found while pinning the catch-all's behavior for KI-41 ---
 # Not a KI-41 fix: KI-41 is about over-matching. This is the opposite failure, and
 # the one that matters -- a credential that reached a supervisor unredacted.

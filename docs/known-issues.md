@@ -807,6 +807,163 @@ Deferred).
   the regression floor and `test_benign_prose_is_not_redacted` as the natural home for a
   false-positive corpus.
 
+- **RDX-R Unit 1 landed 2026-08-07: the seam now exists, and this entry is still OPEN.** The
+  catch-all is no longer one regex making a judgement. It is a **candidate extractor**
+  (`_SECRET_ASSIGNMENT`, which yields assignment-shaped text whose name already carries
+  credential evidence) plus a **classifier** (`_classify_name`, an ordered list of named rules
+  returning a `_Verdict(redact, reason)`), and the catch-all moved out of `_PATTERNS` into
+  `_redact_secret_assignments`, whose count comes from accepted replacements rather than
+  `re.subn`. Unit 1 deliberately changed **no** policy: 350,940 generated inputs and 19.6 MB of
+  real diffs across 14 repositories produce byte-identical output and identical hit counts
+  against `main`. The exemptions this entry is actually about are **Unit 2**, and they now have
+  somewhere to go — a rule above the fail-safe default, with a stated reason, testable on its
+  own. `redact.py` anchors in the bullets above are superseded: `redact.py:88–109` no longer
+  exists as described, and the catch-all now lives below `_PATTERNS` rather than inside it.
+- **One PRE-EXISTING regression-floor gap in `tests/test_redact.py`, deliberately NOT fixed here**
+  (it is identical on `main` and unrelated to the restructure, so closing it belongs in its own
+  change). **Relaxing the value matcher from `{4,}` to `{1,}` survives the whole suite.** The
+  4-character minimum is what keeps `token = abc` out of both the output and the preview count,
+  and nothing pins it. Confirmed by mutation.
+- **A second reported gap turned out NOT to be real, and the way it got here is the point.** The
+  Unit 1 verifier pass reported that deleting the `(?!\[REDACTED_)` lookahead also survives the
+  suite, reasoning that `test_single_secret_is_counted_once_not_double` passes for the wrong
+  reason because its input is quoted (`token = "sk-…"`) and the quote blocks the re-match on its
+  own. **The quote does not block it.** The catch-all's optional `['\"]?` consumes the opening
+  quote, so the just-inserted `[REDACTED_API_KEY]` matches the value matcher in the quoted form
+  exactly as in the unquoted one — measured: without the lookahead, `token = "sk-…"` becomes
+  `token = [REDACTED_SECRET]"` with `hit_count` 2. Deleting the lookahead **fails** that test, which
+  pins its property precisely as its docstring claims. **I published this claim here and in PR
+  #153 without running it**, having verified every other finding in the same report — the one that
+  sounded least surprising went unchecked. Recorded rather than quietly deleted because it is the
+  same failure this entry keeps documenting from the other side: an independent reader is a
+  corrective, not an oracle, and a claim about a security control is worth a command either way.
+- **One record correction, found by re-verifying the anchors before building.** The restructure
+  kickoff carried "`hash_author` does not redact on `main`" forward as a delta to be fixed.
+  **It is wrong about `main`.** Measured: `hash_author = value1234` → `hash_author =
+  [REDACTED_SECRET]`, hit_count 1. `auth` matches anywhere inside a name on `main`, so `main`
+  has no such gap — the asymmetry belonged to **rejected design 3**, which is what the
+  "Direction now" bullet above says and says correctly. The claim drifted when it was copied
+  into the kickoff as a comparison against `main` instead of against design 3. Consequence
+  worth keeping: Unit 1's acceptance bar became **strict parity** rather than "parity plus one
+  intended difference", which is a stronger bar, not a weaker one.
+- **THE CONSTRAINT ON UNIT 2, and the most important thing on this page for whoever builds it.**
+  A declined candidate still **emits its whole matched span verbatim**. The precise invariant,
+  established by the verifier pass rather than reasoned at:
+  - **A decline can never hide a LATER match.** `re.sub` scans the original string, so
+    `match.end()` — and therefore every subsequent match span — is identical whether the callback
+    replaces or hands back `group(0)`. Confirmed over 60,000 adversarial multi-assignment inputs,
+    zero cases where declining changed the span set.
+  - **The entire risk is therefore the declined span's own text.** Which gives the rule Unit 2 has
+    to satisfy: **an exemption is sound only if the whole matched span is safe to emit verbatim.
+    That is a claim about the VALUE, not about the name.**
+  A **name-only rule cannot make that claim**, because `group(1)` is frequently a container key —
+  a YAML key, an HTTP header — rather than the variable that governs the value, so the text behind
+  it is arbitrary. And the prose words this entry wants to exempt are the *worst* case, because
+  they are also real credential names: `oauth`, `author`, `authentication` and `authorization` all
+  contain `auth`, so the extractor yields them. Two distinct leak shapes, both measured with a
+  name-only prose exemption in place:
+
+      oauth: API_TOKEN=abcdef123456                    -> h=0, an assignment hidden behind the key
+      authorization: 8f4e2a91c7b3d5e60192837465afbcde  -> h=0, a raw token AS the value
+      author: EX.EXAMPLEONLYnotareal.0000key0000       -> h=0, a vendor key AS the value
+
+  All three redact correctly today (`hit_count` 1, identical to `main`). The third value is
+  **deliberately synthetic**: it stands in for shapes the seven specific patterns miss — SendGrid's
+  `SG.` (no rule at all) and Stripe's `sk_live_` (our rule is `sk-`, one character off) — and it
+  reads as obviously fake because a realistic Stripe literal in the test file **was blocked by
+  GitHub's secret-scanning push protection**, correctly, since a scanner cannot know a literal is
+  fabricated. Fixtures for this control should carry synthetic values and name the real vendor in
+  prose. **The second shape is the
+  sharper one:** its value contains no `:` or `=` at all, so the two obvious remedies — re-scan the
+  declined span, or refuse to decline while the span holds an assignment — *both fail to fire*.
+  Note also that exempting `authorization` **re-opens the `Bearer` leak PR #152 just closed**.
+  **Two further corrections to how this trap was first written up here:**
+  1. A declined span is **not line-bounded**. The separator is `\s*[:=]\s*` and `\s` matches
+     newlines: `oauth:\n    API_TOKEN=abcdef123456` matches with `group(1)` = `oauth`, separator
+     `":\n    "`, and the span reaching onto a *later line*. Anyone reasoning about how much a
+     decline swallows must not assume one line.
+  2. `_classify_name(name)` is **not where an exemption can live** — it never sees the span. The
+     source docstring's earlier advice to add rules "here, above the default" contradicted the
+     remedy; both have been corrected. **Widening that signature is Unit 2's first design
+     decision**, left open deliberately rather than guessed at without a consumer.
+  Pinned by `test_a_declining_rule_would_shadow_a_secret_in_the_value_KNOWN_TRAP`, which asserts
+  the leak under a stubbed prose exemption, asserts the structural fact it rests on (the extractor
+  really does yield the prose word on those lines), and carries a control line proving the trap is
+  about prose containers rather than about declining in general. When Unit 2 closes it, that test
+  fails, and the failure is the signal to rewrite it.
+- **What the extractor's keyword requirement does and does not buy.** It stops a *benign* first
+  name shadowing a secret — `env: DATABASE_PASSWORD=hunter2supersecret` would otherwise match on
+  `env`, be declined, and the password would walk out. That is why the vocabulary stays in the
+  extractor, pinned by `test_the_extractor_anchors_on_the_credential_name_not_an_earlier_one`. It
+  buys **nothing** against the trap above, which is about credential-ish names.
+- **How all of this was found, which is the transferable part.** Three successive versions of the
+  safety claim here were wrong. **Two of the three were caught by an independent verifier pass on
+  the diff, and neither by any local instrument**: (1) the vocabulary belongs in the classifier —
+  leaks on benign names; found **in the plan-mode pass, before any code**, by building the naive
+  shape and measuring it, so this one is not to the verifier's credit; (2) a stub that declined
+  only names *without* credential evidence, which the extractor never yields, so it exercised zero
+  decline paths while reading as proof of safety; (3) "the trap is bounded to assignments,
+  therefore re-scanning is sufficient" — disproved by the raw-token rows above. Version (2) had
+  already passed a 350,940-input differential, 19.6 MB of real diffs, and six mutation checks.
+  One more distinction worth keeping, since it is easy to overstate: the mutation that now catches
+  version (2) was **written after the finding and derived from it**, so it is a regression
+  guarantee, not independent corroboration. The narrow lesson,
+  worth more than "verify harder": **a test whose stub never fires still passes**, so a pin on a
+  not-yet-reachable path must be checked for *reachability*, not merely for green. The broader one
+  is the one this control keeps re-teaching: local instruments answer "did this change what
+  happens to text I already have?" and cannot answer "is there a shape I stopped catching?".
+- **One record correction, found by re-verifying the anchors before building.** The restructure
+  kickoff carried "`hash_author` does not redact on `main`" forward as a delta to be fixed.
+  **It is wrong about `main`.** Measured: `hash_author = value1234` → `hash_author =
+  [REDACTED_SECRET]`, hit_count 1. `auth` matches anywhere inside a name on `main`, so `main`
+  has no such gap — the asymmetry belonged to **rejected design 3**, which is what the
+  "Direction now" bullet above says and says correctly. The claim drifted when it was copied
+  into the kickoff as a comparison against `main` instead of against design 3. Consequence
+  worth keeping: Unit 1's acceptance bar became **strict parity** rather than "parity plus one
+  intended difference", which is a stronger bar, not a weaker one.
+- **THE CONSTRAINT ON UNIT 2, and the most important thing on this page for whoever builds it:
+  a declining rule shadows whatever its match swallowed.** A declined candidate still
+  **consumes its span** and `re.sub` resumes past it. Two consequences, one avoided and one
+  still open.
+  1. **Avoided.** The natural reading of "extractor plus classifier" — extract every
+     `name = value`, judge the name in Python — leaks on a *benign* first name:
+     `env: DATABASE_PASSWORD=hunter2supersecret` would match on `env`, be declined, and the
+     password would walk out. So the credential vocabulary stays **in the extractor**, which
+     yields only names already carrying evidence. Pinned by
+     `test_the_extractor_anchors_on_the_credential_name_not_an_earlier_one`.
+  2. **Still open, and it is a trap.** Keeping the vocabulary in the extractor does NOT make
+     exemptions safe, because the prose words Unit 2 wants to exempt *contain* keywords —
+     `oauth`, `author` and `authentication` all contain `auth`. The extractor yields the first
+     such name on the line, and its match runs to the next whitespace:
+
+         oauth: API_TOKEN=abcdef123456
+           extractor name -> 'oauth', consuming ': API_TOKEN=abcdef123456'
+
+     Exempt `oauth` and the token behind it walks out with `hit_count` 0 — a false negative
+     wearing the costume of a catch, the same shape as the `Bearer` bug. `author:` is ordinary
+     git-log content, so this is not exotic. **Unit 2 therefore cannot be a name-only rule
+     list.** It must re-scan the span it declines, or refuse to decline while that span still
+     contains an assignment. **The trap is bounded, which is what makes that fix sufficient
+     rather than merely necessary:** the seven specific fixed-format patterns run BEFORE the
+     catch-all, so an `sk-`, `ghp_`, JWT or AWS key inside a would-be-declined span is already
+     redacted (and protected from re-matching by the `(?!\[REDACTED_)` lookahead) before the
+     classifier ever sees the line — verified by declining `oauth`/`author` against all four
+     shapes and watching each still come back `[REDACTED_API_KEY]` / `[REDACTED_GITHUB_TOKEN]` /
+     `[REDACTED_JWT]` / `[REDACTED_AWS_KEY]`. The only thing that can hide in a declined span is
+     another **generic** name=value assignment, which is exactly what a re-scan or a
+     contains-an-assignment check catches. Not a live leak today: nothing declines, and the shipped code
+     redacts all three lines identically to `main`. Pinned as a known trap by
+     `test_a_declining_rule_would_shadow_a_secret_in_the_value_KNOWN_TRAP`, which asserts the
+     leak under a stubbed exemption so the trap lives in the suite rather than only in prose —
+     when Unit 2 closes it, that test fails, and the failure is the signal to rewrite it.
+  **How this was found is itself worth keeping.** The first version of that test claimed the
+  opposite — that shadowing was impossible — and was **wrong**: its stub declined only names
+  *without* credential evidence, which the extractor never yields, so it exercised no decline
+  path at all while reading as proof of safety. Caught by the independent verifier pass on the
+  diff, after it had already survived a differential over 350,940 generated inputs, 19.6 MB of
+  real diffs, and six mutation checks. That is now three separate occasions on this one control
+  where local instruments were green and an independent reader found the hole.
+
 ## KI-43 — `graduate-idea` duplicated `add-project`'s flags and has drifted (live functional gap)
 
 - **Detail:** `graduate-idea` was built by copying `add-project`'s argparse flags verbatim
@@ -1030,6 +1187,18 @@ Deferred).
   describes).
 - **Status:** Open. Filed 2026-08-06 from the KI-41 calibration corpus, not from a report anyone
   read. Relates to [[KI-3]] and [[KI-41]].
+- **Update 2026-08-07: the place to solve this now exists.** RDX-R Unit 1 landed the extractor +
+  classifier seam (see [[KI-41]]), so the value-shape rule this entry asks for can be written as
+  a named Python predicate above the fail-safe default instead of another lookahead. Unit 1
+  changed no policy, so every count quoted above still stands. **This is scheduled LAST (Unit 3),
+  deliberately** — it is the least-understood rule of the three and benefits from the classifier
+  already being in place and trusted. One constraint inherited from Unit 1 and worth reading
+  before starting: **a declining rule emits its whole matched span verbatim**, so exempting
+  `auth=_admin_auth())` is a claim about that entire span, not about the name — and `group(1)` is
+  often a container key rather than the governing variable. The invariant, the counterexamples
+  that rule out a name-only rule, and the note that `_classify_name(name)` cannot host such a rule
+  are written up under [[KI-41]] and asserted by
+  `test_a_declining_rule_would_shadow_a_secret_in_the_value_KNOWN_TRAP`.
 
 ## KI-48 — The redaction catch-all backtracks superlinearly on pathological input
 
@@ -1052,12 +1221,34 @@ Deferred).
   would naturally provide.
 - **Severity:** low (reachable only through content Orion is pointed at, bounded by the diff
   cap, never a disclosure).
-- **Status:** Open, **pre-existing**. Found 2026-08-06 by an independent verification pass that
-  timed adversarial inputs. Recorded rather than fixed because the fix belongs with the
-  restructure. Worth noting for whoever does it: one rejected KI-41 design incidentally improved
-  this (`"authorization" * 400`: 20 s → 0.4 s) and another made it reachable with half the input,
-  so the restructure should measure this explicitly rather than discover it. Relates to
-  [[KI-44]].
+- **Status:** **CLOSED** by the RDX-R Unit 1 restructure (2026-08-07), with the fix measured
+  rather than assumed — the entry above asked for exactly that. The extractor now carries a
+  `(?<![\w.\-])` lookbehind pinning a match to the **start** of a run of name characters, so
+  the engine no longer retries the whole prefix/keyword/suffix split at every offset inside a
+  long name-like run. Measured through the public `redact()`, before and after:
+
+  | input | `main` | after |
+  |---|---|---|
+  | `("secret_token_auth_" * 100) + "Z"` (1.8 KB) | 1.80 s | **0.0030 s** (599×) |
+  | `("secret_token_auth_" * 200) + "Z"` (3.5 KB) | 14.57 s | **0.0124 s** (1177×) |
+  | `"authorization" * 400` (5.1 KB) | 20.30 s | **0.0120 s** (1685×) |
+
+  Pinned by `test_pathological_name_run_does_not_stall_the_redactor` at a deliberately loose
+  2-second bound — ~165× above the measured time so a loaded CI box cannot make it flap, and
+  ~7× below the old behaviour so it genuinely fails on the old pattern (confirmed by mutation:
+  removing the anchor fails the test). **Three things worth keeping from the fix:**
+  1. **The anchor is not a narrowing and cannot remove a match.** Starting at a run's first
+     character, the greedy prefix can still reach any keyword the run contains, so every name
+     the old pattern matched still matches. Verified rather than argued: 350,940 generated
+     inputs and 19.6 MB of real `git log -p` across 14 repositories, byte-identical output and
+     identical hit counts either way.
+  2. **It is still quadratic in the worst case**, just with a small enough constant that the
+     git collector's 400-line diff cap is no longer load-bearing as containment. Bounding name
+     length remains available if a future input ever makes it matter.
+  3. **Ordinary input got faster too** — the 19.6 MB corpus scans in 1.74 s against `main`'s
+     4.83 s, an incidental 2.8× that was not the goal.
+  Found 2026-08-06 by an independent verification pass that timed adversarial inputs, and
+  **pre-existing** — not introduced by the KI-41 work. Relates to [[KI-44]].
 
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a

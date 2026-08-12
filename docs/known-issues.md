@@ -819,11 +819,15 @@ Deferred).
   somewhere to go — a rule above the fail-safe default, with a stated reason, testable on its
   own. `redact.py` anchors in the bullets above are superseded: `redact.py:88–109` no longer
   exists as described, and the catch-all now lives below `_PATTERNS` rather than inside it.
-- **One PRE-EXISTING regression-floor gap in `tests/test_redact.py`, deliberately NOT fixed here**
-  (it is identical on `main` and unrelated to the restructure, so closing it belongs in its own
-  change). **Relaxing the value matcher from `{4,}` to `{1,}` survives the whole suite.** The
-  4-character minimum is what keeps `token = abc` out of both the output and the preview count,
-  and nothing pins it. Confirmed by mutation.
+- **One PRE-EXISTING regression-floor gap in `tests/test_redact.py`, now CLOSED separately (PR
+  #154, merged 2026-08-11).** Relaxing the value matcher from `{4,}` to `{1,}` used to survive the
+  whole suite. The 4-character minimum is what keeps `token = abc` out of both the output and the
+  preview count, and nothing pinned it. Both sides of the boundary are now asserted
+  (`token = abc` survives, `token = abcd` redacts) so the constant cannot drift in either
+  direction, and the test states the tradeoff rather than assuming it: the threshold is
+  deliberately permissive in the *leaking* direction, on the reasoning that no credential worth
+  protecting is three characters long. It landed as its own PR off `main` because the gap
+  pre-dated the restructure and was unrelated to it.
 - **A second reported gap turned out NOT to be real, and the way it got here is the point.** The
   Unit 1 verifier pass reported that deleting the `(?!\[REDACTED_)` lookahead also survives the
   suite, reasoning that `test_single_secret_is_counted_once_not_double` passes for the wrong

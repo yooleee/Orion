@@ -45,7 +45,13 @@
 Usage, from the repo root::
 
     python scripts/redaction_baseline.py [--config orion.toml]
-        [--repos-root ~/Developer] [--show-samples]
+        [--repos-root ~/Developer] [--show-samples] [--as-of ISO8601]
+
+A LIVE run (no --as-of) measures current state and is time-varying by design:
+new report rows and new commits add windows, and committing anything to a
+measured repo — including the repo this script lives in — moves its HEAD and
+with it the final window. Pass --as-of to pin the run to an instant and make
+it reproducible; the recorded baseline quotes a pinned run.
 
 Prints the per-preview warning distribution (the number an operator sees), the
 catch-all hit split by class, and the counterfactual distribution under each
@@ -63,6 +69,7 @@ import subprocess
 import sys
 import tomllib
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 # The script lives in scripts/; the package lives in src/. Resolved relative to
@@ -132,41 +139,58 @@ def _load_reported_projects(config_path: Path) -> tuple[dict[str, Path], Path]:
     return projects, state_db
 
 
-def _real_report_boundaries(repo: Path, sent_ats: list[str]) -> list[str]:
-    """Map real report timestamps to commit boundaries, ending at current HEAD.
+def _real_report_boundaries(
+    repo: Path, sent_ats: list[str], as_of: str | None
+) -> list[str]:
+    """Map real report timestamps to commit boundaries, ending at the as-of HEAD.
 
     Args:
         repo: The project's repository.
-        sent_ats: ISO timestamps from report_history, ascending.
+        sent_ats: ISO timestamps from report_history, ascending (already
+            filtered to <= as_of by the caller when as_of is set).
+        as_of: Pinning timestamp (ISO 8601, offset-aware) or None for live.
 
     Returns:
         Deduplicated boundary shas: the commit that was HEAD at each report
-        time, plus today's HEAD as a final boundary.
+        time, plus a final boundary — current HEAD when live, or the last
+        commit at or before as_of when pinned.
 
     Why:
         Replaying the actual cadence is the honest version of "what does the
         operator see" — synthetic windowing was exactly the metric error
         (aggregate counts, cap lifted) that misled the 2026-08-06 attempt.
+        The as_of pin exists because the live variant is time-varying by
+        design (new reports and new commits add windows), which the second
+        verifier pass proved by getting three different window counts in one
+        hour — including an observer effect where committing this script moved
+        the measured repo's own HEAD. Pinned runs are reproducible; the
+        recorded baseline quotes one.
     """
     boundaries: list[str] = []
     for ts in sent_ats:
         sha = _git(repo, "rev-list", "-1", f"--before={ts}", "HEAD").strip()
         if sha and (not boundaries or boundaries[-1] != sha):
             boundaries.append(sha)
-    head = _git(repo, "rev-parse", "HEAD").strip()
+    if as_of is None:
+        head = _git(repo, "rev-parse", "HEAD").strip()
+    else:
+        head = _git(repo, "rev-list", "-1", f"--before={as_of}", "HEAD").strip()
     if head and (not boundaries or boundaries[-1] != head):
         boundaries.append(head)
     return boundaries
 
 
-def _day_boundaries(repo: Path) -> list[str]:
+def _day_boundaries(repo: Path, as_of: str | None) -> list[str]:
     """One boundary per active day: the last commit of each distinct commit date.
 
     Args:
         repo: The repository to scan.
+        as_of: Pinning timestamp (ISO 8601, offset-aware) or None for live.
+            When set, commits after it are excluded.
 
     Returns:
-        Shas in chronological order, one per day that has at least one commit.
+        Shas in chronological order, one per day that has at least one commit
+        at or before as_of.
 
     Why:
         Repos that were never reported have no real cadence to replay. One
@@ -174,10 +198,15 @@ def _day_boundaries(repo: Path) -> list[str]:
         day", which matches the observed cadence of the projects that WERE
         reported (orion: 57 reports over ~58 days).
     """
+    cutoff = datetime.fromisoformat(as_of) if as_of is not None else None
     last_sha_by_day: dict[str, str] = {}
     day_order: list[str] = []
     for line in _git(repo, "log", "--reverse", "--pretty=%H %cI").splitlines():
         sha, committed = line.split(" ", 1)
+        # %cI carries the committer's own UTC offset, so an aware comparison is
+        # correct regardless of which timezone each commit was made in.
+        if cutoff is not None and datetime.fromisoformat(committed) > cutoff:
+            continue
         day = committed[:10]
         if day not in last_sha_by_day:
             day_order.append(day)
@@ -433,7 +462,23 @@ def main() -> None:
         action="store_true",
         help="Print per-hit names with masked values (2-char prefix + length).",
     )
+    parser.add_argument(
+        "--as-of",
+        metavar="ISO8601",
+        help="Pin the measurement to this offset-aware instant (e.g. "
+        "2026-08-13T09:00:00+00:00): report rows and commits after it are "
+        "excluded, making the run reproducible. Without it the run is LIVE "
+        "and time-varying by design — new reports and commits add windows, "
+        "so two live runs need not agree. The recorded baseline in "
+        "docs/known-issues.md quotes a pinned run.",
+    )
     args = parser.parse_args()
+    if args.as_of is not None:
+        # Fail fast on a naive timestamp: report rows are +00:00 and %cI
+        # carries offsets, so a comparison against a naive instant would be
+        # silently wrong rather than loudly.
+        if datetime.fromisoformat(args.as_of).tzinfo is None:
+            parser.error("--as-of must be offset-aware, e.g. 2026-08-13T09:00:00+00:00")
 
     projects, state_db = _load_reported_projects(args.config)
     con = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
@@ -441,6 +486,10 @@ def main() -> None:
     for project, ts in con.execute(
         "SELECT project, sent_at FROM report_history ORDER BY sent_at"
     ):
+        if args.as_of is not None and datetime.fromisoformat(
+            ts
+        ) > datetime.fromisoformat(args.as_of):
+            continue
         sent_ats.setdefault(project, []).append(ts)
     con.close()
 
@@ -449,14 +498,14 @@ def main() -> None:
     windows: list[tuple[Path, str, str | None, str]] = []
     for project, repo in projects.items():
         previous = None
-        for sha in _real_report_boundaries(repo, sent_ats.get(project, [])):
+        for sha in _real_report_boundaries(repo, sent_ats.get(project, []), args.as_of):
             windows.append((repo, "real", previous, sha))
             previous = sha
     # Dedupe by (device, inode), NOT by resolved path: Path.resolve() does not
     # case-normalize, so on macOS's case-insensitive filesystem a config path of
     # ".../applications" fails to match the on-disk ".../Applications" and the
     # repo gets measured twice (a real bug this instrument shipped with, caught
-    # by the verifier pass — the duplicate inflated the window count to 111).
+    # by the verifier pass — the duplicate inflated the window count by one).
     reported_ids = set()
     for p in projects.values():
         try:
@@ -472,7 +521,7 @@ def main() -> None:
             if (stat.st_dev, stat.st_ino) in reported_ids:
                 continue
             previous = None
-            for sha in _day_boundaries(candidate):
+            for sha in _day_boundaries(candidate, args.as_of):
                 windows.append((candidate, "day", previous, sha))
                 previous = sha
 

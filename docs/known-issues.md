@@ -926,7 +926,9 @@ Deferred).
   actual boundaries as if `share_level = "detailed"`, plus one window per active day for the
   nine never-reported local repos — each assembled exactly as `collect()` assembles a report
   (commits + diffstat + sensitive/noise-filtered diff, 400-line cap) and scored with the
-  shipped `redact()`. The numbers, quoted from the committed instrument's own output:
+  shipped `redact()`. The numbers, quoted from the committed instrument's **pinned,
+  reproducible run** — `python scripts/redaction_baseline.py --as-of
+  2026-08-13T09:00:00+00:00`, two consecutive runs byte-identical:
 
       BASELINE detailed   : warn  31/110 ( 28%)  median 0  max  27  hits  108
       BASELINE high_level : warn   1/110 (  1%)  median 0  max   1  hits    1
@@ -950,15 +952,19 @@ Deferred).
   operator-facing benefit is entirely conditional on a future config change. This is the
   second time this entry's honest answer was "don't build it" (the first is the 2026-08-06
   record above), and the entry closes rather than standing as an invitation to a third
-  attempt. Re-measuring is one command: `python scripts/redaction_baseline.py`. **Two record
-  errors in the first draft of this very bullet were caught by the pre-PR verifier pass and
-  are corrected above** — the high_level hit was misattributed to a `Co-Authored-By:` trailer
-  (structurally impossible: the commits section carries `%s` subjects only), and the window
-  count was 111 because the instrument measured the `applications` repo twice
-  (`Path.resolve()` does not case-normalize on macOS, so the config's lowercase path failed
-  to match the on-disk directory; the dedupe now compares device+inode). That makes five
-  wrong claims on this one control caught by independent review and none by local
-  instruments.
+  attempt. Re-measuring live is one command: `python scripts/redaction_baseline.py`
+  (add `--as-of` for a reproducible pin). **Three record errors in the drafts of this very
+  bullet were caught by two pre-PR verifier passes and are corrected above** — the
+  high_level hit was misattributed to a `Co-Authored-By:` trailer (structurally impossible:
+  the commits section carries `%s` subjects only); the instrument measured the
+  `applications` repo twice (`Path.resolve()` does not case-normalize on macOS, so the
+  config's lowercase path failed to match the on-disk `Applications`; the dedupe now
+  compares device+inode); and the first corrected draft still quoted a denominator nobody
+  else could reproduce, because a live run is **time-varying by design** — new report rows
+  and new commits add windows, including an observer effect where committing this very
+  close-out moved Orion's own HEAD and added a window. That is why the run quoted above is
+  pinned with `--as-of`. Six wrong claims on this one control have now been caught by
+  independent review and none by any local instrument.
 - **The seam question, answered for the record rather than built** — it was Unit 2's first
   design decision, and any future revisit inherits the answer: capture the value as an
   explicit `group(3)` in `_SECRET_ASSIGNMENT` (a capturing group cannot change what matches,

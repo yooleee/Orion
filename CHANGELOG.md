@@ -32,7 +32,9 @@ at the foot of `docs/redaction-restructure-kickoff.md`.
   one window per active day for never-reported repos), scores each with the shipped
   `redact()`, and prints the per-preview warning distribution and per-class counterfactuals
   with values masked. It imports the shipped redactor and collector filters so the
-  measurement cannot drift from real behavior.
+  measurement cannot drift from real behavior. A live run is time-varying by design (new
+  reports and commits add windows); `--as-of <ISO8601>` pins a run and makes it
+  reproducible — the recorded baseline is the pinned run `--as-of 2026-08-13T09:00:00+00:00`.
 - **(Unit 1, previously unchangelogged)** The catch-all became a candidate extractor
   (`_SECRET_ASSIGNMENT`) plus a Python classifier (`_classify_name` → `_Verdict(redact,
   reason)`) called from `_redact_secret_assignments`, at **strict parity** with the old

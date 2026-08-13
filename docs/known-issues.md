@@ -761,8 +761,11 @@ Deferred).
   risk-free since no real secret is literally `false`. Any change needs a corpus check
   against real diffs, plus tests pinning that every currently-caught secret shape still is.
 - **Severity:** low (correctness/UX now, with a slow erosion of the preview control).
-- **Status:** Open. Found 2026-07-21 by the DF1 sweep, on the first `detailed`-share report
-  of a real repo. Relates to [[KI-3]] (the same control's false NEGATIVES).
+- **Status:** **CLOSED (won't fix, documented) 2026-08-13** — decided from a fresh measurement
+  at the production cap; see the close-out bullets at the foot of this entry. Found 2026-07-21
+  by the DF1 sweep, on the first `detailed`-share report of a real repo. Relates to [[KI-3]]
+  (the same control's false NEGATIVES) and [[KI-47]] (which inherits the only measurable
+  slice, deferred behind a named trigger).
 - **Three narrowing designs were built and REJECTED 2026-08-06. The entry stays open, and this
   record exists so the next attempt does not re-walk them.** All three were calibrated against
   27 real `detailed` collector windows (17.6 MB).
@@ -916,57 +919,68 @@ Deferred).
   not-yet-reachable path must be checked for *reachability*, not merely for green. The broader one
   is the one this control keeps re-teaching: local instruments answer "did this change what
   happens to text I already have?" and cannot answer "is there a shape I stopped catching?".
-- **One record correction, found by re-verifying the anchors before building.** The restructure
-  kickoff carried "`hash_author` does not redact on `main`" forward as a delta to be fixed.
-  **It is wrong about `main`.** Measured: `hash_author = value1234` → `hash_author =
-  [REDACTED_SECRET]`, hit_count 1. `auth` matches anywhere inside a name on `main`, so `main`
-  has no such gap — the asymmetry belonged to **rejected design 3**, which is what the
-  "Direction now" bullet above says and says correctly. The claim drifted when it was copied
-  into the kickoff as a comparison against `main` instead of against design 3. Consequence
-  worth keeping: Unit 1's acceptance bar became **strict parity** rather than "parity plus one
-  intended difference", which is a stronger bar, not a weaker one.
-- **THE CONSTRAINT ON UNIT 2, and the most important thing on this page for whoever builds it:
-  a declining rule shadows whatever its match swallowed.** A declined candidate still
-  **consumes its span** and `re.sub` resumes past it. Two consequences, one avoided and one
-  still open.
-  1. **Avoided.** The natural reading of "extractor plus classifier" — extract every
-     `name = value`, judge the name in Python — leaks on a *benign* first name:
-     `env: DATABASE_PASSWORD=hunter2supersecret` would match on `env`, be declined, and the
-     password would walk out. So the credential vocabulary stays **in the extractor**, which
-     yields only names already carrying evidence. Pinned by
-     `test_the_extractor_anchors_on_the_credential_name_not_an_earlier_one`.
-  2. **Still open, and it is a trap.** Keeping the vocabulary in the extractor does NOT make
-     exemptions safe, because the prose words Unit 2 wants to exempt *contain* keywords —
-     `oauth`, `author` and `authentication` all contain `auth`. The extractor yields the first
-     such name on the line, and its match runs to the next whitespace:
+- **CLOSED (won't fix, documented) 2026-08-13, by decision from a fresh measurement at the
+  production cap.** The Unit 2 plan-mode pass re-baselined the per-preview distribution on
+  current data with `scripts/redaction_baseline.py` (committed in the same PR as this update):
+  110 collector-shaped windows — the 87 real reports in `report_history` replayed at their
+  actual boundaries as if `share_level = "detailed"`, plus one window per active day for the
+  nine never-reported local repos — each assembled exactly as `collect()` assembles a report
+  (commits + diffstat + sensitive/noise-filtered diff, 400-line cap) and scored with the
+  shipped `redact()`. The numbers, quoted from the committed instrument's own output:
 
-         oauth: API_TOKEN=abcdef123456
-           extractor name -> 'oauth', consuming ': API_TOKEN=abcdef123456'
+      BASELINE detailed   : warn  31/110 ( 28%)  median 0  max  27  hits  108
+      BASELINE high_level : warn   1/110 (  1%)  median 0  max   1  hits    1
+      minus prose-name (UNSOUND — leaks)        : warn 17/110  hits 54  previews-cleaned 14
+      minus benign-value (sound)                : warn 29/110  hits 88  previews-cleaned  2
+      minus prose-name AND benign-value (sound) : warn 30/110  hits 93  previews-cleaned  1
+      minus code-value (KI-47's class)          : warn 22/110  hits 86  previews-cleaned  9
 
-     Exempt `oauth` and the token behind it walks out with `hit_count` 0 — a false negative
-     wearing the costume of a catch, the same shape as the `Bearer` bug. `author:` is ordinary
-     git-log content, so this is not exotic. **Unit 2 therefore cannot be a name-only rule
-     list.** It must re-scan the span it declines, or refuse to decline while that span still
-     contains an assignment. **The trap is bounded, which is what makes that fix sufficient
-     rather than merely necessary:** the seven specific fixed-format patterns run BEFORE the
-     catch-all, so an `sk-`, `ghp_`, JWT or AWS key inside a would-be-declined span is already
-     redacted (and protected from re-matching by the `(?!\[REDACTED_)` lookahead) before the
-     classifier ever sees the line — verified by declining `oauth`/`author` against all four
-     shapes and watching each still come back `[REDACTED_API_KEY]` / `[REDACTED_GITHUB_TOKEN]` /
-     `[REDACTED_JWT]` / `[REDACTED_AWS_KEY]`. The only thing that can hide in a declined span is
-     another **generic** name=value assignment, which is exactly what a re-scan or a
-     contains-an-assignment check catches. Not a live leak today: nothing declines, and the shipped code
-     redacts all three lines identically to `main`. Pinned as a known trap by
-     `test_a_declining_rule_would_shadow_a_secret_in_the_value_KNOWN_TRAP`, which asserts the
-     leak under a stubbed exemption so the trap lives in the suite rather than only in prose —
-     when Unit 2 closes it, that test fails, and the failure is the signal to rewrite it.
-  **How this was found is itself worth keeping.** The first version of that test claimed the
-  opposite — that shadowing was impossible — and was **wrong**: its stub declined only names
-  *without* credential evidence, which the extractor never yields, so it exercised no decline
-  path at all while reading as proof of safety. Caught by the independent verifier pass on the
-  diff, after it had already survived a differential over 350,940 generated inputs, 19.6 MB of
-  real diffs, and six mutation checks. That is now three separate occasions on this one control
-  where local instruments were green and an independent reader found the hole.
+  Three facts decided it. (1) **Every sound exemption is negligible.** The only variant that
+  moves the warning rate is the blanket prose-name exemption, and that is the design the
+  constraint bullet above forbids — its 54 exempted hits include 21 `Authorization` spans and
+  the `oauth`/`authorization` container shapes that re-open the `Bearer` leak PR #152 closed.
+  The sound variants clean 1–2 of the 31 warned previews. (2) **The warnings cluster where no
+  sound rule can reach.** 22 of the 31 warned windows are Orion's own repo, whose docs and
+  tests deliberately carry credential-shaped fixtures — a warning-free detailed preview of
+  this repo is structurally unreachable, and redacting those fixtures is the control working.
+  (3) **No configured project uses detailed share today.** Every stanza in the live config is
+  `high_level`, under which the same 110 windows produce one hit total — fittingly, the
+  commit *subject* of `4628867`, the Bearer-leak fix, whose own message contains
+  `Authorization: Bearer <token>` and so trips the catch-all in the commits section — so the
+  operator-facing benefit is entirely conditional on a future config change. This is the
+  second time this entry's honest answer was "don't build it" (the first is the 2026-08-06
+  record above), and the entry closes rather than standing as an invitation to a third
+  attempt. Re-measuring is one command: `python scripts/redaction_baseline.py`. **Two record
+  errors in the first draft of this very bullet were caught by the pre-PR verifier pass and
+  are corrected above** — the high_level hit was misattributed to a `Co-Authored-By:` trailer
+  (structurally impossible: the commits section carries `%s` subjects only), and the window
+  count was 111 because the instrument measured the `applications` repo twice
+  (`Path.resolve()` does not case-normalize on macOS, so the config's lowercase path failed
+  to match the on-disk directory; the dedupe now compares device+inode). That makes five
+  wrong claims on this one control caught by independent review and none by local
+  instruments.
+- **The seam question, answered for the record rather than built** — it was Unit 2's first
+  design decision, and any future revisit inherits the answer: capture the value as an
+  explicit `group(3)` in `_SECRET_ASSIGNMENT` (a capturing group cannot change what matches,
+  so the edit is parity-verifiable) and widen the seam to `_classify(name, value)`. The
+  span-safety requirement then **reduces to a value-safety claim**: every other component of
+  a declined span — name, separator, optional quote, `Bearer`/`Basic` scheme word — is a
+  public token the pipeline already emits or discards harmlessly, so "the whole matched span
+  is safe to emit verbatim" holds exactly when the value is safe.
+  `test_a_declining_rule_would_shadow_a_secret_in_the_value_KNOWN_TRAP` stays in the suite
+  unchanged: nothing declines, and the trap it pins remains the live constraint on any future
+  rule.
+- **Two stale duplicate bullets were removed from this entry in the same pass.** PR #153
+  appended the corrected versions of the record-correction bullet and the Unit 2 constraint
+  bullet without deleting the earlier ones, so the entry carried both — and the earlier
+  constraint write-up stated the disproved claim ("the trap is bounded to assignments, so a
+  re-scan of the declined span is sufficient") as live fact. The corrected invariant is the
+  one that remains above: the two obvious remedies both fail on raw-token values, and the
+  whole risk is the declined span's own text. One true detail from the removed version worth
+  keeping: the seven specific patterns run before the catch-all, so an `sk-`, `ghp_`, JWT or
+  AWS-shaped credential inside a would-be-declined span is already redacted (and protected by
+  the `(?!\[REDACTED_)` lookahead) before the classifier sees the line — verified, and NOT
+  sufficient to make declining safe.
 
 ## KI-43 — `graduate-idea` duplicated `add-project`'s flags and has drifted (live functional gap)
 
@@ -1189,8 +1203,9 @@ Deferred).
   worst case is a recurring one.
 - **Severity:** low (correctness/UX, with the same slow erosion of the preview count that KI-41
   describes).
-- **Status:** Open. Filed 2026-08-06 from the KI-41 calibration corpus, not from a report anyone
-  read. Relates to [[KI-3]] and [[KI-41]].
+- **Status:** Open, **deprioritized 2026-08-13** behind a named revisit trigger (the
+  2026-08-13 update below). Filed 2026-08-06 from the KI-41 calibration corpus, not from a
+  report anyone read. Relates to [[KI-3]] and [[KI-41]].
 - **Update 2026-08-07: the place to solve this now exists.** RDX-R Unit 1 landed the extractor +
   classifier seam (see [[KI-41]]), so the value-shape rule this entry asks for can be written as
   a named Python predicate above the fail-safe default instead of another lookahead. Unit 1
@@ -1203,6 +1218,23 @@ Deferred).
   that rule out a name-only rule, and the note that `_classify_name(name)` cannot host such a rule
   are written up under [[KI-41]] and asserted by
   `test_a_declining_rule_would_shadow_a_secret_in_the_value_KNOWN_TRAP`.
+- **Update 2026-08-13, from the Unit 2 close-out measurement: this class is smaller than the
+  2026-08-06 corpus suggested — and it is now the only slice with any measured operator
+  benefit.** At the production 400-line cap over 110 collector-shaped windows (method and
+  numbers under [[KI-41]]'s close-out; `scripts/redaction_baseline.py` is the one-command
+  re-run), code-shaped values are **22 of 106** catch-all hits — not an order of magnitude
+  above prose (54). The uncapped 2026-08-06 counts above are real but cap-dominated: the
+  dense `auth=_admin_auth())` clusters sit in windows the production cap truncates. Removing
+  this class would clean **9 of the 31** warned previews (28% → 20%) — more than any sound
+  KI-41 variant (1–2), and still modest. **Deprioritized rather than scheduled:** no
+  configured project uses `detailed` share today, so no operator sees this noise. **Revisit
+  trigger:** the first time a project flips to `share_level = "detailed"` for real supervisor
+  use, run the instrument; if the warning rate habituates in practice, THIS class — not
+  KI-41's prose — is the slice to scope. Two constraints carry over unchanged from [[KI-41]]:
+  the exemption judgement needs the value (the seam answer recorded there), and a code-shape
+  rule is **not sound by construction** — an unquoted credential passed as a function
+  argument would ride out inside an exempted span — so the acceptance bar is constructed
+  credential shapes and a conforming implementation attacked, never a corpus.
 
 ## KI-48 — The redaction catch-all backtracks superlinearly on pathological input
 

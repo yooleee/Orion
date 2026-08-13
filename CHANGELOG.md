@@ -14,6 +14,47 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## RDX-R — redaction restructure arc concluded (2026-08-07 → 2026-08-13)
+
+The arc that replaced the redaction catch-all's monolithic regex with an extractor +
+classifier seam (Unit 1, PRs #153/#154/#155, merged 2026-08-11), and then decided **against**
+building the exemptions the seam was created for (Unit 2, 2026-08-13). KI-48 closed by the
+restructure; KI-41 closed as won't-fix, documented; KI-47 deprioritized behind a named
+revisit trigger. Full records: KI-41/KI-47/KI-48 in `docs/known-issues.md` and the close-out
+at the foot of `docs/redaction-restructure-kickoff.md`.
+
+### Added
+
+- **`scripts/redaction_baseline.py`** — the measurement instrument behind the Unit 2
+  decision, committed so the revisit trigger is a one-command check. Stdlib-only, dev-only,
+  read-only (state DB opened `mode=ro`, git reads only). It replays the real reports in
+  `report_history` at their actual boundaries as `detailed`-share collector windows (plus
+  one window per active day for never-reported repos), scores each with the shipped
+  `redact()`, and prints the per-preview warning distribution and per-class counterfactuals
+  with values masked. It imports the shipped redactor and collector filters so the
+  measurement cannot drift from real behavior.
+- **(Unit 1, previously unchangelogged)** The catch-all became a candidate extractor
+  (`_SECRET_ASSIGNMENT`) plus a Python classifier (`_classify_name` → `_Verdict(redact,
+  reason)`) called from `_redact_secret_assignments`, at **strict parity** with the old
+  regex: 350,940 generated inputs and 19.6 MB of real diffs produce byte-identical output
+  and identical hit counts. Every classifier path defaults to redact. KI-48's superlinear
+  backtracking closed by a run-start anchor, measured at 1685× on the pathological case.
+
+### Changed
+
+- **KI-41 is closed without a behavior change, by measurement.** At the production 400-line
+  cap over 110 replayed windows, every *sound* exemption design cleans 1–2 of the 31 warned
+  previews — only a blanket prose-name exemption moves the number, and that design provably
+  leaks (it would re-open the `Bearer` fix below). The preview noise KI-41 records also
+  turns out to be conditional: every configured project shares `high_level`, under which the
+  same 110 windows produce one hit in total. The redactor keeps over-redacting prose like
+  `authenticated: false` deliberately — fail-safe stays the bias.
+- **`docs/known-issues.md` KI-41 entry deduplicated.** PR #153 had appended corrected
+  versions of two bullets without removing the stale ones, leaving a disproved safety claim
+  ("re-scan the declined span is sufficient") standing as live fact. The corrected
+  invariant — an exemption is sound only if the whole matched span is safe to emit
+  verbatim, a claim about the value — is now stated once.
+
 ## Redaction: `Authorization: Bearer <token>` leaked the token (2026-08-06)
 
 A false negative in the redactor's generic catch-all, found while pinning that pattern's

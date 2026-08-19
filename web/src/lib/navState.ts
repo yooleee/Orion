@@ -14,7 +14,7 @@
 
 /** The primary sections. A section owns a SET of related views (Projects covers home, a
  *  project, a report, and a tracker), so this is the key, not one-route-per-key. */
-export type NavKey = "projects" | "scheduling";
+export type NavKey = "projects" | "scheduling" | "search";
 
 /** Which primary section(s) are active for a route — exactly one flag per NavKey. */
 export type NavActive = Record<NavKey, boolean>;
@@ -56,6 +56,17 @@ export const NAV_ENTRIES: NavEntry[] = [
     shortLabel: "Schedule",
     glyph: "◷",
     isActive: (path) => path === "/scheduling",
+  },
+  {
+    // S2.3: cross-project search over the KB (reports + discussions). A first-class
+    // section — one entry here lights up BOTH navs (the single-nav-source design), and
+    // the search input lives on the page itself, so no shell chrome is added.
+    key: "search",
+    to: "/search",
+    label: "Search",
+    shortLabel: "Search",
+    glyph: "⌕",
+    isActive: (path) => path === "/search",
   },
 ];
 

@@ -383,3 +383,43 @@ export interface LoginResult {
 export interface LogoutResult {
   ok: boolean;
 }
+
+// --- GET /api/search?q= (S2.3 / KB Inc 3) ------------------------------------
+
+/** One report hit. `title` is the server's `_headline` (same rule as the timeline row
+ *  the hit links to); `snippet` is a plain-text substring of the stored body around the
+ *  first match — NOT HTML-escaped by the server, so it must only ever be rendered as
+ *  React text children (escape-before-highlight). */
+export interface SearchReportHit {
+  id: number;
+  project: string;
+  title: string;
+  generated_at: string;
+  snippet: string;
+}
+
+/** One discussion hit. Same snippet rule as SearchReportHit. */
+export interface SearchDiscussionHit {
+  id: number;
+  project: string;
+  author_name: string;
+  role: DiscussionRole;
+  created_at: string;
+  snippet: string;
+}
+
+/** One result class: its hits (newest first) + its OWN cap flag. `capped: true` means
+ *  more matches existed beyond the server's per-class cap (50) — the UI must say so
+ *  rather than silently truncating (the no-silent-states rule, on the wire). */
+export interface SearchResultClass<Hit> {
+  hits: Hit[];
+  capped: boolean;
+}
+
+/** GET /api/search response: the echoed query + the two DISTINCT result classes
+ *  (reports vs discussions are different things; the shape never flattens them). */
+export interface SearchResults {
+  query: string;
+  reports: SearchResultClass<SearchReportHit>;
+  discussions: SearchResultClass<SearchDiscussionHit>;
+}

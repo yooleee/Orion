@@ -36,10 +36,12 @@ function renderAt(path: string) {
 }
 
 describe("BottomTabBar", () => {
-  it("renders all three tabs as glyph + text label", () => {
+  it("renders all four tabs as glyph + text label", () => {
     renderAt("/");
     // The text label must be present (legible without relying on the glyph or colour).
-    for (const label of ["Projects", "Schedule", "More"]) {
+    // Search joined as a first-class section in S2.3 (one NAV_ENTRIES entry lights up
+    // both navs — this pin is where a silently dropped entry would surface on mobile).
+    for (const label of ["Projects", "Schedule", "Search", "More"]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
     // The To-dos tab retired in the KB-surface Inc 1 IA settlement — guard against it

@@ -56,6 +56,8 @@ from relay.store import (
     record_admin_audit,
     record_observations,
     revoke_credential,
+    search_discussions,
+    search_reports,
     get_project_visibility,
     org_visible_projects,
     project_exists,
@@ -2302,3 +2304,200 @@ def test_delete_user_removes_per_producer_disciplines(tmp_path):
         "SELECT COUNT(*) AS n FROM relay_producer_disciplines WHERE author_id = ?", (b_id,)
     ).fetchone()["n"]
     assert remaining == 0
+
+
+# --- S2.3 Unit 1: search over the two append-only stores -----------------------------
+
+
+def _search_report(conn, project, body, generated_at="2026-08-18T00:00:00+00:00"):
+    """Ingest one report with a chosen body and return its id.
+
+    Why:
+        The search tests vary body text and project per report; _blob() fixes both, so
+        this wraps it rather than duplicating the whole blob shape (DRY). The section
+        body is NOT synced to `body` — search reads relay_reports.body only, and keeping
+        the section text constant pins that nothing else is being matched.
+    """
+    blob = _blob(project=project, generated_at=generated_at)
+    blob["body"] = body
+    return ingest(conn, blob, generated_at)
+
+
+def test_search_reports_matches_case_insensitively(tmp_path):
+    """A lowercase query term finds a mixed-case body (SQL LIKE semantics).
+
+    Why this matters: the settled search semantics are case-insensitive substring
+    match — a user hunting "relay" must find "the Relay" without guessing the casing
+    the report used.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    hit = _search_report(conn, "demo", "Deployed the Relay to Fly.")
+    _search_report(conn, "demo", "Unrelated text.")
+
+    rows, capped = search_reports(conn, ["relay"], None)
+
+    assert [r["id"] for r in rows] == [hit]
+    assert capped is False
+
+
+def test_search_reports_requires_every_term(tmp_path):
+    """Multi-term queries AND across terms — a body matching only one term is no hit.
+
+    Why this matters: AND-over-terms is the settled semantics (narrowing, like every
+    search box people know). OR would make multi-word queries WIDER than either word
+    alone, which is never what a narrowing search intends.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    both = _search_report(conn, "demo", "auth revamp shipped")
+    _search_report(conn, "demo", "auth only here")
+    _search_report(conn, "demo", "revamp only here")
+
+    rows, _ = search_reports(conn, ["auth", "revamp"], None)
+
+    assert [r["id"] for r in rows] == [both]
+
+
+def test_search_reports_orders_newest_first(tmp_path):
+    """Hits come back newest generated_at first (id breaks ties), like history().
+
+    Why this matters: with no ranking (settled: no FTS/relevance at this scale), recency
+    is the one ordering promise the endpoint makes; it must match the timeline's order
+    so search results and the project page never disagree about what is "latest".
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    older = _search_report(conn, "demo", "seam alpha", generated_at="2026-08-01T00:00:00+00:00")
+    newer = _search_report(conn, "demo", "seam beta", generated_at="2026-08-15T00:00:00+00:00")
+
+    rows, _ = search_reports(conn, ["seam"], None)
+
+    assert [r["id"] for r in rows] == [newer, older]
+
+
+def test_search_reports_treats_like_wildcards_as_literals(tmp_path):
+    """`%`, `_`, and `\\` in a query match only themselves, never as LIKE wildcards.
+
+    Why this matters: an unescaped `%` term would match EVERY report (a query of
+    "100%" degenerating to "match anything") and `_` would match any character —
+    silent over-matching that looks like working search. The pin: each wildcard-shaped
+    query returns exactly the literal occurrence.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    percent = _search_report(conn, "demo", "coverage hit 100% today")
+    _search_report(conn, "demo", "coverage hit 1000 today")
+    underscore = _search_report(conn, "demo", "renamed to snake_case")
+    _search_report(conn, "demo", "renamed to snakeXcase")
+    backslash = _search_report(conn, "demo", r"path is C:\repo")
+    _search_report(conn, "demo", "path is C:Xrepo")
+
+    assert [r["id"] for r in search_reports(conn, ["100%"], None)[0]] == [percent]
+    assert [r["id"] for r in search_reports(conn, ["snake_case"], None)[0]] == [underscore]
+    assert [r["id"] for r in search_reports(conn, [r"C:\repo"], None)[0]] == [backslash]
+
+
+def test_search_reports_caps_results_and_flags_it(tmp_path):
+    """More hits than `limit` returns exactly `limit` rows with capped=True; exactly
+    `limit` hits returns them all with capped=False.
+
+    Why this matters: the settled design forbids SILENT truncation — capped is the
+    explicit "there was more" state, and it must not false-positive when the result
+    count merely equals the cap (the classic off-by-one at the boundary).
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    for i in range(3):
+        _search_report(conn, "demo", "capped hit", generated_at=f"2026-08-0{i + 1}T00:00:00+00:00")
+
+    rows, capped = search_reports(conn, ["capped"], None, limit=2)
+    assert len(rows) == 2
+    assert capped is True
+
+    rows, capped = search_reports(conn, ["capped"], None, limit=3)
+    assert len(rows) == 3
+    assert capped is False
+
+
+def test_search_reports_scope_filters_projects(tmp_path):
+    """allowed=None sees every project; a set sees only its projects; an empty set
+    sees nothing (default-deny) — same tri-state as _allowed_projects.
+
+    Why this matters: this filter is the AUTHZ boundary for search — a scoped viewer
+    must get zero hits from out-of-scope projects (existence-hiding), and a
+    zero-grant viewer must get nothing at all. The load-bearing negative of the unit.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    in_scope = _search_report(conn, "mine", "secret-word here")
+    _search_report(conn, "theirs", "secret-word there")
+
+    all_rows, _ = search_reports(conn, ["secret-word"], None)
+    assert len(all_rows) == 2  # unrestricted admin sees both projects' hits
+
+    scoped_rows, _ = search_reports(conn, ["secret-word"], {"mine"})
+    assert [r["id"] for r in scoped_rows] == [in_scope]
+
+    assert search_reports(conn, ["secret-word"], set()) == ([], False)
+
+
+def _discussion(conn, project, body):
+    """Append one discussion item with a chosen body and return its id.
+
+    Why:
+        Mirrors _search_report for the discussion table; created_at is fixed because
+        discussion search orders by id (the store's monotonic order), not timestamps.
+    """
+    return add_discussion_item(
+        conn, project, None, "Supervisor A", "supervisor", body, "2026-08-18T00:00:00+00:00"
+    )
+
+
+def test_search_discussions_matches_terms_case_insensitively(tmp_path):
+    """Discussion search shares the report semantics: case-insensitive AND-over-terms.
+
+    Why this matters: the two result classes are distinct on the wire but must not have
+    subtly different matching rules — a user's query means the same thing in both stores.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    both = _discussion(conn, "demo", "Could you Benchmark the tokenizer?")
+    _discussion(conn, "demo", "benchmark later")
+    _discussion(conn, "demo", "tokenizer only")
+
+    rows, capped = search_discussions(conn, ["benchmark", "tokenizer"], None)
+
+    assert [r["id"] for r in rows] == [both]
+    assert capped is False
+
+
+def test_search_discussions_orders_newest_first(tmp_path):
+    """Discussion hits come back newest (highest id) first.
+
+    Why this matters: the thread itself reads oldest-first, but search is a recency
+    surface — the promise is "the latest place this came up, first", consistent with
+    the report class. Ids are the store's monotonic order (the watermark idiom).
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    first = _discussion(conn, "demo", "deadline moved")
+    second = _discussion(conn, "demo", "deadline moved again")
+
+    rows, _ = search_discussions(conn, ["deadline"], None)
+
+    assert [r["id"] for r in rows] == [second, first]
+
+
+def test_search_discussions_caps_and_scope_filters(tmp_path):
+    """The cap+flag and the tri-state scope filter hold for the discussion class too.
+
+    Why this matters: the authz boundary and the no-silent-truncation rule are
+    per-query properties — they must hold for BOTH classes independently, or a scoped
+    viewer could leak out-of-scope existence through the class that forgot the filter.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    mine_ids = [_discussion(conn, "mine", "quarterly review") for _ in range(3)]
+    _discussion(conn, "theirs", "quarterly review elsewhere")
+
+    rows, capped = search_discussions(conn, ["quarterly"], {"mine"}, limit=2)
+    assert [r["id"] for r in rows] == [mine_ids[2], mine_ids[1]]
+    assert capped is True  # a third in-scope hit exists beyond the cap
+
+    rows, capped = search_discussions(conn, ["quarterly"], {"mine"}, limit=3)
+    assert len(rows) == 3
+    assert capped is False  # out-of-scope hits never count toward "there was more"
+
+    assert search_discussions(conn, ["quarterly"], set()) == ([], False)

@@ -2755,3 +2755,150 @@ def record_admin_audit(
         (actor, action, target_user, role, json.dumps(projects), created_at),
     )
     conn.commit()
+
+
+# --- Search (S2.3 / KB Inc 3): read-only retrieval over the two append-only stores ---
+
+
+def _like_patterns(terms: list[str]) -> list[str]:
+    """Turn whitespace-split query terms into escaped `%…%` LIKE patterns.
+
+    Args:
+        terms: Non-empty list of raw query terms (already split by the caller).
+
+    Returns:
+        One `%term%` pattern per term, with `\\`, `%`, and `_` escaped so they match
+        only themselves under `LIKE … ESCAPE '\\'`.
+
+    Why:
+        `%` and `_` are wildcards inside a LIKE pattern; a user searching "100%" must
+        not match every report. Escaping the escape character itself first keeps a
+        literal backslash in a query from re-arming the characters escaped after it.
+        Shared by both search functions so the two result classes can never drift to
+        different matching rules.
+    """
+    patterns = []
+    for term in terms:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        patterns.append(f"%{escaped}%")
+    return patterns
+
+
+def _search_where(terms: list[str], allowed: set | None) -> tuple[str, list]:
+    """Build the shared WHERE clause + bind params for a body search.
+
+    Args:
+        terms: Non-empty list of raw query terms (AND semantics — every term must match).
+        allowed: The caller's read scope, exactly as _allowed_projects resolves it:
+            None = unrestricted, a set = only those projects (must be non-empty here —
+            the empty set is short-circuited by the callers before any SQL).
+
+    Returns:
+        (where_sql, params): the WHERE body (without the keyword) and its bind values.
+
+    Raises:
+        ValueError: On an empty terms list — the server validates the query first, so
+            an empty list is a programming error, not a user input.
+
+    Why:
+        Both search functions filter the same way on different tables; building the
+        clause once keeps the AND semantics and — load-bearing — the SCOPE FILTER
+        identical across the two result classes. Scope lives in the SQL (not a Python
+        post-filter) so the LIMIT counts only rows the caller may see. LIKE without
+        a COLLATE override is case-insensitive for ASCII; non-ASCII case sensitivity
+        is a known, documented limitation at this corpus size.
+    """
+    if not terms:
+        raise ValueError("terms must be non-empty")
+    clauses = ["body LIKE ? ESCAPE '\\'"] * len(terms)
+    params: list = _like_patterns(terms)
+    if allowed is not None:
+        placeholders = ", ".join("?" * len(allowed))
+        clauses.append(f"project IN ({placeholders})")
+        # sorted() gives deterministic SQL/params for a set input (stable to test/log).
+        params.extend(sorted(allowed))
+    return " AND ".join(clauses), params
+
+
+def search_reports(
+    conn: sqlite3.Connection, terms: list[str], allowed: set | None, limit: int = 50
+) -> tuple[list[dict], bool]:
+    """Search report bodies for all `terms`, newest first, within `allowed` scope.
+
+    Args:
+        conn: An open relay-store connection.
+        terms: Non-empty list of raw query terms; a hit's body must contain EVERY term
+            (case-insensitive substring — see _search_where for the semantics).
+        allowed: Read scope per _allowed_projects: None = every project, a set = only
+            those projects, the empty set = nothing (default-deny).
+        limit: Maximum rows returned. Defaults to 50 (the settled response cap).
+
+    Returns:
+        (hits, capped): full report dicts (the _row_to_report shape history()/get()
+        return — the serializer derives title/snippet from the body) ordered
+        generated_at DESC with id DESC as tiebreaker, and capped=True when more
+        matching rows existed beyond `limit` (never silently truncated).
+
+    Why:
+        Backs GET /api/search's report class. Plain LIKE over ~90 reports is instant
+        and its semantics are explicit; FTS5 was declined with a revisit trigger
+        (thousands of reports, or a real ranking need). Fetching limit+1 rows is how
+        `capped` is known without a second COUNT query. The empty scope set returns
+        without touching SQL — a zero-grant viewer sees nothing, and "nothing" is
+        indistinguishable from a query with no matches (existence-hiding).
+    """
+    if allowed is not None and not allowed:
+        return [], False
+    where, params = _search_where(terms, allowed)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM relay_reports
+        WHERE {where}
+        ORDER BY generated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (*params, limit + 1),
+    ).fetchall()
+    capped = len(rows) > limit
+    return [_row_to_report(row) for row in rows[:limit]], capped
+
+
+def search_discussions(
+    conn: sqlite3.Connection, terms: list[str], allowed: set | None, limit: int = 50
+) -> tuple[list[dict], bool]:
+    """Search discussion-item bodies for all `terms`, newest first, within `allowed` scope.
+
+    Args:
+        conn: An open relay-store connection.
+        terms: Non-empty list of raw query terms (same AND/case semantics as reports).
+        allowed: Read scope per _allowed_projects (None / set / empty set — see
+            search_reports).
+        limit: Maximum rows returned. Defaults to 50 (per result class, not shared
+            with reports — one class filling up must not crowd out the other).
+
+    Returns:
+        (hits, capped): discussion dicts in the discussion_items_for_project shape,
+        ordered id DESC (ids are the store's monotonic order — the watermark idiom —
+        so "newest first" needs no timestamp comparison), and capped=True when more
+        matching rows existed beyond `limit`.
+
+    Why:
+        Backs GET /api/search's discussion class. Kept a separate function (not one
+        UNION query) so each query stays trivially readable and each class carries
+        its own cap flag — the two classes are distinct on the wire by design.
+    """
+    if allowed is not None and not allowed:
+        return [], False
+    where, params = _search_where(terms, allowed)
+    rows = conn.execute(
+        f"""
+        SELECT id, project, author_id, author_name, role, body, created_at
+        FROM relay_discussion_items
+        WHERE {where}
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (*params, limit + 1),
+    ).fetchall()
+    capped = len(rows) > limit
+    return [dict(row) for row in rows[:limit]], capped

@@ -20,6 +20,7 @@ import { Project } from "./routes/Project";
 import { Report } from "./routes/Report";
 import { Tracker } from "./routes/Tracker";
 import { Scheduling } from "./routes/Scheduling";
+import { Search } from "./routes/Search";
 import { Showcase } from "./routes/Showcase";
 import { ShowcaseDemo } from "./routes/ShowcaseDemo";
 import { NotFound } from "./routes/placeholders";
@@ -62,6 +63,7 @@ export function App() {
         <Route path="report/:id" element={<Report />} />
         <Route path="tracker/:name" element={<Tracker />} />
         <Route path="scheduling" element={<Scheduling />} />
+        <Route path="search" element={<Search />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

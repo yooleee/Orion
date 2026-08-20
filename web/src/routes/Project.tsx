@@ -16,7 +16,7 @@
 // =============================================================================
 
 import { useEffect, useState } from "react";
-import { useOutletContext, useParams } from "react-router-dom";
+import { useLocation, useOutletContext, useParams } from "react-router-dom";
 import type { ShellContext } from "../components/Shell";
 import type { DiscussionItem } from "../api/types";
 import { ApiError, getProject } from "../api/client";
@@ -34,6 +34,16 @@ export function Project() {
   // Discussion items posted this session, appended to the fetched thread; reset on change.
   const [postedDiscussion, setPostedDiscussion] = useState<DiscussionItem[]>([]);
   useEffect(() => setPostedDiscussion([]), [name]);
+  // S2.3: a search discussion-hit links here as /project/:name#discussion. React Router
+  // does not scroll to hashes on SPA navigation, so once the data has rendered, bring the
+  // Discussion section into view ourselves. Keyed on `data` (not just the hash) because
+  // the anchor target only exists after the loading state clears.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (hash === "#discussion" && data) {
+      document.getElementById("discussion")?.scrollIntoView();
+    }
+  }, [hash, data]);
   // Posting to the discussion needs a thread standing: a supervisor or the developer
   // (admin). A viewer reads it but cannot join — matching the server's 403 gate.
   const canDiscuss =
@@ -59,7 +69,7 @@ export function Project() {
         data={data}
         tz={tz}
         discussion={
-          <section>
+          <section id="discussion">
             <div className="eyebrow block-label">Discussion</div>
             <DiscussionList items={[...data.discussions, ...postedDiscussion]} />
             <DiscussionComposer

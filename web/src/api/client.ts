@@ -22,6 +22,7 @@ import type {
   ProjectDetail,
   ReportDetail,
   SchedulingData,
+  SearchResults,
   ShowcaseData,
 } from "./types";
 
@@ -66,6 +67,10 @@ export const getProject = (name: string) =>
 export const getReport = (id: number | string) =>
   apiFetch<ReportDetail>(`/api/reports/${encodeURIComponent(String(id))}`);
 export const getScheduling = () => apiFetch<SchedulingData>("/api/scheduling");
+// Cross-project search (S2.3). The caller enforces the 2-char minimum before calling
+// (shorter is the server's 400 "query too short", a state the UI never needs to reach).
+export const getSearch = (q: string) =>
+  apiFetch<SearchResults>(`/api/search?q=${encodeURIComponent(q)}`);
 // Public, no-login: 404s (ApiError.status === 404) when the relay's Showcase is disabled,
 // which the Showcase screen turns into a clean "not available" note.
 export const getShowcase = () => apiFetch<ShowcaseData>("/api/showcase");

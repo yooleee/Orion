@@ -396,6 +396,60 @@ grouped into three time buckets, plus a summary. Scope-filtered identically to `
   `get_checklist` + `observed_history` per project → `api.serialize_scheduling`. Pure read-only
   re-aggregation — no new derivation, no producer/wire/store change.
 
+### `GET /api/search?q=<terms>` (S2.3 / KB Inc 3)
+
+Cross-project search over the two append-only stores: report bodies (`relay_reports.body`) and
+discussion items (`relay_discussion_items.body`). Scope-filtered identically to `/api/portfolio`.
+Checklists, observations, About, and disciplines are deliberately not searched (current state or
+already-visible text — additive later if wanted).
+
+```json
+{
+  "query": "auth revamp",
+  "reports": {
+    "hits": [
+      { "id": 41, "project": "orion", "title": "Auth revamp arc closed out.",
+        "generated_at": "2026-07-20T18:00:00+00:00",
+        "snippet": "…the auth revamp landed across eight PRs and the…" }
+    ],
+    "capped": false
+  },
+  "discussions": {
+    "hits": [
+      { "id": 7, "project": "orion", "author_name": "Supervisor A", "role": "supervisor",
+        "created_at": "2026-07-21T09:00:00+00:00",
+        "snippet": "…is the auth revamp done now?…" }
+    ],
+    "capped": false
+  }
+}
+```
+
+- **Semantics:** case-insensitive substring match (SQL `LIKE`; ASCII case only — a documented
+  limitation at this corpus size), AND over whitespace-split terms, newest first. No ranking.
+  `%`, `_`, and `\` in a query are literals (escaped server-side) — a query of `100%` matches
+  only reports containing the literal text `100%`.
+- **Two result classes, never flattened.** A report hit and a discussion hit are distinct shapes
+  under distinct keys. Report hits are ordered `generated_at` DESC (id DESC tiebreak, matching the
+  timeline); discussion hits are ordered `id` DESC (the store's monotonic order).
+- **Cap:** 50 hits **per class**, each class carrying its own explicit `capped` flag — `true`
+  means more matches existed beyond the cap (never silent truncation). Per-class (not one global
+  cap) so one class filling up cannot crowd out the other.
+- **`title`** is the report's `_headline` (same rule as the timeline row the hit links to).
+  **`snippet`** is a plain-text substring of the stored body around the first match (~40 chars of
+  context either side, word-trimmed, `…` only on edges that were actually cut). Bodies are
+  redacted before ingest, so a snippet shows only what the report page already shows to the same
+  principal. The snippet is NOT HTML-escaped — escaping (and match highlighting) is the client's
+  job at render time, per the escape-before-highlight rule.
+- **Validation:** `q` is required; fewer than 2 chars after strip → `400 {"error": "query too short"}`
+  (a distinct state from "nothing matched", which is `200` with empty `hits`).
+- **Scoping:** the standard gate (`401` unauthenticated when gated; results only from allowed
+  projects). A term that exists only in an out-of-scope project returns a response
+  indistinguishable from searching for text that exists nowhere (existence-hiding preserved).
+  Not available on the public showcase.
+- Source: `store.search_reports` + `store.search_discussions` (scope enforced in SQL) →
+  `api.serialize_search`. Read-only; no producer/wire/store-schema change.
+
 ### `POST /checklist` (producer push — machine, not the SPA)
 
 The producer-side settings carrier (Bearer ingest token). Body `{"project": "<name>"}` plus **at least

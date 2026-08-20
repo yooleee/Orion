@@ -1228,3 +1228,173 @@ def test_project_disciplines_null_when_empty_cleared_set():
     like the never-pushed case, that should hide the section, not show an empty one.
     """
     assert _project({"cards": [], "updated_at": "2026-06-27T10:00:00+00:00"})["disciplines"] is None
+
+
+# --- serialize_search: the /api/search wire shape (S2.3 Unit 1) ---------------
+
+
+def _report_hit(body, *, id=1, project="demo", generated_at="2026-08-15T10:00:00+00:00"):
+    """Build a report dict in the _row_to_report shape with a chosen body.
+
+    Why: search hits reuse the store's full report shape; the serializer picks the
+    wire fields and derives title/snippet from the body, so tests vary only the body.
+    """
+    return {
+        "id": id,
+        "project": project,
+        "body": body,
+        "sections": [],
+        "participants": [],
+        "share_level": "high_level",
+        "lane": "raw",
+        "generated_at": generated_at,
+        "orion_version": "0.0.0",
+        "ingested_at": generated_at,
+        "author_id": None,
+        "author_name": None,
+    }
+
+
+def _discussion_hit(body, *, id=1, project="demo"):
+    """Build a discussion dict in the discussion_items_for_project shape."""
+    return {
+        "id": id,
+        "project": project,
+        "author_id": None,
+        "author_name": "Supervisor A",
+        "role": "supervisor",
+        "body": body,
+        "created_at": "2026-08-15T11:00:00+00:00",
+    }
+
+
+def test_search_emits_two_result_classes_with_their_own_cap_flags():
+    """The wire shape: query echoed, reports and discussions each {hits, capped},
+    report hits carrying id/project/title/generated_at/snippet and discussion hits
+    id/project/author_name/role/created_at/snippet — and nothing more.
+
+    Why this matters: this IS the Unit 2 contract. The two classes stay distinct
+    (never flattened), the cap flag travels with the list it caps, and neither hit
+    shape leaks store internals (no body, no author_id) — the snippet and title are
+    the only body-derived text on the wire.
+    """
+    out = api.serialize_search(
+        query="seam beta",
+        terms=["seam", "beta"],
+        report_hits=[_report_hit("Built the seam beta today.")],
+        reports_capped=True,
+        discussion_hits=[_discussion_hit("Is the seam beta done?")],
+        discussions_capped=False,
+    )
+
+    assert out["query"] == "seam beta"
+    assert out["reports"]["capped"] is True
+    assert out["discussions"]["capped"] is False
+    (r,) = out["reports"]["hits"]
+    assert r == {
+        "id": 1,
+        "project": "demo",
+        "title": "Built the seam beta today.",
+        "generated_at": "2026-08-15T10:00:00+00:00",
+        "snippet": "Built the seam beta today.",
+    }
+    (d,) = out["discussions"]["hits"]
+    assert d == {
+        "id": 1,
+        "project": "demo",
+        "author_name": "Supervisor A",
+        "role": "supervisor",
+        "created_at": "2026-08-15T11:00:00+00:00",
+        "snippet": "Is the seam beta done?",
+    }
+
+
+def test_search_snippet_windows_around_the_first_match():
+    """A match deep inside a long multi-line body yields a one-line snippet with
+    ellipses both sides, trimmed to word boundaries, containing the matched term.
+
+    Why this matters: the snippet is the reader's scent — it must show the match in
+    context without dumping the body, never cut mid-word at a truncated edge (word
+    fragments read as noise), and collapse newlines so a result row stays one line.
+    """
+    body = (
+        "First line of the report about many things.\n"
+        "Second line mentions the tokenizer benchmark in passing here.\n"
+        "Third line closes the report with a summary of everything else."
+    )
+    out = api.serialize_search(
+        query="benchmark",
+        terms=["benchmark"],
+        report_hits=[_report_hit(body)],
+        reports_capped=False,
+        discussion_hits=[],
+        discussions_capped=False,
+    )
+
+    snippet = out["reports"]["hits"][0]["snippet"]
+    assert "benchmark" in snippet
+    assert snippet.startswith("…") and snippet.endswith("…")
+    assert "\n" not in snippet  # one line, newlines collapsed
+    # Word-boundary trim: every piece between the ellipses is a whole word from the body.
+    for word in snippet.strip("…").split():
+        assert word in body
+
+
+def test_search_snippet_short_body_passes_through_whole():
+    """A body shorter than the window is the snippet verbatim — no ellipses.
+
+    Why this matters: ellipses assert "there is more"; on a short body that would be
+    a false claim (the no-silent-states discipline applies to presentation too).
+    """
+    out = api.serialize_search(
+        query="seam",
+        terms=["seam"],
+        report_hits=[_report_hit("Shipped the seam.")],
+        reports_capped=False,
+        discussion_hits=[],
+        discussions_capped=False,
+    )
+    assert out["reports"]["hits"][0]["snippet"] == "Shipped the seam."
+
+
+def test_search_snippet_centers_on_the_earliest_matching_term():
+    """With multiple terms, the snippet windows around whichever term appears FIRST
+    in the body, not the first term of the query.
+
+    Why this matters: "around the first match" is the settled snippet rule; keying it
+    to query order instead would make the snippet depend on how the user happened to
+    type the words.
+    """
+    filler = "word " * 30
+    body = f"alpha appears here early. {filler}omega appears far later."
+    out = api.serialize_search(
+        query="omega alpha",
+        terms=["omega", "alpha"],
+        report_hits=[_report_hit(body)],
+        reports_capped=False,
+        discussion_hits=[],
+        discussions_capped=False,
+    )
+    snippet = out["reports"]["hits"][0]["snippet"]
+    assert "alpha appears here early" in snippet
+    assert "omega" not in snippet
+
+
+def test_search_snippet_is_plain_text_passthrough():
+    """A markup-shaped body reaches the wire verbatim in the snippet — the server
+    neither strips nor encodes HTML.
+
+    Why this matters: escaping is the CLIENT's job at render time (the contract's
+    escape-before-highlight rule); if the server half-escaped, the SPA would
+    double-escape and real angle brackets in reports would render as entities. This
+    pin documents where the responsibility lives.
+    """
+    out = api.serialize_search(
+        query="script",
+        terms=["script"],
+        report_hits=[],
+        reports_capped=False,
+        discussion_hits=[_discussion_hit("beware <script>alert(1)</script> in bodies")],
+        discussions_capped=False,
+    )
+    assert "<script>alert(1)</script>" in out["discussions"]["hits"][0]["snippet"]

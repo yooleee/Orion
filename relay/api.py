@@ -1076,3 +1076,137 @@ def serialize_report(
         },
         "nav": _report_nav(report["id"], history, numbers),
     }
+
+
+# --- Search (S2.3 / KB Inc 3): the /api/search wire shape ---------------------
+
+# Context shown either side of the first match in a snippet. ~40 chars is enough to
+# read the sentence around the term without dumping the report; the value is a
+# presentation choice, so it lives here, not in the store.
+_SNIPPET_CONTEXT_CHARS = 40
+
+_WHITESPACE_RE = re.compile(r"\s")
+
+
+def _search_snippet(body: str, terms: list[str]) -> str:
+    """Extract a one-line plain-text snippet around the body's first term match.
+
+    Args:
+        body: The stored (already-redacted) body text the hit came from.
+        terms: The query terms; the window centers on whichever occurs EARLIEST in
+            the body (case-insensitive), not on query order.
+
+    Returns:
+        A single-line substring of `body` (~_SNIPPET_CONTEXT_CHARS chars either side
+        of the match), trimmed to word boundaries, whitespace collapsed, with "…" on
+        each edge that was actually cut. The whole body (collapsed) when it fits.
+
+    Why:
+        The snippet is presentation over stored text — a substring, never a rewrite,
+        so it discloses nothing the report page doesn't already show to the same
+        principal. Word-trimming only at CUT edges (and ellipses only there) keeps
+        "there is more" an honest signal. The store guarantees every term matches,
+        but a defensive fallback to the body's start keeps a mismatch (e.g. a future
+        semantics drift) a cosmetic bug, not a crash.
+    """
+    lower = body.lower()
+    first_pos: int | None = None
+    match_len = 0
+    for term in terms:
+        pos = lower.find(term.lower())
+        if pos != -1 and (first_pos is None or pos < first_pos):
+            first_pos, match_len = pos, len(term)
+    if first_pos is None:
+        first_pos, match_len = 0, 0
+
+    start = max(0, first_pos - _SNIPPET_CONTEXT_CHARS)
+    end = min(len(body), first_pos + match_len + _SNIPPET_CONTEXT_CHARS)
+
+    # Word-trim only where we actually cut into the body: advance a mid-word start to
+    # the next whitespace, retreat a mid-word end to the previous one. Searching only
+    # up to / back to the match keeps the matched term itself always inside the window.
+    if start > 0 and not _WHITESPACE_RE.match(body[start - 1]):
+        ws = _WHITESPACE_RE.search(body, start, first_pos)
+        if ws is not None:
+            start = ws.end()
+    if end < len(body) and not _WHITESPACE_RE.match(body[end]):
+        trailing = body[first_pos + match_len : end]
+        last_ws = None
+        for m in _WHITESPACE_RE.finditer(trailing):
+            last_ws = m
+        if last_ws is not None:
+            end = first_pos + match_len + last_ws.start()
+
+    # Collapse runs of whitespace (incl. newlines) so a result row reads as one line.
+    snippet = " ".join(body[start:end].split())
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(body) else ""
+    return f"{prefix}{snippet}{suffix}"
+
+
+def serialize_search(
+    *,
+    query: str,
+    terms: list[str],
+    report_hits: list[dict],
+    reports_capped: bool,
+    discussion_hits: list[dict],
+    discussions_capped: bool,
+) -> dict:
+    """Serialize search results (GET /api/search) — two distinct result classes.
+
+    Args:
+        query: The raw (stripped) query string, echoed back for the SPA's header.
+        terms: The whitespace-split terms the store matched on, for snippet windows.
+        report_hits: Matching reports newest first (store.search_reports — the full
+            _row_to_report shape; only wire fields + body-derived text leave here).
+        reports_capped: True when report hits were cut at the cap (store-computed).
+        discussion_hits: Matching discussion items newest first
+            (store.search_discussions).
+        discussions_capped: True when discussion hits were cut at the cap.
+
+    Returns:
+        {"query", "reports": {"hits", "capped"}, "discussions": {"hits", "capped"}}.
+        Report hits carry id/project/title/generated_at/snippet; discussion hits
+        carry id/project/author_name/role/created_at/snippet.
+
+    Why:
+        Reports and discussions are distinct result classes by design — one is a
+        producer's narrated update, the other a conversation turn — so the shape
+        keeps them separate rather than flattening to one list a client would have
+        to re-partition. Each class's `capped` rides next to the list it caps
+        (never a silent truncation). Grouping by project is left to the SPA: the
+        server ships flat newest-first data, the client owns presentation. title
+        reuses _headline so a result row reads exactly like the timeline row it
+        links to; author_id stays internal (same rule as every other serializer).
+    """
+    return {
+        "query": query,
+        "reports": {
+            "hits": [
+                {
+                    "id": r["id"],
+                    "project": r["project"],
+                    "title": _headline(r["body"]) if r["body"] else "",
+                    "generated_at": r["generated_at"],
+                    "snippet": _search_snippet(r["body"], terms),
+                }
+                for r in report_hits
+            ],
+            "capped": reports_capped,
+        },
+        "discussions": {
+            "hits": [
+                {
+                    "id": d["id"],
+                    "project": d["project"],
+                    "author_name": d["author_name"],
+                    "role": d["role"],
+                    "created_at": d["created_at"],
+                    "snippet": _search_snippet(d["body"], terms),
+                }
+                for d in discussion_hits
+            ],
+            "capped": discussions_capped,
+        },
+    }

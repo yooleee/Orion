@@ -61,6 +61,7 @@ from relay.store import (
     get_project_lifecycle,
     get_user_by_name,
     history,
+    ingest,
     list_projects,
     org_visible_projects,
     observed_history,
@@ -4649,3 +4650,143 @@ def test_pushed_disciplines_surface_on_the_project_page(tmp_path):
         ]
         # The freshness stamp is a non-empty ISO timestamp (the relay's receive time).
         assert disciplines["updated_at"]
+
+
+# --- GET /api/search (S2.3 Unit 1): search over reports + discussions ---------------
+
+
+def _seed_search_data(db):
+    """Seed two projects for the search authz tests, writing via the store directly.
+
+    Layout: project "mine" has a report containing "quasar" and a discussion item
+    containing "pulsar"; project "theirs" has a report AND a discussion item both
+    containing "nebular". So "nebular" exists ONLY out of a {mine}-scoped viewer's
+    scope, in both result classes.
+
+    Why: the authz tests need exact bodies in exact projects; the ingest HTTP path
+    would work too, but the endpoint under test is the READ side — direct store writes
+    keep the setup minimal (the write contract has its own tests).
+    """
+    conn = open_relay_store(db)
+    try:
+        for project, body in [
+            ("mine", "Observed a quasar in the logs."),
+            ("theirs", "The nebular refactor landed."),
+        ]:
+            ingest(
+                conn,
+                {
+                    "project": project,
+                    "participants": [],
+                    "share_level": "high_level",
+                    "lane": "raw",
+                    "body": body,
+                    "generated_at": "2026-08-15T00:00:00+00:00",
+                    "orion_version": "0.0.0",
+                    "sections": [["Code activity", "constant section text"]],
+                },
+                "2026-08-15T00:00:01+00:00",
+            )
+        add_discussion_item(
+            conn, "mine", None, "Supervisor A", "supervisor",
+            "Is the pulsar data in yet?", "2026-08-15T01:00:00+00:00",
+        )
+        add_discussion_item(
+            conn, "theirs", None, "Supervisor A", "supervisor",
+            "nebular question here", "2026-08-15T01:00:00+00:00",
+        )
+    finally:
+        conn.close()
+
+
+def test_api_search_requires_session_when_gated(tmp_path):
+    """Unauthenticated search on a gated relay is a 401, same as every data route.
+
+    Why this matters: authz negative (a) of the unit — the search surface must sit
+    behind the SAME cookie gate as the routes it draws from, with no anonymous probe.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+        status, body = _get_json(base_url, "/api/search?q=anything")
+        assert status == 401
+        assert body == {"error": "login required"}
+
+
+def test_api_search_rejects_short_or_missing_query(tmp_path):
+    """q absent, whitespace-only, or a single char is a 400 "query too short".
+
+    Why this matters: the settled minimum is 2 chars — a 1-char LIKE over every body
+    is a scan that matches half the corpus, useless as search and free load. The 400
+    (not an empty 200) tells the SPA the QUERY was invalid, not that nothing matched —
+    distinct states stay distinct on the wire.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        for q in ("/api/search", "/api/search?q=", "/api/search?q=%20%20", "/api/search?q=x"):
+            status, body = _get_json(base_url, q)
+            assert status == 400, q
+            assert body == {"error": "query too short"}
+
+
+def test_api_search_admin_sees_both_classes_across_projects(tmp_path):
+    """An admin (allowed=None) search returns report AND discussion hits from every
+    project, in the contract shape, echoing the query.
+
+    Why this matters: authz case (c) plus the happy-path contract — cross-project
+    reach is exactly the value the relay-side search adds over any single project page.
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _seed_search_data(db)
+        _provision_user(db, "Teammate B", "admin-key", role="admin")
+        cookie = _login(base_url, "admin-key")
+
+        status, out = _get_json(base_url, "/api/search?q=nebular", cookie=cookie)
+        assert status == 200
+        assert out["query"] == "nebular"
+        (report_hit,) = out["reports"]["hits"]
+        assert report_hit["project"] == "theirs"
+        assert report_hit["title"] == "The nebular refactor landed."
+        assert "nebular" in report_hit["snippet"]
+        assert out["reports"]["capped"] is False
+        (discussion_hit,) = out["discussions"]["hits"]
+        assert discussion_hit["project"] == "theirs"
+        assert discussion_hit["author_name"] == "Supervisor A"
+        assert "nebular" in discussion_hit["snippet"]
+
+        # A multi-term query survives URL encoding and ANDs the terms (matches the
+        # "quasar" report only when both words appear).
+        status, out = _get_json(base_url, "/api/search?q=quasar%20logs", cookie=cookie)
+        assert status == 200
+        assert [r["project"] for r in out["reports"]["hits"]] == ["mine"]
+
+        status, out = _get_json(base_url, "/api/search?q=quasar%20absentword", cookie=cookie)
+        assert out["reports"]["hits"] == []
+
+
+def test_api_search_scoped_viewer_gets_zero_hits_indistinguishable_from_absent(tmp_path):
+    """A viewer scoped to {mine} searching a term that exists ONLY in "theirs" gets a
+    response identical (modulo the echoed query text) to searching for a term that
+    exists nowhere — and their own in-scope hits still come back.
+
+    Why this matters: authz negative (b), the load-bearing test of the unit. If the
+    scope filter leaked ANY signal — a hit, a count, a capped flag — a scoped viewer
+    could probe for out-of-scope projects' content by searching words (existence-hiding
+    broken). Comparing the raw bodies after substituting the echoed query pins
+    "indistinguishable" at the byte level, not just "both look empty".
+    """
+    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+        _seed_search_data(db)
+        _provision_user(db, "Mum", "mum-key", role="viewer", projects=["mine"])
+        cookie = _login(base_url, "mum-key")
+
+        # In-scope search works: both classes, only from "mine".
+        status, out = _get_json(base_url, "/api/search?q=quasar", cookie=cookie)
+        assert status == 200
+        assert [r["project"] for r in out["reports"]["hits"]] == ["mine"]
+        status, out = _get_json(base_url, "/api/search?q=pulsar", cookie=cookie)
+        assert [d["project"] for d in out["discussions"]["hits"]] == ["mine"]
+
+        # The probe: "nebular" exists only out of scope (in BOTH stores); "qqqqqqq"
+        # exists nowhere. Same byte-length so the substitution proves body equality.
+        status_a, body_a = _get(base_url, "/api/search?q=nebular", cookie=cookie)
+        status_b, body_b = _get(base_url, "/api/search?q=qqqqqqq", cookie=cookie)
+        assert status_a == status_b == 200
+        assert body_a.replace("nebular", "qqqqqqq") == body_b

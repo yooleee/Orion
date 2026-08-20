@@ -96,6 +96,8 @@ from .store import (
     rename_user,
     revoke_credential,
     revoke_user,
+    search_discussions,
+    search_reports,
     set_about,
     set_due_soon_days,
     set_operated_by,
@@ -232,6 +234,12 @@ _MAX_BLOB_BYTES = 1_000_000
 # orion.bot.core.
 MAX_COMMENT_BODY_CHARS = 4_000
 MAX_AUTHOR_CHARS = 200
+
+# Minimum stripped length of a GET /api/search query (S2.3). A 1-char LIKE over every
+# stored body matches half the corpus — useless as search, free load as an endpoint —
+# so anything shorter is a 400, telling the SPA the QUERY was invalid (a distinct state
+# from "nothing matched", which is a 200 with empty hits).
+MIN_SEARCH_QUERY_CHARS = 2
 
 # Map an authenticated principal's relay_users role to its standing in a project
 # discussion thread (E2 Inc 5, Unit 2). The discussion role is ALWAYS derived here from the
@@ -1039,6 +1047,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 "/api/me",
                 "/api/portfolio",
                 "/api/scheduling",
+                "/api/search",
                 "/api/showcase",
             )
             or path.startswith("/api/projects/")
@@ -3049,13 +3058,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_spa_api(self, path: str) -> None:
-        """Serve the SPA's read-only JSON API (/api/me|portfolio|projects/*|reports/*).
+        """Serve the SPA's read-only JSON API (/api/me|portfolio|projects/*|reports/*|search).
 
         Args:
             path: The request path (already stripped of its query string).
 
         Why:
-            One handler shares the cookie gate + scope resolution across the four read
+            One handler shares the cookie gate + scope resolution across the read
             endpoints, exactly as the dashboard GET routes do — but answers JSON and a 401
             (not a 303) when a gated relay has no valid session, so the SPA's fetch can route
             itself to /login. Scope is enforced identically to the HTML routes: a viewer's
@@ -3112,6 +3121,38 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # 303) so the SPA's fetch can route itself to /login.
             if gated and principal is None:
                 self._send_json(401, {"error": "login required"})
+                return
+
+            if path == "/api/search":
+                # S2.3: search over the two append-only stores. Sits BELOW the 401 gate
+                # (an unauthenticated search never runs), and passes `allowed` into the
+                # store queries so the scope filter is enforced in SQL — an out-of-scope
+                # project contributes nothing, and the response for a term that exists
+                # only out of scope is indistinguishable from one that exists nowhere
+                # (existence-hiding, same rule as /api/projects). The dispatch matched on
+                # the bare path, so the query string is parsed here, per-route (the same
+                # idiom as the Bearer discussion pull).
+                params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                q = params.get("q", [""])[0].strip()
+                if len(q) < MIN_SEARCH_QUERY_CHARS:
+                    self._send_json(400, {"error": "query too short"})
+                    return
+                terms = q.split()
+                report_hits, reports_capped = search_reports(conn, terms, allowed)
+                discussion_hits, discussions_capped = search_discussions(
+                    conn, terms, allowed
+                )
+                self._send_json(
+                    200,
+                    api.serialize_search(
+                        query=q,
+                        terms=terms,
+                        report_hits=report_hits,
+                        reports_capped=reports_capped,
+                        discussion_hits=discussion_hits,
+                        discussions_capped=discussions_capped,
+                    ),
+                )
                 return
 
             if path == "/api/portfolio":

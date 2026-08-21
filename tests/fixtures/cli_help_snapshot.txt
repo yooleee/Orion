@@ -1,0 +1,761 @@
+# Orion CLI --help snapshot (COLUMNS=80, ORION_CONFIG unset).
+# Regenerate with: python scripts/help_snapshot.py --write
+
+$ orion --help
+usage: orion [-h]
+             {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,graduate-idea,projects,show,check,status,baseline,discussions,bot,relay-serve,relay-user,relay-project}
+             ...
+
+Turn local git activity into supervisor-ready progress updates.
+
+positional arguments:
+  {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,graduate-idea,projects,show,check,status,baseline,discussions,bot,relay-serve,relay-user,relay-project}
+    report              Generate and (after preview) send a progress report.
+    checklist-push      Push a project's current checklist to the relay (no
+                        report); --all for every project, --watch for live
+                        updates.
+    disciplines-push    Extract a project's disciplines from its docs and push
+                        them to the relay (no report).
+    intake              Send a pushed/hand-written update for a project (skips
+                        collectors & LLM).
+    relay-backfill      Push an already-sent report onto the relay dashboard
+                        (relay-only, no chat) — for reports sent before the
+                        relay was scoped in.
+    install-hook        Install a git hook that auto-reports a project on
+                        commit/push.
+    add-project         Register a new project in orion.toml (the only command
+                        that writes config).
+    graduate-idea       Register a graduated incubator idea as a new project
+                        (delegates to add-project).
+    projects            List the projects defined in the config (read-only).
+    show                Show one project's resolved config (read-only).
+    check               Validate the config and report send-readiness (read-
+                        only).
+    status              Show which projects have unreported activity across
+                        the config (read-only).
+    baseline            Mark a project's current state as already-reported
+                        WITHOUT sending, so the first real report covers only
+                        new activity (skips a giant first report).
+    discussions         Read and reply to a project's two-way supervisor
+                        discussion thread (E2 Inc 5).
+    bot                 Run the Slack bot (PARKED since KI-28 Stage 2; revived
+                        with per-user keys).
+    relay-serve         Run the local relay: receive pushed reports and serve
+                        a read-only dashboard.
+    relay-user          Manage relay dashboard users: provision, list, and
+                        revoke per-user access keys.
+    relay-project       Manage relay project settings: who inside the org may
+                        read a project, and whether it is still running or
+                        finished.
+
+options:
+  -h, --help            show this help message and exit
+
+$ orion report --help
+usage: orion report [-h] [--all] [--config CONFIG] [--yes] [--due] [project]
+
+positional arguments:
+  project          Project name as defined in orion.toml (omit when using
+                   --all).
+
+options:
+  -h, --help       show this help message and exit
+  --all            Report on every project in the config (for scheduled --all
+                   --yes runs).
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+  --yes, -y        Non-interactive: skip the preview for projects with
+                   auto_send=true (for unattended/scheduled runs). Projects
+                   without auto_send are skipped, never sent. Without --yes,
+                   every run previews as usual.
+  --due            With --all only: report just the projects DUE under their
+                   `cadence` (skip any reported within their interval).
+                   Projects with no cadence set are always due. Lets one
+                   scheduled `--all --due --yes` serve projects on mixed
+                   cadences from a single entry.
+
+$ orion checklist-push --help
+usage: orion checklist-push [-h] [--all] [--config CONFIG] [--due] [--watch]
+                            [--interval INTERVAL] [--clear-due-soon-days]
+                            [--clear-about]
+                            [project]
+
+positional arguments:
+  project               Project name as defined in orion.toml (omit when using
+                        --all; must enable `checklist`).
+
+options:
+  -h, --help            show this help message and exit
+  --all                 Push every checklist-enabled project in the config
+                        (for scheduled --all --due runs).
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+  --due                 With --all only: push just the projects DUE under
+                        their `cadence` (skip any pushed within their
+                        interval), and skip a due project whose content is
+                        unchanged since its last push. Projects with no
+                        cadence are always due. Lets one scheduled `--all
+                        --due` entry keep every tracker card fresh.
+  --watch               Single-project only: run a foreground loop that polls
+                        the tasks_file and pushes the checklist whenever it
+                        changes, until Ctrl-C (near-real-time edit tracking).
+                        Cannot combine with --all/--due.
+  --interval INTERVAL   Seconds between polls in --watch mode (default: 3.0).
+  --clear-due-soon-days
+                        Single-project only: clear this project's stored 'due
+                        soon' horizon on the relay, so it falls back to the
+                        default. The relay never clears a setting just because
+                        a push omits it (KI-35), so dropping `due_soon_days`
+                        from config leaves the old horizon in place until you
+                        run this.
+  --clear-about         Single-project only: clear this project's stored About
+                        line on the relay. Like --clear-due-soon-days, the
+                        relay never clears About just because a push omits it
+                        (KI-35), so removing `about_file` from config leaves
+                        the old About in place until you run this.
+
+$ orion disciplines-push --help
+usage: orion disciplines-push [-h] [--config CONFIG] [--clear] project
+
+positional arguments:
+  project          Project name as defined in orion.toml (must enable the
+                   'disciplines' collector).
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+  --clear          Retire this project's cards: push an EMPTY set
+                   deliberately. A normal push REFUSES to send an empty set
+                   (an unreadable doc would otherwise wipe the section
+                   silently), so this is the explicit way to clear it. Reads
+                   no docs and needs no API key.
+
+$ orion intake --help
+usage: orion intake [-h] [--config CONFIG] [--message MESSAGE] [--yes] project
+
+positional arguments:
+  project               Project name as defined in orion.toml.
+
+options:
+  -h, --help            show this help message and exit
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+  --message MESSAGE, -m MESSAGE
+                        The update body. If omitted, the body is read from
+                        stdin.
+  --yes, -y             Non-interactive: skip the preview and send (for the
+                        Claude session skill, which shows the summary for
+                        approval in-session first). Redaction still runs;
+                        without --yes the preview shows as usual.
+
+$ orion relay-backfill --help
+usage: orion relay-backfill [-h] [--config CONFIG] --generated-at GENERATED_AT
+                            [--body-file BODY_FILE] [--yes]
+                            project
+
+positional arguments:
+  project               Project name as defined in orion.toml.
+
+options:
+  -h, --help            show this help message and exit
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+  --generated-at GENERATED_AT
+                        ISO 8601 timestamp of when the report was ORIGINALLY
+                        sent (read it off the delivered Slack/Discord
+                        message). Sets the card's time on the dashboard; a
+                        naive value is treated as UTC.
+  --body-file BODY_FILE
+                        Path to a file holding the exact report body. If
+                        omitted, the body is read from stdin.
+  --yes, -y             Skip the preview/confirm and push (the content was
+                        already delivered once). Redaction still runs; without
+                        --yes the preview shows as usual.
+
+$ orion install-hook --help
+usage: orion install-hook [-h] [--hook {pre-push,post-commit}]
+                          [--config CONFIG] [--print] [--force]
+                          project
+
+positional arguments:
+  project               Project name as defined in orion.toml.
+
+options:
+  -h, --help            show this help message and exit
+  --hook {pre-push,post-commit}
+                        Which git hook to install (default: pre-push, which
+                        fires when you push — less noisy than post-commit,
+                        which fires on every commit).
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+  --print               Print the hook script to stdout instead of installing
+                        it (review first).
+  --force               Overwrite an existing hook of the same name.
+
+$ orion add-project --help
+usage: orion add-project [-h] [--repo-path REPO_PATH] [--like PROJECT]
+                         [--recipient "Name:channel:ENV_VAR"]
+                         [--share-level {high_level,detailed}]
+                         [--collectors COLLECTORS] [--tasks-file TASKS_FILE]
+                         [--notes-file NOTES_FILE]
+                         [--tracker-file TRACKER_FILE] [--seed-tasks-from DOC]
+                         [--config CONFIG] [--print] [--yes]
+                         [--incubator-file INCUBATOR_FILE]
+                         [name]
+
+positional arguments:
+  name                  Project name (default: the repo directory's name).
+
+options:
+  -h, --help            show this help message and exit
+  --repo-path REPO_PATH
+                        Path to the git repo (default: the current repo's top
+                        level, else cwd).
+  --like PROJECT        Copy recipients from this existing project (combine
+                        with or use instead of --recipient).
+  --recipient "Name:channel:ENV_VAR"
+                        Add a recipient (repeatable). Channel is "discord" or
+                        "slack"; the last field NAMES a .env variable.
+  --share-level {high_level,detailed}
+                        How much git detail to expose (default: high_level —
+                        no code diff).
+  --collectors COLLECTORS
+                        Comma-separated signals to enable (default: git). Any
+                        of: git,tasks,notes,incubator,tracker.
+  --tasks-file TASKS_FILE
+                        Path to the tasks checklist. If 'tasks' is enabled and
+                        this is omitted, defaults to <repo>/TODO.md and
+                        creates a starter checklist there.
+  --notes-file NOTES_FILE
+                        Path to the notes file (required if 'notes' is in
+                        --collectors).
+  --tracker-file TRACKER_FILE
+                        Path to the status-aware tracker doc (required if
+                        'tracker' is in --collectors).
+  --seed-tasks-from DOC
+                        When a tasks_file is being created (no --tasks-file
+                        given), seed its checklist from this doc's Markdown
+                        tables instead of an empty starter.
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+  --print               Print the stanza that would be written, and write
+                        nothing (review first).
+  --yes, -y             Write without the preview confirmation (for non-
+                        interactive callers).
+  --incubator-file INCUBATOR_FILE
+                        Path to the incubator index.md (required if
+                        'incubator' is in --collectors).
+
+$ orion graduate-idea --help
+usage: orion graduate-idea [-h] [--repo-path REPO_PATH] [--like PROJECT]
+                           [--recipient "Name:channel:ENV_VAR"]
+                           [--share-level {high_level,detailed}]
+                           [--collectors COLLECTORS] [--tasks-file TASKS_FILE]
+                           [--notes-file NOTES_FILE]
+                           [--tracker-file TRACKER_FILE]
+                           [--seed-tasks-from DOC] [--config CONFIG] [--print]
+                           [--yes] [--name NAME] [--incubator PROJECT]
+                           [--incubator-file INCUBATOR_FILE] [--force]
+                           idea
+
+positional arguments:
+  idea                  The incubator idea title to graduate (matched case-
+                        insensitively).
+
+options:
+  -h, --help            show this help message and exit
+  --repo-path REPO_PATH
+                        Path to the git repo (default: the current repo's top
+                        level, else cwd).
+  --like PROJECT        Copy recipients from this existing project (combine
+                        with or use instead of --recipient).
+  --recipient "Name:channel:ENV_VAR"
+                        Add a recipient (repeatable). Channel is "discord" or
+                        "slack"; the last field NAMES a .env variable.
+  --share-level {high_level,detailed}
+                        How much git detail to expose (default: high_level —
+                        no code diff).
+  --collectors COLLECTORS
+                        Comma-separated signals to enable (default: git). Any
+                        of: git,tasks,notes,incubator,tracker.
+  --tasks-file TASKS_FILE
+                        Path to the tasks checklist. If 'tasks' is enabled and
+                        this is omitted, defaults to <repo>/TODO.md and
+                        creates a starter checklist there.
+  --notes-file NOTES_FILE
+                        Path to the notes file (required if 'notes' is in
+                        --collectors).
+  --tracker-file TRACKER_FILE
+                        Path to the status-aware tracker doc (required if
+                        'tracker' is in --collectors).
+  --seed-tasks-from DOC
+                        When a tasks_file is being created (no --tasks-file
+                        given), seed its checklist from this doc's Markdown
+                        tables instead of an empty starter.
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+  --print               Print the stanza that would be written, and write
+                        nothing (review first).
+  --yes, -y             Write without the preview confirmation (for non-
+                        interactive callers).
+  --name NAME           Project name (default: a slug derived from the idea
+                        title).
+  --incubator PROJECT   Which incubator project's index to read (needed only
+                        if several exist).
+  --incubator-file INCUBATOR_FILE
+                        Read the index from this path directly (overrides the
+                        config lookup).
+  --force               Graduate even if the idea's status is not 'graduated'.
+
+$ orion projects --help
+usage: orion projects [-h] [--config CONFIG]
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion show --help
+usage: orion show [-h] [--config CONFIG] project
+
+positional arguments:
+  project          Project name as defined in orion.toml.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion check --help
+usage: orion check [-h] [--config CONFIG]
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion status --help
+usage: orion status [-h] [--config CONFIG]
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion baseline --help
+usage: orion baseline [-h] [--config CONFIG] project
+
+positional arguments:
+  project          Project name as defined in orion.toml.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion discussions --help
+usage: orion discussions [-h] {pull,reply} ...
+
+positional arguments:
+  {pull,reply}
+    pull        Pull new supervisor messages on a project's discussion thread.
+    reply       Post a developer reply to a project's discussion thread.
+
+options:
+  -h, --help    show this help message and exit
+
+$ orion discussions pull --help
+usage: orion discussions pull [-h] [--config CONFIG] [--json] [--all] project
+
+positional arguments:
+  project          Project name as defined in orion.toml.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+  --json           Emit the raw JSON response instead of the human-readable
+                   listing.
+  --all            Show the WHOLE thread without advancing the unread marker
+                   (the default shows only messages new since your last pull,
+                   and advances the marker).
+
+$ orion discussions reply --help
+usage: orion discussions reply [-h] [--as NAME] [--config CONFIG] project body
+
+positional arguments:
+  project          Project name as defined in orion.toml.
+  body             The reply text.
+
+options:
+  -h, --help       show this help message and exit
+  --as NAME        Display name for this reply (e.g. --as "Teammate B").
+                   Defaults to the label "developer". The role is always
+                   'developer' regardless of this name.
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion bot --help
+usage: orion bot [-h] [--config CONFIG]
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-serve --help
+usage: orion relay-serve [-h] [--host HOST] [--port PORT] [--db DB]
+                         [--token-env TOKEN_ENV]
+                         [--view-token-env VIEW_TOKEN_ENV]
+                         [--require-view-auth] [--timezone TIMEZONE]
+                         [--session-days SESSION_DAYS] [--allow-legacy-admin]
+                         [--disable-legacy-ingest] [--web-dir WEB_DIR]
+                         [--showcase] [--showcase-project NAME[:"blurb"]]
+                         [--config CONFIG]
+
+options:
+  -h, --help            show this help message and exit
+  --host HOST           Interface to bind (default: 127.0.0.1 — loopback only,
+                        not world-reachable).
+  --port PORT           Port to bind (default: 8787).
+  --db DB               Path to the relay's own sqlite store (default: orion-
+                        relay.sqlite3).
+  --token-env TOKEN_ENV
+                        Name of the .env variable holding the ingest token
+                        (default: ORION_RELAY_TOKEN). Must match the token
+                        your pushing config's [relay] token_env_var resolves
+                        to.
+  --view-token-env VIEW_TOKEN_ENV
+                        Name of the .env variable holding the dashboard read
+                        secret for HTTP Basic auth (default:
+                        ORION_RELAY_VIEW_TOKEN). REQUIRED when --host is non-
+                        loopback; optional on loopback (reads stay open).
+  --require-view-auth   Demand the dashboard view secret even on a loopback
+                        bind. Use this when the relay runs on loopback behind
+                        a reverse proxy (the proxy exposes it, so 'loopback'
+                        isn't actually private) — a forgotten secret then
+                        fails closed instead of serving an open dashboard. See
+                        docs/deployment.md.
+  --timezone TIMEZONE   IANA zone the dashboard renders timestamps in
+                        (default: America/Los_Angeles). The relay does not
+                        read orion.toml, so this is set here. Examples:
+                        --timezone UTC, --timezone "Europe/London". An unknown
+                        zone is rejected at startup.
+  --session-days SESSION_DAYS
+                        Dashboard login session length in days (default: 30).
+  --allow-legacy-admin  Keep the legacy shared view key usable as an admin
+                        login even after per-user accounts exist (default: off
+                        — it is bootstrap-only, usable only while no users
+                        have been provisioned).
+  --disable-legacy-ingest
+                        Retire the shared ingest token on the push path
+                        (default: off — the shared token keeps working,
+                        anonymously, for backward compatibility). Turn this on
+                        once every producer has its own contributor key: the
+                        shared token then 401s and only named per-user keys
+                        can push. Each legacy use logs a line first, so you
+                        can confirm it has gone quiet before flipping this.
+  --web-dir WEB_DIR     Path to the built SPA assets (e.g. web/dist) to serve
+                        single-host. When set, the relay serves the React
+                        dashboard (static assets + an index.html fallback)
+                        instead of the legacy server-rendered HTML. Omit to
+                        serve the legacy HTML.
+  --showcase            Enable the public, no-login Showcase surface (default:
+                        off). When on, GET /api/showcase serves ONLY the
+                        projects named with --showcase-project; while off it
+                        404s and the dashboard hides the Public showcase link.
+  --showcase-project NAME[:"blurb"]
+                        Add a project to the public Showcase allowlist
+                        (repeatable; order is the display order). Optionally
+                        append a curated one-line blurb after a colon, e.g.
+                        --showcase-project 'orion:A local-first tracker that
+                        observes & reframes'. Without a blurb the project's
+                        latest report headline is shown. Only effective with
+                        --showcase.
+  --config CONFIG       Path to the config file, used only to locate .env
+                        (default: orion.toml; or set $ORION_CONFIG).
+
+$ orion relay-user --help
+usage: orion relay-user [-h]
+                        {add,list,revoke,grant,key,password,role,rename,set-operator,delete}
+                        ...
+
+positional arguments:
+  {add,list,revoke,grant,key,password,role,rename,set-operator,delete}
+    add                 Provision a new user and print their one-time access
+                        key.
+    list                List the relay's users (no credential material is
+                        shown).
+    revoke              Revoke a user: deactivate their key and force-log-out
+                        any live session.
+    grant               Grant an existing user access to one or more
+                        additional projects.
+    key                 Manage an account's key credentials (add/list/revoke)
+                        — replaces `rotate`.
+    password            Manage an interactive account's password (set/unlock).
+    role                Change an account's role (logs out live sessions; a
+                        scoped role needs grants).
+    rename              Rename an account (already-recorded history keeps the
+                        name it was written with).
+    set-operator        Repoint an agent account at a different operating
+                        human.
+    delete              Hard-delete a user, freeing their name to be reused
+                        (revoke keeps the name).
+
+options:
+  -h, --help            show this help message and exit
+
+$ orion relay-user add --help
+usage: orion relay-user add [-h]
+                            [--role {viewer,admin,supervisor,member,contributor}]
+                            [--project PROJECT] [--kind {human,agent}]
+                            [--operated-by NAME] [--config CONFIG]
+                            name
+
+positional arguments:
+  name                  The user's unique display name / handle.
+
+options:
+  -h, --help            show this help message and exit
+  --role {viewer,admin,supervisor,member,contributor}
+                        The user's role (default: viewer). An admin sees all
+                        projects; a viewer or supervisor is scoped to its
+                        granted projects (a supervisor may also post to a
+                        project's discussion thread). A contributor is a push-
+                        only producer identity: its key authenticates the
+                        ingest endpoints for its granted projects but never
+                        grants dashboard login. A member is a read-only ORG
+                        INSIDER: it sees every org-visible project with no
+                        grant at all, plus any grants on top, and can never
+                        write anything.
+  --project PROJECT     A project this viewer may see (repeatable: --project a
+                        --project b). Ignored for an admin's dashboard reads
+                        (which see all), but NOT for pushes: every key is
+                        scoped to its account's grants. A viewer with none
+                        sees nothing.
+  --kind {human,agent}  What this account IS (default: human). An 'agent' is a
+                        machine identity (Claude Code, a CI job) that pushes
+                        on a human's behalf: it must have role contributor and
+                        requires --operated-by.
+  --operated-by NAME    For --kind agent: the human account this agent acts on
+                        behalf of. Its work stays attributed to the agent
+                        (badged, 'operated by <name>'), so provenance is never
+                        lost.
+  --config CONFIG       Path to the config file (default: orion.toml; or set
+                        $ORION_CONFIG).
+
+$ orion relay-user list --help
+usage: orion relay-user list [-h] [--config CONFIG]
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user revoke --help
+usage: orion relay-user revoke [-h] [--config CONFIG] name
+
+positional arguments:
+  name             The user to revoke (by name).
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user grant --help
+usage: orion relay-user grant [-h] [--project PROJECT] [--config CONFIG] name
+
+positional arguments:
+  name               The user whose scope to widen (by name).
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A project to grant (repeatable: --project a --project b).
+                     At least one required.
+  --config CONFIG    Path to the config file (default: orion.toml; or set
+                     $ORION_CONFIG).
+
+$ orion relay-user key --help
+usage: orion relay-user key [-h] {add,list,revoke} ...
+
+positional arguments:
+  {add,list,revoke}
+    add              Attach a NEW key to an account (shown once); the existing
+                     keys keep working.
+    list             List an account's credentials (never shows the key
+                     material itself).
+    revoke           Revoke ONE credential by id; the account's other keys
+                     keep working.
+
+options:
+  -h, --help         show this help message and exit
+
+$ orion relay-user key add --help
+usage: orion relay-user key add [-h] --label LABEL [--config CONFIG] name
+
+positional arguments:
+  name             The account to attach the key to.
+
+options:
+  -h, --help       show this help message and exit
+  --label LABEL    A short label for where this key lives, e.g. 'mac' or
+                   'wsl2' (unique per account).
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user key list --help
+usage: orion relay-user key list [-h] [--config CONFIG] name
+
+positional arguments:
+  name             The account whose credentials to list.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user key revoke --help
+usage: orion relay-user key revoke [-h] --id ID [--config CONFIG] name
+
+positional arguments:
+  name             The account the credential belongs to.
+
+options:
+  -h, --help       show this help message and exit
+  --id ID          The credential id to revoke (from `key list` — labels are
+                   reusable, ids are not).
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user password --help
+usage: orion relay-user password [-h] {set,unlock} ...
+
+positional arguments:
+  {set,unlock}
+    set         Set/replace a password (prompts twice, hidden). Their keys
+                stop logging in.
+    unlock      Clear a login lockout after failed attempts (does not change
+                the password).
+
+options:
+  -h, --help    show this help message and exit
+
+$ orion relay-user password set --help
+usage: orion relay-user password set [-h] [--generate] [--config CONFIG] name
+
+positional arguments:
+  name             The interactive account to set a password for.
+
+options:
+  -h, --help       show this help message and exit
+  --generate       Have the relay mint a strong password and print it ONCE,
+                   instead of prompting.
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user password unlock --help
+usage: orion relay-user password unlock [-h] [--config CONFIG] name
+
+positional arguments:
+  name             The account to unlock.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user role --help
+usage: orion relay-user role [-h] [--config CONFIG] name role
+
+positional arguments:
+  name             The account whose role to change.
+  role             The new role: admin | viewer | supervisor | member |
+                   contributor.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user rename --help
+usage: orion relay-user rename [-h] [--config CONFIG] name new_name
+
+positional arguments:
+  name             The account to rename.
+  new_name         The new (unique) name.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user set-operator --help
+usage: orion relay-user set-operator [-h] [--config CONFIG] name operator
+
+positional arguments:
+  name             The agent account to reassign.
+  operator         The human account this agent should act on behalf of.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-user delete --help
+usage: orion relay-user delete [-h] [--config CONFIG] name
+
+positional arguments:
+  name             The user to delete (by name).
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).
+
+$ orion relay-project --help
+usage: orion relay-project [-h] {visibility,lifecycle} ...
+
+positional arguments:
+  {visibility,lifecycle}
+    visibility          Set whether a project is org-visible or grant-only
+                        (restricted).
+    lifecycle           Mark a project finished (past) or still running
+                        (active).
+
+options:
+  -h, --help            show this help message and exit
+
+$ orion relay-project visibility --help
+usage: orion relay-project visibility [-h] [--config CONFIG]
+                                      name {org,restricted}
+
+positional arguments:
+  name              The project to set.
+  {org,restricted}  'org': every member-role account may read it with no per-
+                    project grant. 'restricted' (the default for every
+                    project): grant-only. Viewers and supervisors are
+                    unaffected either way — they always see only their grants.
+
+options:
+  -h, --help        show this help message and exit
+  --config CONFIG   Path to the config file (default: orion.toml; or set
+                    $ORION_CONFIG).
+
+$ orion relay-project lifecycle --help
+usage: orion relay-project lifecycle [-h] [--config CONFIG] name {past,active}
+
+positional arguments:
+  name             The project to set.
+  {past,active}    'past': the project is finished — it groups into the
+                   dashboard's 'Past projects' section and drops out of every
+                   deadline view (due-soon, at-risk, slipping, Scheduling), so
+                   it can never read as overdue. 'active' (the default every
+                   project is born with): the normal live state. Fully
+                   reversible.
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Path to the config file (default: orion.toml; or set
+                   $ORION_CONFIG).

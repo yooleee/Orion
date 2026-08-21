@@ -1468,7 +1468,13 @@ Deferred).
   unauthenticated browser gets anyway. The fix shape is small: an `/api/` prefix guard
   ahead of the SPA fallback that returns a JSON 404 for paths no route matched.
 - **Severity:** low (developer-experience / API hygiene).
-- **Status:** Open. Found by DF2 (2026-08-20).
+- **Status:** **Resolved** (2026-08-21, CS-O PR2): the reserved `/api` namespace now answers
+  a JSON 404 for every unmatched path ahead of the SPA fallback, in both serving modes —
+  and for **every HTTP method**: PUT/DELETE/PATCH/OPTIONS/HEAD (which used to hit the
+  stdlib's HTML 501 even under `/api`) route through the same JSON 404 (HEAD body-less),
+  while keeping the stdlib 501 outside `/api`. The SPA client needed no change:
+  `web/src/api/client.ts` already branches on `res.ok` and parses `{error}` bodies, so the
+  fix turns its former parse crash into a clean `ApiError(404)`. Found by DF2 (2026-08-20).
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

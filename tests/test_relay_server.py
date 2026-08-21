@@ -3955,6 +3955,95 @@ def test_api_still_json_when_web_dir_set(tmp_path):
         assert status == 200 and me["gated"] is False
 
 
+# --- KI-51: unknown /api/* answers a JSON 404, never the SPA shell -------------------
+
+
+def _request(base_url, path, method):
+    """Issue an arbitrary-method request; return (status, content_type, body_bytes).
+
+    urllib raises HTTPError for 4xx/5xx — that error object IS the response here, so
+    both arms read status/headers/body the same way.
+    """
+    req = urllib.request.Request(base_url + path, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, resp.headers.get("Content-Type", ""), resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers.get("Content-Type", ""), err.read()
+
+
+def test_unknown_api_get_is_json_404_not_the_spa_shell(tmp_path):
+    """With --web-dir, an unmatched GET under /api answers a JSON 404, not index.html.
+
+    Why this matters: KI-51 — the SPA's client-routing fallback used to swallow API
+    typos, so `GET /api/projects` (the real route is /api/portfolio; the exact probe a
+    DF2 script guessed) returned 200 text/html and the caller saw a JSONDecodeError
+    instead of "wrong endpoint". Real client routes must STILL fall through to the
+    shell, or the fix breaks the SPA to fix the API.
+    """
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        for path in ("/api/projects", "/api/nope", "/api", "/api/"):
+            status, ctype, body = _request(base_url, path, "GET")
+            assert status == 404, path
+            assert "application/json" in ctype, path
+            assert json.loads(body) == {"error": "not found"}, path
+        # The SPA fallback survived for genuine client routes.
+        status, ctype, body = _request(base_url, "/project/orion", "GET")
+        assert status == 200 and b"id=root" in body
+
+
+def test_unknown_api_other_methods_are_json_404(tmp_path):
+    """PUT/DELETE/PATCH/OPTIONS under /api answer the same JSON 404; HEAD is body-less.
+
+    Why this matters: the relay routes only GET and POST, so these methods used to hit
+    the stdlib's HTML 501 page even inside /api. The CS-O contract is that the API
+    namespace answers as an API for EVERY method. HEAD gets the status + JSON content
+    type with no body (RFC 9110: a HEAD response carries no content).
+    """
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        for method in ("PUT", "DELETE", "PATCH", "OPTIONS"):
+            status, ctype, body = _request(base_url, "/api/nope", method)
+            assert status == 404, method
+            assert "application/json" in ctype, method
+            assert json.loads(body) == {"error": "not found"}, method
+        # A wrong method on a REAL route is also a 404 (there are zero PUT routes; a
+        # 405 map for methods nothing uses would be speculative structure).
+        assert _request(base_url, "/api/portfolio", "PUT")[0] == 404
+
+        status, ctype, body = _request(base_url, "/api/nope", "HEAD")
+        assert status == 404 and "application/json" in ctype and body == b""
+
+
+def test_unrouted_methods_outside_api_keep_the_stdlib_501(tmp_path):
+    """A PUT to a non-API path still answers the stdlib's 501, unchanged by KI-51.
+
+    Why this matters: the JSON-404 contract is scoped to the reserved /api namespace.
+    Outside it these methods keep their pre-existing behavior byte-for-byte, so the
+    change cannot ripple into anything that probed the server's method support.
+    """
+    web = _build_web_dir(tmp_path)
+    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+        status, ctype, _body = _request(base_url, "/project/orion", "PUT")
+        assert status == 501
+        assert "text/html" in ctype  # the stdlib's error page, not the API's JSON
+
+
+def test_unknown_api_get_is_json_404_headless_too(tmp_path):
+    """Without --web-dir the same unmatched /api GET answers the same JSON 404.
+
+    Why this matters: headless mode already 404'd everything unmatched; this pins that
+    the KI-51 guard kept the two serving modes answering identically for the API
+    namespace, so a client cannot tell (or need to care) whether a relay serves a SPA.
+    """
+    with _running_relay(tmp_path) as (base_url, _db):
+        status, ctype, body = _request(base_url, "/api/nope", "GET")
+        assert status == 404
+        assert "application/json" in ctype
+        assert json.loads(body) == {"error": "not found"}
+
+
 def test_no_web_dir_is_api_only(tmp_path):
     """Without --web-dir the relay is API-only/headless: "/" 404s JSON; /api/me still 200s.
 

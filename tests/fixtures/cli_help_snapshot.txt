@@ -478,17 +478,18 @@ options:
 
 $ orion relay-user --help
 usage: orion relay-user [-h]
-                        {add,list,revoke,grant,ungrant,key,password,role,rename,set-operator,delete}
+                        {add,list,deactivate,grant,ungrant,key,password,role,rename,set-operator,delete}
                         ...
 
 positional arguments:
-  {add,list,revoke,grant,ungrant,key,password,role,rename,set-operator,delete}
+  {add,list,deactivate,grant,ungrant,key,password,role,rename,set-operator,delete}
     add                 Provision a new user and print their one-time access
                         key.
     list                List the relay's users (no credential material is
                         shown).
-    revoke              Revoke a user: deactivate their key and force-log-out
-                        any live session.
+    deactivate          Deactivate an account: its keys stop authenticating
+                        and any live session is logged out. Keeps the name
+                        (use `delete` to free it).
     grant               Grant an existing user access to one or more
                         additional projects.
     ungrant             Remove one or more projects from an existing user's
@@ -503,7 +504,7 @@ positional arguments:
     set-operator        Repoint an agent account at a different operating
                         human.
     delete              Hard-delete a user, freeing their name to be reused
-                        (revoke keeps the name).
+                        (deactivate keeps the name).
 
 options:
   -h, --help            show this help message and exit
@@ -512,7 +513,8 @@ $ orion relay-user add --help
 usage: orion relay-user add [-h]
                             [--role {viewer,admin,supervisor,member,contributor}]
                             [--project PROJECT] [--kind {human,agent}]
-                            [--operated-by NAME] [--config CONFIG]
+                            [--operated-by NAME] [--key-only]
+                            [--config CONFIG]
                             name
 
 positional arguments:
@@ -544,6 +546,9 @@ options:
                         behalf of. Its work stays attributed to the agent
                         (badged, 'operated by <name>'), so provenance is never
                         lost.
+  --key-only            Scripting mode: print ONLY the new access key (plus a
+                        newline) on stdout — no provisioning summary. Errors
+                        still go to stderr.
   --config CONFIG       Path to the config file (default: orion.toml; or set
                         $ORION_CONFIG).
 
@@ -555,11 +560,11 @@ options:
   --config CONFIG  Path to the config file (default: orion.toml; or set
                    $ORION_CONFIG).
 
-$ orion relay-user revoke --help
-usage: orion relay-user revoke [-h] [--config CONFIG] name
+$ orion relay-user deactivate --help
+usage: orion relay-user deactivate [-h] [--config CONFIG] name
 
 positional arguments:
-  name             The user to revoke (by name).
+  name             The user to deactivate (by name).
 
 options:
   -h, --help       show this help message and exit
@@ -609,7 +614,9 @@ options:
   -h, --help         show this help message and exit
 
 $ orion relay-user key add --help
-usage: orion relay-user key add [-h] --label LABEL [--config CONFIG] name
+usage: orion relay-user key add [-h] [--label LABEL] [--key-only]
+                                [--config CONFIG]
+                                name
 
 positional arguments:
   name             The account to attach the key to.
@@ -617,7 +624,13 @@ positional arguments:
 options:
   -h, --help       show this help message and exit
   --label LABEL    A short label for where this key lives, e.g. 'mac' or
-                   'wsl2' (unique per account).
+                   'wsl2' (default: 'key'). Labels must be unique among an
+                   account's ACTIVE keys — adding a second key without --label
+                   is rejected by the relay (409), so name each additional
+                   key.
+  --key-only       Scripting mode: print ONLY the new access key (plus a
+                   newline) on stdout — no summary or next-steps. Errors still
+                   go to stderr.
   --config CONFIG  Path to the config file (default: orion.toml; or set
                    $ORION_CONFIG).
 

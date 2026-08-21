@@ -3005,11 +3005,13 @@ def test_relay_user_list_empty_is_friendly(tmp_path, monkeypatch, capsys):
     assert "No relay users" in capsys.readouterr().out
 
 
-def test_relay_user_revoke_calls_client_and_confirms(tmp_path, monkeypatch, capsys):
-    """`relay-user revoke <name>` calls the client with the resolved URL+token+name.
+def test_relay_user_deactivate_calls_client_and_confirms(tmp_path, monkeypatch, capsys):
+    """`relay-user deactivate <name>` calls the client with the resolved URL+token+name.
 
-    Why this matters: revocation is the settled Inc-1 safety valve; the command must thread
-    the name to the client and confirm the deactivation to the operator.
+    Why this matters: immediate cutoff is the settled Inc-1 safety valve; the command must
+    thread the name to the client and confirm the deactivation to the operator. The verb
+    renamed from `revoke` in CS-O PR3 (clean break); the wire client (`relay_revoke_user`)
+    deliberately keeps its route-derived name.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
@@ -3023,14 +3025,14 @@ def test_relay_user_revoke_calls_client_and_confirms(tmp_path, monkeypatch, caps
         lambda url, token, name, **k: calls.append((url, token, name))
         or {"name": name, "revoked": True},
     )
-    code = cli.main(["relay-user", "revoke", "alice", "--config", str(toml)])
+    code = cli.main(["relay-user", "deactivate", "alice", "--config", str(toml)])
     assert code == 0
     assert calls == [("https://relay.test/ingest", "admin-secret", "alice")]
-    assert "Revoked" in capsys.readouterr().out
+    assert "Deactivated" in capsys.readouterr().out
 
 
-def test_relay_user_revoke_unknown_user_is_clean_error(tmp_path, monkeypatch, capsys):
-    """Revoking an unknown name surfaces the relay's 404 as a clean exit 1.
+def test_relay_user_deactivate_unknown_user_is_clean_error(tmp_path, monkeypatch, capsys):
+    """Deactivating an unknown name surfaces the relay's 404 as a clean exit 1.
 
     Why this matters: a typo'd name must be an actionable message, not a crash.
     """
@@ -3048,9 +3050,152 @@ def test_relay_user_revoke_unknown_user_is_clean_error(tmp_path, monkeypatch, ca
             DeliveryError("Relay returned HTTP 404: no user named 'ghost'")
         ),
     )
-    code = cli.main(["relay-user", "revoke", "ghost", "--config", str(toml)])
+    code = cli.main(["relay-user", "deactivate", "ghost", "--config", str(toml)])
     assert code == 1
     assert "404" in capsys.readouterr().err
+
+
+# --- CS-O PR3: --key-only scripting mode + the optional key-add label ----------------
+
+
+def test_relay_user_add_key_only_prints_exactly_the_key(tmp_path, monkeypatch, capsysbinary):
+    """`relay-user add --key-only` writes the raw key + one newline to stdout — nothing else.
+
+    Why this matters: the kickoff's scripting contract, pinned on BYTES: no headings,
+    prose, or ANSI, so `KEY=$(orion relay-user add ci --role contributor --key-only)`
+    captures a clean credential. Any extra byte on stdout breaks every script consumer.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_create_user",
+        lambda *a, **k: {
+            "name": "ci", "role": "contributor", "projects": [], "key": "nxi_test_key_123",
+        },
+    )
+    code = cli.main(
+        ["relay-user", "add", "ci", "--role", "contributor", "--key-only", "--config", str(toml)]
+    )
+    assert code == 0
+    out = capsysbinary.readouterr().out
+    assert out == b"nxi_test_key_123\n"  # byte-exact: the whole contract
+
+
+def test_relay_user_key_add_key_only_prints_exactly_the_key(
+    tmp_path, monkeypatch, capsysbinary
+):
+    """`relay-user key add --key-only` writes the raw key + one newline — no safe-sequence prose."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_add_user_key",
+        lambda *a, **k: {"name": "ci", "label": "key", "id": 2, "key": "nxi_second_key_456"},
+    )
+    code = cli.main(["relay-user", "key", "add", "ci", "--key-only", "--config", str(toml)])
+    assert code == 0
+    assert capsysbinary.readouterr().out == b"nxi_second_key_456\n"
+
+
+def test_key_only_failure_writes_nothing_to_stdout(tmp_path, monkeypatch, capsysbinary):
+    """A failed --key-only call leaves stdout EMPTY (errors on stderr only).
+
+    Why this matters: the kickoff pin "no partial key output on failure" — a script doing
+    KEY=$(...) must see an empty capture + nonzero exit, never a fragment or an error
+    message where the key belongs.
+    """
+    from orion.delivery import DeliveryError
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_create_user",
+        lambda *a, **k: (_ for _ in ()).throw(DeliveryError("Relay returned HTTP 409")),
+    )
+    code = cli.main(["relay-user", "add", "ci", "--key-only", "--config", str(toml)])
+    captured = capsysbinary.readouterr()
+    assert code == 1
+    assert captured.out == b""
+    assert b"409" in captured.err
+
+
+def test_relay_user_key_add_label_defaults_to_the_constant_key(tmp_path, monkeypatch, capsys):
+    """`key add` without --label threads the neutral constant "key" to the relay.
+
+    Why this matters: the kickoff requires a constant default (NOT hostname-derived — no
+    machine name may leak into relay state) so the one-key common case needs no flag.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_add_user_key",
+        lambda url, token, name, label, **k: calls.append(label)
+        or {"name": name, "label": label, "id": 2, "key": "nxi_k"},
+    )
+    code = cli.main(["relay-user", "key", "add", "ci", "--config", str(toml)])
+    assert code == 0
+    assert calls == ["key"]
+
+
+def test_relay_user_key_add_duplicate_label_409_is_a_clean_error(
+    tmp_path, monkeypatch, capsys
+):
+    """A duplicate active label (e.g. a second label-less add) surfaces the 409, exit 1.
+
+    Why this matters: the defined duplicate-label behavior (CS-O PR3): the relay rejects,
+    the CLI reports it cleanly — deliberately NOT auto-uniquified, so every credential's
+    label is a name someone chose (or the documented default), never invented.
+    """
+    from orion.delivery import DeliveryError
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_add_user_key",
+        lambda *a, **k: (_ for _ in ()).throw(
+            DeliveryError("Relay returned HTTP 409: label 'key' already active")
+        ),
+    )
+    code = cli.main(["relay-user", "key", "add", "ci", "--config", str(toml)])
+    assert code == 1
+    assert "409" in capsys.readouterr().err
+
+
+def test_relay_user_old_revoke_verb_is_gone(tmp_path, monkeypatch, capsys):
+    """`relay-user revoke` no longer parses — the rename is a clean break, no alias.
+
+    Why this matters: CS-O decision 2 — no alias layer. An operator typing the old verb
+    must get argparse's unknown-choice error (exit 2), not silently reach the handler.
+    (`key revoke` still exists — credential-level revoke deliberately keeps its name.)
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["relay-user", "revoke", "alice", "--config", str(toml)])
+    assert exc.value.code == 2  # argparse invalid-choice
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_relay_user_grant_calls_client_and_prints_new_scope(tmp_path, monkeypatch, capsys):
@@ -4296,7 +4441,7 @@ _LEAF_COMMANDS = [
     ["install-hook"], ["add-project"], ["graduate-idea"], ["projects"], ["show"], ["check"],
     ["status"], ["baseline"], ["discussions", "pull"], ["discussions", "reply"], ["bot"],
     ["relay-serve"],
-    ["relay-user", "add"], ["relay-user", "list"], ["relay-user", "revoke"],
+    ["relay-user", "add"], ["relay-user", "list"], ["relay-user", "deactivate"],
     ["relay-user", "grant"], ["relay-user", "ungrant"],
     ["relay-user", "key", "add"], ["relay-user", "key", "list"],
     ["relay-user", "key", "revoke"], ["relay-user", "password", "set"],

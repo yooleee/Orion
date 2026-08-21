@@ -81,7 +81,7 @@ People sign in with a name and password; machines hold keys. The two never overl
 
 | Command | What it does |
 |---|---|
-| `orion relay-user add <name>` | Provision an account and print its access key **once** (never retrievable later, only revocable). `--role` is one of `viewer` (default), `supervisor`, `member`, `admin`, `contributor`. |
+| `orion relay-user add <name>` | Provision an account and print its access key **once** (never retrievable later, only revocable). `--role` is one of `viewer` (default), `supervisor`, `member`, `admin`, `contributor`. `--key-only` prints just the raw key, for scripts (`KEY=$(orion relay-user add ci --role contributor --key-only)`). |
 | `orion relay-user add <name> --role viewer --project a --project b` | A **viewer** scoped to specific projects (`--project` repeatable). A viewer with no projects sees nothing. |
 | `orion relay-user add <name> --role member` | A **member**: read-only org insider. Sees every **org-visible** project with no grants at all, plus any grants on top. Can write nothing. |
 | `orion relay-user add <name> --role admin` | An **admin** sees **all** projects on the dashboard. Note its *keys* are still contributor-bounded to its grants — no machine credential ever carries unrestricted push. |
@@ -92,7 +92,7 @@ People sign in with a name and password; machines hold keys. The two never overl
 | `orion relay-user role <name> <role>` | Change a role. Bumps the session version, so live sessions are logged out. |
 | `orion relay-user rename <name> <new>` | Rename an account. Already-recorded history keeps the name it was written with. |
 | `orion relay-user set-operator <agent> <human>` | Repoint an agent at a different operator. Moves display grouping only; provenance is untouched. |
-| `orion relay-user revoke <name>` | Immediate cutoff: deactivates the account **and all its credentials**, and force-logs-out live sessions. Keeps the name. |
+| `orion relay-user deactivate <name>` | Immediate cutoff: deactivates the account **and all its credentials**, and force-logs-out live sessions. Keeps the name (renamed from `revoke` in the CS-O overhaul; credential-level `key revoke` keeps its name). |
 | `orion relay-user delete <name>` | Hard-delete, freeing the `UNIQUE` name to reuse. Blocked while the account still operates active agents. |
 
 ### Credentials
@@ -101,7 +101,7 @@ People sign in with a name and password; machines hold keys. The two never overl
 |---|---|
 | `orion relay-user password set <name>` | Set a human's password — prompts twice, hidden. `--generate` mints a strong one and prints it **once**. Never accepts a password as an argument. |
 | `orion relay-user password unlock <name>` | Clear a login lockout without changing a password the person still knows. |
-| `orion relay-user key add <name> --label <l>` | Attach **another** key to an account; existing keys keep working. |
+| `orion relay-user key add <name> [--label <l>]` | Attach **another** key to an account; existing keys keep working. `--label` defaults to `key`; labels are unique among an account's active keys, so name each additional one. `--key-only` prints just the raw key for scripts. |
 | `orion relay-user key list <name>` | Credential ids, labels, and last-used. Never key material. |
 | `orion relay-user key revoke <name> --id <n>` | Revoke **one** credential. The account and its other keys live on, and the human's session is not disturbed. |
 

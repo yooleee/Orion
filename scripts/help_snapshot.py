@@ -63,7 +63,7 @@ COMMAND_TREE = [
     ["relay-user"],
     ["relay-user", "add"],
     ["relay-user", "list"],
-    ["relay-user", "revoke"],
+    ["relay-user", "deactivate"],
     ["relay-user", "grant"],
     ["relay-user", "ungrant"],
     ["relay-user", "key"],

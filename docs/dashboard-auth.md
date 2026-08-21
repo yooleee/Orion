@@ -174,7 +174,7 @@ orion relay-user grant mac --project other-app                    # add a projec
 orion relay-user ungrant mac --project other-app                  # take one back (grant's inverse)
 orion relay-user role supervisor-a supervisor                     # change a role (logs out live sessions)
 orion relay-user rename mac mac-mini                              # rename (history keeps the old name)
-orion relay-user revoke mac                                       # instant cutoff (keeps the name)
+orion relay-user deactivate mac                                   # instant cutoff (keeps the name)
 orion relay-user delete mac                                       # hard-delete: frees the name to reuse
 ```
 

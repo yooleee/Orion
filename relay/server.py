@@ -43,6 +43,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1057,6 +1058,17 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_spa_api(path)
             return
 
+        # KI-51: an unmatched /api/* path must answer as an API (JSON 404), never fall
+        # through to the SPA shell below — a JSON client probing a wrong endpoint used to
+        # get 200 text/html and a JSONDecodeError instead of "wrong endpoint". Placed
+        # AFTER every real /api route above and BEFORE the web_dir block, so both serving
+        # modes share one behavior (headless already answered this 404 at the bottom).
+        # The /api namespace is reserved: no built asset lives under it, so this cannot
+        # shadow a file. The body is constant, so nothing about real routes is leaked.
+        if self._is_api_path(path):
+            self._send_json(404, {"error": "not found"})
+            return
+
         # E2 Inc 4 (KI-23): the React SPA is the dashboard's only front-end. When started
         # with --web-dir the relay serves the built SPA single-host — the SPA owns every
         # page (/, /project/*, /report/*, /login) via client-side routing. So serve a real
@@ -1183,6 +1195,74 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(404, {"error": "not found"})
+
+    @staticmethod
+    def _is_api_path(path: str) -> bool:
+        """Return whether a request path is inside the reserved /api namespace.
+
+        Args:
+            path: The already-parsed request path (query string stripped).
+
+        Returns:
+            True for "/api" and anything under "/api/".
+
+        Why:
+            KI-51's one predicate, shared by the GET fall-through guard and the
+            unrouted-method handlers so "what counts as an API path" cannot drift
+            between them. Bare "/api" is included: the namespace is reserved as a
+            whole, and a client typo'ing the prefix is still an API consumer.
+        """
+        return path == "/api" or path.startswith("/api/")
+
+    def _handle_unrouted_method(self) -> None:
+        """Answer a request whose HTTP method has no routes at all (KI-51).
+
+        An /api path gets the API's JSON 404 — a JSON client must never receive an
+        HTML error page from the API namespace, whatever the method. Anything else
+        keeps the stdlib's exact default: 501 "Unsupported method", byte-compatible
+        with what BaseHTTPRequestHandler answered before these handlers existed.
+
+        Why:
+            The relay routes only GET and POST; PUT/DELETE/PATCH/OPTIONS/HEAD used
+            to fall to the stdlib's HTML 501 even under /api. There are ZERO routes
+            for these methods, so a blanket 404 (not a per-route 405 map) is the
+            honest answer for the API namespace — a 405 map would be speculative
+            structure for methods nothing uses.
+        """
+        path = urllib.parse.urlparse(self.path).path
+        if self._is_api_path(path):
+            # HEAD must not carry a body (RFC 9110): send the same status + JSON
+            # content type, body omitted. Every other method gets the JSON body.
+            if self.command == "HEAD":
+                self.send_response(404)
+                # Same content type _send_json sends, so the API's 404 is uniform.
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send_json(404, {"error": "not found"})
+            return
+        self.send_error(
+            HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})"
+        )
+
+    # The five methods the relay deliberately has no routes for, all answered by the
+    # shared handler above. Explicit one-liners rather than dynamic dispatch, so the
+    # supported surface is readable at a glance.
+    def do_PUT(self) -> None:
+        self._handle_unrouted_method()
+
+    def do_DELETE(self) -> None:
+        self._handle_unrouted_method()
+
+    def do_PATCH(self) -> None:
+        self._handle_unrouted_method()
+
+    def do_OPTIONS(self) -> None:
+        self._handle_unrouted_method()
+
+    def do_HEAD(self) -> None:
+        self._handle_unrouted_method()
 
     def _bearer_push_preamble(self, conn, validate) -> tuple[dict, dict] | None:
         """Run the guard sequence EVERY Bearer producer push shares, in order (AU1-R P2).

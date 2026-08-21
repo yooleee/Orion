@@ -60,6 +60,7 @@ from relay.store import (
     get_project_kind,
     get_project_lifecycle,
     get_user_by_name,
+    projects_for_user,
     history,
     ingest,
     list_projects,
@@ -2162,6 +2163,116 @@ def test_grant_is_idempotent_and_requires_a_project(tmp_path):
         assert _admin_post(
             base_url, "/api/users/grant", {"name": "prod", "projects": []}
         )[0] == 400
+
+
+def test_ungrant_narrows_scope_so_the_contributors_push_404s(tmp_path):
+    """POST /api/users/ungrant removes a grant; the contributor's push is out of scope again.
+
+    Why this matters: the inverse of test_grant_widens_scope... and the point of KI-40 —
+    scope is a security control, and this is the first path that NARROWS it. The push
+    going back to 404 (not just the response listing a smaller scope) proves enforcement
+    re-reads the DB with no session/state to invalidate.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo", "other"])
+        assert _post(base_url, _blob_for("other"), token="prod-key")[0] == 201  # in scope
+
+        status, r = _admin_post(
+            base_url, "/api/users/ungrant", {"name": "prod", "projects": ["other"]}
+        )
+        assert status == 200
+        assert r["removed"] == ["other"]
+        assert r["projects"] == ["demo"]  # remaining explicit scope
+        assert r["role"] == "contributor" and r["still_visible"] == []
+
+        assert _post(base_url, _blob_for("other"), token="prod-key")[0] == 404  # gone
+        assert _post(base_url, _blob_for("demo"), token="prod-key")[0] == 201  # untouched
+
+
+def test_ungrant_reports_removed_vs_requested_and_audits_zero_removal(tmp_path):
+    """Not-held names are skipped (idempotent), and even a zero-removal attempt is audited.
+
+    Why this matters: two CS-O contract pins. An admin re-running a cleanup must get a
+    clean report of what actually came off rather than an error; and the audit trail
+    records every ungrant ATTEMPT with the REMOVED list (empty on a no-op), so the trail
+    shows actual change, not intent.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo"])
+
+        # Partial hit: one held, one never held — plus a duplicate to pin normalization.
+        status, r = _admin_post(
+            base_url, "/api/users/ungrant",
+            {"name": "prod", "projects": ["demo", "never-held", "demo"]},
+        )
+        assert status == 200
+        assert r["removed"] == ["demo"] and r["projects"] == []
+
+        # Re-run: everything already gone — still 200, nothing removed.
+        status, r = _admin_post(
+            base_url, "/api/users/ungrant", {"name": "prod", "projects": ["demo"]}
+        )
+        assert status == 200 and r["removed"] == []
+
+        conn = open_relay_store(db)
+        rows = conn.execute(
+            "SELECT action, projects FROM relay_admin_audit WHERE action = 'ungrant' ORDER BY id"
+        ).fetchall()
+        assert [json.loads(row["projects"]) for row in rows] == [["demo"], []]
+
+
+def test_ungrant_matches_grants_error_matrix(tmp_path):
+    """Unknown user → 404, bad/empty projects → 400, non-admin token → 401.
+
+    Why this matters: ungrant must not be a softer gate than grant in any direction —
+    same admin front matter (_admin_read_named), same validation, same failure shapes —
+    or the pair drifts and the narrower path becomes the easier one to probe.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        _provision_user(db, "prod", "prod-key", role="contributor", projects=["demo"])
+        assert _admin_post(
+            base_url, "/api/users/ungrant", {"name": "ghost", "projects": ["demo"]}
+        )[0] == 404
+        assert _admin_post(
+            base_url, "/api/users/ungrant", {"name": "prod", "projects": []}
+        )[0] == 400
+        assert _admin_post(
+            base_url, "/api/users/ungrant", {"name": "prod", "projects": "demo"}
+        )[0] == 400
+        assert _admin_post(
+            base_url, "/api/users/ungrant", {"name": "prod", "projects": ["demo"]},
+            token="not-the-admin-token",
+        )[0] == 401
+        # None of the failures touched the grant.
+        conn = open_relay_store(db)
+        user = get_user_by_name(conn, "prod")
+        assert projects_for_user(conn, user["id"]) == ["demo"]
+
+
+def test_ungrant_from_a_member_reports_the_project_as_still_visible(tmp_path):
+    """Ungranting an org-visible project from a member removes the grant, not the access.
+
+    Why this matters: the one semantic KI-40 flagged as needing the SERVER to explain —
+    org visibility is a floor grants stack on, so for a member the removal changes
+    nothing readable. `still_visible` is the server-computed fact the CLI's note rides;
+    the member actually still reading the project is the behavior that makes it true.
+    """
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _seed_two_projects(base_url, db)  # kb-member, zero grants, open-project org-visible
+        _admin_post(
+            base_url, "/api/users/grant", {"name": "kb-member", "projects": ["open-project"]}
+        )
+
+        status, r = _admin_post(
+            base_url, "/api/users/ungrant",
+            {"name": "kb-member", "projects": ["open-project"]},
+        )
+        assert status == 200
+        assert r["removed"] == ["open-project"] and r["projects"] == []
+        assert r["role"] == "member" and r["still_visible"] == ["open-project"]
+
+        # The floor holds: the member still reads the org-visible project.
+        assert _get_json(base_url, "/api/projects/open-project", cookie=cookie)[0] == 200
 
 
 def test_key_add_lets_two_keys_push_under_one_account(tmp_path):

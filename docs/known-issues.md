@@ -776,11 +776,17 @@ Deferred).
   battery around it behaved cleanly (revoke keeps the name — re-add 409s; delete frees
   it). The asymmetry this entry names is intact.
 - **Severity:** low now, medium once accounts are provisioned for other people.
-- **Status:** Open. Recorded 2026-07-20 during the auth-revamp close-out; the approved
-  `sliptest` cleanup was **blocked** on it and deferred. Slotted for a proposed
-  **command overhaul / revamp slice** (with the sibling wording and lifecycle-ergonomics
-  findings) rather than a one-off patch, by user decision — the whole `relay-user` surface
-  grew additively across three arcs and deserves one considered pass.
+- **Status:** **Resolved** (2026-08-21, CS-O PR1): `relay-user ungrant <name> --project p`
+  now exists, exactly as the audit mapped it — store `ungrant_projects` (idempotent,
+  transactional, returns what was actually removed), `POST /api/users/ungrant` on the
+  `_admin_read_named` gate with grant's validation, an `"ungrant"` audit row (written even
+  for a zero-removal no-op, with the removed list), and the CLI verb reporting
+  removed-vs-requested plus the member/org-visible note from the server's `still_visible`
+  field. The deferred live `sliptest` grant cleanup is now UNBLOCKED — it remains a
+  separately-authorized ops step (this session's close-out), not part of the code PR.
+  Originally recorded 2026-07-20 during the auth-revamp close-out; slotted into the
+  command-surface overhaul by user decision rather than patched one-off — the whole
+  `relay-user` surface grew additively across three arcs and deserved one considered pass.
 - **Audit (2026-07-28):** re-confirmed live (the `sliptest` grant is still on `macos`, still
   unremovable), and the fix is now **mapped**: a store `ungrant_projects` (one parameterized
   DELETE, idempotent), a `POST /api/users/ungrant` route on the existing `_admin_read_named`

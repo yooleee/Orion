@@ -14,6 +14,36 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## DF2 — second dogfood sweep (2026-08-20)
+
+The second progressive-dogfood sweep of `docs/known-issues.md`, run on the sandbox harness
+(real repos, real Haiku calls; state, webhooks, relay redirected — `docs/dogfood-harness.md`).
+Coverage record and the two new entries (KI-50, KI-51) landed in the sweep-record PR (#161);
+the fixes below landed as their own PRs per the one-PR-per-bugfix idiom.
+
+### Fixed
+
+- **KI-2 — Discord truncation replaced with lossless splitting.** Messages over Discord's
+  2000-char `content` cap were truncated with a marker; both sweeps showed this firing on
+  the ordinary first report of a real project (DF1: 52 commits, a third of the report lost
+  on Discord while Slack got all of it; DF2: 107 commits, cut at exactly 2000 again). The
+  plain-content fallback now **splits** an over-cap report into several messages POSTed in
+  order — cut at the last line boundary that fits, hard-cut only for a single over-long
+  line — so every character is delivered. `ComposedMessage` gained a defaulted
+  `continuations` tuple (compose still owns rendering; delivery stays pure transport), and
+  the preview labels and shows **every** part, which also removed KI-50's realistic
+  trigger: with splitting, the preview again covers everything that leaves the machine.
+  Slack's plain-text fallback still truncates at its ~40k ceiling — far above any real
+  report, and the residual case is recorded under KI-50 (downgraded to Monitored).
+  Pinned by compose-level tests (line-cut reconstruction is byte-exact; hard cut loses
+  nothing; the tail line survives into the last part; the multi-part preview shows every
+  part) and a CLI-level test (every part POSTed, in order, to the recipient's webhook);
+  verified for real against a local sink — a 5.4k intake arrived as 3 POSTs, tail intact.
+
+- **KI-49 — failed backup runs now leave a visible marker** (PR #160; the entry stays
+  open for the job-never-runs class). See the KI-49 entry in `docs/known-issues.md` for
+  the full record.
+
 ## RDX-R — redaction restructure arc concluded (2026-08-07 → 2026-08-13)
 
 The arc that replaced the redaction catch-all's monolithic regex with an extractor +

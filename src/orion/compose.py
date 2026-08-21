@@ -20,10 +20,10 @@ from orion.report import ReportBlob
 
 # Per-platform text ceilings, enforced HERE (compose owns rendering; delivery is
 # pure transport that POSTs whatever payload it is handed). Discord rejects
-# `content` over 2000 chars; Slack's practical `text` ceiling is ~40k. We truncate
-# with a visible marker rather than let the API reject an over-long (already
-# redacted) report. Splitting across messages is a possible future improvement
-# (see docs/known-issues.md KI-2); truncation is the simplest correct behavior.
+# `content` over 2000 chars: an over-cap report is SPLIT across several messages
+# (KI-2 — truncation fired on ordinary first reports and silently lost the tail).
+# Slack's practical `text` ceiling is ~40k, far above any real report, so its
+# plain fallback still truncates with a visible marker rather than split.
 _DISCORD_CONTENT_LIMIT = 2000
 _SLACK_TEXT_LIMIT = 40000
 _TRUNCATION_MARKER = "\n… [truncated]"
@@ -52,28 +52,36 @@ _SLACK_MAX_BLOCKS = 50
 
 @dataclass(frozen=True)
 class ComposedMessage:
-    """A channel-ready message: the JSON body to POST plus a faithful preview.
+    """A channel-ready message: the JSON body/bodies to POST plus a faithful preview.
 
     Args:
         payload: The exact JSON body delivery will POST to the channel's webhook
             (today: {"content": …} for Discord, {"text": …} for Slack). Delivery
             does not reshape it — what is here is what is sent.
-        preview: A human-readable text rendering of that payload, shown at the
-            preview-before-send gate. It is derived from the same payload so the
-            human sees exactly the text that will leave the machine.
+        continuations: Zero or more follow-on payloads, POSTed in order after
+            `payload` to the same webhook. Non-empty only when a channel's hard
+            cap forces one report across several messages (today: Discord's
+            2000-char plain-content fallback, split rather than truncated —
+            KI-2). Empty for every message that fits, so existing construction
+            sites and single-message channels are unchanged.
+        preview: A human-readable text rendering of the payload AND its
+            continuations, shown at the preview-before-send gate. It is derived
+            from the same payloads so the human sees exactly the text that will
+            leave the machine — all of it, across every part.
 
     Why:
         B3 moves Orion off the "a message is one string" model toward structured
         payloads (Discord embeds / Slack Block Kit). Bundling the payload and its
         preview in one object means the bytes that get sent and the bytes the human
         approves can never drift apart per channel — the preview-before-send
-        guarantee stays trustworthy. In this checkpoint the payload is still the
-        plain {"content"/"text": str} shape, so nothing on the wire changes yet;
-        the richer renderers slot in behind this same return type next.
+        guarantee stays trustworthy. `continuations` extends the same idea to a
+        report bigger than one message: the whole set is composed (and previewed)
+        together, and delivery stays pure transport.
     """
 
     payload: dict
     preview: str
+    continuations: tuple[dict, ...] = ()
 
 
 def compose(blob: ReportBlob, channel: str, display_timezone: str) -> ComposedMessage:
@@ -105,12 +113,28 @@ def compose(blob: ReportBlob, channel: str, display_timezone: str) -> ComposedMe
     # resolving it here keeps the builders taking a ready tz rather than re-parsing.
     tz = ZoneInfo(display_timezone)
     if channel == "slack":
-        payload = _slack_payload(blob, tz)
+        payloads = [_slack_payload(blob, tz)]
     else:
         # Discord, and the defensive default for an unknown channel (config
         # validation restricts `channel` upstream, so this degrades gracefully).
-        payload = _discord_payload(blob, tz)
-    return ComposedMessage(payload=payload, preview=_render_preview(payload))
+        # May be several messages: the plain-content fallback SPLITS an over-cap
+        # report rather than truncating it (KI-2).
+        payloads = _discord_payloads(blob, tz)
+    if len(payloads) == 1:
+        preview = _render_preview(payloads[0])
+    else:
+        # Multi-part: preview every part, each under a labeled separator so the
+        # human knows several webhook messages will be sent. The separator lines
+        # are presentation-only (same license _render_preview already takes for
+        # whitespace/dividers); every character that will be POSTed is shown.
+        total = len(payloads)
+        preview = "\n".join(
+            f"— message {index} of {total} —\n{_render_preview(part)}"
+            for index, part in enumerate(payloads, start=1)
+        )
+    return ComposedMessage(
+        payload=payloads[0], preview=preview, continuations=tuple(payloads[1:])
+    )
 
 
 def _sections_for(blob: ReportBlob) -> list[tuple[str, str]]:
@@ -134,8 +158,8 @@ def _sections_for(blob: ReportBlob) -> list[tuple[str, str]]:
     return [("Update", blob.body)]
 
 
-def _discord_payload(blob: ReportBlob, tz: ZoneInfo) -> dict:
-    """Build a Discord embed payload, falling back to plain content if it won't fit.
+def _discord_payloads(blob: ReportBlob, tz: ZoneInfo) -> list[dict]:
+    """Build the Discord message(s): one embed, or plain content split to fit.
 
     Args:
         blob: The report to render.
@@ -143,16 +167,20 @@ def _discord_payload(blob: ReportBlob, tz: ZoneInfo) -> dict:
             the formatter and the plain-Markdown fallback.
 
     Returns:
-        {"embeds": [embed]} when the embed satisfies Discord's size limits, else
-        {"content": …} with the plain Markdown message (truncated).
+        [{"embeds": [embed]}] when the embed satisfies Discord's size limits, else
+        one {"content": …} per 2000-char part of the plain Markdown message —
+        split, not truncated (KI-2), so nothing is lost.
 
     Why:
         An embed — a titled, colored card with one field per signal — is the richer
         Discord rendering. Discord caps embed sizes and rejects the whole message
-        if any cap is exceeded, so for an oversized report we degrade to today's
-        plain message rather than send an invalid payload: a complete report beats
-        a rejected one. We do NOT also set `content` alongside `embeds` (Discord
-        would render both, duplicating the report); the embed stands alone.
+        if any cap is exceeded, so for an oversized report we degrade to the plain
+        message. That fallback used to truncate at Discord's 2000-char content cap,
+        which KI-2's dogfood evidence showed firing on ordinary first reports and
+        silently costing the recipient a third of the report; it now splits into
+        several messages POSTed in order instead. We do NOT also set `content`
+        alongside `embeds` (Discord would render both, duplicating the report);
+        the embed stands alone.
     """
     embed = {
         "title": _cap(f"Progress update — {blob.project}", _DISCORD_TITLE_LIMIT),
@@ -165,8 +193,11 @@ def _discord_payload(blob: ReportBlob, tz: ZoneInfo) -> dict:
         ],
     }
     if _discord_embed_fits(embed):
-        return {"embeds": [embed]}
-    return {"content": _truncate(_format_markdown(blob, tz), _DISCORD_CONTENT_LIMIT)}
+        return [{"embeds": [embed]}]
+    return [
+        {"content": part}
+        for part in _split_message(_format_markdown(blob, tz), _DISCORD_CONTENT_LIMIT)
+    ]
 
 
 def _discord_embed_fits(embed: dict) -> bool:
@@ -338,6 +369,48 @@ def _render_preview(payload: dict) -> str:
     return payload.get("content") or payload.get("text") or ""
 
 
+def _split_message(message: str, limit: int) -> list[str]:
+    """Split a message into parts that each fit within a channel's text limit.
+
+    Args:
+        message: The full rendered message text.
+        limit: The channel's maximum allowed length per message (Discord: 2000).
+
+    Returns:
+        The message as a single-element list when it already fits, otherwise a
+        list of parts, each within the limit, together carrying every character
+        of the original.
+
+    Why:
+        This replaces truncation for Discord's plain-content fallback (KI-2):
+        truncation silently cost the recipient the whole tail on ordinary first
+        reports, and — with a Discord-only audience — left the cut tail
+        unpreviewed on its way to the relay (KI-50). Each part is cut at the LAST
+        newline that fits, so lines stay whole and the parts read naturally as
+        consecutive messages; the one newline broken at each such cut is consumed
+        by the split (re-joining those parts with "\n" reconstructs the original
+        exactly — pinned by a test). A single line longer than the whole limit
+        cannot be cut at a newline, so it falls back to a hard character cut,
+        which loses nothing either.
+    """
+    if len(message) <= limit:
+        return [message]
+    parts: list[str] = []
+    rest = message
+    while len(rest) > limit:
+        # The last newline positioned so the part before it fits (index <= limit).
+        cut = rest.rfind("\n", 0, limit + 1)
+        if cut > 0:
+            parts.append(rest[:cut])
+            rest = rest[cut + 1 :]  # the broken newline is consumed by the split
+        else:
+            # No usable newline in the window (one very long line): hard cut.
+            parts.append(rest[:limit])
+            rest = rest[limit:]
+    parts.append(rest)
+    return parts
+
+
 def _truncate(message: str, limit: int) -> str:
     """Shorten a message to fit a channel's text limit, with a visible marker.
 
@@ -350,10 +423,12 @@ def _truncate(message: str, limit: int) -> str:
         truncation marker appended.
 
     Why:
-        One shared helper (parameterized by limit) keeps Discord's and Slack's
-        truncation identical and testable, and reserves room for the marker so the
-        result never itself exceeds the limit. The body is already redacted, so
-        truncation is safe — just lossy.
+        Slack's plain-text fallback still truncates (its 40k ceiling sits far above
+        any real report, so splitting there would be speculative); Discord's
+        fallback now splits via _split_message instead (KI-2). The marker keeps the
+        loss visible, and room is reserved for it so the result never itself
+        exceeds the limit. The body is already redacted, so truncation is safe —
+        just lossy.
     """
     if len(message) <= limit:
         return message

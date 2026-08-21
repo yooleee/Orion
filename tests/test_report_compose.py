@@ -14,6 +14,7 @@ from orion.compose import (
     _DISCORD_CONTENT_LIMIT,
     _SLACK_TEXT_LIMIT,
     ComposedMessage,
+    _split_message,
     compose,
 )
 from orion.config import ProjectConfig, Recipient
@@ -304,17 +305,80 @@ def test_intake_blob_renders_single_update_section():
     assert fields[0]["value"] == "A pushed update."
 
 
-def test_discord_overflow_falls_back_to_plain_content():
-    """A section too big for an embed falls back to a plain, truncated `content`.
+def test_discord_overflow_splits_instead_of_truncating():
+    """A report too big for an embed splits into several full messages, losing nothing.
 
-    Why this matters: Discord rejects an oversized embed; rather than fail, compose
-    degrades to today's plain message (truncated to the limit) — a complete report
-    beats a rejected one. The preview reflects whatever was actually built.
+    Why this matters: this is KI-2's fix. The old behavior truncated the plain
+    fallback at Discord's 2000-char cap, which DF1/DF2 showed firing on ordinary
+    first reports and silently costing the recipient the report's tail (and, with
+    a Discord-only audience, sending that unpreviewed tail to the relay — KI-50).
+    The last line of the body surviving into the final part is the regression
+    assertion that the tail is no longer lost.
     """
-    composed = compose(_blob("A" * 5000), "discord", _TZ)
+    body = "\n".join(f"line {i}: " + "x" * 80 for i in range(60))  # ~5.3k, multi-line
+    composed = compose(_blob(body), "discord", _TZ)
     assert "embeds" not in composed.payload                     # too big -> fallback
-    assert len(composed.payload["content"]) <= _DISCORD_CONTENT_LIMIT
-    assert composed.preview == composed.payload["content"]
+    parts = [composed.payload, *composed.continuations]
+    assert len(parts) > 1                                       # split, not squeezed
+    for part in parts:
+        assert len(part["content"]) <= _DISCORD_CONTENT_LIMIT
+        assert "[truncated]" not in part["content"]
+    assert "line 59:" in parts[-1]["content"]                   # the tail survived
+
+
+def test_discord_within_cap_sends_a_single_message():
+    """A report that fits produces one payload and no continuations.
+
+    Why this matters: splitting must be invisible for the common case — every
+    existing consumer treats `payload` as the whole message, and that stays true
+    whenever the report fits its channel.
+    """
+    composed = compose(_blob("A short update."), "discord", _TZ)
+    assert composed.continuations == ()
+
+
+def test_multipart_preview_shows_every_part():
+    """The preview of a split message labels and includes every part.
+
+    Why this matters: preview-before-send is the guaranteeing human layer (KI-3).
+    A split message is several POSTs; the human must see all of them — including
+    the final tail — and understand that multiple messages will be sent.
+    """
+    body = "\n".join(f"line {i}: " + "x" * 80 for i in range(60))
+    composed = compose(_blob(body), "discord", _TZ)
+    total = 1 + len(composed.continuations)
+    assert total > 1
+    assert f"— message 1 of {total} —" in composed.preview
+    assert f"— message {total} of {total} —" in composed.preview
+    assert "line 59:" in composed.preview                       # the tail is previewed
+
+
+def test_split_message_reconstructs_exactly_at_line_cuts():
+    """Line-boundary splitting is lossless: parts re-join to the original.
+
+    Why this matters: the split consumes exactly the one newline it breaks at, so
+    "\\n".join(parts) must equal the input byte for byte — the property that makes
+    splitting safe to prefer over truncation. Also pins that every part fits and
+    no line is broken mid-way when newlines are available.
+    """
+    original = "\n".join(f"row {i} " + "y" * 90 for i in range(120))  # ~11.6k
+    parts = _split_message(original, 2000)
+    assert len(parts) > 1
+    assert all(len(p) <= 2000 for p in parts)
+    assert "\n".join(parts) == original
+
+
+def test_split_message_hard_cuts_a_single_overlong_line():
+    """One line longer than the whole limit falls back to a lossless hard cut.
+
+    Why this matters: a line with no newline inside the window cannot be cut at a
+    line boundary; the fallback must still preserve every character (re-joining
+    with "" restores the input) rather than dropping or looping.
+    """
+    original = "B" * 5001
+    parts = _split_message(original, 2000)
+    assert all(len(p) <= 2000 for p in parts)
+    assert "".join(parts) == original
 
 
 def test_slack_overflow_falls_back_to_plain_text():

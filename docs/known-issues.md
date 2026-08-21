@@ -94,36 +94,6 @@ Deferred).
 - **Severity:** medium
 - **Status:** Decided (by-design); per-recipient state deferred → **C3** (with KI-11).
 
-## KI-2 — Discord message truncation is lossy
-
-- **Detail:** Messages over Discord's 2000-character limit are truncated with a marker
-  rather than split across multiple messages.
-- **Why it matters:** A long (but already redacted) report loses its tail. Splitting into
-  multiple messages would preserve everything; truncation was chosen as the simplest
-  correct behavior for Phase 1.
-- **Exercised (DF1, 2026-07-21) — fires on ordinary use, not an edge case:** the first real
-  report of `instruction-debugger` (52 commits, `high_level`) hit it immediately. The Discord
-  recipient received **2000 characters, cut mid-word** (`- Unit 1: \`ch` + `… [truncated]`);
-  the Slack recipient on the same run received all **3066**. Two supervisors, materially
-  different content, roughly a third lost on one of them. **Detail not previously recorded:**
-  at that size Discord also silently drops the *embed* format and falls back to a plain
-  `content` string, so nothing on the sending side signals the loss — the preview shows the
-  full report, and only the delivered payload is short. That asymmetry (Slack whole, Discord
-  truncated, no warning either way) is a better argument for splitting than the original
-  entry made.
-- **Exercised (DF2, 2026-08-20) — fired again on ordinary use, and one DF1 claim needs
-  correcting.** The sandbox first report of `instruction-debugger` (107 commits,
-  `high_level`, single Discord recipient) truncated at exactly 2000 again. But the DF1 line
-  "the preview shows the full report … nothing on the sending side signals the loss" does
-  not describe current behavior: the preview shows each audience's **composed** message, so
-  a Discord-only audience sees the truncated text *with* its `… [truncated]` marker — the
-  chat-side loss is now visible before sending. What that per-audience honesty exposes
-  instead: the relay's full copy is then partly unpreviewed, which is [[KI-50]], filed by
-  this sweep. The splitting-vs-truncating decision here is unchanged and still deferred.
-- **Severity:** low
-- **Status:** Deferred (enhancement). The DF1 evidence raises its practical priority: the
-  trigger is a normal first report of a real project, not a pathological input.
-
 ## KI-3 — Redaction pattern set is inherently incomplete
 
 - **Detail:** `redact._PATTERNS` is a living list of known secret shapes. No regex set can
@@ -1450,10 +1420,11 @@ Deferred).
   channel truncates. A Discord-only project is the realistic case; every current live
   chat project also carries a Slack recipient (40k cap), whose preview block shows
   effectively everything, so today's exposure is configs that drop to one channel.
-- **Relation to KI-2:** this is not the truncation itself (that stays KI-2, deferred).
-  DF2 corrected KI-2's DF1-era claim — the preview now honestly shows each audience's
-  truncated message. This entry is what that correction exposes: the honest per-channel
-  preview is not a preview of everything that leaves the machine.
+- **Relation to KI-2:** this is not the truncation itself (that was KI-2 — resolved
+  2026-08-20 by splitting, see the Resolved index). DF2 corrected KI-2's DF1-era claim —
+  the preview honestly shows each audience's composed message. This entry is what that
+  correction exposed: the honest per-channel preview was not a preview of everything that
+  left the machine, for as long as a channel truncated.
 - **Candidate fix, deliberately not built this sweep:** preview is a security control, so
   reshaping it needs an explicit decision, not a drive-by patch (the KI-41 arc's standing
   ruling). The shape that suggests itself: when the relay is enabled and no previewed
@@ -1463,8 +1434,19 @@ Deferred).
   (worse — it makes the dashboard record incomplete).
 - **Severity:** low-medium (security-control shape; narrow, ordinary trigger; no leak
   observed — the automatic redaction layer did run on everything).
-- **Status:** Open — needs decision. Found by DF2 (2026-08-20) on the sweep's first real
-  report.
+- **Status:** **Largely defused by the KI-2 fix (2026-08-20, same day, user-approved) —
+  downgraded to low / Monitored.** Discord's plain fallback now **splits** an over-cap
+  report instead of truncating, and the multi-part preview labels and shows every part —
+  so the realistic trigger this entry reproduced (a Discord-only audience over 2000 chars)
+  no longer produces any unpreviewed text: the preview again covers everything that
+  leaves the machine, chat and relay alike. Verified against a live sink: a 5.4k intake
+  arrived as 3 POSTs, tail intact, all previewed. **The residual, kept honest:** the
+  structural split (preview = composed messages; relay = full blob) still exists, and
+  Slack's plain-text fallback still truncates at its 40k ceiling — so a single report
+  over ~40k to a Slack-only audience would re-create the shape. No real report has come
+  within an order of magnitude of that; if one does, the "relay — full record" preview
+  block above is the recorded candidate. The candidate-fix bullet stays for that case;
+  no further change without a fresh decision.
 
 ## KI-51 — Unknown `/api/*` paths return the SPA shell with a 200, not a JSON 404
 
@@ -1484,6 +1466,15 @@ Deferred).
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
+
+- **KI-2** — Discord truncated messages over its 2000-char cap with a marker, twice shown
+  (DF1, DF2) to fire on a real project's ordinary first report and cost the Discord
+  recipient roughly a third of it. **Resolved 2026-08-20** (DF2 follow-up): the
+  plain-content fallback now splits an over-cap report into several messages POSTed in
+  order, cut at line boundaries, losing nothing; the multi-part preview labels and shows
+  every part (which also removed [[KI-50]]'s realistic trigger). Slack's 40k plain-text
+  fallback still truncates — pathological sizes only. See CHANGELOG → *"DF2 — second
+  dogfood sweep"*.
 
 - **KI-42** — Report titles showed raw Markdown: a title is the report body's first line, which is
   Markdown, so `**bold**` or `## heading` reached the timeline and report page verbatim (filed in the

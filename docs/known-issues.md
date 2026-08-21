@@ -1322,6 +1322,19 @@ Deferred).
 - **Status:** open. Filed 2026-08-20 from the S2.3 close-out; the immediate cause (lost
   flyctl auth) was fixed the same day by an interactive `fly auth login` and the job
   re-proven (kickstart → exit 0, consistent pull). The silent-failure gap is what remains.
+- **Update (DF2, 2026-08-20): the cheapest layer is BUILT — the marker file.** On any
+  failed run, `relay-backup.sh` now writes a dated `FAILED-<date>.txt` into
+  `~/orion-backups/` (the directory the operator already looks at, sorting next to the
+  backups the failure interrupts), naming the exit code and pointing at the log. A later
+  *successful* run removes standing markers, because their meaning is "your newest backup
+  is older than scheduled" and a fresh verified backup ends that condition (the failure
+  history stays in the log). Verified locally through the script's env seams, no live
+  contact: a dead health URL produced exit 7 plus the marker; a stubbed-`fly` success run
+  passed the real `integrity_check` and cleared it. **What this does NOT close, so the
+  entry stays open:** a job that never *starts* (unloaded plist, machine asleep at the
+  window, launchd itself broken) still fails to silence — that class needs the staleness
+  check or the monthly runbook line from the direction list above. Alerting through the
+  relay remains ruled out (the dependency inversion).
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

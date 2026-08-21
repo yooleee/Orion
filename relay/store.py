@@ -2390,6 +2390,57 @@ def grant_projects(
     conn.commit()
 
 
+def ungrant_projects(
+    conn: sqlite3.Connection, user_id: int, projects: list[str]
+) -> list[str]:
+    """Remove one or more projects from an existing user's explicit scope (KI-40).
+
+    Args:
+        conn: An open relay-store connection.
+        user_id: The user whose scope to narrow.
+        projects: Project names to ungrant. Names the user does not hold (including
+            nonexistent projects) are silently skipped, mirroring grant's tolerance.
+
+    Returns:
+        The project names actually removed, sorted alphabetically. Empty when the
+        user held none of the requested names (idempotent no-op).
+
+    Why:
+        The inverse `grant_projects` never had: scope is a security control, and a
+        control that only widens is the wrong shape (KI-40). Reading the held set
+        first (rather than trusting rowcount on a bare DELETE) lets the caller
+        report removed-vs-requested precisely — and that report feeds the audit
+        trail, so the read and the delete must see the same state. Under the
+        sqlite3 module's legacy autocommit a bare SELECT does NOT open a
+        transaction, so the explicit BEGIN IMMEDIATE below is what makes the
+        pair atomic: it takes the write lock up front, keeping a concurrent
+        admin write (this server handles requests on threads, one connection
+        each) from landing between the SELECT and the DELETE and silently
+        falsifying the returned/audited list.
+    """
+    if not projects:
+        # An empty IN () is a sqlite syntax error; the no-op answer is already known.
+        return []
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    placeholders = ", ".join("?" for _ in projects)
+    held = {
+        row["project"]
+        for row in conn.execute(
+            f"SELECT project FROM relay_user_projects WHERE user_id = ? AND project IN ({placeholders})",
+            (user_id, *projects),
+        )
+    }
+    removed = sorted(held)
+    if removed:
+        conn.execute(
+            f"DELETE FROM relay_user_projects WHERE user_id = ? AND project IN ({placeholders})",
+            (user_id, *projects),
+        )
+    conn.commit()
+    return removed
+
+
 def active_agents_operated_by(conn: sqlite3.Connection, user_id: int) -> list[str]:
     """List the names of ACTIVE agent accounts that `user_id` operates.
 

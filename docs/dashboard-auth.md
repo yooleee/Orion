@@ -171,6 +171,7 @@ orion relay-user add teammate-b --role member                     # reads every 
 orion relay-user add mac  --role contributor --project my-app     # a push-only producer (a machine)
 orion relay-user list                                             # the roster (no key material)
 orion relay-user grant mac --project other-app                    # add a project to an existing user
+orion relay-user ungrant mac --project other-app                  # take one back (grant's inverse)
 orion relay-user role supervisor-a supervisor                     # change a role (logs out live sessions)
 orion relay-user rename mac mac-mini                              # rename (history keeps the old name)
 orion relay-user revoke mac                                       # instant cutoff (keeps the name)

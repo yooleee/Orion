@@ -88,6 +88,7 @@ People sign in with a name and password; machines hold keys. The two never overl
 | `orion relay-user add <name> --kind agent --operated-by <human>` | An **agent**: a machine acting on a person's behalf. Must be `--role contributor`; the operator must be an active human. |
 | `orion relay-user list` | The roster: role, kind, operator, status, scope, last login. Shows **no** credential material. |
 | `orion relay-user grant <name> --project p` | Widen an account's project scope in place. |
+| `orion relay-user ungrant <name> --project p` | Narrow an account's project scope in place (grant's inverse). Idempotent: names the account does not hold are reported, not errors. For a **member**, an ungranted org-visible project stays readable (visibility is a floor) and the command says so. |
 | `orion relay-user role <name> <role>` | Change a role. Bumps the session version, so live sessions are logged out. |
 | `orion relay-user rename <name> <new>` | Rename an account. Already-recorded history keeps the name it was written with. |
 | `orion relay-user set-operator <agent> <human>` | Repoint an agent at a different operator. Moves display grouping only; provenance is untouched. |

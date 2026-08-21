@@ -109,6 +109,7 @@ from .store import (
     set_project_lifecycle,
     set_project_visibility,
     touch_credential,
+    ungrant_projects,
     update_last_login,
     upsert_checklist,
     upsert_producer_checklist,
@@ -1127,6 +1128,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/users/grant":
             self._handle_grant_user()
             return
+        if path == "/api/users/ungrant":
+            self._handle_ungrant_user()
+            return
         if path == "/api/users/delete":
             self._handle_delete_user()
             return
@@ -2005,6 +2009,70 @@ class _RelayHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json(200, {"name": name, "projects": scope})
+
+    def _handle_ungrant_user(self) -> None:
+        """Remove project(s) from an existing user's scope (POST /api/users/ungrant).
+
+        Body: name (required), projects (required non-empty list of strings).
+        Admin-gated; 404 if no such user; 200 {name, role, removed, projects, still_visible}
+        — `removed` is what actually came off (requested names not held are skipped,
+        idempotently), `projects` the remaining explicit scope, and `still_visible` the
+        removed names a `member` can still read because they are org-visible.
+
+        Why:
+            The inverse of grant, closing KI-40: scope is a security control, and one that
+            only widens is the wrong shape. Validation and normalization mirror grant
+            exactly so the pair cannot drift. The audit row records the REMOVED list
+            (possibly empty — a zero-removal attempt is still an admin action worth a
+            trail entry). `still_visible` is computed server-side because only the relay
+            knows org visibility — the CLI's "this member still sees it" note must be
+            derived, never guessed. No session invalidation is needed: scope is re-read
+            from the DB per request (_allowed_projects), the same mechanism visibility
+            flips ride.
+        """
+        got = self._admin_read_named()
+        if got is None:
+            return
+        payload, name = got
+        projects = payload.get("projects")
+        if not isinstance(projects, list) or not all(isinstance(p, str) for p in projects):
+            self._send_json(400, {"error": "field 'projects' must be a list of strings"})
+            return
+        # Normalize like grant: strip, drop blanks, de-dupe (order-preserving).
+        projects = list(dict.fromkeys(p.strip() for p in projects if p.strip()))
+        if not projects:
+            self._send_json(400, {"error": "at least one non-empty project is required"})
+            return
+        conn = open_relay_store(self.server.db_path)
+        try:
+            user = get_user_by_name(conn, name)
+            if user is None:
+                self._send_json(404, {"error": f"no user named {name!r}"})
+                return
+            removed = ungrant_projects(conn, user["id"], projects)
+            record_admin_audit(
+                conn, _ADMIN_ACTOR, "ungrant", name, user["role"], removed, _utc_now_iso()
+            )
+            scope = projects_for_user(conn, user["id"])
+            # Only a member reads projects it holds no grant for (org visibility is a
+            # floor). For every other role the removed names are genuinely gone.
+            still_visible = (
+                sorted(set(removed) & org_visible_projects(conn))
+                if user["role"] == _MEMBER_ROLE
+                else []
+            )
+        finally:
+            conn.close()
+        self._send_json(
+            200,
+            {
+                "name": name,
+                "role": user["role"],
+                "removed": removed,
+                "projects": scope,
+                "still_visible": still_visible,
+            },
+        )
 
     # NOTE (Unit 2b): `_handle_rotate_user` / POST /api/users/rotate is RETIRED. Under the
     # multi-credential account model, one-shot rotation is both redundant and worse than what

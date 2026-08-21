@@ -68,6 +68,7 @@ from relay.store import (
     set_due_soon_days,
     set_project_kind,
     set_project_lifecycle,
+    ungrant_projects,
     update_last_login,
     upsert_checklist,
     upsert_producer_checklist,
@@ -2501,3 +2502,92 @@ def test_search_discussions_caps_and_scope_filters(tmp_path):
     assert capped is False  # out-of-scope hits never count toward "there was more"
 
     assert search_discussions(conn, ["quarterly"], set()) == ([], False)
+
+
+# --- ungrant_projects (KI-40): grant's inverse at the store layer ---------------------
+
+
+def test_ungrant_removes_only_the_requested_grants(tmp_path):
+    """Ungranting one project removes exactly that grant and reports it as removed.
+
+    Why this matters: this is KI-40's core fix — scope must be able to NARROW. The
+    returned list is the contract the server's removed-vs-requested reporting rides on,
+    so it must name what actually came off, not what was asked for.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(
+        conn, "prod", "v-a", "contributor", ["demo", "other"], "test",
+        "2026-08-21T00:00:00+00:00",
+    )
+
+    removed = ungrant_projects(conn, user_id, ["other", "never-held"])
+    assert removed == ["other"]  # 'never-held' is skipped, not an error
+    assert projects_for_user(conn, user_id) == ["demo"]
+
+
+def test_ungrant_is_idempotent_and_tolerates_an_empty_list(tmp_path):
+    """Re-ungranting a removed project (or passing nothing) is a clean zero-removal no-op.
+
+    Why this matters: the contract pin from the CS-O kickoff — repeated ungrant must
+    succeed and report removed-vs-requested rather than erroring, so an admin can re-run
+    a cleanup safely. The empty list would otherwise be a sqlite `IN ()` syntax error.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(
+        conn, "prod", "v-a", "contributor", ["demo"], "test", "2026-08-21T00:00:00+00:00"
+    )
+
+    assert ungrant_projects(conn, user_id, ["demo"]) == ["demo"]
+    assert ungrant_projects(conn, user_id, ["demo"]) == []  # idempotent re-run
+    assert ungrant_projects(conn, user_id, []) == []
+    assert projects_for_user(conn, user_id) == []
+
+
+def test_ungrant_leaves_other_users_grants_untouched(tmp_path):
+    """Removing a project from one user never touches another holder of the same project.
+
+    Why this matters: the DELETE is keyed on (user_id, project); a regression that dropped
+    the user_id predicate would silently strip a shared project from every account.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    a = add_user(conn, "a", "v-a", "contributor", ["demo"], "test", "2026-08-21T00:00:00+00:00")
+    b = add_user(conn, "b", "v-b", "contributor", ["demo"], "test", "2026-08-21T00:00:00+00:00")
+
+    assert ungrant_projects(conn, a, ["demo"]) == ["demo"]
+    assert projects_for_user(conn, a) == []
+    assert projects_for_user(conn, b) == ["demo"]
+
+
+def test_ungrant_reads_and_deletes_inside_one_write_transaction(tmp_path):
+    """The held-set SELECT and the DELETE run under one up-front write transaction.
+
+    Why this matters: the returned list feeds the admin audit trail, so the read and
+    the delete must see the same state. Under sqlite3's legacy autocommit a bare
+    SELECT opens NO transaction — without an explicit BEGIN IMMEDIATE, a concurrent
+    admin write (the relay serves requests on threads, one connection each) could
+    land between the two statements and the audited "removed" list would silently
+    misreport what was deleted. A race itself can't be tested deterministically, so
+    this pins the mechanism: the trace must show BEGIN IMMEDIATE before the SELECT.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(
+        conn, "prod", "v-a", "contributor", ["demo"], "test", "2026-08-21T00:00:00+00:00"
+    )
+
+    statements = []
+    conn.set_trace_callback(statements.append)
+    assert ungrant_projects(conn, user_id, ["demo"]) == ["demo"]
+    conn.set_trace_callback(None)
+
+    begin = next(
+        (i for i, s in enumerate(statements) if s.strip().upper().startswith("BEGIN IMMEDIATE")),
+        None,
+    )
+    select = next(
+        (i for i, s in enumerate(statements) if s.strip().upper().startswith("SELECT")), None
+    )
+    assert begin is not None, f"no BEGIN IMMEDIATE issued; trace: {statements}"
+    assert select is not None and begin < select, (
+        f"the held-set SELECT ran outside the write transaction; trace: {statements}"
+    )
+    assert not conn.in_transaction  # the single commit closed it

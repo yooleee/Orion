@@ -478,11 +478,11 @@ options:
 
 $ orion relay-user --help
 usage: orion relay-user [-h]
-                        {add,list,revoke,grant,key,password,role,rename,set-operator,delete}
+                        {add,list,revoke,grant,ungrant,key,password,role,rename,set-operator,delete}
                         ...
 
 positional arguments:
-  {add,list,revoke,grant,key,password,role,rename,set-operator,delete}
+  {add,list,revoke,grant,ungrant,key,password,role,rename,set-operator,delete}
     add                 Provision a new user and print their one-time access
                         key.
     list                List the relay's users (no credential material is
@@ -491,6 +491,8 @@ positional arguments:
                         any live session.
     grant               Grant an existing user access to one or more
                         additional projects.
+    ungrant             Remove one or more projects from an existing user's
+                        scope (grant's inverse).
     key                 Manage an account's key credentials (add/list/revoke)
                         — replaces `rotate`.
     password            Manage an interactive account's password (set/unlock).
@@ -574,6 +576,20 @@ options:
   -h, --help         show this help message and exit
   --project PROJECT  A project to grant (repeatable: --project a --project b).
                      At least one required.
+  --config CONFIG    Path to the config file (default: orion.toml; or set
+                     $ORION_CONFIG).
+
+$ orion relay-user ungrant --help
+usage: orion relay-user ungrant [-h] [--project PROJECT] [--config CONFIG]
+                                name
+
+positional arguments:
+  name               The user whose scope to narrow (by name).
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  A project to ungrant (repeatable: --project a --project
+                     b). At least one required.
   --config CONFIG    Path to the config file (default: orion.toml; or set
                      $ORION_CONFIG).
 

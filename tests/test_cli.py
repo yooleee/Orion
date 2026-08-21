@@ -3090,6 +3090,100 @@ def test_relay_user_grant_without_project_is_clean_error(tmp_path, monkeypatch, 
     assert "project" in capsys.readouterr().err.lower()
 
 
+def test_relay_user_ungrant_calls_client_and_prints_removed_vs_requested(
+    tmp_path, monkeypatch, capsys
+):
+    """`relay-user ungrant <name> --project P` threads name+projects and reports the result.
+
+    Why this matters: KI-40's CLI half. The output contract is removed-vs-requested — a
+    name the user never held is reported as "not held", not an error — plus the
+    remaining scope, all read from the relay's response rather than recomputed locally.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_ungrant_projects",
+        lambda url, token, name, projects, **k: calls.append((url, token, name, projects))
+        or {
+            "name": name,
+            "role": "contributor",
+            "removed": ["other"],
+            "projects": ["demo"],
+            "still_visible": [],
+        },
+    )
+    code = cli.main(
+        [
+            "relay-user", "ungrant", "alice",
+            "--project", "other", "--project", "never-held",
+            "--config", str(toml),
+        ]
+    )
+    assert code == 0
+    assert calls == [
+        ("https://relay.test/ingest", "admin-secret", "alice", ["other", "never-held"])
+    ]
+    out = capsys.readouterr().out
+    assert "Ungranted from 'alice': other." in out
+    assert "Not held (nothing to remove): never-held" in out
+    assert "Scope is now: demo" in out
+    assert "Note:" not in out  # no member/visibility note for a contributor
+
+
+def test_relay_user_ungrant_without_project_is_clean_error(tmp_path, monkeypatch, capsys):
+    """ungrant with no --project errors (exit 1) before any client call."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    called = []
+    monkeypatch.setattr(cli, "relay_ungrant_projects", lambda *a, **k: called.append(1))
+    code = cli.main(["relay-user", "ungrant", "alice", "--config", str(toml)])
+    assert code == 1 and called == []  # errored before calling the client
+    assert "project" in capsys.readouterr().err.lower()
+
+
+def test_relay_user_ungrant_prints_the_member_still_visible_note(
+    tmp_path, monkeypatch, capsys
+):
+    """When the relay says a removed project stays org-visible, the CLI says so too.
+
+    Why this matters: the KI-40 semantic — ungranting a member changes nothing for an
+    org-visible project. The note must ride the relay's `still_visible` field (only the
+    server knows org visibility), and the point of printing it is that the admin learns
+    the removal did not actually revoke access.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_ungrant_projects",
+        lambda url, token, name, projects, **k: {
+            "name": name,
+            "role": "member",
+            "removed": ["open-project"],
+            "projects": [],
+            "still_visible": ["open-project"],
+        },
+    )
+    code = cli.main(
+        ["relay-user", "ungrant", "kb-member", "--project", "open-project", "--config", str(toml)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Ungranted from 'kb-member': open-project." in out
+    assert "Note: open-project remain(s) readable" in out and "member" in out
+
+
 def test_relay_user_key_add_prints_the_key_once_and_the_safe_sequence(tmp_path, monkeypatch, capsys):
     """`relay-user key add` threads name+label and prints the one-time key plus next steps.
 
@@ -4203,7 +4297,8 @@ _LEAF_COMMANDS = [
     ["status"], ["baseline"], ["discussions", "pull"], ["discussions", "reply"], ["bot"],
     ["relay-serve"],
     ["relay-user", "add"], ["relay-user", "list"], ["relay-user", "revoke"],
-    ["relay-user", "grant"], ["relay-user", "key", "add"], ["relay-user", "key", "list"],
+    ["relay-user", "grant"], ["relay-user", "ungrant"],
+    ["relay-user", "key", "add"], ["relay-user", "key", "list"],
     ["relay-user", "key", "revoke"], ["relay-user", "password", "set"],
     ["relay-user", "password", "unlock"], ["relay-user", "role"], ["relay-user", "rename"],
     ["relay-user", "set-operator"], ["relay-user", "delete"],
@@ -4220,7 +4315,7 @@ def _help_text(capsys, command):
 
 
 def test_every_leaf_command_still_offers_config(capsys):
-    """All 32 leaf commands expose --config, and the 30 standard ones share one help text.
+    """All 33 leaf commands expose --config, and the 32 standard ones share one help text.
 
     Why this matters: P3 replaced 30 byte-identical --config blocks with one
     `_add_config_arg` helper. The risk of that kind of collapse is a command silently LOSING

@@ -68,6 +68,7 @@ from orion.delivery.relay import (
     create_user as relay_create_user,
     delete_user as relay_delete_user,
     grant_projects as relay_grant_projects,
+    ungrant_projects as relay_ungrant_projects,
     list_users as relay_list_users,
     post_discussion,
     pull_discussions,
@@ -969,6 +970,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_config_arg(ru_grant, default_config)
 
+    ru_ungrant = relay_user_subs.add_parser(
+        "ungrant",
+        help="Remove one or more projects from an existing user's scope (grant's inverse).",
+    )
+    ru_ungrant.add_argument("name", help="The user whose scope to narrow (by name).")
+    ru_ungrant.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        dest="projects",
+        metavar="PROJECT",
+        help="A project to ungrant (repeatable: --project a --project b). At least one required.",
+    )
+    _add_config_arg(ru_ungrant, default_config)
+
     # `key` is a command GROUP (add/list/revoke) — an account holds N credentials, so the
     # verbs act on a credential, not on the account. This REPLACES the retired `rotate`:
     # replacement is now add -> deploy -> verify -> revoke, which overlaps the two keys
@@ -1234,6 +1250,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_relay_user_revoke(args.name, Path(args.config))
         if args.relay_user_command == "grant":
             return cmd_relay_user_grant(args.name, args.projects, Path(args.config))
+        if args.relay_user_command == "ungrant":
+            return cmd_relay_user_ungrant(args.name, args.projects, Path(args.config))
         if args.relay_user_command == "key":
             if args.relay_user_key_command == "add":
                 return cmd_relay_user_key_add(args.name, args.label, Path(args.config))
@@ -4660,6 +4678,61 @@ def cmd_relay_user_grant(name: str, projects: list[str], config_path: Path) -> i
     scope = result.get("projects") or []
     print(f"Granted {name!r} access to: {', '.join(projects)}.")
     print(f"  Scope is now: {', '.join(scope) if scope else '(none)'}")
+    return 0
+
+
+def cmd_relay_user_ungrant(name: str, projects: list[str], config_path: Path) -> int:
+    """Remove projects from an existing user's scope (`relay-user ungrant`).
+
+    Args:
+        name: The user whose scope to narrow.
+        projects: Project names to ungrant (at least one required).
+        config_path: Path to orion.toml.
+
+    Returns:
+        Exit code: 0 on success (including a zero-removal no-op — ungrant is
+        idempotent); 1 on no --project given, a config/secrets error, or a failed
+        request (e.g. an unknown name → the relay's 404).
+
+    Why:
+        Grant's missing inverse (KI-40): scope is a security control, and one that only
+        widens is the wrong shape. The output reports removed-vs-requested (names the
+        user never held are skipped, not errors), the remaining scope, and — from the
+        relay's `still_visible` field — which removed projects a `member` account can
+        STILL read because they are org-visible. That note rides server facts: only the
+        relay knows org visibility, so the CLI must not guess it.
+    """
+    if not projects:
+        print(
+            "Error: ungrant needs at least one --project (e.g. --project my-app).",
+            file=sys.stderr,
+        )
+        return 1
+    result = _run_admin_command(
+        config_path, lambda url, token: relay_ungrant_projects(url, token, name, projects)
+    )
+    if result is _ADMIN_CALL_FAILED:
+        return 1
+
+    removed = result.get("removed") or []
+    scope = result.get("projects") or []
+    still_visible = result.get("still_visible") or []
+    # The server normalized (strip/de-dupe) before matching, so diff against the same
+    # normalization or a duplicated --project flag would show up as "not held".
+    requested = list(dict.fromkeys(p.strip() for p in projects if p.strip()))
+    not_held = [p for p in requested if p not in removed]
+    if removed:
+        print(f"Ungranted from {name!r}: {', '.join(removed)}.")
+    else:
+        print(f"Nothing removed from {name!r}.")
+    if not_held:
+        print(f"  Not held (nothing to remove): {', '.join(not_held)}")
+    print(f"  Scope is now: {', '.join(scope) if scope else '(none)'}")
+    if still_visible:
+        print(
+            f"  Note: {', '.join(still_visible)} remain(s) readable — org-visible, and "
+            f"{name!r} is a member (org visibility is a floor grants stack on)."
+        )
     return 0
 
 

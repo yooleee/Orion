@@ -596,6 +596,35 @@ def grant_projects(
     )
 
 
+def ungrant_projects(
+    relay_url: str, admin_token: str, name: str, projects: list, *, timeout: float = 10.0
+) -> dict:
+    """Remove project(s) from an existing user's scope, for `relay-user ungrant` (KI-40).
+
+    Args:
+        relay_url: The configured relay URL; the admin path is derived from it.
+        admin_token: The admin Bearer token.
+        name: The user whose scope to narrow.
+        projects: Project names to ungrant (names not held are skipped server-side).
+        timeout: Seconds to wait before failing.
+
+    Returns:
+        The parsed 200 response: {"name", "role", "removed": [<what actually came off>],
+        "projects": [<remaining explicit scope>], "still_visible": [<removed names a
+        member still reads via org visibility>]}.
+
+    Why:
+        Grant's missing inverse (KI-40): scope only ever widened. Mirrors grant_projects'
+        one-line shape over the shared admin helper; the richer response exists so the CLI
+        can report removed-vs-requested and the member/org-visibility note from server
+        facts instead of guessing.
+    """
+    url = urllib.parse.urljoin(relay_url, "/api/users/ungrant")
+    return _admin_request(
+        "POST", url, admin_token, {"name": name, "projects": list(projects)}, timeout
+    )
+
+
 def add_user_key(
     relay_url: str, admin_token: str, name: str, label: str, *, timeout: float = 10.0
 ) -> dict:

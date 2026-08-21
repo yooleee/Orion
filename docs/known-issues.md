@@ -1293,6 +1293,36 @@ Deferred).
   **pre-existing** — not introduced by the KI-41 work. Relates to [[KI-44]].
 
 
+## KI-49 — The weekly relay-backup job fails silently
+
+- **Detail:** `com.orion.relay-backup` (launchd, weekly) runs `relay-backup.sh`; its only
+  failure signals are a non-zero `last exit code` in `launchctl print` and error lines in
+  `orion-backup-launchd.log` — nothing an operator routinely sees. Between 2026-07-29 and
+  2026-08-20 **every run failed** (first Fly API "tunnel unavailable" timeouts, then flyctl's
+  stored token going invalid outright), so layer 2 of the backup posture was down for three
+  weeks. It was discovered only because the S2.3 deploy close-out's runbook happens to begin
+  with a manual backup pull.
+- **Why it matters:** the weekly pull exists precisely for the failure classes layer 1 (Fly's
+  daily snapshots, 5-day retention) cannot cover — a loss noticed late, or the Fly account
+  itself. A silently dead job converts the documented "≤ 7 days" worst case into unbounded
+  loss while the operator's mental model still says "backed up weekly." An unattended job
+  whose failure mode is silence is worse than no job, because it displaces the manual habit
+  that would otherwise exist.
+- **What bounds it today:** layer 1 kept running throughout; the store is small and
+  low-churn; and the deploy runbook's pre-deploy pull refreshes the operator copy on every
+  release (which is exactly how this was caught).
+- **Direction for a fix (cheapest first):** a dated `FAILED-<date>` marker file written into
+  `~/orion-backups/` on any error (the operator looks there anyway, and a marker sorts next
+  to the backups it interrupts); or a staleness check (newest backup older than 8 days →
+  visible complaint) run from somewhere routinely seen; the zero-code floor is a runbook
+  line — check the newest backup's date monthly. Alerting *through the relay* would invert
+  the dependency (the thing being backed up reporting on its own backups) — avoid.
+- **Severity:** low-medium — no data was lost this time, and layer 1 bounded the real
+  exposure, but the failure mode is structural and already occurred once.
+- **Status:** open. Filed 2026-08-20 from the S2.3 close-out; the immediate cause (lost
+  flyctl auth) was fixed the same day by an interactive `fly auth login` and the job
+  re-proven (kickstart → exit 0, consistent pull). The silent-failure gap is what remains.
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 

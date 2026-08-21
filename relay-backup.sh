@@ -30,6 +30,26 @@ REMOTE_TMP=/tmp/orion-pull.sqlite3
 
 mkdir -p "$DEST_DIR"
 
+# Failure marker (KI-49). This job's only failure signals used to be a non-zero
+# exit in `launchctl print` and lines in a log — nothing an operator routinely
+# sees, which is how three weeks of failed runs went unnoticed. On any failure,
+# drop a dated FAILED-<date>.txt INTO the backup directory: the operator looks
+# there anyway, and the marker sorts next to the backups it interrupts. A later
+# successful run removes the markers, because their meaning is "your newest
+# backup is older than it should be" — once a fresh backup lands that is no
+# longer true (the failure history stays in the log). Deliberately NOT alerting
+# through the relay: the thing being backed up must not report on its own backups.
+# This covers a run that starts and fails; a job that never runs at all (unloaded
+# plist, machine off) still needs the staleness check / runbook line KI-49 lists.
+on_exit() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'relay-backup FAILED on %s (exit %s). See orion-backup-launchd.log; newest good backup is older than scheduled.\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$status" > "$DEST_DIR/FAILED-$(date +%Y%m%d).txt"
+    fi
+}
+trap on_exit EXIT
+
 # 1. Wake the machine. REQUIRED, not optional: `fly ssh console` does NOT auto-start a
 #    stopped machine — it fails with "app <name> has no started VMs". Since this app runs
 #    min_machines_running = 0, the machine is stopped most of the time, so an unattended
@@ -71,3 +91,7 @@ if result != "ok":
     sys.exit(f"integrity_check FAILED on {path}: {result}")
 print(f"{path}: integrity_check ok, {reports} reports")
 PY
+
+# 6. This run produced a verified backup, so any standing FAILED markers no longer
+#    describe the current state — clear them (see the marker comment above).
+rm -f "$DEST_DIR"/FAILED-*.txt

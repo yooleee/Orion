@@ -5134,7 +5134,15 @@ def _deliver(
             # Route to the right channel's sender. config validation guarantees
             # recipient.channel is supported, so the sender lookup hits.
             send = _sender_for(recipient.channel)
-            send(messages[key].payload, url)
+            message = messages[key]
+            # One report may span several webhook POSTs (KI-2: Discord splits an
+            # over-cap report instead of truncating). POST them in order; a
+            # failure partway marks the recipient failed like any other, and the
+            # already-delivered prefix is strictly no worse than the old
+            # truncation (which delivered only a prefix on every over-cap run).
+            send(message.payload, url)
+            for continuation in message.continuations:
+                send(continuation, url)
             sent_to.append(recipient.name)
         except (SecretsError, DeliveryError) as exc:
             # A per-recipient failure shouldn't abort the others.

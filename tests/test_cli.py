@@ -453,6 +453,32 @@ def test_one_channel_failure_does_not_block_the_other(tmp_path, env_and_mocks):
     assert env_and_mocks["sent"] == []
 
 
+def test_over_cap_report_delivers_every_split_part_in_order(tmp_path, env_and_mocks):
+    """A report over Discord's cap arrives as several POSTs carrying the whole text.
+
+    Why this matters: KI-2's fix — compose splits the over-cap plain fallback into
+    continuations and _deliver must POST all of them, in order, to the same
+    webhook. The tail line surviving into the LAST recorded send is the regression
+    assertion that nothing is truncated on the wire.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    repo = _make_repo(tmp_path)
+    toml = _write_config(tmp_path, repo)
+    # Big enough that the embed can't hold it (field value > 1024) and the plain
+    # fallback exceeds one 2000-char message.
+    body = "\n".join(f"line {i}: " + "x" * 80 for i in range(60))
+    use_summary(mp, body)
+
+    _answer(mp, "y")
+    assert cli.main(["report", "demo", "--config", str(toml)]) == 0
+
+    sent = env_and_mocks["sent"]
+    assert len(sent) > 1                             # several POSTs, one recipient
+    assert len({url for _, url in sent}) == 1        # all to the same webhook
+    assert "line 0:" in sent[0][0]                   # head in the first part
+    assert "line 59:" in sent[-1][0]                 # tail in the last part
+
+
 def test_no_activity_across_all_collectors_sends_nothing(tmp_path, env_and_mocks):
     """When no enabled collector has activity, nothing is sent and exit is 0.
 

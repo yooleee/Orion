@@ -336,7 +336,7 @@ orion relay-user add supervisor-a --role viewer --project my-app  # a dashboard 
 orion relay-user password set supervisor-a                        # prompts twice, hidden
 orion relay-user add mac --role contributor --project my-app      # a machine (prints its key once)
 orion relay-user list                                             # who has access, and their scope
-orion relay-user revoke supervisor-a                              # cut off access immediately
+orion relay-user deactivate supervisor-a                          # cut off access immediately
 ```
 
 An **account** is the durable identity and holds N individually revocable **credentials**, so one

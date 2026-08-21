@@ -104,7 +104,7 @@ orion relay-user list                                          # roster: role, k
 orion relay-user grant mac --project other-app                 # widen an existing account's scope
 orion relay-user role supervisor-a supervisor                  # change a role (logs out live sessions)
 orion relay-user rename mac mac-mini                           # rename (history keeps the old name)
-orion relay-user revoke supervisor-a                           # cutoff (keeps the name)
+orion relay-user deactivate supervisor-a                       # cutoff (keeps the name)
 orion relay-user delete supervisor-a                           # hard-delete (frees the name)
 
 # Project visibility — who inside the org may read a project.

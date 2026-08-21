@@ -552,20 +552,23 @@ def list_users(relay_url: str, admin_token: str, *, timeout: float = 10.0) -> di
 def revoke_user(
     relay_url: str, admin_token: str, name: str, *, timeout: float = 10.0
 ) -> dict:
-    """Revoke a relay user (deactivate + force-logout) for `relay-user revoke` (C3).
+    """Deactivate a relay user (keys stop working + force-logout) for `relay-user deactivate`.
 
     Args:
         relay_url: The configured relay URL; the admin path is derived from it.
         admin_token: The admin Bearer token.
-        name: The user to revoke.
+        name: The user to deactivate.
         timeout: Seconds to wait before failing.
 
     Returns:
         The parsed 200 response: {"name": <name>, "revoked": true}.
 
     Why:
-        The third admin client call. The relay does the deactivate + session-version bump
-        atomically, so a successful return means the user is force-logged-out everywhere.
+        The third admin client call (C3). The relay does the deactivate + session-version
+        bump atomically, so a successful return means the user is force-logged-out
+        everywhere. This function and the /api/users/revoke route keep the wire's legacy
+        "revoke" name after the CS-O PR3 surface rename — the route is internal protocol,
+        and renaming it is a relay-side change that PR's CLI scope deliberately avoided.
     """
     url = urllib.parse.urljoin(relay_url, "/api/users/revoke")
     return _admin_request("POST", url, admin_token, {"name": name}, timeout)

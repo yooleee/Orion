@@ -879,7 +879,7 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
     )
 
-    # `relay-user` is a command GROUP with add/list/revoke subcommands — the admin-side
+    # `relay-user` is a command GROUP with add/list/deactivate/... subcommands — the admin-side
     # provisioning CLI that talks to a running relay's /api/users endpoint over HTTP
     # (authenticated with the SEPARATE admin token). It is the only nested-subcommand
     # group in the CLI; every other command is flat.
@@ -941,6 +941,15 @@ def main(argv: list[str] | None = None) -> int:
             "is never lost."
         ),
     )
+    ru_add.add_argument(
+        "--key-only",
+        action="store_true",
+        dest="key_only",
+        help=(
+            "Scripting mode: print ONLY the new access key (plus a newline) on stdout — "
+            "no provisioning summary. Errors still go to stderr."
+        ),
+    )
     _add_config_arg(ru_add, default_config)
 
     ru_list = relay_user_subs.add_parser(
@@ -948,12 +957,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_config_arg(ru_list, default_config)
 
-    ru_revoke = relay_user_subs.add_parser(
-        "revoke",
-        help="Revoke a user: deactivate their key and force-log-out any live session.",
+    ru_deactivate = relay_user_subs.add_parser(
+        "deactivate",
+        help=(
+            "Deactivate an account: its keys stop authenticating and any live session "
+            "is logged out. Keeps the name (use `delete` to free it)."
+        ),
     )
-    ru_revoke.add_argument("name", help="The user to revoke (by name).")
-    _add_config_arg(ru_revoke, default_config)
+    ru_deactivate.add_argument("name", help="The user to deactivate (by name).")
+    _add_config_arg(ru_deactivate, default_config)
 
     ru_grant = relay_user_subs.add_parser(
         "grant",
@@ -1000,8 +1012,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     ru_key_add.add_argument("name", help="The account to attach the key to.")
     ru_key_add.add_argument(
-        "--label", required=True,
-        help="A short label for where this key lives, e.g. 'mac' or 'wsl2' (unique per account).",
+        "--label", default="key",
+        help=(
+            "A short label for where this key lives, e.g. 'mac' or 'wsl2' (default: "
+            "'key'). Labels must be unique among an account's ACTIVE keys — adding a "
+            "second key without --label is rejected by the relay (409), so name each "
+            "additional key."
+        ),
+    )
+    ru_key_add.add_argument(
+        "--key-only",
+        action="store_true",
+        dest="key_only",
+        help=(
+            "Scripting mode: print ONLY the new access key (plus a newline) on stdout — "
+            "no summary or next-steps. Errors still go to stderr."
+        ),
     )
     _add_config_arg(ru_key_add, default_config)
 
@@ -1079,7 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ru_delete = relay_user_subs.add_parser(
         "delete",
-        help="Hard-delete a user, freeing their name to be reused (revoke keeps the name).",
+        help="Hard-delete a user, freeing their name to be reused (deactivate keeps the name).",
     )
     ru_delete.add_argument("name", help="The user to delete (by name).")
     _add_config_arg(ru_delete, default_config)
@@ -1243,18 +1269,21 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.config),
                 account_kind=args.account_kind,
                 operated_by=args.operated_by,
+                key_only=args.key_only,
             )
         if args.relay_user_command == "list":
             return cmd_relay_user_list(Path(args.config))
-        if args.relay_user_command == "revoke":
-            return cmd_relay_user_revoke(args.name, Path(args.config))
+        if args.relay_user_command == "deactivate":
+            return cmd_relay_user_deactivate(args.name, Path(args.config))
         if args.relay_user_command == "grant":
             return cmd_relay_user_grant(args.name, args.projects, Path(args.config))
         if args.relay_user_command == "ungrant":
             return cmd_relay_user_ungrant(args.name, args.projects, Path(args.config))
         if args.relay_user_command == "key":
             if args.relay_user_key_command == "add":
-                return cmd_relay_user_key_add(args.name, args.label, Path(args.config))
+                return cmd_relay_user_key_add(
+                    args.name, args.label, Path(args.config), key_only=args.key_only
+                )
             if args.relay_user_key_command == "list":
                 return cmd_relay_user_key_list(args.name, Path(args.config))
             if args.relay_user_key_command == "revoke":
@@ -4428,7 +4457,7 @@ def _load_relay_admin(config_path: Path) -> tuple[str, str]:
 
 # AU1-R P3: a sentinel meaning "the admin call failed and its message is already on stderr".
 # A distinct object rather than None because several admin client calls legitimately return
-# None (the ones whose success carries no payload — revoke, unlock, rename), so None cannot
+# None (the ones whose success carries no payload — deactivate, unlock, rename), so None cannot
 # also mean failure. Its ONLY correct use is `if result is _ADMIN_CALL_FAILED: return 1`.
 _ADMIN_CALL_FAILED = object()
 
@@ -4503,6 +4532,7 @@ def cmd_relay_user_add(
     config_path: Path,
     account_kind: str = "human",
     operated_by: str | None = None,
+    key_only: bool = False,
 ) -> int:
     """Provision a relay user and print their one-time access key (`relay-user add`).
 
@@ -4513,6 +4543,10 @@ def cmd_relay_user_add(
         config_path: Path to orion.toml.
         account_kind: "human" (default) or "agent" (Unit 4a).
         operated_by: For an agent, the operating human's account name; None for a human.
+        key_only: Scripting mode (CS-O PR3): print ONLY the raw key + one newline on
+            stdout, nothing else — so `KEY=$(orion relay-user add ...)` works. Errors
+            stay on stderr, and the key is only printed from a successful response
+            (no partial output on failure).
 
     Returns:
         Exit code: 0 on success; 1 on a config/secrets error or a failed request
@@ -4553,6 +4587,11 @@ def cmd_relay_user_add(
     if result is _ADMIN_CALL_FAILED:
         return 1
 
+    if key_only:
+        # The whole contract: raw key + one newline, nothing else on stdout.
+        print(result["key"])
+        return 0
+
     print(f"Provisioned user {result['name']!r} (role: {result['role']}).")
     if result.get("kind") == "agent":
         print(f"  Kind: agent, operated by {result['operated_by']!r}.")
@@ -4584,7 +4623,7 @@ def cmd_relay_user_list(config_path: Path) -> int:
         or a failed request.
 
     Why:
-        The operational view: who has access, what they can see, and who has been revoked.
+        The operational view: who has access, what they can see, and who has been deactivated.
         It calls GET /api/users, which returns NO credential material (no verifier, no
         key), so a listing can never surface a secret.
     """
@@ -4597,7 +4636,7 @@ def cmd_relay_user_list(config_path: Path) -> int:
         print("No relay users provisioned yet.")
         return 0
     for user in users:
-        status = "active" if user.get("active") else "REVOKED"
+        status = "active" if user.get("active") else "DEACTIVATED"
         if user["role"] == "admin":
             scope = "all (admin)"
         else:
@@ -4617,11 +4656,11 @@ def cmd_relay_user_list(config_path: Path) -> int:
     return 0
 
 
-def cmd_relay_user_revoke(name: str, config_path: Path) -> int:
-    """Revoke a relay user: deactivate + force-logout (`relay-user revoke`).
+def cmd_relay_user_deactivate(name: str, config_path: Path) -> int:
+    """Deactivate a relay account: keys stop working + force-logout (`relay-user deactivate`).
 
     Args:
-        name: The user to revoke.
+        name: The user to deactivate.
         config_path: Path to orion.toml.
 
     Returns:
@@ -4629,10 +4668,15 @@ def cmd_relay_user_revoke(name: str, config_path: Path) -> int:
         (e.g. an unknown name → the relay's 404, surfaced as a clear message).
 
     Why:
-        Revocation is a settled Increment-1 requirement: an admin must be able to cut off
-        access immediately. It calls POST /api/users/revoke, where the relay deactivates
-        the user and bumps their session_version atomically — so the key stops logging in
-        AND any cookie already in a browser dies on its next request.
+        Immediate cutoff is a settled Increment-1 requirement. The verb renamed from
+        `revoke` in CS-O PR3 (decision 9, clean break): account-level DEACTIVATE keeps
+        the name, `delete` frees it, and `key revoke` kills one credential — three
+        different acts that should not share a word. Semantics are untouched: it calls
+        POST /api/users/revoke (the wire route keeps its legacy name — renaming it is a
+        relay-side protocol change this CLI-scoped PR deliberately does not make), where
+        the relay deactivates the user and bumps their session_version atomically — so
+        keys stop authenticating AND any cookie already in a browser dies on its next
+        request.
     """
     if _run_admin_command(
         config_path, lambda url, token: relay_revoke_user(url, token, name)
@@ -4640,8 +4684,8 @@ def cmd_relay_user_revoke(name: str, config_path: Path) -> int:
         return 1
 
     print(
-        f"Revoked user {name!r}: their key is deactivated and any live session is "
-        "logged out."
+        f"Deactivated user {name!r}: their keys stop authenticating and any live "
+        "session is logged out. The name is kept — `relay-user delete` frees it."
     )
     return 0
 
@@ -4736,17 +4780,25 @@ def cmd_relay_user_ungrant(name: str, projects: list[str], config_path: Path) ->
     return 0
 
 
-def cmd_relay_user_key_add(name: str, label: str, config_path: Path) -> int:
+def cmd_relay_user_key_add(
+    name: str, label: str, config_path: Path, key_only: bool = False
+) -> int:
     """Attach a new key credential to an account (`relay-user key add`).
 
     Args:
         name: The account to attach the key to.
-        label: A short label for where the key will live (unique among active credentials).
+        label: A short label for where the key will live (unique among active
+            credentials). Defaults to the constant "key" at the parser (CS-O PR3) —
+            deliberately neutral, not hostname-derived, so no machine name leaks into
+            relay state; a second label-less add on the same account is the relay's 409.
         config_path: Path to orion.toml.
+        key_only: Scripting mode (CS-O PR3): print ONLY the raw key + one newline on
+            stdout, nothing else. Errors stay on stderr; the key is only printed from a
+            successful response (no partial output on failure).
 
     Returns:
         Exit code: 0 on success; 1 on a config/secrets error or a failed request (unknown
-        name → 404; revoked account or duplicate active label → the relay's 409).
+        name → 404; deactivated account or duplicate active label → the relay's 409).
 
     Why:
         The replacement for the retired `rotate`, and the command that makes one identity
@@ -4760,6 +4812,11 @@ def cmd_relay_user_key_add(name: str, label: str, config_path: Path) -> int:
     )
     if result is _ADMIN_CALL_FAILED:
         return 1
+
+    if key_only:
+        # The whole contract: raw key + one newline, nothing else on stdout.
+        print(result["key"])
+        return 0
 
     print(f"Added key {label!r} (id {result['id']}) to {name!r}. Existing keys still work.")
     print("  Access key (shown ONCE — copy it now; it cannot be retrieved later):")
@@ -5092,7 +5149,7 @@ def cmd_relay_user_delete(name: str, config_path: Path) -> int:
         → 404).
 
     Why:
-        `revoke` keeps the row, so the UNIQUE name stays occupied and can't be re-provisioned
+        `deactivate` keeps the row, so the UNIQUE name stays occupied and can't be re-provisioned
         (KI-31). `delete` removes the user + grants + live per-producer checklists and frees the
         name, while their past reports/replies keep the author name already recorded on them.
     """

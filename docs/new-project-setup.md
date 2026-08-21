@@ -142,6 +142,9 @@ python -c "import secrets; print('ORION_RELAY_TOKEN=' + secrets.token_urlsafe(32
 > ```bash
 > orion relay-user add mac --role contributor --project my-app          # a machine
 > orion relay-user key add mac --label wsl2                             # a SECOND machine, same identity
+> orion add-project other-app --grant mac                               # register a LATER project and
+>                                                                       # widen mac's scope in one step
+
 > orion relay-user add claude-mac --role contributor --kind agent \
 >     --operated-by yoo --project my-app                                # an agent acting for you
 > ```

@@ -2556,3 +2556,38 @@ def test_ungrant_leaves_other_users_grants_untouched(tmp_path):
     assert ungrant_projects(conn, a, ["demo"]) == ["demo"]
     assert projects_for_user(conn, a) == []
     assert projects_for_user(conn, b) == ["demo"]
+
+
+def test_ungrant_reads_and_deletes_inside_one_write_transaction(tmp_path):
+    """The held-set SELECT and the DELETE run under one up-front write transaction.
+
+    Why this matters: the returned list feeds the admin audit trail, so the read and
+    the delete must see the same state. Under sqlite3's legacy autocommit a bare
+    SELECT opens NO transaction — without an explicit BEGIN IMMEDIATE, a concurrent
+    admin write (the relay serves requests on threads, one connection each) could
+    land between the two statements and the audited "removed" list would silently
+    misreport what was deleted. A race itself can't be tested deterministically, so
+    this pins the mechanism: the trace must show BEGIN IMMEDIATE before the SELECT.
+    """
+    conn = open_relay_store(tmp_path / "relay.sqlite3")
+    user_id = add_user(
+        conn, "prod", "v-a", "contributor", ["demo"], "test", "2026-08-21T00:00:00+00:00"
+    )
+
+    statements = []
+    conn.set_trace_callback(statements.append)
+    assert ungrant_projects(conn, user_id, ["demo"]) == ["demo"]
+    conn.set_trace_callback(None)
+
+    begin = next(
+        (i for i, s in enumerate(statements) if s.strip().upper().startswith("BEGIN IMMEDIATE")),
+        None,
+    )
+    select = next(
+        (i for i, s in enumerate(statements) if s.strip().upper().startswith("SELECT")), None
+    )
+    assert begin is not None, f"no BEGIN IMMEDIATE issued; trace: {statements}"
+    assert select is not None and begin < select, (
+        f"the held-set SELECT ran outside the write transaction; trace: {statements}"
+    )
+    assert not conn.in_transaction  # the single commit closed it

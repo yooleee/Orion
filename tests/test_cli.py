@@ -4315,7 +4315,7 @@ def _help_text(capsys, command):
 
 
 def test_every_leaf_command_still_offers_config(capsys):
-    """All 33 leaf commands expose --config, and the 31 standard ones share one help text.
+    """All 33 leaf commands expose --config, and the 32 standard ones share one help text.
 
     Why this matters: P3 replaced 30 byte-identical --config blocks with one
     `_add_config_arg` helper. The risk of that kind of collapse is a command silently LOSING

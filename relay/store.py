@@ -2409,12 +2409,20 @@ def ungrant_projects(
         The inverse `grant_projects` never had: scope is a security control, and a
         control that only widens is the wrong shape (KI-40). Reading the held set
         first (rather than trusting rowcount on a bare DELETE) lets the caller
-        report removed-vs-requested precisely. Both statements run in one implicit
-        transaction with a single commit, so a multi-project ungrant is atomic.
+        report removed-vs-requested precisely — and that report feeds the audit
+        trail, so the read and the delete must see the same state. Under the
+        sqlite3 module's legacy autocommit a bare SELECT does NOT open a
+        transaction, so the explicit BEGIN IMMEDIATE below is what makes the
+        pair atomic: it takes the write lock up front, keeping a concurrent
+        admin write (this server handles requests on threads, one connection
+        each) from landing between the SELECT and the DELETE and silently
+        falsifying the returned/audited list.
     """
     if not projects:
         # An empty IN () is a sqlite syntax error; the no-op answer is already known.
         return []
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     placeholders = ", ".join("?" for _ in projects)
     held = {
         row["project"]

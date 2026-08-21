@@ -33,6 +33,33 @@ Deferred).
 > address). Recorded so the absence of an "Exercised" line reads as *not yet done*, never as
 > *checked and fine*.
 
+> **DF2 dogfood sweep, 2026-08-20.** Second sweep, same harness, run per DF1's recorded
+> disposition (no kickoff, discovery on the sandbox: real repos, real Haiku calls; state,
+> webhooks and relay all redirected). Entries carrying an **"Exercised (DF2, 2026-08-20)"**
+> line were run for real this time. What DF2 reached that DF1 could not: **all six of DF1's
+> unexercised entries except KI-34** — KI-10 (rich Markdown through the Slack lane), KI-16
+> (the local-backend *seam*, against a local OpenAI-compatible stub — model quality remains
+> untested), KI-17, KI-21 (the rename arm), KI-33 (miss **and** self-heal) — plus KI-36's
+> failing form in its real mode (`--disable-legacy-ingest`), which DF1 explicitly could not
+> reproduce. KI-34 is since resolved; its resolved layout was verified live on a dense real
+> project during the SPA pass. Surfaces landed since DF1, all exercised clean: the
+> auth-revamp `relay-user` verbs (key add/list/revoke, password set/unlock + the key-login
+> cutover, role, rename, set-operator, revoke-vs-delete name semantics), the S2.2
+> `relay-project lifecycle`/`visibility` verbs and the dashboard's Past-projects grouping,
+> the About + due-soon carriers with their KI-35 tri-state (set → survives omission →
+> explicit clear), the DF1 empty-clobber guard on `disciplines-push` (refuses the
+> config-relative accident by name), `relay-backfill` (now attributed under a contributor
+> key), `add-project --like`, and the **S2.3 search band** — `GET /api/search` (scope-aware,
+> multi-word AND, input validation) and the SPA Search page (grouped, highlighted hits).
+> One honest S2.3 dogfood signal: the sweep itself never reached for search to answer its
+> own questions — with operator access, `sqlite3` and `grep` were always closer to hand;
+> search's audience is the browser-side reader, and there it worked. Findings: **one fix
+> PR** (KI-49's failure marker, PR #160) and **two new entries** ([[KI-50]], the unpreviewed
+> relay tail — the sweep's significant find — and [[KI-51]]). Not re-exercised, by choice:
+> everything DF1 already reproduced on since-unchanged code (KI-1/5/6/7/11/14/24/32/37/38),
+> the closed/deferred redaction complex (KI-41/47/48, per their standing decisions), and
+> KI-44's deferred thread-cap half.
+
 ---
 
 ## KI-1 — Multi-recipient partial-failure policy
@@ -84,6 +111,15 @@ Deferred).
   full report, and only the delivered payload is short. That asymmetry (Slack whole, Discord
   truncated, no warning either way) is a better argument for splitting than the original
   entry made.
+- **Exercised (DF2, 2026-08-20) — fired again on ordinary use, and one DF1 claim needs
+  correcting.** The sandbox first report of `instruction-debugger` (107 commits,
+  `high_level`, single Discord recipient) truncated at exactly 2000 again. But the DF1 line
+  "the preview shows the full report … nothing on the sending side signals the loss" does
+  not describe current behavior: the preview shows each audience's **composed** message, so
+  a Discord-only audience sees the truncated text *with* its `… [truncated]` marker — the
+  chat-side loss is now visible before sending. What that per-audience honesty exposes
+  instead: the relay's full copy is then partly unpreviewed, which is [[KI-50]], filed by
+  this sweep. The splitting-vs-truncating decision here is unchanged and still deferred.
 - **Severity:** low
 - **Status:** Deferred (enhancement). The DF1 evidence raises its practical priority: the
   trigger is a normal first report of a real project, not a pathological input.
@@ -230,6 +266,15 @@ Deferred).
   speculative complexity. If a future source introduces other Markdown that must render in
   Slack, extend the translator then. Flagged so the scope is a conscious choice, not an
   oversight.
+- **Exercised (DF2, 2026-08-20) — first real probe of the limits, via `intake` with
+  deliberately rich Markdown.** The two supported constructs worked (`**bold**` → `*bold*`,
+  nested `_italics_` inside survived correctly). Everything outside the scope reached the
+  Slack sink raw, as the entry predicts: `[text](url)` links arrive as literal bracket
+  syntax (Slack's own form is `<url|text>`), pipe tables arrive as plain pipe lines, and a
+  ` ```python ` fence keeps its language tag as visible text. The boundary is real but only
+  reachable through user-authored structured content (intake/notes) — the LLM lane's output
+  still has not produced these constructs. The scope choice stands, now with a measured
+  edge rather than an assumed one.
 - **Severity:** low
 - **Status:** By-design (extend only when a real case needs it).
 
@@ -341,6 +386,16 @@ Deferred).
   OpenAI-compatible endpoint, or needs a native-only capability for summarization. Until then the
   single shape is the simplest thing that works. Recorded so the scope is a conscious choice, not
   an oversight.
+- **Exercised (DF2, 2026-08-20) — the SEAM, not the quality.** A local OpenAI-compatible
+  stub stood in for a runtime, which exercises exactly the contract this entry is about: a
+  real 16,805-character collector prompt went through `LocalSummarizer` via config
+  (`provider = "local"`, `base_url`, `model`) and the reply flowed into a complete report.
+  Both non-conformance arms failed closed as documented — a response missing
+  `message.content` gave *"Local summarizer returned an unexpected response shape"*, an
+  HTTP 500 gave a clean `SummarizerError`, and neither advanced state. What this
+  deliberately does NOT test is summary **quality** on a real local model — the entry's
+  original blocker stands, and the capability-floor note under KI-4 is still the only
+  evidence there.
 - **Severity:** low
 - **Status:** By-design (extend with a native-API backend only when a real case needs it).
 
@@ -371,6 +426,12 @@ Deferred).
   path is anonymous). KI-17's original point that some users would *prefer* anonymity by choice is not
   yet a first-class per-report/per-project option. That remains a clean additive step (a config toggle
   + an optional null-author path), tracked here rather than closed.
+- **Exercised (DF2, 2026-08-20):** both attribution modes verified on the sandbox relay —
+  a shared-token push landed an anonymous row (`author_id` NULL, no "pushed by"), the same
+  command under a contributor key landed attributed (`sb-prod-a`, server-derived), and
+  `relay-backfill` under a key is attributed too. Confirmed by grep that no
+  anonymity-by-choice switch exists anywhere in config or CLI. The entry's open half is
+  accurately stated; no change.
 
 ## KI-21 — Forward-store item identity is the title, so a renamed item is a new item
 
@@ -396,6 +457,12 @@ Deferred).
   migration (the store is an append-only **projection**, rebuildable from the pushes) — but that is held
   as a seam, not built, since folding group into the key would orphan history on a re-grouping for no
   current benefit. Complements **KI-6** (the tasks collector's text identity) — same model, applied forward.
+- **Exercised (DF2, 2026-08-20) — the rename arm (a), reproduced exactly as written:** a
+  sandbox tracker item renamed between pushes ("Beta Grant" → "Beta Grant Fellowship") left
+  the old key's observation rows orphaned in `relay_observed_items` and started the new key
+  with a fresh, history-free stream — visible at both the store and the API. Arm (b), two
+  same-titled items collapsing to one key, was **not** constructed this sweep; it remains
+  documented-but-unexercised. The identity model behaved as documented; no change.
 - **Severity:** low
 - **Status:** By-design (documented limitation; revisit if a rename/duplicate-title case bites in real
   use — group+title keying is the available seam if so).
@@ -433,6 +500,9 @@ Deferred).
   Unit 2) covers the concept, and an *authored* blurb would be a distinct, additive later choice.
   The DF1 line above predates that removal. Gaps **3** (participant roles) and **4**
   (`source_tags`) are now the open remainder.
+- **Exercised (DF2, 2026-08-20):** gaps 3 and 4 re-confirmed live against the sandbox relay,
+  read off `GET /api/reports/1`: `participants` carries `role: null` and `source_tags` ships
+  `[]`. Still the open remainder; still degrading gracefully.
 - **Update (Tracker slice, E2 Inc 4):** gap 8 closed. The producer now ships a first-class semantic
   `status` field (`not_started|in_progress|submitted|closed`) additively (the text embed stays for legacy
   `render.py`/reports), the relay folds `in_progress` into `state` and passes raw `status` through, and the
@@ -545,6 +615,14 @@ Deferred).
   history), and it self-heals as fresh identified pushes accumulate.
 - **Severity:** low (conservative; transient; only affects a producer that straddled the anonymous→keyed
   cutover).
+- **Exercised (DF2, 2026-08-20) — reproduced end to end, both the miss and the self-heal.**
+  A sandbox tracker item was observed once anonymously (due 2026-08-25) and once under a
+  contributor key with the deadline moved to 2026-09-01 — a real postponement straddling
+  the cutover — and the API showed `slipping: false`: neither stream held ≥2 observations,
+  the documented conservative miss. A second identified push (moved again to 2026-09-05)
+  flipped it to `slipping: true` — the identified stream now carries the postponement on
+  its own, confirming the entry's "self-heals as fresh identified pushes accumulate."
+  Exactly as designed; no change.
 - **Status:** By-design. The alternative — cross-attributing anonymous history to whoever later
   identified — would break the unforgeable server-derived-attribution invariant. Left as-is.
 
@@ -614,8 +692,18 @@ Deferred).
   pushes. Reproducing the original 404 drop requires `--disable-legacy-ingest` or a
   contributor key, which is worth remembering when the forward-fix is finally built — the
   behaviour differs by ingest mode.
-- **Severity:** low–medium (recovery exists; the forward-fix is a convenience, and the gap only
-  bites at onboarding, before a grant).
+- **Exercised (DF2, 2026-08-20) — the failing form finally reproduced in its real mode,
+  which DF1 could not.** With the sandbox relay restarted `--disable-legacy-ingest` (the
+  production posture), an `intake` under a contributor key with **no grant** for the
+  project delivered to chat and had its relay push 404 — the report dropped from the
+  dashboard record, the exact gap this entry describes. Two details worth adding: the CLI
+  **does** print `⚠ relay push failed (report still delivered)`, so an interactive run is
+  not silent — the silence is specific to unattended runs where nobody reads stdout. And
+  `relay-backfill` then recovered the exact body at a chosen `generated_at`, now
+  **attributed** (the pushing key's author lands on the backfilled row) — the recovery
+  path works in the keyed world too. The forward-fix remains open and re-confirmed:
+  `add-project`'s next-steps output still says webhooks + `orion check` and never mentions
+  granting the project into the relay.
 - **Status:** Partially addressed — the `relay-backfill` recovery command shipped in this slice;
   the `add-project` scope-prompt forward-fix stays **Open**. Revisited at the auth-revamp planning
   pass (2026-07-19): kept **out of the revamp arc** to bound its scope, recorded as a small
@@ -712,6 +800,11 @@ Deferred).
   idempotent (granting `orion` to an existing contributor reported *"Scope is now:
   applications, orion"*), which is precisely the asymmetry: scope widens on demand and never
   narrows.
+- **Exercised (DF2, 2026-08-20):** still add-only. The verb set is unchanged (`key`,
+  `password`, `role`, `rename`, `set-operator` joined the surface in the revamp; no
+  ungrant verb among them), `grant` still widens idempotently, and the whole lifecycle
+  battery around it behaved cleanly (revoke keeps the name — re-add 409s; delete frees
+  it). The asymmetry this entry names is intact.
 - **Severity:** low now, medium once accounts are provisioned for other people.
 - **Status:** Open. Recorded 2026-07-20 during the auth-revamp close-out; the approved
   `sliptest` cleanup was **blocked** on it and deferred. Slotted for a proposed
@@ -1322,6 +1415,59 @@ Deferred).
 - **Status:** open. Filed 2026-08-20 from the S2.3 close-out; the immediate cause (lost
   flyctl auth) was fixed the same day by an interactive `fly auth login` and the job
   re-proven (kickstart → exit 0, consistent pull). The silent-failure gap is what remains.
+
+## KI-50 — The preview shows only the composed channel messages, so the relay's full copy can carry an unpreviewed tail
+
+- **Detail:** the report preview renders one block per audience — the **composed**
+  per-channel message, exactly what that channel will receive. The relay push is separate
+  and deliberate: `_relay_push(full_blob)` always ships the **full** report body
+  (commented in `cli.py`: "the relay always receives the FULL, unfiltered report"). When
+  every previewed channel truncates, the difference between the two is text that leaves
+  the machine without ever being shown. Reproduced in DF2 on an ordinary config: first
+  report of `instruction-debugger` (107 commits, `high_level`), single **Discord**
+  recipient — the preview and the delivered Discord message were both exactly 2000
+  characters ending in `… [truncated]`; the relay row's body was **5583** characters.
+  Characters 2001–5583 reached the hosted relay unpreviewed.
+- **Why it matters:** preview-before-send is the **guaranteeing layer** ([[KI-3]]): the
+  human check is what redaction's admitted incompleteness is backstopped by. Redaction
+  itself ran on the full body (both passes), so the automatic layer is intact — the hole
+  is precisely in the human layer, for exactly the bytes the human never saw. The trigger
+  is narrow but ordinary: it needs a report over the smallest channel cap (2000 — which
+  [[KI-2]] shows a normal first report exceeds) delivered to an audience whose every
+  channel truncates. A Discord-only project is the realistic case; every current live
+  chat project also carries a Slack recipient (40k cap), whose preview block shows
+  effectively everything, so today's exposure is configs that drop to one channel.
+- **Relation to KI-2:** this is not the truncation itself (that stays KI-2, deferred).
+  DF2 corrected KI-2's DF1-era claim — the preview now honestly shows each audience's
+  truncated message. This entry is what that correction exposes: the honest per-channel
+  preview is not a preview of everything that leaves the machine.
+- **Candidate fix, deliberately not built this sweep:** preview is a security control, so
+  reshaping it needs an explicit decision, not a drive-by patch (the KI-41 arc's standing
+  ruling). The shape that suggests itself: when the relay is enabled and no previewed
+  block contains the full body, add one labeled block ("relay — full record") so the
+  preview's coverage matches the send again. Alternatives: preview the full body first
+  and the per-channel renderings after; or gate the relay push to the previewed prefix
+  (worse — it makes the dashboard record incomplete).
+- **Severity:** low-medium (security-control shape; narrow, ordinary trigger; no leak
+  observed — the automatic redaction layer did run on everything).
+- **Status:** Open — needs decision. Found by DF2 (2026-08-20) on the sweep's first real
+  report.
+
+## KI-51 — Unknown `/api/*` paths return the SPA shell with a 200, not a JSON 404
+
+- **Detail:** under `--web-dir`, any unmatched GET falls through to the SPA's
+  `index.html` — the deliberate catch-all that client-side routing needs, and the
+  ordering trap the `/healthz` work documented. That fallback also swallows unmatched
+  **API** paths: `GET /api/projects` (not a route — the real one is `/api/portfolio`)
+  returns `200 text/html`. A JSON client gets the page shell where it expected data.
+- **Why it matters:** an API consumer probing a wrong path sees a 200 and then a JSON
+  parse error, which reads as "the relay is broken," not "wrong endpoint" — exactly how
+  DF2 hit it (a scripted read guessed `/api/projects` and got a `JSONDecodeError`). Not a
+  security issue: auth still gates every real route, and the shell is what any
+  unauthenticated browser gets anyway. The fix shape is small: an `/api/` prefix guard
+  ahead of the SPA fallback that returns a JSON 404 for paths no route matched.
+- **Severity:** low (developer-experience / API hygiene).
+- **Status:** Open. Found by DF2 (2026-08-20).
 
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.

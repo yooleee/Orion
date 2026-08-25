@@ -269,7 +269,7 @@ above):
 
 ```bash
 python -m orion projects          # list every project: auto_send, share level, channels
-python -m orion show <project>    # one project's resolved config (paths, flags, recipients)
+python -m orion projects <name>   # one project's resolved config (paths, flags, recipients)
 python -m orion check             # validate the config and report send-readiness
 python -m orion status            # which projects have unreported activity, across the config
 ```

@@ -208,8 +208,9 @@ exist, then declare the result finished.
    nothing much, if the work lives elsewhere).
 2. **Get its content onto the relay.** Whatever it has is what it gets: a checklist push
    (`orion checklist-push <name>`) carries the checklist and the About line, and
-   `orion relay-backfill <name> --body-file <file>` carries a historical report body with
-   the date you give it. Run the backfill once per report you want on the timeline.
+   `orion intake <name> --relay-only --generated-at <iso> --body-file <file>` carries a
+   historical report body at the date you give it (the mode formerly named
+   `relay-backfill`). Run it once per report you want on the timeline.
 
    A finished project often has no task list left. That is fine: set `about_file` and leave
    `checklist` off, and `orion checklist-push <name>` sends just the About line.

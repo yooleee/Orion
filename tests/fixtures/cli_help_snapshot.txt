@@ -3,13 +3,13 @@
 
 $ orion --help
 usage: orion [-h]
-             {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,projects,show,check,status,baseline,discussions,relay-serve,relay-user,relay-project}
+             {report,checklist-push,disciplines-push,intake,install-hook,add-project,projects,check,status,baseline,discussions,relay-serve,relay-user,relay-project}
              ...
 
 Turn local git activity into supervisor-ready progress updates.
 
 positional arguments:
-  {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,projects,show,check,status,baseline,discussions,relay-serve,relay-user,relay-project}
+  {report,checklist-push,disciplines-push,intake,install-hook,add-project,projects,check,status,baseline,discussions,relay-serve,relay-user,relay-project}
     report              Generate and (after preview) send a progress report.
     checklist-push      Push a project's current checklist to the relay (no
                         report); --all for every project, --watch for live
@@ -18,15 +18,13 @@ positional arguments:
                         them to the relay (no report).
     intake              Send a pushed/hand-written update for a project (skips
                         collectors & LLM).
-    relay-backfill      Push an already-sent report onto the relay dashboard
-                        (relay-only, no chat) — for reports sent before the
-                        relay was scoped in.
     install-hook        Install a git hook that auto-reports a project on
                         commit/push.
     add-project         Register a new project in orion.toml (the only command
                         that writes config).
-    projects            List the projects defined in the config (read-only).
-    show                Show one project's resolved config (read-only).
+    projects            List the projects defined in the config, or show ONE
+                        project's resolved config when a name is given (read-
+                        only; absorbs the former `show`).
     check               Validate the config and report send-readiness (read-
                         only).
     status              Show which projects have unreported activity across
@@ -128,7 +126,10 @@ options:
                    no docs and needs no API key.
 
 $ orion intake --help
-usage: orion intake [-h] [--config CONFIG] [--message MESSAGE] [--yes] project
+usage: orion intake [-h] [--config CONFIG] [--message MESSAGE]
+                    [--body-file BODY_FILE] [--relay-only]
+                    [--generated-at GENERATED_AT] [--yes]
+                    project
 
 positional arguments:
   project               Project name as defined in orion.toml.
@@ -138,36 +139,26 @@ options:
   --config CONFIG       Path to the config file (default: orion.toml; or set
                         $ORION_CONFIG).
   --message MESSAGE, -m MESSAGE
-                        The update body. If omitted, the body is read from
-                        stdin.
+                        The update body. If omitted, the body comes from
+                        --body-file, else stdin. Giving both --message and
+                        --body-file is an error.
+  --body-file BODY_FILE
+                        Path to a file holding the exact update body
+                        (alternative to --message/stdin).
+  --relay-only          Recovery mode (was `relay-backfill`): push the body
+                        onto the relay dashboard ONLY — no chat delivery, no
+                        local history — at the ORIGINAL send time. Requires
+                        --generated-at; a relay failure is fatal.
+  --generated-at GENERATED_AT
+                        With --relay-only (required there, rejected
+                        elsewhere): ISO 8601 timestamp of when the report was
+                        ORIGINALLY sent (read it off the delivered message).
+                        Sets the card's time on the dashboard; a naive value
+                        is treated as UTC.
   --yes, -y             Non-interactive: skip the preview and send (for the
                         Claude session skill, which shows the summary for
                         approval in-session first). Redaction still runs;
                         without --yes the preview shows as usual.
-
-$ orion relay-backfill --help
-usage: orion relay-backfill [-h] [--config CONFIG] --generated-at GENERATED_AT
-                            [--body-file BODY_FILE] [--yes]
-                            project
-
-positional arguments:
-  project               Project name as defined in orion.toml.
-
-options:
-  -h, --help            show this help message and exit
-  --config CONFIG       Path to the config file (default: orion.toml; or set
-                        $ORION_CONFIG).
-  --generated-at GENERATED_AT
-                        ISO 8601 timestamp of when the report was ORIGINALLY
-                        sent (read it off the delivered Slack/Discord
-                        message). Sets the card's time on the dashboard; a
-                        naive value is treated as UTC.
-  --body-file BODY_FILE
-                        Path to a file holding the exact report body. If
-                        omitted, the body is read from stdin.
-  --yes, -y             Skip the preview/confirm and push (the content was
-                        already delivered once). Redaction still runs; without
-                        --yes the preview shows as usual.
 
 $ orion install-hook --help
 usage: orion install-hook [-h] [--hook {pre-push,post-commit}]
@@ -249,18 +240,11 @@ options:
                         'incubator' is in --collectors).
 
 $ orion projects --help
-usage: orion projects [-h] [--config CONFIG]
-
-options:
-  -h, --help       show this help message and exit
-  --config CONFIG  Path to the config file (default: orion.toml; or set
-                   $ORION_CONFIG).
-
-$ orion show --help
-usage: orion show [-h] [--config CONFIG] project
+usage: orion projects [-h] [--config CONFIG] [project]
 
 positional arguments:
-  project          Project name as defined in orion.toml.
+  project          A project name for the detail view (omit to list every
+                   project).
 
 options:
   -h, --help       show this help message and exit

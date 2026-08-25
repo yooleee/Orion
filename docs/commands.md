@@ -22,7 +22,7 @@ orion discussions pull myproject   # pull supervisor messages back to your machi
 |---|---|
 | `orion report <project>` | Collect activity (git/tasks/notes/incubator), summarize, **preview**, then send. The main command. |
 | `orion report --all --yes` | Report every project, non-interactive (for schedulers; only sends projects with `auto_send=true`). |
-| `orion intake <project> -m "…"` | Send a hand-written update (no LLM). Omit `-m` to type it on stdin. |
+| `orion intake <project> -m "…"` | Send a hand-written update (no LLM). Body from `-m`, `--body-file`, or stdin (one source). `--relay-only --generated-at <iso>` is the recovery mode (formerly `relay-backfill`): push the body onto the relay dashboard ONLY — no chat, no local history — at the ORIGINAL send time (naive values read as UTC); a relay failure is then fatal, and preview/confirm applies unless `--yes`. |
 | `orion discussions pull <project>` | Pull a project's two-way supervisor↔developer thread from the relay (only new ones; advances your unread marker). `--all` re-reads everything without moving the marker. |
 | `orion discussions reply <project> "<text>"` | Post your reply into the project's thread (lands as role `developer`). `--as "<name>"` sets the display label. |
 
@@ -32,8 +32,7 @@ orion discussions pull myproject   # pull supervisor messages back to your machi
 |---|---|
 | `orion check` | Validate the config and send-readiness (`.env` secrets present). Read-only — sends nothing. |
 | `orion status` | Show which projects have **unreported activity** across the config. Read-only — sends nothing. |
-| `orion projects` | List every project defined in the config. |
-| `orion show <project>` | Show one project's resolved config (paths, share level, collectors, recipients). |
+| `orion projects [name]` | List every project defined in the config — or, with a name, show that project's resolved config (paths, share level, collectors, recipients; absorbs the former `show`). |
 | `orion add-project [name]` | Register a new project in `orion.toml` (**the only command that writes config**). Name defaults to the repo directory. `--recipient "Name:channel:ENV_VAR"` (repeatable), `--like <project>` to copy recipients, `--repo-path`, `--share-level`, `--collectors git,tasks,notes`, `--tasks-file`/`--notes-file`; `--print` to preview the stanza, `--yes` to skip confirmation. When `tasks` is enabled and `--tasks-file` is omitted, it defaults to `<repo>/TODO.md` and **creates a starter checklist** there (preview-gated, never overwriting); pass an explicit `--tasks-file` to keep config-only. `--grant <account>` also widens that relay account's push scope to the new project (the KI-36 forward-fix — without a grant, the project's first reports 404 off the dashboard); interactive runs with a provisioning-configured relay offer the same as an opt-in prompt, scripted runs are never prompted. |
 | `orion baseline <project>` | Mark current state as already-reported **without sending** — so the next report covers only new activity (avoids dumping full history). |
 | `orion install-hook <project>` | Install a git hook so a push auto-reports. `--hook pre-push` (default) or `post-commit`; `--print` to review first, `--force` to overwrite. |
@@ -54,7 +53,6 @@ leaving any stored checklist untouched. That is how a project with no task list 
 band. (`checklist = true` with no `tasks_file` or `tracker_file` is still an error — that
 combination is a misconfiguration, not an About-only push. `--watch` needs a checklist source
 to poll, so it does not apply here either.)
-| `orion relay-backfill <project> --generated-at <iso>` | Push an **already-sent** report onto the relay dashboard, **relay-only (no chat)** — for reports sent before the relay was scoped in (KI-36). Body from `--body-file` or stdin; `--generated-at` is the original send time (read off the delivered message). One report per invocation; two-pass redaction still runs; preview/confirm unless `--yes`. |
 
 > The parked native Slack bot was **removed** in the CS-O overhaul (command, module, and
 > the `orion[slack-bot]` extra — git history keeps the code). Its blocker was delegation:

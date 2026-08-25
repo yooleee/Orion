@@ -685,7 +685,9 @@ Deferred).
   output never mentioned the relay). A requested grant that fails exits 1 with the
   manual command while the registration stands. The `relay-backfill` recovery command
   had already shipped (2026-07-18); prevention + recovery now both exist. History above
-  kept as the record of the gap's two dogfood reproductions.
+  kept as the record of the gap's two dogfood reproductions. (CS-O PR6 note: the
+  recovery path is now spelled `intake --relay-only --generated-at <iso>` — the
+  `relay-backfill` command folded into `intake` with semantics unchanged.)
 
 ## KI-37 — Concurrent first opens of a non-WAL relay DB can fail on the WAL conversion
 

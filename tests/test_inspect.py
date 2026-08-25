@@ -12,6 +12,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from orion import cli
 
 
@@ -66,22 +68,22 @@ def test_projects_lists_every_project_with_key_facts(tmp_path, capsys):
     assert "Sam (slack)" in out
 
 
-def test_show_prints_resolved_fields_without_secret_values(tmp_path, capsys):
-    """`show <project>` prints the resolved config — names/paths, never a secret.
+def test_projects_detail_prints_resolved_fields_without_secret_values(tmp_path, capsys):
+    """`projects <name>` prints the resolved config — names/paths, never a secret.
 
-    Why this matters: the per-project detail view must surface the webhook ENV-VAR
-    NAME (so you can check your wiring) but never a secret value — the URL lives in
-    .env and never enters the config. We assert the var name shows and that no URL
-    leaks into the output.
+    Why this matters: the per-project detail view (the former `show`, folded into
+    `projects` in CS-O PR6) must surface the webhook ENV-VAR NAME (so you can check
+    your wiring) but never a secret value — the URL lives in .env and never enters
+    the config. We assert the var name shows and that no URL leaks into the output.
     """
     toml = _write(tmp_path, _TWO_PROJECTS)
 
-    code = cli.main(["show", "alpha", "--config", str(toml)])
+    code = cli.main(["projects", "alpha", "--config", str(toml)])
     assert code == 0
 
     out = capsys.readouterr().out
-    # `show` prints Path(repo_path), which renders with OS-NATIVE separators — on
-    # Windows "/tmp/alpha" becomes "\tmp\alpha". Compare against that rendering, not
+    # The detail view prints Path(repo_path), which renders with OS-NATIVE separators —
+    # on Windows "/tmp/alpha" becomes "\tmp\alpha". Compare against that rendering, not
     # the POSIX literal, so the assertion holds on every OS (caught by CI on Windows).
     expected_repo = str(Path("/tmp/alpha"))
     assert "repo_path:" in out and expected_repo in out
@@ -91,18 +93,28 @@ def test_show_prints_resolved_fields_without_secret_values(tmp_path, capsys):
     assert "https://" not in out                       # no URL/secret value
 
 
-def test_show_unknown_project_errors(tmp_path, capsys):
-    """`show` on an unknown project fails cleanly (exit 1) and names known ones.
+def test_projects_detail_unknown_name_errors(tmp_path, capsys):
+    """`projects <name>` on an unknown project fails cleanly (exit 1), naming known ones.
 
     Why this matters: a typo'd project should get the same helpful ConfigError the
-    rest of the CLI gives — the known-names list — not a traceback.
+    rest of the CLI gives — the known-names list — not a traceback. This is the CS-O
+    PR6 contract pin for the merged detail view.
     """
     toml = _write(tmp_path, _TWO_PROJECTS)
 
-    code = cli.main(["show", "nope", "--config", str(toml)])
+    code = cli.main(["projects", "nope", "--config", str(toml)])
     assert code == 1
     err = capsys.readouterr().err
     assert "nope" in err and "alpha" in err            # names the bad + the known
+
+
+def test_show_is_a_clean_break(tmp_path, capsys):
+    """`orion show` no longer parses — folded into `projects [NAME]` (CS-O PR6)."""
+    toml = _write(tmp_path, _TWO_PROJECTS)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["show", "alpha", "--config", str(toml)])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_projects_on_invalid_config_errors(tmp_path, capsys):

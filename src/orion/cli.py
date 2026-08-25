@@ -37,7 +37,7 @@ from orion.collectors._markdown import Table, parse_tables
 from orion.collectors.about import read_about
 from orion.collectors.git import GitError
 from orion.collectors.git import collect as collect_git
-from orion.collectors.incubator import IncubatorError, read_index
+from orion.collectors.incubator import IncubatorError
 from orion.collectors.incubator import collect as collect_incubator
 from orion.collectors.notes import NotesError
 from orion.collectors.notes import collect as collect_notes
@@ -103,7 +103,7 @@ from orion.report import (
     serialize_blob,
     serialize_checklist_item,
 )
-from orion.scaffold import parse_recipient_spec, render_project_stanza, slugify_project_name
+from orion.scaffold import parse_recipient_spec, render_project_stanza
 from orion.secrets import SecretsError, get_required, load_secrets
 from orion.state import (
     get_cache,
@@ -241,10 +241,10 @@ def _add_config_arg(parser: argparse.ArgumentParser, default_config: str) -> Non
 
         TWO deliberate non-users, both of which would be bugs to "fix":
 
-        1. `add-project` and `graduate-idea` get `--config` from
-           `_project_registration_parser` via `parents=[...]`. Calling this helper on them as
-           well would raise `argparse.ArgumentError: conflicting option string: --config` at
-           parser-BUILD time — i.e. on every single invocation of the CLI, not just theirs.
+        1. `add-project` gets `--config` from `_project_registration_parser` via
+           `parents=[...]`. Calling this helper on it as well would raise
+           `argparse.ArgumentError: conflicting option string: --config` at parser-BUILD
+           time — i.e. on every single invocation of the CLI, not just add-project's.
            This helper is called on the shared parent instead, which is where it belongs.
         2. `relay-serve` keeps its own `--config` with different help text ("used only to
            locate .env"). That is an accurate statement about that command specifically —
@@ -259,7 +259,7 @@ def _add_config_arg(parser: argparse.ArgumentParser, default_config: str) -> Non
 
 
 def _project_registration_parser(default_config: str) -> argparse.ArgumentParser:
-    """Build the parser holding every flag `add-project` and `graduate-idea` share.
+    """Build the parent parser holding `add-project`'s registration flags.
 
     Args:
         default_config: The config path to show as the `--config` default (resolved in
@@ -270,18 +270,14 @@ def _project_registration_parser(default_config: str) -> argparse.ArgumentParser
         `parents=[...]` to the two real subparsers — never parsed on its own.
 
     Why:
-        `graduate-idea` was built by copying `add-project`'s flags. `add-project` then grew
-        `--tracker-file` and `--seed-tasks-from` and the copy did not, which made
-        `graduate-idea --collectors git,tracker` an impossible command: the tracker
-        collector requires a path and there was no flag to supply one (KI-43). Copying the
-        two missing flags across would fix this instance and leave the drift CLASS armed for
-        the next flag. One shared parent means a flag can only be added to both at once.
-
-        `--incubator-file` is deliberately NOT here even though both commands accept it: on
-        `add-project` it names the incubator collector's file for the new project's config,
-        while on `graduate-idea` it names the source index to READ. Same option string, same
-        dest, genuinely different meanings — so each parser declares its own, and argparse
-        would raise "conflicting option string" if this parent tried to own it.
+        Born as the KI-43 fix: `graduate-idea` was built by copying `add-project`'s flags,
+        the copy drifted, and one shared parent meant a flag could only be added to both at
+        once. `graduate-idea` was removed in CS-O PR5 (decision 8), so this parent now has
+        ONE child — it stays deliberately as the registration seam: a future second
+        registration command re-attaches here instead of re-copying the flag list, which is
+        exactly the drift class KI-43 recorded. `--incubator-file` stays declared on
+        `add-project` itself (historically the two commands gave the same option string
+        different meanings, so the parent never owned it).
 
         Note for the later cli.py DRY pass: `--config` lives here for these two commands, so
         a repo-wide `add_config_arg(parser)` helper must skip them or it will collide.
@@ -609,9 +605,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Overwrite an existing hook of the same name.",
     )
 
-    # Both config-writing commands draw their common flags from ONE parent parser, so the
-    # two flag sets cannot drift apart again (KI-43). See _project_registration_parser for
-    # why --incubator-file is excluded from it.
+    # add-project's flags live on a parent parser (the KI-43 fix). Its second child,
+    # graduate-idea, was removed in CS-O PR5 — the parent stays as the registration seam
+    # a future second registration command would re-attach to.
     registration_flags = _project_registration_parser(default_config)
 
     # The ONE config-writing command. It is explicit, append-only, and previews
@@ -633,44 +629,6 @@ def main(argv: list[str] | None = None) -> int:
         dest="incubator_file",
         default=None,
         help="Path to the incubator index.md (required if 'incubator' is in --collectors).",
-    )
-
-    # graduate-idea (D4 follow-on): register a graduated incubator idea as a project.
-    # It shares add-project's flags via the parent above (it delegates to it) and adds
-    # the idea-specific ones below.
-    graduate_parser = subparsers.add_parser(
-        "graduate-idea",
-        parents=[registration_flags],
-        help="Register a graduated incubator idea as a new project (delegates to add-project).",
-    )
-    graduate_parser.add_argument(
-        "idea",
-        help="The incubator idea title to graduate (matched case-insensitively).",
-    )
-    graduate_parser.add_argument(
-        "--name",
-        default=None,
-        help="Project name (default: a slug derived from the idea title).",
-    )
-    graduate_parser.add_argument(
-        "--incubator",
-        default=None,
-        metavar="PROJECT",
-        help="Which incubator project's index to read (needed only if several exist).",
-    )
-    # NOT the same flag as add-project's --incubator-file: here it names the index to READ,
-    # there it names the new project's incubator collector file. Hence each parser owns its
-    # own declaration rather than sharing one via the parent.
-    graduate_parser.add_argument(
-        "--incubator-file",
-        dest="incubator_file",
-        default=None,
-        help="Read the index from this path directly (overrides the config lookup).",
-    )
-    graduate_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Graduate even if the idea's status is not 'graduated'.",
     )
 
     # Read-only inspect commands (B6). They print config; they never write it.
@@ -759,11 +717,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_config_arg(disc_reply, default_config)
 
-    bot_parser = subparsers.add_parser(
-        "bot",
-        help="Run the Slack bot (PARKED since KI-28 Stage 2; revived with per-user keys).",
-    )
-    _add_config_arg(bot_parser, default_config)
 
     relay_parser = subparsers.add_parser(
         "relay-serve",
@@ -1210,27 +1163,6 @@ def main(argv: list[str] | None = None) -> int:
             assume_yes=args.yes,
             grant=args.grant,
         )
-    if args.command == "graduate-idea":
-        return cmd_graduate_idea(
-            args.idea,
-            Path(args.config),
-            name=args.name,
-            incubator=args.incubator,
-            incubator_file=args.incubator_file,
-            force=args.force,
-            repo_path=args.repo_path,
-            like=args.like,
-            recipient_specs=args.recipients,
-            share_level=args.share_level,
-            collectors_csv=args.collectors,
-            tasks_file=args.tasks_file,
-            notes_file=args.notes_file,
-            tracker_file=args.tracker_file,
-            seed_tasks_from=args.seed_tasks_from,
-            print_only=args.print_only,
-            assume_yes=args.yes,
-            grant=args.grant,
-        )
     if args.command == "projects":
         return cmd_projects(Path(args.config))
     if args.command == "show":
@@ -1251,8 +1183,6 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_discussions_reply(
                 args.project, args.body, args.author, Path(args.config)
             )
-    if args.command == "bot":
-        return cmd_bot(Path(args.config))
     if args.command == "relay-serve":
         return cmd_relay_serve(
             args.host,
@@ -3528,185 +3458,6 @@ def cmd_add_project(
     return _grant_new_project_scope(project_name, grant, config_path, assume_yes)
 
 
-def _resolve_incubator_index(
-    config_path: Path, incubator_file: str | None, incubator: str | None
-) -> Path:
-    """Find the incubator index file to read for `graduate-idea`.
-
-    Args:
-        config_path: Path to orion.toml (used to locate the incubator project).
-        incubator_file: An explicit index path that, when given, wins outright.
-        incubator: The name of the project whose incubator index to use, when the
-            config has more than one incubator-collector project.
-
-    Returns:
-        The resolved, absolute path to the incubator index file.
-
-    Why:
-        `graduate-idea` reads ideas from the SAME index a configured incubator
-        project already points at, so the user doesn't repeat the path. An explicit
-        `--incubator-file` overrides (and lets the command work before any config
-        exists). Otherwise we find the project(s) whose collectors include
-        "incubator": exactly one is unambiguous; several require `--incubator <name>`;
-        none is a clear setup error. Raises ConfigError with an actionable message in
-        every ambiguous/empty case — the same fail-loud-at-the-edge style as the rest
-        of the CLI.
-    """
-    # An explicit path wins and needs no config — resolve like add-project's
-    # --repo-path: expand "~", and resolve a relative path against the cwd.
-    if incubator_file is not None:
-        path = Path(incubator_file).expanduser()
-        if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
-        return path
-
-    if not config_path.exists():
-        raise ConfigError(
-            f"No config at {config_path} to find an incubator project in. Pass "
-            f"--incubator-file <path> to point at the index directly."
-        )
-    config = load_config(config_path)
-    incubator_projects = [
-        p for p in config.projects.values() if "incubator" in p.collectors
-    ]
-    if not incubator_projects:
-        raise ConfigError(
-            "No project enables the 'incubator' collector. Add one (see "
-            "orion.toml.example) or pass --incubator-file <path>."
-        )
-
-    if incubator is not None:
-        project = get_project(config, incubator)  # raises ConfigError if unknown
-        if "incubator" not in project.collectors or project.incubator_file is None:
-            raise ConfigError(
-                f"Project {incubator!r} does not enable the 'incubator' collector."
-            )
-        return project.incubator_file
-
-    if len(incubator_projects) > 1:
-        names = ", ".join(sorted(p.name for p in incubator_projects))
-        raise ConfigError(
-            f"Multiple projects enable the 'incubator' collector ({names}). "
-            f"Pass --incubator <name> to choose one."
-        )
-
-    # Exactly one — unambiguous. config validation guarantees its file is set.
-    return incubator_projects[0].incubator_file
-
-
-def cmd_graduate_idea(
-    idea: str,
-    config_path: Path,
-    *,
-    name: str | None,
-    incubator: str | None,
-    incubator_file: str | None,
-    force: bool,
-    repo_path: str | None,
-    like: str | None,
-    recipient_specs: list[str],
-    share_level: str,
-    collectors_csv: str,
-    tasks_file: str | None,
-    notes_file: str | None,
-    tracker_file: str | None,
-    seed_tasks_from: str | None,
-    print_only: bool,
-    assume_yes: bool,
-    grant: str | None = None,
-) -> int:
-    """Graduate an incubator idea into a tracked project (idea #4 follow-on).
-
-    Args:
-        idea: The idea title to graduate (matched case-insensitively against the
-            incubator index).
-        config_path: Path to orion.toml.
-        name: Explicit project name; when None, derived by slugifying the idea title.
-        incubator: Which incubator project's index to read (when several exist).
-        incubator_file: Explicit index path override (wins over config lookup).
-        force: Graduate even if the idea's status is not "graduated".
-        repo_path, like, recipient_specs, share_level, collectors_csv, tasks_file,
-            notes_file, tracker_file, seed_tasks_from, print_only, assume_yes: passed
-            straight through to cmd_add_project (graduate-idea only resolves the NAME;
-            registration is identical to add-project). These are exactly the flags the
-            shared parent parser declares — this signature must accept all of them, or
-            the parser accepting a flag that the handler then discards is precisely the
-            KI-43 bug in a new place.
-
-    Returns:
-        Exit code: 0 on success or a declined preview; 1 on any error.
-
-    Why:
-        D4 made the incubator a signal; this closes the loop — when an idea reaches
-        "graduated", it becomes a real tracked project. It is deliberately a THIN
-        wrapper: it resolves the index, finds the idea, checks status, derives a name,
-        then DELEGATES to cmd_add_project so the config write, preview-before-write,
-        recipient resolution, repo inference, and re-load validation are reused, not
-        duplicated (DRY). It is read-only on the incubator file — the only thing it
-        writes is orion.toml, via add-project.
-    """
-    try:
-        index_path = _resolve_incubator_index(config_path, incubator_file, incubator)
-        statuses = read_index(index_path)  # {title -> status}; IncubatorError if unreadable
-    except (ConfigError, IncubatorError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-    # Match the idea case-insensitively, but keep the index's canonical title for the
-    # name slug and messages (so "vlm photo overlay" still graduates "VLM Photo Overlay").
-    matched = next((t for t in statuses if t.lower() == idea.strip().lower()), None)
-    if matched is None:
-        graduated = sorted(t for t, s in statuses.items() if s == "graduated")
-        if graduated:
-            hint = "Graduated ideas available: " + ", ".join(repr(t) for t in graduated) + "."
-        else:
-            hint = "No ideas currently have status 'graduated'."
-        print(
-            f"Error: idea {idea!r} not found in {index_path}. {hint}",
-            file=sys.stderr,
-        )
-        return 1
-
-    status = statuses[matched]
-    if status != "graduated" and not force:
-        print(
-            f"Error: idea {matched!r} has status {status!r}, not 'graduated'. "
-            f"Update the incubator index, or pass --force to graduate it anyway.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Derive the project name from the idea title unless one was given explicitly.
-    project_name = name if name else slugify_project_name(matched)
-    if not project_name:
-        print(
-            f"Error: could not derive a project name from {matched!r}. "
-            f"Pass an explicit --name.",
-            file=sys.stderr,
-        )
-        return 1
-
-    print(f"Graduating idea {matched!r} (status: {status}) → project {project_name!r}.")
-
-    # Delegate the actual registration — identical to `add-project`, name pre-filled.
-    return cmd_add_project(
-        project_name,
-        config_path,
-        repo_path=repo_path,
-        like=like,
-        recipient_specs=recipient_specs,
-        share_level=share_level,
-        collectors_csv=collectors_csv,
-        tasks_file=tasks_file,
-        notes_file=notes_file,
-        tracker_file=tracker_file,
-        seed_tasks_from=seed_tasks_from,
-        print_only=print_only,
-        assume_yes=assume_yes,
-        grant=grant,
-    )
-
-
 def _humanize_ago(iso_timestamp: str) -> str:
     """Render how long ago an ISO 8601 UTC timestamp was, in coarse units.
 
@@ -4263,36 +4014,6 @@ def _print_discussions(
             f"  [{item['role']}] {item['author_name']} · "
             f"{_format_display_time(item['created_at'], display_timezone)} · {item['body']}"
         )
-
-
-def cmd_bot(config_path: Path) -> int:
-    """Report that the Slack bot is PARKED (its write target retired in KI-28 Stage 2).
-
-    Args:
-        config_path: Path to orion.toml (unused while parked; kept for signature parity
-            with the other cmd_* handlers and for the revival that re-reads it).
-
-    Returns:
-        Exit code 1 — the bot cannot run, so this is a clean, actionable notice rather
-        than starting a listener that could never deliver.
-
-    Why:
-        The bot's only job was to relay chat replies into report comments via the relay's
-        POST /api/comments, which retired in KI-28 Stage 2. Repointing it at the discussion
-        write must wait for per-user keys (the next slice), because that Bearer path stamps
-        role "developer" and a chat reply is supervisor speech — posting it now would be
-        dishonest attribution. So rather than start a live Socket Mode listener that can
-        never land a message, `orion bot` prints why it is parked and exits. The pure core
-        (orion.bot.core) and the Slack shell survive as the seam revival re-wires.
-    """
-    print(
-        "The chat bot is parked (KI-28 Stage 2): its write path (relay comments) retired, "
-        "and repointing it at the discussion write awaits per-user keys in the next slice "
-        "so chat replies attribute honestly as supervisor speech. See "
-        "docs/two-person-shared-base-kickoff.md.",
-        file=sys.stderr,
-    )
-    return 1
 
 
 def _load_relay_serve():

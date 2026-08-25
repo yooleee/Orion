@@ -119,7 +119,8 @@ def read_index(incubator_file: Path) -> dict[str, str]:
         in file order. Empty when the file has no parseable idea table.
 
     Why:
-        A small public entry point so other commands (notably `graduate-idea`) can ask
+        A small public entry point so code outside the collector (historically the
+        `graduate-idea` command, removed in CS-O PR5) can ask
         "what ideas/statuses are in the index right now?" WITHOUT re-implementing the
         table parsing or reaching into the private `_parse_table`. It reuses the same
         `_read` (so a missing/unreadable file raises the same `IncubatorError`) and the

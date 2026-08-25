@@ -3,13 +3,13 @@
 
 $ orion --help
 usage: orion [-h]
-             {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,graduate-idea,projects,show,check,status,baseline,discussions,bot,relay-serve,relay-user,relay-project}
+             {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,projects,show,check,status,baseline,discussions,relay-serve,relay-user,relay-project}
              ...
 
 Turn local git activity into supervisor-ready progress updates.
 
 positional arguments:
-  {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,graduate-idea,projects,show,check,status,baseline,discussions,bot,relay-serve,relay-user,relay-project}
+  {report,checklist-push,disciplines-push,intake,relay-backfill,install-hook,add-project,projects,show,check,status,baseline,discussions,relay-serve,relay-user,relay-project}
     report              Generate and (after preview) send a progress report.
     checklist-push      Push a project's current checklist to the relay (no
                         report); --all for every project, --watch for live
@@ -25,8 +25,6 @@ positional arguments:
                         commit/push.
     add-project         Register a new project in orion.toml (the only command
                         that writes config).
-    graduate-idea       Register a graduated incubator idea as a new project
-                        (delegates to add-project).
     projects            List the projects defined in the config (read-only).
     show                Show one project's resolved config (read-only).
     check               Validate the config and report send-readiness (read-
@@ -38,8 +36,6 @@ positional arguments:
                         new activity (skips a giant first report).
     discussions         Read and reply to a project's two-way supervisor
                         discussion thread (E2 Inc 5).
-    bot                 Run the Slack bot (PARKED since KI-28 Stage 2; revived
-                        with per-user keys).
     relay-serve         Run the local relay: receive pushed reports and serve
                         a read-only dashboard.
     relay-user          Manage relay dashboard users: provision, list, and
@@ -252,73 +248,6 @@ options:
                         Path to the incubator index.md (required if
                         'incubator' is in --collectors).
 
-$ orion graduate-idea --help
-usage: orion graduate-idea [-h] [--repo-path REPO_PATH] [--like PROJECT]
-                           [--recipient "Name:channel:ENV_VAR"]
-                           [--share-level {high_level,detailed}]
-                           [--collectors COLLECTORS] [--tasks-file TASKS_FILE]
-                           [--notes-file NOTES_FILE]
-                           [--tracker-file TRACKER_FILE]
-                           [--seed-tasks-from DOC] [--grant ACCOUNT]
-                           [--config CONFIG] [--print] [--yes] [--name NAME]
-                           [--incubator PROJECT]
-                           [--incubator-file INCUBATOR_FILE] [--force]
-                           idea
-
-positional arguments:
-  idea                  The incubator idea title to graduate (matched case-
-                        insensitively).
-
-options:
-  -h, --help            show this help message and exit
-  --repo-path REPO_PATH
-                        Path to the git repo (default: the current repo's top
-                        level, else cwd).
-  --like PROJECT        Copy recipients from this existing project (combine
-                        with or use instead of --recipient).
-  --recipient "Name:channel:ENV_VAR"
-                        Add a recipient (repeatable). Channel is "discord" or
-                        "slack"; the last field NAMES a .env variable.
-  --share-level {high_level,detailed}
-                        How much git detail to expose (default: high_level —
-                        no code diff).
-  --collectors COLLECTORS
-                        Comma-separated signals to enable (default: git). Any
-                        of: git,tasks,notes,incubator,tracker.
-  --tasks-file TASKS_FILE
-                        Path to the tasks checklist. If 'tasks' is enabled and
-                        this is omitted, defaults to <repo>/TODO.md and
-                        creates a starter checklist there.
-  --notes-file NOTES_FILE
-                        Path to the notes file (required if 'notes' is in
-                        --collectors).
-  --tracker-file TRACKER_FILE
-                        Path to the status-aware tracker doc (required if
-                        'tracker' is in --collectors).
-  --seed-tasks-from DOC
-                        When a tasks_file is being created (no --tasks-file
-                        given), seed its checklist from this doc's Markdown
-                        tables instead of an empty starter.
-  --grant ACCOUNT       After registering, grant this relay account push scope
-                        for the new project (KI-36 forward-fix). Needs [relay]
-                        admin_token_env_var in the config and the admin token
-                        in .env. Without it, an interactive run offers a
-                        prompt.
-  --config CONFIG       Path to the config file (default: orion.toml; or set
-                        $ORION_CONFIG).
-  --print               Print the stanza that would be written, and write
-                        nothing (review first).
-  --yes, -y             Write without the preview confirmation (for non-
-                        interactive callers).
-  --name NAME           Project name (default: a slug derived from the idea
-                        title).
-  --incubator PROJECT   Which incubator project's index to read (needed only
-                        if several exist).
-  --incubator-file INCUBATOR_FILE
-                        Read the index from this path directly (overrides the
-                        config lookup).
-  --force               Graduate even if the idea's status is not 'graduated'.
-
 $ orion projects --help
 usage: orion projects [-h] [--config CONFIG]
 
@@ -404,14 +333,6 @@ options:
   --as NAME        Display name for this reply (e.g. --as "Teammate B").
                    Defaults to the label "developer". The role is always
                    'developer' regardless of this name.
-  --config CONFIG  Path to the config file (default: orion.toml; or set
-                   $ORION_CONFIG).
-
-$ orion bot --help
-usage: orion bot [-h] [--config CONFIG]
-
-options:
-  -h, --help       show this help message and exit
   --config CONFIG  Path to the config file (default: orion.toml; or set
                    $ORION_CONFIG).
 

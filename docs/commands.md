@@ -37,9 +37,8 @@ orion discussions pull myproject   # pull supervisor messages back to your machi
 | `orion add-project [name]` | Register a new project in `orion.toml` (**the only command that writes config**). Name defaults to the repo directory. `--recipient "Name:channel:ENV_VAR"` (repeatable), `--like <project>` to copy recipients, `--repo-path`, `--share-level`, `--collectors git,tasks,notes`, `--tasks-file`/`--notes-file`; `--print` to preview the stanza, `--yes` to skip confirmation. When `tasks` is enabled and `--tasks-file` is omitted, it defaults to `<repo>/TODO.md` and **creates a starter checklist** there (preview-gated, never overwriting); pass an explicit `--tasks-file` to keep config-only. `--grant <account>` also widens that relay account's push scope to the new project (the KI-36 forward-fix — without a grant, the project's first reports 404 off the dashboard); interactive runs with a provisioning-configured relay offer the same as an opt-in prompt, scripted runs are never prompted. |
 | `orion baseline <project>` | Mark current state as already-reported **without sending** — so the next report covers only new activity (avoids dumping full history). |
 | `orion install-hook <project>` | Install a git hook so a push auto-reports. `--hook pre-push` (default) or `post-commit`; `--print` to review first, `--force` to overwrite. |
-| `orion graduate-idea "<idea>"` | Register a **graduated** incubator idea as a new project (delegates to `add-project`; name slugified from the title). `--force` to graduate a non-graduated idea, `--name` to override, `--incubator-file` to point at the index directly. |
 
-## Two-way: the relay + the Slack bot
+## Two-way: the relay
 
 | Command | What it does |
 |---|---|
@@ -56,16 +55,12 @@ band. (`checklist = true` with no `tasks_file` or `tracker_file` is still an err
 combination is a misconfiguration, not an About-only push. `--watch` needs a checklist source
 to poll, so it does not apply here either.)
 | `orion relay-backfill <project> --generated-at <iso>` | Push an **already-sent** report onto the relay dashboard, **relay-only (no chat)** — for reports sent before the relay was scoped in (KI-36). Body from `--body-file` or stdin; `--generated-at` is the original send time (read off the delivered message). One report per invocation; two-pass redaction still runs; preview/confirm unless `--yes`. |
-| `orion bot` | **PARKED** (KI-28 Stage 2): the bot's write path (relay comments) retired, so `orion bot` prints a parked notice and exits. Its remaining blocker is delegation, not per-user keys — see below. |
 
-**`orion bot` is still parked, but the blocker moved.** Its comment write target was retired in
-KI-28 Stage 2. The old note said revival waited on per-user keys — **those landed** in the auth
-revamp (accounts + credentials, Units 2b/3). What it actually needs now is **delegation**: the
-Bearer discussion path stamps role `developer`, but a chat reply is *supervisor* speech, so the
-bot must be able to write **as** a supervisor rather than as itself. The account model makes
-that expressible (it is the named acting-as seam) but the arc deliberately did not build it.
-The pure decision core and the Slack shell remain the revival seam. Full context:
-[`docs/slack-bot.md`](slack-bot.md).
+> The parked native Slack bot was **removed** in the CS-O overhaul (command, module, and
+> the `orion[slack-bot]` extra — git history keeps the code). Its blocker was delegation:
+> a chat reply is *supervisor* speech, and the Bearer discussion path stamps role
+> `developer`, so a bot must be able to write **as** a supervisor. A future revival is
+> additive and starts from that delegation seam, not from the removed shell.
 
 ## Dashboard user management (`relay-user`)
 

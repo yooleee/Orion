@@ -1088,6 +1088,11 @@ Deferred).
   by graduate-idea's intentional three (`--name`, `--incubator`, `--force`) and fails with a
   readable diff naming the shared parent as the fix. That guard was itself verified by
   injecting a flag on `add-project` alone and watching it fail.
+  **Postscript (2026-08-21, CS-O PR5):** `graduate-idea` itself was removed (decision 8 —
+  one D-era invocation ever), which retires the `--help`-diff guard: with one registration
+  command there is nothing to drift. The structural half of this fix SURVIVES —
+  `_project_registration_parser` stays as the registration seam a future second command
+  re-attaches to, so the drift class this entry records cannot restart by copying.
 - **Two things the filing did not capture, found while fixing:**
   1. **`parents=[...]` alone would not have fixed the bug.** Three more sites dropped the
      values even once the parser accepted them: main's dispatch, `cmd_graduate_idea`'s

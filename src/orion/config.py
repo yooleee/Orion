@@ -47,12 +47,6 @@ SUPPORTED_COLLECTORS = REPORT_COLLECTORS + PUSH_ONLY_COLLECTORS
 
 SUPPORTED_CHANNELS = ("discord", "slack")  # Phase 3: Slack added alongside Discord.
 
-# Which chat platforms the native two-way bot can listen on (C2-bots). Slack
-# (Socket Mode) is the first slice; Discord (Gateway) is the planned next platform,
-# at which point this becomes a one-line addition — the [bot] config, the pure
-# decision core, and the relay write endpoint are all platform-neutral, so adding a
-# platform is additive (a new shell module + this tuple), not a rewrite.
-SUPPORTED_BOT_PLATFORMS = ("slack",)
 
 # Which summarizer backends Orion can drive (B4). "anthropic" is the default and
 # uses the Anthropic Messages API; "local" targets any OpenAI-compatible chat
@@ -320,44 +314,6 @@ class RelayConfig:
 
 
 @dataclass(frozen=True)
-class BotConfig:
-    """Whether (and how) to run the native two-way chat bot (C2-bots).
-
-    Args:
-        enabled: Master opt-in switch. When False, the bot is a pure no-op — `orion
-            bot` refuses to start and nothing else changes — so every existing config
-            is unaffected.
-        platform: Which chat platform to listen on — one of SUPPORTED_BOT_PLATFORMS
-            ("slack" in this slice). Empty when disabled.
-        token_env_var: NAME of the .env variable holding the platform BOT token
-            (Slack's `xoxb-…`). The token itself never lives in the config — the same
-            env-var indirection as a recipient's webhook_env_var. Empty when disabled.
-        app_token_env_var: NAME of the .env variable holding the platform APP-LEVEL
-            token (Slack's `xapp-…`), which Socket Mode needs to open its outbound
-            WebSocket. Distinct from the bot token. Empty when disabled.
-        channel_bindings: Ordered (channel_id, project) pairs — which chat channel
-            maps to which project. A supervisor's reply in a bound channel becomes a
-            comment on that project's latest report. A tuple (not a dict) to keep the
-            dataclass frozen/hashable; the runtime turns it into a dict. Empty when
-            disabled.
-
-    Why:
-        Modeling the bot as a global, opt-in [bot] table (one bot process serves every
-        project, like [relay] is one relay) is the smallest surface that turns it on.
-        The bot writes INTO the relay (reusing [relay]'s url + token as its target), so
-        BotConfig carries no relay URL/token of its own — only what is bot-specific:
-        the platform, its two tokens' env-var NAMES, and the channel→project map. A
-        later platform (Discord) or per-project bot is an additive change, not a rewrite.
-    """
-
-    enabled: bool
-    platform: str
-    token_env_var: str
-    app_token_env_var: str
-    channel_bindings: tuple[tuple[str, str], ...]
-
-
-@dataclass(frozen=True)
 class Config:
     """The whole registry: state-DB location, summarizer/relay config, every project.
 
@@ -367,8 +323,6 @@ class Config:
             Anthropic/Haiku when no [summarizer] table is present.
         relay: The hosted-relay push config (C1). Defaults to disabled (a no-op)
             when no [relay] table is present.
-        bot: The native two-way chat-bot config (C2-bots). Defaults to disabled (a
-            no-op) when no [bot] table is present.
         display_timezone: IANA zone name for human-facing timestamps in delivered
             messages (KI-20). Defaults to America/Los_Angeles so messages match the
             dashboard's Pacific display; overridable per config (e.g. "UTC").
@@ -384,7 +338,6 @@ class Config:
     state_db: Path
     summarizer: SummarizerConfig
     relay: RelayConfig
-    bot: BotConfig
     display_timezone: str = DEFAULT_DISPLAY_TIMEZONE
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
@@ -442,10 +395,9 @@ def load_config(path: Path) -> Config:
     # table resolves to a no-op, so existing configs push nowhere and are unchanged.
     relay = _parse_relay(raw.get("relay"), path)
 
-    # The bot is global (one [bot] table) and opt-in. Parsed AFTER projects so its
-    # channel→project bindings can be validated against the real project names; an
-    # absent or disabled table resolves to a no-op, so existing configs are unchanged.
-    bot = _parse_bot(raw.get("bot"), path, set(projects))
+    # NOTE (CS-O PR5): the [bot] table is no longer parsed. The loader has no top-level
+    # key allowlist, so a leftover [bot] stanza is accepted-but-ignored — the same
+    # treatment as any unknown section (the recorded decision-8 choice).
 
     # Global display time zone for delivered-message timestamps (KI-20). Absent ->
     # the Pacific default, so existing configs simply start matching the dashboard.
@@ -455,7 +407,6 @@ def load_config(path: Path) -> Config:
         state_db=state_db,
         summarizer=summarizer,
         relay=relay,
-        bot=bot,
         display_timezone=display_timezone,
         projects=projects,
     )
@@ -735,138 +686,6 @@ def _parse_relay(raw: object, config_path: Path) -> RelayConfig:
         url=url.strip(),
         token_env_var=token_env_var.strip(),
         admin_token_env_var=admin_token_env_var,
-    )
-
-
-def _disabled_bot() -> BotConfig:
-    """Build the disabled-no-op BotConfig (absent or `enabled = false`).
-
-    Returns:
-        A BotConfig with enabled=False and empty fields.
-
-    Why:
-        Both the absent-table and the explicitly-disabled paths return the same no-op
-        value; naming it once keeps those two returns identical (DRY) and makes the
-        "off means truly inert" contract obvious.
-    """
-    return BotConfig(
-        enabled=False,
-        platform="",
-        token_env_var="",
-        app_token_env_var="",
-        channel_bindings=(),
-    )
-
-
-def _parse_bot(raw: object, config_path: Path, project_names: set[str]) -> BotConfig:
-    """Validate the optional [bot] table into a BotConfig (C2-bots).
-
-    Args:
-        raw: The raw value under the top-level `bot` key, or None when absent.
-        config_path: Path to the config, used to locate error messages.
-        project_names: The set of project names already parsed from this config, so a
-            channel binding to an unknown/typo'd project fails at load time.
-
-    Returns:
-        A validated BotConfig. Absent or `enabled = false` resolves to a disabled
-        no-op, so a config with no [bot] — or one that has turned it off — runs no bot
-        and behaves exactly as before.
-
-    Why:
-        Mirrors _parse_relay: centralizing validation here means the CLI can trust the
-        bot config without re-checking it, and a half-specified bot (enabled but no
-        token var, or a channel bound to a project that does not exist) fails loudly at
-        load time naming the exact fix — rather than failing confusingly when the
-        always-on process is already running. We validate the channel→project bindings
-        against project_names because a typo there would otherwise silently relay a
-        supervisor's reply to the wrong (or a nonexistent) project. The relay url/token
-        are NOT here: the bot writes into the [relay] table's target, so the CLI reads
-        those from config.relay — keeping one relay definition, not two.
-    """
-    where = f"[bot] in {config_path}"
-
-    # Absent table -> disabled no-op (the backward-compatible path).
-    if raw is None:
-        return _disabled_bot()
-
-    if not isinstance(raw, dict):
-        raise ConfigError(f"{where} must be a table.")
-
-    # enabled defaults to False (opt-in) and must be a real boolean — same strictness
-    # as [relay].enabled and auto_send (so `enabled = 1`/`"yes"` is caught, not coerced).
-    enabled = raw.get("enabled", False)
-    if not isinstance(enabled, bool):
-        raise ConfigError(
-            f"{where} has invalid enabled={enabled!r}. Expected true or false."
-        )
-
-    # Disabled -> a pure no-op; everything else is ignored even if present.
-    if not enabled:
-        return _disabled_bot()
-
-    # platform defaults to the only supported value and must be a known one.
-    platform = raw.get("platform", "slack")
-    if not isinstance(platform, str) or platform not in SUPPORTED_BOT_PLATFORMS:
-        raise ConfigError(
-            f"{where} has an unsupported platform={platform!r}. "
-            f"Supported now: {SUPPORTED_BOT_PLATFORMS}."
-        )
-
-    # Both token env-var NAMES are required when enabled: Socket Mode needs the bot
-    # token (xoxb-…) AND the app-level token (xapp-…). Each must NAME a .env variable.
-    token_env_var = raw.get("token_env_var")
-    if not isinstance(token_env_var, str) or not token_env_var.strip():
-        raise ConfigError(
-            f"{where} is enabled but missing a non-empty `token_env_var` "
-            f'(the .env variable holding the bot token, e.g. token_env_var = "ORION_SLACK_BOT_TOKEN").'
-        )
-    _validate_env_var_name(token_env_var.strip(), "token_env_var", where)
-
-    app_token_env_var = raw.get("app_token_env_var")
-    if not isinstance(app_token_env_var, str) or not app_token_env_var.strip():
-        raise ConfigError(
-            f"{where} is enabled but missing a non-empty `app_token_env_var` "
-            f'(the .env variable holding the Socket Mode app-level token, e.g. '
-            f'app_token_env_var = "ORION_SLACK_APP_TOKEN").'
-        )
-    _validate_env_var_name(app_token_env_var.strip(), "app_token_env_var", where)
-
-    # At least one channel→project binding is required — a bot with no channels would
-    # listen to nothing. Each binding is a {channel_id, project} table.
-    channels_raw = raw.get("channels")
-    if not isinstance(channels_raw, list) or not channels_raw:
-        raise ConfigError(
-            f"{where} is enabled but defines no channels. Add at least one "
-            f'[[bot.channels]] table with channel_id = "C…" and project = "<name>".'
-        )
-
-    bindings: list[tuple[str, str]] = []
-    for index, entry in enumerate(channels_raw):
-        cwhere = f"[[bot.channels]] #{index + 1} in {config_path}"
-        if not isinstance(entry, dict):
-            raise ConfigError(f"{cwhere} must be a table.")
-        channel_id = entry.get("channel_id")
-        if not isinstance(channel_id, str) or not channel_id.strip():
-            raise ConfigError(
-                f"{cwhere} is missing a non-empty `channel_id` "
-                f'(the platform channel id, e.g. channel_id = "C07ABC123").'
-            )
-        project = entry.get("project")
-        if not isinstance(project, str) or not project.strip():
-            raise ConfigError(f"{cwhere} is missing a non-empty `project`.")
-        if project.strip() not in project_names:
-            raise ConfigError(
-                f"{cwhere} binds to unknown project {project.strip()!r}. "
-                f"Define [projects.{project.strip()}] or fix the name."
-            )
-        bindings.append((channel_id.strip(), project.strip()))
-
-    return BotConfig(
-        enabled=True,
-        platform=platform,
-        token_env_var=token_env_var.strip(),
-        app_token_env_var=app_token_env_var.strip(),
-        channel_bindings=tuple(bindings),
     )
 
 

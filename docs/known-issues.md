@@ -794,6 +794,10 @@ Deferred).
   removed-vs-requested plus the member/org-visible note from the server's `still_visible`
   field. The deferred live `sliptest` grant cleanup is now UNBLOCKED — it remains a
   separately-authorized ops step (this session's close-out), not part of the code PR.
+  **Ops step DONE (2026-08-25, user-run against prod after the Session-1 deploy):**
+  `relay-user ungrant macos --project sliptest` removed the stale grant this entry
+  first recorded on 2026-07-20; the relay returned the narrowed scope (the five real
+  projects, `sliptest` gone). This entry is now fully closed, recovery to record: none.
   Originally recorded 2026-07-20 during the auth-revamp close-out; slotted into the
   command-surface overhaul by user decision rather than patched one-off — the whole
   `relay-user` surface grew additively across three arcs and deserved one considered pass.

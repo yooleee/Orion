@@ -200,7 +200,7 @@ usage: orion add-project [-h] [--repo-path REPO_PATH] [--like PROJECT]
                          [--collectors COLLECTORS] [--tasks-file TASKS_FILE]
                          [--notes-file NOTES_FILE]
                          [--tracker-file TRACKER_FILE] [--seed-tasks-from DOC]
-                         [--config CONFIG] [--print] [--yes]
+                         [--grant ACCOUNT] [--config CONFIG] [--print] [--yes]
                          [--incubator-file INCUBATOR_FILE]
                          [name]
 
@@ -237,6 +237,11 @@ options:
                         When a tasks_file is being created (no --tasks-file
                         given), seed its checklist from this doc's Markdown
                         tables instead of an empty starter.
+  --grant ACCOUNT       After registering, grant this relay account push scope
+                        for the new project (KI-36 forward-fix). Needs [relay]
+                        admin_token_env_var in the config and the admin token
+                        in .env. Without it, an interactive run offers a
+                        prompt.
   --config CONFIG       Path to the config file (default: orion.toml; or set
                         $ORION_CONFIG).
   --print               Print the stanza that would be written, and write
@@ -254,8 +259,9 @@ usage: orion graduate-idea [-h] [--repo-path REPO_PATH] [--like PROJECT]
                            [--collectors COLLECTORS] [--tasks-file TASKS_FILE]
                            [--notes-file NOTES_FILE]
                            [--tracker-file TRACKER_FILE]
-                           [--seed-tasks-from DOC] [--config CONFIG] [--print]
-                           [--yes] [--name NAME] [--incubator PROJECT]
+                           [--seed-tasks-from DOC] [--grant ACCOUNT]
+                           [--config CONFIG] [--print] [--yes] [--name NAME]
+                           [--incubator PROJECT]
                            [--incubator-file INCUBATOR_FILE] [--force]
                            idea
 
@@ -293,6 +299,11 @@ options:
                         When a tasks_file is being created (no --tasks-file
                         given), seed its checklist from this doc's Markdown
                         tables instead of an empty starter.
+  --grant ACCOUNT       After registering, grant this relay account push scope
+                        for the new project (KI-36 forward-fix). Needs [relay]
+                        admin_token_env_var in the config and the admin token
+                        in .env. Without it, an interactive run offers a
+                        prompt.
   --config CONFIG       Path to the config file (default: orion.toml; or set
                         $ORION_CONFIG).
   --print               Print the stanza that would be written, and write

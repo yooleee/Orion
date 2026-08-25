@@ -3181,6 +3181,185 @@ def test_relay_user_key_add_duplicate_label_409_is_a_clean_error(
     assert "409" in capsys.readouterr().err
 
 
+# --- CS-O PR4 (KI-36 forward-fix): add-project's opt-in relay scope grant ------------
+
+
+def _run_add_project(toml, repo, extra):
+    """Run `add-project newproj` against the relay-admin config (DRY for the PR4 tests)."""
+    return cli.main(
+        [
+            "add-project", "newproj",
+            "--repo-path", str(repo),
+            "--recipient", "Supervisor A:discord:ORION_DISCORD_TEST",
+            "--config", str(toml),
+            *extra,
+        ]
+    )
+
+
+def test_add_project_grant_flag_grants_after_registration(tmp_path, monkeypatch, capsys):
+    """`add-project --grant <account>` registers, then grants the account the new project.
+
+    Why this matters: the KI-36 forward-fix's explicit door — the scoping gap (first
+    reports 404-dropping from the dashboard) is closed in the same command that opens
+    it. The grant must carry exactly the new project, nothing else.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_grant_projects",
+        lambda url, token, account, projects, **k: calls.append((url, token, account, projects))
+        or {"name": account, "projects": ["newproj"]},
+    )
+    code = _run_add_project(toml, repo, ["--yes", "--grant", "ci"])
+    assert code == 0
+    assert calls == [("https://relay.test/ingest", "admin-secret", "ci", ["newproj"])]
+    assert "[projects.newproj]" in toml.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert "Granted 'ci' push scope for 'newproj'" in out
+
+
+def test_add_project_grant_failure_keeps_registration_and_exits_1(
+    tmp_path, monkeypatch, capsys
+):
+    """A failed --grant exits 1 but the registration STANDS, with the manual command shown.
+
+    Why this matters: honest failure semantics — the user asked for two acts; the first
+    succeeded and must not be rolled back or misreported, the second failed and must not
+    be papered over with exit 0.
+    """
+    from orion.delivery import DeliveryError
+
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr(
+        cli,
+        "relay_grant_projects",
+        lambda *a, **k: (_ for _ in ()).throw(DeliveryError("Relay returned HTTP 404")),
+    )
+    code = _run_add_project(toml, repo, ["--yes", "--grant", "ghost"])
+    assert code == 1
+    assert "[projects.newproj]" in toml.read_text(encoding="utf-8")  # registration stands
+    err = capsys.readouterr().err
+    assert "registered" in err
+    assert "orion relay-user grant ghost --project newproj" in err
+
+
+def test_add_project_print_plus_grant_is_a_pairing_error(tmp_path, monkeypatch, capsys):
+    """`--print --grant` errors up front: nothing is registered, so nothing can be granted."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+    before = toml.read_text(encoding="utf-8")
+
+    called = []
+    monkeypatch.setattr(cli, "relay_grant_projects", lambda *a, **k: called.append(1))
+    code = _run_add_project(toml, repo, ["--print", "--grant", "ci"])
+    assert code == 1 and called == []
+    assert toml.read_text(encoding="utf-8") == before  # nothing written
+    assert "--print" in capsys.readouterr().err
+
+
+def test_add_project_scripted_yes_never_prompts_and_prints_the_grant_hint(
+    tmp_path, monkeypatch, capsys
+):
+    """A --yes run without --grant asks nothing and grants nothing — it only hints.
+
+    Why this matters: the kickoff's hard constraint — scripted/automated add-project
+    behavior must not change. Both input() and the grant client are rigged to blow up if
+    touched, so a regression that prompts or grants cannot pass. The one addition is the
+    printed pointer (the DF2 finding: next-steps never mentioned the relay).
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    def _boom(*a, **k):
+        raise AssertionError("scripted add-project must not prompt or grant")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    monkeypatch.setattr(cli, "relay_grant_projects", _boom)
+    code = _run_add_project(toml, repo, ["--yes"])
+    assert code == 0
+    assert "orion relay-user grant <account> --project newproj" in capsys.readouterr().out
+
+
+def test_add_project_interactive_prompt_grants_on_yes(tmp_path, monkeypatch, capsys):
+    """An interactive run (TTY) offers the prompt; answering y + a name grants.
+
+    Why this matters: the opt-in interactive door. Input sequence: preview confirm (y),
+    grant offer (y), account name — all through the same input() seam the preview gate
+    already uses.
+    """
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    answers = iter(["y", "y", "mac"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "relay_grant_projects",
+        lambda url, token, account, projects, **k: calls.append((account, projects))
+        or {"name": account, "projects": ["newproj"]},
+    )
+    code = _run_add_project(toml, repo, [])
+    assert code == 0
+    assert calls == [("mac", ["newproj"])]
+
+
+def test_add_project_interactive_prompt_declined_grants_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """Answering N to the offer grants nothing and leaves the manual hint."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_ADMIN_TOKEN", "admin-secret")
+    repo = _make_repo(tmp_path)
+    toml = _write_relay_admin_config(tmp_path, repo)
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    answers = iter(["y", "n"])  # preview confirm, then decline the grant offer
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    called = []
+    monkeypatch.setattr(cli, "relay_grant_projects", lambda *a, **k: called.append(1))
+    code = _run_add_project(toml, repo, [])
+    assert code == 0 and called == []
+    assert "orion relay-user grant <account> --project newproj" in capsys.readouterr().out
+
+
+def test_add_project_without_relay_config_prints_no_grant_hint(tmp_path, monkeypatch, capsys):
+    """With no [relay] in the config, add-project's output is exactly as before PR4."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    repo = _make_repo(tmp_path)
+    toml = _write_config(tmp_path, repo)  # the plain no-relay config
+
+    code = cli.main(
+        [
+            "add-project", "newproj",
+            "--repo-path", str(repo),
+            "--recipient", "Supervisor A:discord:ORION_DISCORD_TEST",
+            "--config", str(toml),
+            "--yes",
+        ]
+    )
+    assert code == 0
+    assert "relay-user grant" not in capsys.readouterr().out
+
+
 def test_relay_user_old_revoke_verb_is_gone(tmp_path, monkeypatch, capsys):
     """`relay-user revoke` no longer parses — the rename is a clean break, no alias.
 

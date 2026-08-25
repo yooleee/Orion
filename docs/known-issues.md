@@ -674,10 +674,18 @@ Deferred).
   path works in the keyed world too. The forward-fix remains open and re-confirmed:
   `add-project`'s next-steps output still says webhooks + `orion check` and never mentions
   granting the project into the relay.
-- **Status:** Partially addressed — the `relay-backfill` recovery command shipped in this slice;
-  the `add-project` scope-prompt forward-fix stays **Open**. Revisited at the auth-revamp planning
-  pass (2026-07-19): kept **out of the revamp arc** to bound its scope, recorded as a small
-  follow-on once the account model lands (the prompt then scopes an account, not a bare key).
+- **Status:** **Resolved** (2026-08-21, CS-O PR4): the forward-fix landed as the recorded
+  follow-on shape — `add-project --grant <account>` widens the named relay account's push
+  scope to the new project right after registration (exactly the account-scoping form the
+  auth-revamp note anticipated), and an interactive run with a provisioning-configured
+  relay offers the same as an opt-in prompt (default No). Both doors are opt-in per the
+  CS-O kickoff: scripted/automated `add-project` behavior is unchanged and pinned by a
+  test that fails if a `--yes` run prompts or grants; the one addition everywhere is a
+  next-steps pointer at `relay-user grant` (closing the DF2 finding that onboarding
+  output never mentioned the relay). A requested grant that fails exits 1 with the
+  manual command while the registration stands. The `relay-backfill` recovery command
+  had already shipped (2026-07-18); prevention + recovery now both exist. History above
+  kept as the record of the gap's two dogfood reproductions.
 
 ## KI-37 — Concurrent first opens of a non-WAL relay DB can fail on the WAL conversion
 

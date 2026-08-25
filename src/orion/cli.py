@@ -346,6 +346,14 @@ def _project_registration_parser(default_config: str) -> argparse.ArgumentParser
         help="When a tasks_file is being created (no --tasks-file given), seed its "
         "checklist from this doc's Markdown tables instead of an empty starter.",
     )
+    shared.add_argument(
+        "--grant",
+        default=None,
+        metavar="ACCOUNT",
+        help="After registering, grant this relay account push scope for the new "
+        "project (KI-36 forward-fix). Needs [relay] admin_token_env_var in the config "
+        "and the admin token in .env. Without it, an interactive run offers a prompt.",
+    )
     _add_config_arg(shared, default_config)
     shared.add_argument(
         "--print",
@@ -1200,6 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
             seed_tasks_from=args.seed_tasks_from,
             print_only=args.print_only,
             assume_yes=args.yes,
+            grant=args.grant,
         )
     if args.command == "graduate-idea":
         return cmd_graduate_idea(
@@ -1220,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
             seed_tasks_from=args.seed_tasks_from,
             print_only=args.print_only,
             assume_yes=args.yes,
+            grant=args.grant,
         )
     if args.command == "projects":
         return cmd_projects(Path(args.config))
@@ -3188,6 +3198,78 @@ def _seed_checklist_from_doc(doc_path: Path, project_name: str) -> str | None:
     return header + "\n".join(lines) + "\n"
 
 
+def _grant_new_project_scope(
+    project_name: str, grant: str | None, config_path: Path, assume_yes: bool
+) -> int:
+    """Grant (or offer to grant) a relay account push scope for a just-registered project.
+
+    Args:
+        project_name: The project that was just registered.
+        grant: The account named by --grant, or None (which may open the opt-in prompt).
+        config_path: Path to orion.toml (locates the relay config + admin secret).
+        assume_yes: The registration's --yes flag; True suppresses the prompt entirely.
+
+    Returns:
+        Exit code for the whole add: 0 when nothing was requested or the grant
+        succeeded; 1 when a REQUESTED grant (flag or answered prompt) failed. The
+        registration is never rolled back — the failure message says so and gives the
+        manual command.
+
+    Why:
+        The KI-36 forward-fix. A new project's first reports can push under a
+        contributor key with no grant, 404 fail-soft, and silently vanish from the
+        dashboard record; the cheapest prevention is closing the gap at add-project
+        time. Everything here is opt-in by kickoff contract: the flag is explicit, the
+        prompt appears only on an interactive run (TTY, no --yes) with a
+        provisioning-configured relay, and every other path is at most one printed
+        hint — scripted/automated behavior must not change. The relay probe swallows
+        ConfigError deliberately: this step may never introduce a new failure mode
+        into a command that just succeeded.
+    """
+    # Probe the relay config without raising: no relay (or a broken one) simply means
+    # none of this applies — add-project's own success has already been reported.
+    try:
+        relay_cfg = load_relay_config(config_path)
+    except ConfigError:
+        return 0
+    if not relay_cfg.enabled:
+        return 0
+    admin_available = bool(relay_cfg.admin_token_env_var)
+
+    account = grant
+    if account is None and admin_available and not assume_yes and sys.stdin.isatty():
+        # Interactive opt-in (default No). Blank account = changed their mind.
+        if _confirm(
+            f"Also grant a relay account push scope for {project_name!r} now? [y/N] "
+        ):
+            account = input("Account name (blank to skip): ").strip() or None
+
+    if account is not None:
+        result = _run_admin_command(
+            config_path,
+            lambda url, token: relay_grant_projects(url, token, account, [project_name]),
+        )
+        if result is _ADMIN_CALL_FAILED:
+            print(
+                f"The project is registered; the grant did not happen. Grant later "
+                f"with: orion relay-user grant {account} --project {project_name}",
+                file=sys.stderr,
+            )
+            return 1
+        scope = result.get("projects") or []
+        print(f"  Granted {account!r} push scope for {project_name!r}.")
+        print(f"    Scope is now: {', '.join(scope) if scope else '(none)'}")
+        return 0
+
+    # No grant requested or taken: leave the pointer so the gap is at least visible
+    # (the DF2 finding — next-steps never mentioned the relay).
+    print(
+        f"  Also: grant your push account scope for it — "
+        f"orion relay-user grant <account> --project {project_name}"
+    )
+    return 0
+
+
 def cmd_add_project(
     name: str | None,
     config_path: Path,
@@ -3204,6 +3286,7 @@ def cmd_add_project(
     tracker_file: str | None = None,
     incubator_file: str | None = None,
     seed_tasks_from: str | None = None,
+    grant: str | None = None,
 ) -> int:
     """Register a new project by appending (or creating) a stanza in orion.toml.
 
@@ -3230,9 +3313,15 @@ def cmd_add_project(
             seed its checklist from this doc's Markdown tables instead of the empty
             starter. Ignored (with a warning) when no tasks_file is being created; a doc
             with no usable table falls back to the starter (never fails the add).
+        grant: A relay account to grant push scope for the new project after
+            registration (the KI-36 forward-fix), or None. Without it, an interactive
+            run may offer the same grant as an opt-in prompt — scripted runs (--yes,
+            redirected stdin) are never prompted. Incompatible with print_only
+            (nothing is registered, so nothing can be granted).
 
     Returns:
-        Exit code: 0 on success or a declined preview; 1 on any error.
+        Exit code: 0 on success or a declined preview; 1 on any error (including a
+        REQUESTED grant that failed — the registration itself stands either way).
 
     Why:
         This is Orion's ONLY config writer, added to kill the onboarding friction
@@ -3243,6 +3332,16 @@ def cmd_add_project(
         The validating/rendering lives in scaffold.py; this function owns inference
         and file I/O, mirroring the cmd_install_hook / build_hook_script split.
     """
+    # --grant acts on the just-registered project; --print registers nothing, so the
+    # pairing is a contradiction worth refusing up front rather than silently ignoring.
+    if print_only and grant is not None:
+        print(
+            "Error: --grant has nothing to act on with --print (nothing is registered). "
+            "Drop --print to register and grant.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         # 1. Infer the repo path: an explicit flag wins; else this git repo's root;
         #    else the cwd. A relative --repo-path resolves against the cwd.
@@ -3424,7 +3523,9 @@ def cmd_add_project(
     # `check` validates the WHOLE config and takes no project argument — naming one
     # here made the first command a new user is told to run fail outright.
     print("  Then: orion check")
-    return 0
+    # KI-36 forward-fix: offer to close the scoping gap right where it opens. The
+    # helper owns the flag/prompt/hint gating so scripted runs stay untouched.
+    return _grant_new_project_scope(project_name, grant, config_path, assume_yes)
 
 
 def _resolve_incubator_index(
@@ -3512,6 +3613,7 @@ def cmd_graduate_idea(
     seed_tasks_from: str | None,
     print_only: bool,
     assume_yes: bool,
+    grant: str | None = None,
 ) -> int:
     """Graduate an incubator idea into a tracked project (idea #4 follow-on).
 
@@ -3601,6 +3703,7 @@ def cmd_graduate_idea(
         seed_tasks_from=seed_tasks_from,
         print_only=print_only,
         assume_yes=assume_yes,
+        grant=grant,
     )
 
 

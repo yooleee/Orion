@@ -2001,9 +2001,9 @@ def test_relay_error_is_non_fatal(tmp_path, env_and_mocks):
     assert env_and_mocks["sent"] == []
 
 
-# --- relay-backfill (push already-sent reports onto the relay, chat-silent) -----------
+# --- intake --relay-only (the former relay-backfill: chat-silent relay recovery) ------
 #
-# relay-backfill lands an already-sent report on the relay's append-only history WITHOUT
+# The relay-only mode lands an already-sent report on the relay's append-only history WITHOUT
 # re-delivering to any chat recipient (the whole difference from `intake`). These drive it
 # end to end with cli.relay_push captured (no network), asserting the pushed blob, that
 # redaction ran, and — critically — that NO chat send happens.
@@ -2016,8 +2016,8 @@ def _backfill_config(tmp_path):
     return _write_relay_config(tmp_path, _make_repo(tmp_path))
 
 
-def test_relay_backfill_pushes_blob_chat_silent(tmp_path, env_and_mocks):
-    """`relay-backfill --yes` pushes the report blob to the relay and sends NO chat message.
+def test_intake_relay_only_pushes_blob_chat_silent(tmp_path, env_and_mocks):
+    """`intake --relay-only --yes` pushes the report blob to the relay and sends NO chat message.
 
     Why this matters: this is the whole point vs `intake` — the report lands on the
     dashboard's history at its original timestamp, but no Discord/Slack message goes out
@@ -2032,7 +2032,7 @@ def test_relay_backfill_pushes_blob_chat_silent(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 0
@@ -2045,13 +2045,13 @@ def test_relay_backfill_pushes_blob_chat_silent(tmp_path, env_and_mocks):
     assert blob["body"].startswith("Shipped the login flow")
     assert blob["generated_at"] == "2026-07-17T09:15:54+00:00"
     assert blob["participants"] == ["Alex"]         # from the project's recipients
-    assert blob["lane"] == "structured"             # no LLM runs in a backfill
+    assert blob["lane"] == "structured"             # no LLM runs in a relay-only push
     assert blob["sections"] == []                   # renders as one untitled section (intake-style)
     # Chat-silent: the report was already delivered — backfill must NOT re-send it.
     assert env_and_mocks["sent"] == []
 
 
-def test_relay_backfill_redacts_body(tmp_path, env_and_mocks):
+def test_intake_relay_only_redacts_body(tmp_path, env_and_mocks):
     """A secret in the supplied body is scrubbed before it reaches the relay.
 
     Why this matters: a historical report body can carry a secret (a token pasted into a
@@ -2066,14 +2066,14 @@ def test_relay_backfill_redacts_body(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 0
     assert "AKIAIOSFODNN7EXAMPLE" not in json.loads(pushes[0][0])["body"]
 
 
-def test_relay_backfill_normalizes_naive_timestamp(tmp_path, env_and_mocks):
+def test_intake_relay_only_normalizes_naive_timestamp(tmp_path, env_and_mocks):
     """A naive --generated-at is treated as UTC and normalized to a tz-aware ISO string.
 
     Why this matters: the relay orders cards by generated_at; a naive timestamp must not
@@ -2087,14 +2087,14 @@ def test_relay_backfill_normalizes_naive_timestamp(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", "2026-07-17T09:15:54",
+        "intake", "demo", "--relay-only", "--generated-at", "2026-07-17T09:15:54",
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 0
     assert json.loads(pushes[0][0])["generated_at"] == "2026-07-17T09:15:54+00:00"
 
 
-def test_relay_backfill_bad_timestamp_is_usage_error(tmp_path, env_and_mocks):
+def test_intake_relay_only_bad_timestamp_is_usage_error(tmp_path, env_and_mocks):
     """A malformed --generated-at is a usage error (exit 2), nothing pushed.
 
     Why this matters: the timestamp is required and must be valid ISO 8601; a typo should
@@ -2108,14 +2108,14 @@ def test_relay_backfill_bad_timestamp_is_usage_error(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", "last tuesday",
+        "intake", "demo", "--relay-only", "--generated-at", "last tuesday",
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 2
     assert pushes == []
 
 
-def test_relay_backfill_empty_body_refused(tmp_path, env_and_mocks):
+def test_intake_relay_only_empty_body_refused(tmp_path, env_and_mocks):
     """A whitespace-only body is refused (exit 1), nothing pushed."""
     mp = env_and_mocks["monkeypatch"]
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
@@ -2125,14 +2125,14 @@ def test_relay_backfill_empty_body_refused(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 1
     assert pushes == []
 
 
-def test_relay_backfill_requires_enabled_relay(tmp_path, env_and_mocks):
+def test_intake_relay_only_requires_enabled_relay(tmp_path, env_and_mocks):
     """With the relay disabled, backfill errors (exit 1) — it has nowhere to push."""
     mp = env_and_mocks["monkeypatch"]
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
@@ -2142,14 +2142,14 @@ def test_relay_backfill_requires_enabled_relay(tmp_path, env_and_mocks):
     toml = _write_relay_config(tmp_path, _make_repo(tmp_path), enabled=False)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 1
     assert pushes == []
 
 
-def test_relay_backfill_preview_abort_pushes_nothing(tmp_path, env_and_mocks):
+def test_intake_relay_only_preview_abort_pushes_nothing(tmp_path, env_and_mocks):
     """Without --yes, declining the preview aborts cleanly (exit 0) and pushes nothing.
 
     Why this matters: preview-before-send is the default guard (and the idempotence guard,
@@ -2164,14 +2164,14 @@ def test_relay_backfill_preview_abort_pushes_nothing(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
         "--body-file", str(body), "--config", str(toml),
     ])
     assert code == 0
     assert pushes == []
 
 
-def test_relay_backfill_push_failure_exits_1(tmp_path, env_and_mocks):
+def test_intake_relay_only_push_failure_exits_1(tmp_path, env_and_mocks):
     """A relay push failure is fatal (exit 1) — unlike the report path's fail-soft push.
 
     Why this matters: landing the report on the dashboard IS the point of backfill, so a
@@ -2190,13 +2190,13 @@ def test_relay_backfill_push_failure_exits_1(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS,
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
         "--body-file", str(body), "--yes", "--config", str(toml),
     ])
     assert code == 1
 
 
-def test_relay_backfill_reads_body_from_stdin(tmp_path, env_and_mocks):
+def test_intake_relay_only_reads_body_from_stdin(tmp_path, env_and_mocks):
     """With no --body-file, the body is read from stdin (a shell pipe / paste)."""
     import io
 
@@ -2207,11 +2207,89 @@ def test_relay_backfill_reads_body_from_stdin(tmp_path, env_and_mocks):
     toml = _backfill_config(tmp_path)
 
     code = cli.main([
-        "relay-backfill", "demo", "--generated-at", _BACKFILL_TS, "--yes",
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS, "--yes",
         "--config", str(toml),
     ])
     assert code == 0
     assert json.loads(pushes[0][0])["body"].startswith("Piped report body")
+
+
+def test_intake_flag_pairings_are_usage_errors(tmp_path, env_and_mocks, capsys):
+    """The three illegal pairings exit 2 BEFORE any config load, send, or push.
+
+    Why this matters: the CS-O PR6 matrix pins — --generated-at is required exactly
+    with --relay-only and rejected without it (a backdated ordinary send would falsify
+    chat history), and --message/--body-file are one body source. The nonexistent
+    config path proves the checks run before anything else: reaching the loader would
+    error differently (exit 1).
+    """
+    mp = env_and_mocks["monkeypatch"]
+    pushes = _capture_relay(mp)
+    missing = tmp_path / "nope.toml"  # never touched — pairing errors come first
+
+    cases = [
+        ["intake", "demo", "--relay-only", "-m", "x"],                      # no timestamp
+        ["intake", "demo", "--generated-at", _BACKFILL_TS, "-m", "x"],      # no --relay-only
+        ["intake", "demo", "-m", "x", "--body-file", "f.md"],               # two body sources
+    ]
+    for args in cases:
+        code = cli.main(args + ["--config", str(missing)])
+        assert code == 2, args
+        assert "Error:" in capsys.readouterr().err
+    assert pushes == [] and env_and_mocks["sent"] == []
+
+
+def test_intake_body_file_feeds_the_ordinary_lane(tmp_path, env_and_mocks):
+    """`intake --body-file` delivers to chat exactly like -m (the shared body helper).
+
+    Why this matters: --body-file arrived with the relay-backfill merge and must work
+    identically in BOTH modes (the PR6 precedence contract) — this pins the ordinary
+    lane half: the file's content reaches the chat recipient.
+    """
+    mp = env_and_mocks["monkeypatch"]
+    body = tmp_path / "update.md"
+    body.write_text("Prepared update from a file.\n", encoding="utf-8")
+    repo = _make_repo(tmp_path)
+    toml = _write_config(tmp_path, repo)
+
+    code = cli.main(
+        ["intake", "demo", "--body-file", str(body), "--yes", "--config", str(toml)]
+    )
+    assert code == 0
+    assert len(env_and_mocks["sent"]) == 1
+    assert "Prepared update from a file." in env_and_mocks["sent"][0][0]
+
+
+def test_intake_relay_only_never_touches_local_history(tmp_path, env_and_mocks):
+    """A relay-only push writes NO report_history row and advances no marker.
+
+    Why this matters: the PR6 contract makes backfill's no-touch behavior explicit —
+    the local record must describe what was DELIVERED, and a recovery re-push of an
+    already-recorded report is not a new delivery. (Ordinary intake records history;
+    this is precisely where the two modes must not blur.)
+    """
+    from orion.state import open_state
+
+    mp = env_and_mocks["monkeypatch"]
+    mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
+    pushes = _capture_relay(mp)
+    toml = _backfill_config(tmp_path)
+
+    code = cli.main([
+        "intake", "demo", "--relay-only", "--generated-at", _BACKFILL_TS,
+        "-m", "Recovered report body.", "--yes", "--config", str(toml),
+    ])
+    assert code == 0 and len(pushes) == 1
+    conn = open_state(tmp_path / "state.sqlite3")
+    assert conn.execute("SELECT COUNT(*) FROM report_history").fetchone()[0] == 0
+
+
+def test_relay_backfill_is_a_clean_break(capsys):
+    """`orion relay-backfill` no longer parses — folded into `intake --relay-only`."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["relay-backfill", "demo"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 # --- relay-serve CLI adapter (C1, CP8) ----------------------------------------
@@ -4320,8 +4398,8 @@ def test_baseline_survives_a_push_only_collector_and_marks_no_marker_for_it(tmp_
 # rather than discovered, so ADDING a command is a deliberate edit here too — a new command
 # that forgets --config should fail this test, which is the whole point.
 _LEAF_COMMANDS = [
-    ["report"], ["checklist-push"], ["disciplines-push"], ["intake"], ["relay-backfill"],
-    ["install-hook"], ["add-project"], ["projects"], ["show"], ["check"],
+    ["report"], ["checklist-push"], ["disciplines-push"], ["intake"],
+    ["install-hook"], ["add-project"], ["projects"], ["check"],
     ["status"], ["baseline"], ["discussions", "pull"], ["discussions", "reply"],
     ["relay-serve"],
     ["relay-user", "add"], ["relay-user", "list"], ["relay-user", "deactivate"],

@@ -14,6 +14,70 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## CS-O — command-surface overhaul, Session 1 (2026-08-21)
+
+The first of two build sessions for the command-surface overhaul
+(`docs/command-surface-overhaul-build-kickoff.md`): one considered pass over a surface that
+had grown additively across three arcs. Seven PRs (#163–#169), each plan-first and
+eyes-on-verified against a real local relay. The top-level surface went from 18 commands
+to 14. Session 2 (legacy-ingest retirement, relay-serve config-file-first, secrets
+bootstrap, the mechanical cli.py split) follows.
+
+### Added
+
+- **`relay-user ungrant <name> --project p` — grant's inverse (KI-40, PR1 #164).** Scope
+  is a security control, and a control that only widens is the wrong shape. Admin-gated
+  on grant's exact validation; idempotent (not-held names are reported, never errors);
+  every attempt audit-logged with the list actually removed (empty on a no-op); the
+  held-set read and the delete run under one `BEGIN IMMEDIATE` write transaction so a
+  concurrent admin write cannot falsify the audited list — a defect the pre-PR verifier
+  agent caught in the first version and a trace-callback test now pins. For a `member`,
+  the response's server-computed `still_visible` field drives a CLI note when an
+  ungranted project stays readable through org visibility.
+- **`add-project --grant <account>` + an opt-in interactive prompt (KI-36, PR4 #167).**
+  The forward-fix for the onboarding scoping gap: a new project's first reports could
+  push under an ungranted contributor key, 404 fail-soft, and silently drop from the
+  dashboard record. Both doors are opt-in; scripted `add-project` behavior is unchanged,
+  pinned by a test that fails if a `--yes` run prompts or grants. Next-steps output now
+  points at the grant step.
+- **`--key-only` on `relay-user add` and `key add` (PR3 #166):** stdout carries the raw
+  key + one newline and nothing else (byte-pinned), so `KEY=$(orion relay-user add ci
+  --role contributor --key-only)` works; errors stay on stderr with no partial output.
+- **A committed `--help`-tree snapshot + enforcement test (PR0 #163):** every surface
+  change now fails the suite until the fixture is regenerated in the same PR, making each
+  change an explicit reviewable diff and giving the later cli.py split its byte-diff pin.
+
+### Changed
+
+- **Account-level `relay-user revoke` → `deactivate` (PR3 #166), clean break, no alias.**
+  Three lifecycle acts no longer share a word: deactivate keeps the name, `delete` frees
+  it, credential-level `key revoke` keeps its name. `list` prints `DEACTIVATED`.
+- **`relay-backfill` → `intake --relay-only --generated-at <iso>` (PR6 #169).** The
+  recovery lane is a mode of the structured-push command, semantics untouched (the nine
+  existing tests re-spelled with assertions unchanged): chat-silent, fatal on relay
+  failure, no local history touch, original-timestamp card. `--body-file` now works in
+  ordinary intake too, with one shared body-precedence rule in both modes.
+- **`show` → `projects [NAME]` (PR6 #169):** list without an argument, detail with;
+  `check` and `status` stay separate — distinct questions, deliberately not collapsed.
+- **`key add --label` optional (PR3 #166)** with the neutral constant default `key` (not
+  hostname-derived); duplicate active labels stay the relay's 409, surfaced cleanly.
+- **Unknown `/api/*` paths answer a JSON 404 on every HTTP method (KI-51, PR2 #165).**
+  Under `--web-dir` an unmatched API GET used to fall through to the SPA shell as
+  `200 text/html`; PUT/DELETE/PATCH/OPTIONS/HEAD used to hit the stdlib's HTML 501 even
+  inside `/api`. The reserved namespace now answers as an API everywhere; behavior
+  outside `/api` is byte-identical to before.
+
+### Removed
+
+- **`orion bot`** (PR5 #168): command, `src/orion/bot/` module, the `orion[slack-bot]`
+  extra, and its docs — parked since KI-28 Stage 2 with zero real invocations; a future
+  revival is additive and starts from the delegation seam, not the removed shell. A
+  leftover `[bot]` config table is accepted-but-ignored, matching the loader's existing
+  unknown-section policy (pinned by test).
+- **`orion graduate-idea`** (PR5 #168): one recorded invocation ever. The `incubator`
+  collector stays — only the command went. The KI-43 anti-drift guard retired with it;
+  the shared registration parent parser survives as the seam.
+
 ## DF2 — second dogfood sweep (2026-08-20)
 
 The second progressive-dogfood sweep of `docs/known-issues.md`, run on the sandbox harness

@@ -73,38 +73,6 @@ state_db = "orion.sqlite3"
 # token_env_var       = "ORION_RELAY_TOKEN"
 # admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
 
-# OPTIONAL native Slack bot (C2-bots) — two-way in chat. CURRENTLY PARKED: `orion bot`
-# reports that it is parked and exits, because the per-report comment it used to write
-# into was retired (KI-28 Stage 2) and its replacement, the per-project discussion
-# thread, needs per-user keys before a bot may write to it. The config shape below is
-# kept so the table does not have to be re-invented when the bot is unparked.
-#
-# When it runs again, a supervisor's reply in a mapped Slack channel will land in that
-# project's discussion thread (the same thread the dashboard shows). It is opt-in: omit
-# the table (or set enabled = false) and no bot runs. The choice is GLOBAL (one bot
-# process serves every project). The bot writes INTO the [relay] above — it reuses
-# the relay's `url` and `token_env_var`, so [relay] must ALSO be enabled.
-#
-# Requires the optional extra: pip install orion[slack-bot] (pulls in slack-bolt).
-# Needs a Slack app with Socket Mode ON, the channels:history + users:read scopes,
-# the message.channels event subscription, and the bot invited to each channel.
-# See docs/slack-bot.md for the full walkthrough.
-#
-# `token_env_var` names the .env var holding the bot token (xoxb-…);
-# `app_token_env_var` names the one holding the Socket Mode app-level token (xapp-…).
-# Both are NAMES — the tokens live in .env, never here. Each [[bot.channels]] binds
-# one Slack channel id to one project (turn on Developer Mode in Slack, then
-# right-click a channel → Copy → Copy channel ID).
-# [bot]
-# enabled           = true
-# platform          = "slack"
-# token_env_var     = "ORION_SLACK_BOT_TOKEN"
-# app_token_env_var = "ORION_SLACK_APP_TOKEN"
-#
-#   [[bot.channels]]
-#   channel_id = "C07ABC123"   # the Slack channel to listen in
-#   project    = "orion"       # which project its replies attach to
-
 # One [projects.<name>] table per tracked project. <name> is what you pass to
 # `orion report <name>`.
 [projects.orion]
@@ -217,6 +185,5 @@ webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"   # names the .env key holding th
 #   webhook_env_var = "ORION_DISCORD_WEBHOOK_MENTOR"
 #   signals = ["incubator"]                  # receives only idea-pipeline updates
 #
-# When an idea here reaches "graduated", turn it into its own tracked project with:
-#   python -m orion graduate-idea "<idea title>" --like orion
-# (reads this index, slugifies the title into a project name, then runs add-project).
+# When an idea here reaches "graduated", register it as its own tracked project with
+# `orion add-project` (the `graduate-idea` shortcut was removed in the CS-O overhaul).

@@ -3892,26 +3892,6 @@ def test_config_path_defaults_to_orion_config_env(tmp_path, monkeypatch, capsys)
     assert "demo" in out                              # loaded via $ORION_CONFIG
 
 
-# --- `orion bot` is PARKED (KI-28 Stage 2) ------------------------------------
-# The bot's write path (relay comments) retired and repointing to the discussion write
-# awaits per-user keys, so cmd_bot no longer starts a listener — it prints why it is
-# parked and exits 1. The pure decision core is still covered by test_bot_core.py.
-
-
-def test_bot_is_parked_and_exits_cleanly(tmp_path, capsys):
-    """`orion bot` exits 1 with a parked notice and never starts a listener.
-
-    Why this matters: the bot cannot deliver until per-user keys land, so running it must
-    be a clear, actionable no-op rather than a live Socket Mode connection that could never
-    post. The message names the reason (parked) and points at the revival.
-    """
-    # cmd_bot is parked regardless of config, so a nonexistent config path is fine — it is
-    # never read. The conftest guards already block any real .env / network.
-    code = cli.main(["bot", "--config", str(tmp_path / "orion.toml")])
-    assert code == 1
-    assert "parked" in capsys.readouterr().err.lower()
-
-
 # --- D5: per-recipient signals routing ----------------------------------------
 # These drive the full report pipeline (real repo + notes file, mocked LLM and
 # delivery) and assert that each recipient receives ONLY the sections their
@@ -4334,282 +4314,6 @@ def test_baseline_survives_a_push_only_collector_and_marks_no_marker_for_it(tmp_
         assert get_marker(conn, "demo", collector) is None
 
 
-# --- D4 follow-on: graduate-idea ----------------------------------------------
-# graduate-idea reads the incubator index, finds a graduated idea, and registers a
-# project for it by delegating to add-project. These tests need no LLM/delivery
-# mocks (the command only writes config) — they use --yes/--print to skip prompts.
-
-_GRAD_INDEX = (
-    "| Idea | Status | One-line pitch |\n"
-    "|------|--------|----------------|\n"
-    "| [VLM Photo Overlay](ideas/vlm.md) | graduated | Annotate a photo |\n"
-    "| [Recipe Sorter](ideas/rs.md) | refining | Sort recipes |\n"
-)
-
-
-def _write_index(tmp_path, body=_GRAD_INDEX):
-    """Write an incubator index file and return its path (DRY across these tests)."""
-    path = tmp_path / "index.md"
-    path.write_text(body, encoding="utf-8")
-    return path
-
-
-def test_graduate_idea_registers_graduated_idea(tmp_path):
-    """A graduated idea becomes a registered project (name slugified from the title).
-
-    Why this matters: this is the whole point of D4's follow-on — close the loop from
-    "idea reached graduated" to "tracked project", reusing add-project's write path.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    code = cli.main([
-        "graduate-idea", "VLM Photo Overlay",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--recipient", "Alex:discord:ORION_W_ALEX",
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 0
-    # The written config re-loads and contains the slugified project.
-    assert "vlm-photo-overlay" in load_config(cfg).projects
-
-
-def test_graduate_idea_refuses_non_graduated_without_force(tmp_path, capsys):
-    """An idea that is not 'graduated' is refused (and nothing is written).
-
-    Why this matters: the command's semantics are "graduate a graduated idea"; a
-    mistaken non-graduated target should fail loudly, not silently register.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    code = cli.main([
-        "graduate-idea", "Recipe Sorter",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--recipient", "Alex:discord:ORION_W_ALEX",
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 1
-    assert not cfg.exists()  # refused before delegating to the writer
-    assert "not 'graduated'" in capsys.readouterr().err
-
-
-def test_graduate_idea_force_allows_non_graduated(tmp_path):
-    """--force graduates an idea regardless of its status.
-
-    Why this matters: the override exists for the deliberate case; it must actually
-    bypass the status gate and register the project.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    code = cli.main([
-        "graduate-idea", "Recipe Sorter", "--force",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--recipient", "Alex:discord:ORION_W_ALEX",
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 0
-    assert "recipe-sorter" in load_config(cfg).projects
-
-
-def test_graduate_idea_not_found_lists_graduated(tmp_path, capsys):
-    """An unknown idea fails and names the graduated ideas that ARE available.
-
-    Why this matters: a typo'd title should be a one-glance fix, not a dead end —
-    mirroring get_project listing known projects.
-    """
-    index = _write_index(tmp_path)
-    code = cli.main([
-        "graduate-idea", "Nonexistent Idea",
-        "--incubator-file", str(index),
-        "--config", str(tmp_path / "orion.toml"),
-    ])
-    assert code == 1
-    err = capsys.readouterr().err
-    assert "not found" in err and "VLM Photo Overlay" in err
-
-
-def test_graduate_idea_name_override(tmp_path):
-    """--name overrides the derived slug.
-
-    Why this matters: the slug is a default, not a constraint; the user can choose
-    the project key explicitly.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    code = cli.main([
-        "graduate-idea", "VLM Photo Overlay", "--name", "vlm",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--recipient", "Alex:discord:ORION_W_ALEX",
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 0
-    projects = load_config(cfg).projects
-    assert "vlm" in projects and "vlm-photo-overlay" not in projects
-
-
-def test_graduate_idea_print_writes_nothing(tmp_path, capsys):
-    """--print shows the stanza (with the slugified name) and writes no config.
-
-    Why this matters: the review-before-write affordance carries through from
-    add-project; a --print run must never create the file.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    code = cli.main([
-        "graduate-idea", "VLM Photo Overlay",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--recipient", "Alex:discord:ORION_W_ALEX",
-        "--config", str(cfg), "--print",
-    ])
-    assert code == 0
-    assert not cfg.exists()
-    assert "[projects.vlm-photo-overlay]" in capsys.readouterr().out
-
-
-def test_graduate_idea_finds_incubator_project_from_config(tmp_path):
-    """With no --incubator-file, the index is found via the configured incubator project.
-
-    Why this matters: the intended use is a dedicated [projects.incubator]; the user
-    shouldn't repeat the index path. This also exercises --like copying recipients.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    cfg.write_text(
-        f"""
-        state_db = "state.sqlite3"
-
-        [projects.incubator]
-        repo_path = "{tmp_path.as_posix()}"
-        collectors = ["incubator"]
-        incubator_file = "{index.as_posix()}"
-
-          [[projects.incubator.recipients]]
-          name = "Mentor"
-          channel = "discord"
-          webhook_env_var = "ORION_W_MENTOR"
-        """
-    )
-    code = cli.main([
-        "graduate-idea", "VLM Photo Overlay",
-        "--like", "incubator",
-        "--repo-path", str(tmp_path),
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 0
-    project = load_config(cfg).projects["vlm-photo-overlay"]
-    # Recipients were copied from the incubator project via --like.
-    assert project.recipients[0].name == "Mentor"
-
-
-# --- KI-43 (AU1-R F4): graduate-idea shares add-project's flags ------------------
-# graduate-idea's flags began as a verbatim copy of add-project's. add-project later grew
-# --tracker-file and --seed-tasks-from; the copy did not, so graduating into a
-# tracker-carrying project was IMPOSSIBLE (the tracker collector requires a path and there
-# was no flag to supply one). The fix shares one parent parser, so the first test below
-# pins the behaviour and the second pins the structure that keeps it true.
-
-
-def test_graduate_idea_accepts_tracker_file(tmp_path):
-    """`graduate-idea --collectors git,tracker --tracker-file X` registers with the tracker.
-
-    Why this matters: this is the exact command KI-43 filed as broken. Before the fix the
-    parser rejected --tracker-file outright (exit 2), and omitting it hit the
-    enabled-collector-needs-a-path check in scaffold.py — so there was no way to graduate an
-    idea into a tracker-carrying project without falling back to add-project by hand. The
-    assertion goes all the way to the written config, not just the exit code, because the
-    bug's shape was "the flag parses but the value is discarded on the way through".
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    tracker = tmp_path / "ROADMAP.md"
-    code = cli.main([
-        "graduate-idea", "VLM Photo Overlay",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--collectors", "git,tracker",
-        "--tracker-file", str(tracker),
-        "--recipient", "Supervisor A:discord:ORION_W_A",
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 0
-    project = load_config(cfg).projects["vlm-photo-overlay"]
-    assert project.collectors == ("git", "tracker")
-    assert project.tracker_file == tracker
-    assert not tracker.exists()  # a tracker points at a doc the user maintains
-
-
-def test_graduate_idea_accepts_seed_tasks_from(tmp_path):
-    """`graduate-idea --seed-tasks-from DOC` seeds the created checklist, like add-project.
-
-    Why this matters: --seed-tasks-from is the second flag that drifted. It is asserted
-    separately from --tracker-file because the two reach cmd_add_project by different
-    routes (one lands in the config stanza, the other changes what gets WRITTEN to a new
-    checklist file), so a single test could pass while the other path stayed broken.
-    """
-    index = _write_index(tmp_path)
-    cfg = tmp_path / "orion.toml"
-    seed_doc = tmp_path / "PLAN.md"
-    seed_doc.write_text(
-        "| Task | Status |\n|------|--------|\n| Ship the thing | done |\n",
-        encoding="utf-8",
-    )
-    code = cli.main([
-        "graduate-idea", "VLM Photo Overlay",
-        "--incubator-file", str(index),
-        "--repo-path", str(tmp_path),
-        "--collectors", "git,tasks",
-        "--seed-tasks-from", str(seed_doc),
-        "--recipient", "Supervisor A:discord:ORION_W_A",
-        "--config", str(cfg), "--yes",
-    ])
-    assert code == 0
-    # 'tasks' with no --tasks-file defaults to <repo>/TODO.md and CREATES it; the seed doc's
-    # table is what should be in it, rather than the empty starter checklist.
-    created = load_config(cfg).projects["vlm-photo-overlay"].tasks_file
-    assert created is not None and created.exists()
-    assert "Ship the thing" in created.read_text(encoding="utf-8")
-
-
-def test_add_project_and_graduate_idea_flag_sets_cannot_drift(capsys):
-    """The two commands' flag sets differ ONLY by graduate-idea's idea-specific three.
-
-    Why this matters: this is the anti-drift guard, and it is the actual point of the fix —
-    KI-43 was not one missing flag, it was a duplicated flag list nobody diffed for months.
-    Adding a flag to one command and not the other now fails here with a readable diff.
-
-    How it works: both commands' `--help` output is captured (argparse exits 0 after
-    printing) and the `--flag` tokens extracted, so the assertion runs against the REAL
-    parsers rather than a hand-kept list. The parser is built inline inside main(), so
-    there is no build_parser() to introspect directly — capturing help is what reaches it
-    without restructuring main().
-
-    The three expected differences are intentional and load-bearing:
-      --name, --incubator, --force  exist only on graduate-idea (they are about locating and
-                                    vetting the IDEA, which add-project knows nothing about).
-    Note --incubator-file is in NEITHER direction: both commands accept it, with genuinely
-    different meanings (the new project's collector file vs. the index to read), which is
-    exactly why it is excluded from the shared parent.
-    """
-    def flags_of(command):
-        with pytest.raises(SystemExit) as exc:
-            cli.main([command, "--help"])
-        assert exc.value.code == 0
-        return set(re.findall(r"--[a-z][a-z0-9-]*", capsys.readouterr().out))
-
-    add_flags = flags_of("add-project")
-    graduate_flags = flags_of("graduate-idea")
-
-    assert add_flags - graduate_flags == set(), (
-        "add-project grew flags graduate-idea lacks — put them on the shared parent parser "
-        "(_project_registration_parser), not on add-project alone. This is KI-43 recurring."
-    )
-    assert graduate_flags - add_flags == {"--name", "--incubator", "--force"}
-
-
 # --- AU1-R P3: the --config flag is declared once, and still reaches every command ------
 
 # Every LEAF command (the ones that actually run, not the grouping parsers). Written out
@@ -4617,8 +4321,8 @@ def test_add_project_and_graduate_idea_flag_sets_cannot_drift(capsys):
 # that forgets --config should fail this test, which is the whole point.
 _LEAF_COMMANDS = [
     ["report"], ["checklist-push"], ["disciplines-push"], ["intake"], ["relay-backfill"],
-    ["install-hook"], ["add-project"], ["graduate-idea"], ["projects"], ["show"], ["check"],
-    ["status"], ["baseline"], ["discussions", "pull"], ["discussions", "reply"], ["bot"],
+    ["install-hook"], ["add-project"], ["projects"], ["show"], ["check"],
+    ["status"], ["baseline"], ["discussions", "pull"], ["discussions", "reply"],
     ["relay-serve"],
     ["relay-user", "add"], ["relay-user", "list"], ["relay-user", "deactivate"],
     ["relay-user", "grant"], ["relay-user", "ungrant"],
@@ -4639,7 +4343,7 @@ def _help_text(capsys, command):
 
 
 def test_every_leaf_command_still_offers_config(capsys):
-    """All 33 leaf commands expose --config, and the 32 standard ones share one help text.
+    """All 31 leaf commands expose --config, and the 30 standard ones share one help text.
 
     Why this matters: P3 replaced 30 byte-identical --config blocks with one
     `_add_config_arg` helper. The risk of that kind of collapse is a command silently LOSING
@@ -4665,24 +4369,37 @@ def test_every_leaf_command_still_offers_config(capsys):
             assert standard in out, f"{label} has non-standard --config help text"
 
 
-def test_the_two_registration_commands_build_without_an_argparse_collision(capsys):
-    """add-project and graduate-idea get --config from the shared parent, exactly once.
+def test_the_registration_command_builds_without_an_argparse_collision(capsys):
+    """add-project gets --config from the shared parent parser, exactly once.
 
-    Why this matters: this is the trap the kickoff warned would "fail loudly at parser-build
-    time". `_project_registration_parser` owns --config for these two commands via
-    `parents=[...]`, so ALSO calling `_add_config_arg` on either subparser raises
+    Why this matters: `_project_registration_parser` owns --config for add-project via
+    `parents=[...]`, so ALSO calling `_add_config_arg` on the subparser raises
     `conflicting option string: --config` — and because the parser is built inside main(),
-    that would break EVERY invocation of the CLI, not just these two commands. The flag
-    appearing once in each help output is the observable form of "the helper composed with
-    the shared parent instead of duplicating it".
+    that would break EVERY invocation of the CLI. The flag appearing once in the help
+    output is the observable form of "the helper composed with the shared parent instead
+    of duplicating it". (graduate-idea, the parent's second child and the original KI-43
+    subject, was removed in CS-O PR5; the parent stays as the registration seam.)
     """
-    for command in (["add-project"], ["graduate-idea"]):
-        out = _help_text(capsys, command)
-        # argparse prints an option in the usage line and again in the options list, so a
-        # correctly-declared flag appears exactly twice; a duplicate declaration cannot get
-        # this far (it raises at build time), which is what makes reaching here the check.
-        occurrences = len(re.findall(r"(?<![\w-])--config(?![\w-])", out))
-        assert occurrences == 2, (
-            f"{command[0]} shows --config {occurrences}× in --help; expected 2 "
-            "(usage line + options list)"
-        )
+    out = _help_text(capsys, ["add-project"])
+    # argparse prints an option in the usage line and again in the options list, so a
+    # correctly-declared flag appears exactly twice; a duplicate declaration cannot get
+    # this far (it raises at build time), which is what makes reaching here the check.
+    occurrences = len(re.findall(r"(?<![\w-])--config(?![\w-])", out))
+    assert occurrences == 2, (
+        f"add-project shows --config {occurrences}× in --help; expected 2 "
+        "(usage line + options list)"
+    )
+
+
+def test_removed_commands_are_clean_breaks(tmp_path, capsys):
+    """`orion bot` and `orion graduate-idea` no longer parse — invalid choice, exit 2.
+
+    Why this matters: CS-O decision 8 removes both commands with NO alias or stub. An
+    operator typing either must get argparse's unknown-choice error naming the real
+    surface, not a silent no-op or a leftover handler.
+    """
+    for removed in ("bot", "graduate-idea"):
+        with pytest.raises(SystemExit) as exc:
+            cli.main([removed])
+        assert exc.value.code == 2, removed
+        assert "invalid choice" in capsys.readouterr().err

@@ -41,41 +41,6 @@ from .config import (
 # (spaces, dots, slashes) is rejected so the user picks an explicit, safe name.
 PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# Any run of characters NOT allowed in a project name; collapsed to a single hyphen
-# when deriving a slug from a free-text title (e.g. an incubator idea title).
-_SLUG_STRIP_RE = re.compile(r"[^a-z0-9_-]+")
-
-
-def slugify_project_name(title: str) -> str | None:
-    """Derive a valid project name (slug) from a free-text title.
-
-    Args:
-        title: A human title such as an incubator idea name ("VLM Photo Overlay").
-
-    Returns:
-        A lowercase slug matching PROJECT_NAME_RE (e.g. "vlm-photo-overlay"), or
-        None when nothing valid remains (e.g. a title of only punctuation), in which
-        case the caller must ask for an explicit name.
-
-    Why:
-        `graduate-idea` turns an incubator idea into a project, but idea titles carry
-        spaces and capitals that a project name (a TOML bare key, PROJECT_NAME_RE)
-        cannot. Deriving a sensible default here — lowercase, spaces/punctuation to
-        single hyphens, trimmed — lets the common case "just work" while still letting
-        the user override with an explicit name. Returning None (rather than "") makes
-        the "couldn't derive one" case explicit for the caller to handle, instead of
-        silently producing an empty/invalid name.
-    """
-    # Lowercase first so the slug is canonical; PROJECT_NAME_RE also allows uppercase,
-    # but lowercase reads better as a CLI argument and avoids case-only duplicates.
-    lowered = title.strip().lower()
-    # Replace every run of disallowed characters (spaces, punctuation) with one hyphen.
-    slug = _SLUG_STRIP_RE.sub("-", lowered)
-    # Collapse any doubled hyphens the substitution created, then trim separators from
-    # the ends so we never produce "-foo-" or "foo--bar".
-    slug = re.sub(r"-{2,}", "-", slug).strip("-_")
-    return slug or None
-
 
 def parse_recipient_spec(spec: str) -> Recipient:
     """Parse a CLI ``"Name:channel:ENV_VAR"`` string into a validated Recipient.

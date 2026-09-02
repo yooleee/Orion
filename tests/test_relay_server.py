@@ -1934,11 +1934,12 @@ def test_create_user_returns_key_once_and_user_can_login(tmp_path):
 
 
 def test_create_user_rejects_a_contributor_key(tmp_path):
-    """The INGEST token cannot create users — provisioning needs the admin token (401).
+    """A contributor key cannot create users — provisioning needs the admin token (401).
 
     Why this matters: independent secrets are the core hardening — whoever can push
-    reports (the ingest token) must NOT be able to mint users. We present the ingest token
-    and require a 401, no user created, and the admin token never echoed.
+    reports (a contributor key) must NOT be able to mint users. We present a live,
+    provisioned contributor key and require a 401, no user created, and the admin token
+    never echoed.
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
         status, payload = _admin_post(
@@ -1948,7 +1949,9 @@ def test_create_user_rejects_a_contributor_key(tmp_path):
         assert _ADMIN not in json.dumps(payload)  # admin token never leaked
 
         conn = open_relay_store(db)
-        assert get_user_by_name(conn, "mallory") is None  # nothing provisioned
+        # Only the seeded producer exists — nothing was provisioned by the refused call.
+        assert conn.execute("SELECT COUNT(*) FROM relay_users").fetchone()[0] == 1
+        assert get_user_by_name(conn, "mallory") is None
 
 
 def test_create_user_absent_token_is_401(tmp_path):
@@ -2101,10 +2104,10 @@ def test_list_users_excludes_credential_material(tmp_path):
 
 
 def test_list_users_requires_admin_token(tmp_path):
-    """GET /api/users with the ingest token (not the admin token) is refused 401.
+    """GET /api/users with a contributor key (not the admin token) is refused 401.
 
     Why this matters: the listing is part of the admin surface, gated by the same separate
-    admin token — the ingest token must not read the user roster.
+    admin token — a push credential must not read the user roster.
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
         code, body = _get(base_url, "/api/users", bearer=_PRODUCER_KEY)
@@ -3165,12 +3168,13 @@ def test_an_agent_push_is_badged_with_its_kind_and_operator(tmp_path):
         assert report["operated_by_name"] == human
 
 
-def test_a_human_push_and_a_legacy_push_carry_no_badge(tmp_path):
-    """Non-agent reports stay exactly as they were: a human badges "human", legacy nulls.
+def test_a_human_push_and_a_pre_attribution_report_carry_no_badge(tmp_path):
+    """Non-agent reports stay exactly as they were: a human badges "human", unattributed nulls.
 
-    The null-vs-"human" distinction is load-bearing. A legacy anonymous push genuinely
-    carried NO identity, so emitting "human" for it would assert an attribution the relay
-    never made — and would badge unattributed history as someone's work.
+    The null-vs-"human" distinction is load-bearing. A pre-attribution report (history from
+    before per-producer identity, seeded via the store) genuinely carries NO identity, so
+    emitting "human" for it would assert an attribution the relay never made — and would
+    badge unattributed history as someone's work.
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
         _provision_user(db, "dev", "dev-key", role="contributor", projects=["alpha"])

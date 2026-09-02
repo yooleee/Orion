@@ -322,13 +322,11 @@ options:
 
 $ orion relay-serve --help
 usage: orion relay-serve [-h] [--host HOST] [--port PORT] [--db DB]
-                         [--token-env TOKEN_ENV]
                          [--view-token-env VIEW_TOKEN_ENV]
                          [--require-view-auth] [--timezone TIMEZONE]
                          [--session-days SESSION_DAYS] [--allow-legacy-admin]
-                         [--disable-legacy-ingest] [--web-dir WEB_DIR]
-                         [--showcase] [--showcase-project NAME[:"blurb"]]
-                         [--config CONFIG]
+                         [--web-dir WEB_DIR] [--showcase]
+                         [--showcase-project NAME[:"blurb"]] [--config CONFIG]
 
 options:
   -h, --help            show this help message and exit
@@ -337,11 +335,6 @@ options:
   --port PORT           Port to bind (default: 8787).
   --db DB               Path to the relay's own sqlite store (default: orion-
                         relay.sqlite3).
-  --token-env TOKEN_ENV
-                        Name of the .env variable holding the ingest token
-                        (default: ORION_RELAY_TOKEN). Must match the token
-                        your pushing config's [relay] token_env_var resolves
-                        to.
   --view-token-env VIEW_TOKEN_ENV
                         Name of the .env variable holding the dashboard read
                         secret for HTTP Basic auth (default:
@@ -364,14 +357,6 @@ options:
                         login even after per-user accounts exist (default: off
                         — it is bootstrap-only, usable only while no users
                         have been provisioned).
-  --disable-legacy-ingest
-                        Retire the shared ingest token on the push path
-                        (default: off — the shared token keeps working,
-                        anonymously, for backward compatibility). Turn this on
-                        once every producer has its own contributor key: the
-                        shared token then 401s and only named per-user keys
-                        can push. Each legacy use logs a line first, so you
-                        can confirm it has gone quiet before flipping this.
   --web-dir WEB_DIR     Path to the built SPA assets (e.g. web/dist) to serve
                         single-host. When set, the relay serves the React
                         dashboard (static assets + an index.html fallback)

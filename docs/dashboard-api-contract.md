@@ -235,8 +235,9 @@ Everything observed about one project. `404` when missing or out of scope.
   `{ author_name, progress, items }` per producer, ordered by name, the `items` in the SAME per-item
   shape as `checklist`. It is a dual-write beside the aggregate `checklist`. As of C3 Inc 2.5 the
   displayed `checklist`/`stats` derive from the **effective checklist** (a done-OR merge of these
-  per-producer copies) at ≥2 producers, with the aggregate as the byte-identical <2-producer fallback; a
-  legacy shared-token push writes the aggregate ONLY, so it leaves `producer_checklists` empty.
+  per-producer copies) at ≥2 producers, with the aggregate as the byte-identical <2-producer fallback.
+  (Historical rows from the retired shared-token era wrote the aggregate ONLY, so a project whose
+  checklist predates per-producer identity can have an empty `producer_checklists`.)
   `author_name` is server-derived and denormalized (survives revocation); `author_id` is **not** on the
   wire. The dashboard renders one card per producer only when there are **two or more** (a single
   producer's card would just duplicate the aggregate). Note (C3 Inc 2.5): each producer card's
@@ -259,7 +260,7 @@ Everything observed about one project. `404` when missing or out of scope.
   immediately correct on every past report — and both go `null` if the account is later deleted, even
   though `author_name` survives.
 - `reports[].author_name` (C3 Inc 2) is the producer who pushed the report — a server-derived display
-  name, or `null` for a legacy (shared-token) push or a report predating attribution. The name is
+  name, or `null` for a report predating attribution (including the retired shared-token era). The name is
   denormalized at write time so it survives the user's later revocation; the internal `author_id` is
   **not** on the wire (same convention as `discussions`). The dashboard shows a "pushed by" only when it
   is non-null, so older reports render unchanged.

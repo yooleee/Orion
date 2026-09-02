@@ -61,8 +61,8 @@ Copy the live `orion.toml`, keep every `repo_path` / `tasks_file` / `tracker_fil
 
 **Rename the relay env vars — this is not cosmetic.** Commands run from the repo
 directory pick up the production `.env` through dotenv's working-directory search. If the
-sandbox config named `ORION_RELAY_TOKEN`, a production token could end up authenticating
-against the local relay. Distinct names make that impossible rather than unlikely.
+sandbox config named `ORION_RELAY_TOKEN`, the production contributor key could end up being
+presented to the local relay. Distinct names make that impossible rather than unlikely.
 
 Pick a project whose shape differs from `orion`'s. `applications` is the useful one: no
 git collector (so no LLM lane), `kind = "tracker"`, a `cadence`, and a checklist.
@@ -72,7 +72,6 @@ Single-config assumptions are what hide bugs, so a second shape is where they su
 
 ```
 orion relay-serve --port 8788 --db $SB/relay.sqlite3 \
-  --token-env ORION_SB_RELAY_TOKEN \
   --web-dir web/dist \
   --config $SB/orion-sandbox.toml
 ```

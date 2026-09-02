@@ -74,7 +74,17 @@ from relay.store import (
 )
 from relay.derive import today_in_tz
 
-_TOKEN = "test-ingest-token"
+# The default PRODUCER every relay in this file is provisioned with (CS-O PR7): since the
+# shared ingest token was retired, a push must present a provisioned contributor key, so
+# _running_relay seeds this account (granted _PRODUCER_PROJECTS) and _post sends its key by
+# default. Tests whose subject is the user table itself pass producer=False.
+_PRODUCER = "producer"
+_PRODUCER_KEY = "test-producer-key"
+_PRODUCER_PROJECTS = (
+    "demo", "anything", "alpha", "beta", "open-project", "secret-project", "secret-proj",
+    "secret-skunkworks", "ghost", "real-project", "secret", "wrapped-project", "live-project",
+    "granted", "applications", "barebones", "wide", "narrow", "other",
+)
 
 # The relay derives "today" in this zone (server._DISPLAY_TZ, the un-overridden default in
 # _running_relay). The forward-look tests below compute deadlines RELATIVE to this same
@@ -87,27 +97,30 @@ _VIEW = "test-view-secret"
 # running-relay helper builds a default AuthConfig from them so login works end to end.
 _SKEY = b"test-session-signing-key-32-bytes!!"
 _PEPPER = b"test-user-pepper-secret"
-# The independent admin/provisioning token (POST/GET /api/users). Distinct from the
-# ingest token (_TOKEN) on purpose — the ingest token must NOT be able to create users.
+# The independent admin/provisioning token (POST/GET /api/users). Distinct from any push
+# credential on purpose — a contributor key must NOT be able to create users.
 _ADMIN = "test-admin-token"
 
 
 @contextmanager
 def _running_relay(
     tmp_path,
-    token=_TOKEN,
     view_token=None,
     require_view_auth=False,
     auth=None,
     public_origin=False,
     web_dir=None,
     showcase=None,
+    producer=True,
 ):
     """Start a RelayServer on an ephemeral port in a thread; yield (base_url, db).
 
     Args:
         tmp_path: pytest temp dir for the relay's sqlite file.
-        token: the shared ingest Bearer token.
+        producer: seed the default contributor account (_PRODUCER / _PRODUCER_KEY, granted
+            _PRODUCER_PROJECTS) so _post's default key can push. Pass False when the test's
+            subject is the user table itself (exact user lists, first-user ids, the
+            "no users yet" bootstrap-admin window) — the seed would change its meaning.
         view_token: optional dashboard read secret. None (default) leaves GETs open,
             matching the loopback access model; set it to gate the dashboard (with a
             view secret OR provisioned users, GETs require a session cookie).
@@ -130,9 +143,13 @@ def _running_relay(
     if auth is None:
         auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER)
     server = create_server(
-        "127.0.0.1", 0, db, token, view_token, require_view_auth, auth=auth,
+        "127.0.0.1", 0, db, view_token, require_view_auth, auth=auth,
         web_dir=web_dir, showcase=showcase,
     )
+    if producer and _user_id_of(db, _PRODUCER) is None:  # idempotent across a restart
+        _provision_user(
+            db, _PRODUCER, _PRODUCER_KEY, role="contributor", projects=_PRODUCER_PROJECTS
+        )
     _, port = server.server_address
     base_url = f"http://127.0.0.1:{port}"
     if public_origin:
@@ -152,7 +169,7 @@ def _running_relay(
         thread.join(timeout=5)
 
 
-def _post(base_url, body, *, token=_TOKEN, path="/ingest"):
+def _post(base_url, body, *, token=_PRODUCER_KEY, path="/ingest"):
     """POST `body` (bytes) to the relay and return (status_code, response_bytes).
 
     Args:
@@ -213,6 +230,16 @@ def _get(base_url, path, *, cookie=None, bearer=None):
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8")
+
+
+def _user_id_of(db, name):
+    """Return the id of the user named `name`, or None if no such row exists."""
+    conn = open_relay_store(db)
+    try:
+        row = get_user_by_name(conn, name)
+        return None if row is None else row["id"]
+    finally:
+        conn.close()
 
 
 def _provision_user(
@@ -570,7 +597,7 @@ def test_push_checklist_client_round_trips_through_the_relay(tmp_path):
     items = [{"text": "Ship it", "done": True}, {"text": "Polish", "done": False}]
     with _running_relay(tmp_path) as (base_url, db):
         # base_url is the relay root; the client derives /checklist via urljoin.
-        push_checklist(base_url, "demo", items, _TOKEN)
+        push_checklist(base_url, "demo", items, _PRODUCER_KEY)
         conn = open_relay_store(db)
         assert get_checklist(conn, "demo") == items
 
@@ -1058,9 +1085,10 @@ def test_due_soon_days_widens_at_risk_but_not_the_scheduling_week(tmp_path):
         assert _post(base_url, _checklist_body_with_due_soon("wide", item, 14), path="/checklist")[0] == 200
         assert _post(base_url, _checklist_body_with_due_soon("narrow", item), path="/checklist")[0] == 200
 
-        # The default _running_relay is ungated (no view_token / users), so /api reads are open.
+        # The seeded producer account gates the dashboard, so reads go through a session.
+        cookie = _reader_cookie(db, base_url)
         # (1) Portfolio at-risk DOES honour the horizon: 10 <= 14 for wide → 1; 10 > 7 for narrow → 0.
-        code, body = _get(base_url, "/api/portfolio")
+        code, body = _get(base_url, "/api/portfolio", cookie=cookie)
         assert code == 200
         projects = {e["name"]: e for e in json.loads(body)["projects"]}
         assert projects["wide"]["at_risk"] == 1
@@ -1068,7 +1096,7 @@ def test_due_soon_days_widens_at_risk_but_not_the_scheduling_week(tmp_path):
 
         # (2) Scheduling buckets do NOT: the fixed 7-day week puts BOTH 10-day-out items in
         # "later" (10 > 7), so the custom horizon never redefines "this week".
-        code, body = _get(base_url, "/api/scheduling")
+        code, body = _get(base_url, "/api/scheduling", cookie=cookie)
         assert code == 200
         buckets = json.loads(body)["buckets"]
 
@@ -1096,8 +1124,8 @@ def test_wrong_token_is_401_generic_and_stores_nothing(tmp_path):
         status, body = _post(base_url, _real_blob_json().encode("utf-8"), token="wrong")
         assert status == 401
         assert json.loads(body)["error"] == "unauthorized"
-        # The expected token must never appear in any response.
-        assert _TOKEN not in body.decode("utf-8")
+        # No real key must ever appear in any response.
+        assert _PRODUCER_KEY not in body.decode("utf-8")
 
         conn = open_relay_store(db)
         assert list_projects(conn) == []  # nothing stored
@@ -1148,8 +1176,8 @@ def test_401_advertises_bearer_scheme(tmp_path):
 # ---------------------------------------------------------------------------
 # C3 Increment 2 — contributor push identity + per-project scope (Unit 1.2a).
 # A provisioned "contributor" authenticates the Bearer push path with its OWN key,
-# confined to its granted projects; the legacy shared token keeps working anonymously
-# until --disable-legacy-ingest. Every Bearer failure is one generic 401.
+# confined to its granted projects; since CS-O PR7 that is the ONLY push credential (the
+# shared ingest token is gone). Every Bearer failure is one generic 401.
 # ---------------------------------------------------------------------------
 
 
@@ -1238,19 +1266,22 @@ def test_contributor_report_is_attributed_through_the_read_api(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         _provision_user(db, "Teammate B", "contrib-key", role="contributor", projects=["demo"])
         _provision_user(db, "root", "admin-key", role="admin")  # reads via the cookie SPA API
+        # An anonymous report can only be pre-attribution HISTORY now (CS-O PR7 retired the
+        # anonymous push), so it is seeded through the store FIRST, as the older row.
+        _seed_report(db, "demo")
         assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 201  # attributed
-        assert _post(base_url, _blob_for("demo"), token=_TOKEN)[0] == 201  # legacy, anonymous
 
         cookie = _login(base_url, "admin-key")
 
-        # Project timeline (serialize_project): newest first — legacy then the contributor's.
+        # Project timeline (serialize_project): newest first — the contributor's, then the
+        # older anonymous row.
         code, body = _get(base_url, "/api/projects/demo", cookie=cookie)
         assert code == 200
         timeline = json.loads(body)["reports"]
-        assert [r["author_name"] for r in timeline] == [None, "Teammate B"]
+        assert [r["author_name"] for r in timeline] == ["Teammate B", None]
 
         # Single-report page (serialize_report) for the attributed report.
-        attributed_id = timeline[1]["id"]
+        attributed_id = timeline[0]["id"]
         code, rbody = _get(base_url, f"/api/reports/{attributed_id}", cookie=cookie)
         assert code == 200
         detail = json.loads(rbody)
@@ -1281,8 +1312,6 @@ def test_two_contributors_get_separate_producer_checklists(tmp_path):
             {"text": "B task 1", "done": True}, {"text": "B task 2", "done": False},
         ])[0] == 200
         assert push_checklist("demo", "c-key", [{"text": "C task", "done": False}])[0] == 200
-        # A legacy push updates the aggregate only — no producer card.
-        assert push_checklist("demo", _TOKEN, [{"text": "legacy", "done": False}])[0] == 200
 
         cookie = _login(base_url, "admin-key")
         code, body = _get(base_url, "/api/projects/demo", cookie=cookie)
@@ -1356,55 +1385,38 @@ def test_effective_checklist_agrees_across_portfolio_project_and_scheduling(tmp_
         assert "Ship" not in demo_labels  # done in the merged view → no open deadline
 
 
-def test_legacy_shared_token_still_ingests_by_default(tmp_path):
-    """The shared ingest token keeps working (anonymously, unrestricted) while enabled.
+def test_unprovisioned_bearer_token_is_401_but_a_contributor_key_pushes(tmp_path):
+    """A Bearer token that is not a provisioned key gets the generic 401; a contributor key pushes.
 
-    Why this matters: decision #4 — a machine credential must not silently expire. Even after
-    named contributors exist, the shared token still ingests by default (any project, no
-    scope), so existing crons do not break the moment the first contributor is provisioned.
+    Why this matters (CS-O PR7): the shared ingest token is retired END TO END — there is
+    no server-side secret a bare token could match any more, so a random (or formerly-valid
+    shared) token is indistinguishable from a wrong key. Only a provisioned, active,
+    push-capable account's own key authenticates a push.
     """
-    with _running_relay(tmp_path) as (base_url, db):
+    with _running_relay(tmp_path, producer=False) as (base_url, db):
         _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
-        # Shared token, and a project the contributor is NOT granted — legacy is unrestricted.
-        assert _post(base_url, _blob_for("anything"), token=_TOKEN)[0] == 201
-
-
-def test_disable_legacy_ingest_rejects_shared_token_but_contributor_still_pushes(tmp_path):
-    """--disable-legacy-ingest 401s the shared token while named keys keep pushing.
-
-    Why this matters: the deliberate cutover. Once every producer has its own key, the
-    operator retires the shared token; from then on only named per-user keys can push, and the
-    shared token is dead — the moment the operator (not a silent expiry) chooses.
-    """
-    auth = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, disable_legacy_ingest=True)
-    with _running_relay(tmp_path, auth=auth) as (base_url, db):
-        _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
-        assert _post(base_url, _blob_for("demo"), token=_TOKEN)[0] == 401  # shared token dead
+        assert _post(base_url, _blob_for("demo"), token="test-ingest-token")[0] == 401
         assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 201  # own key lives
+        conn = open_relay_store(db)
+        assert len(history(conn, "demo")) == 1  # only the identified push landed
 
 
-def test_legacy_ingest_use_logs_a_line_but_identified_push_does_not(tmp_path, capfd):
-    """Each legacy shared-token push logs a line; a named contributor push does not.
+def test_relay_without_a_user_pepper_authenticates_no_push(tmp_path):
+    """With user_pepper=None a relay 401s even a genuinely provisioned contributor key.
 
-    Why this matters: decision #4 makes retirement operator-driven, and the operator's signal
-    for "the shared token has gone quiet" is this log line. It must fire for a legacy push
-    (naming the route, never the token) and NOT for an identified push, so a quiet log means
-    every producer has actually migrated to its own key.
+    Why this matters (CS-O PR7): contributor keys are the ONLY push credential, and the
+    pepper is what turns a presented key into a verifier to look up — without it nothing
+    can resolve, by construction. This pins that fail-closed property at the relay layer,
+    which is what makes the CLI's unconditional ORION_RELAY_USER_PEPPER requirement guard
+    a real hazard (a pepper-less relay would 401 every push silently) rather than a
+    theoretical one.
     """
-    with _running_relay(tmp_path) as (base_url, db):
+    pepperless = AuthConfig(session_key=_SKEY, user_pepper=None)
+    with _running_relay(tmp_path, auth=pepperless, producer=False) as (base_url, db):
         _provision_user(db, "mac", "contrib-key", role="contributor", projects=["demo"])
-        capfd.readouterr()  # drain startup/setup noise
-
-        _post(base_url, _blob_for("demo"), token=_TOKEN)  # legacy shared token
-        legacy_err = capfd.readouterr().err
-        assert "legacy shared ingest token used" in legacy_err
-        assert "POST /ingest" in legacy_err
-        assert _TOKEN not in legacy_err  # the token itself is never logged
-
-        _post(base_url, _blob_for("demo"), token="contrib-key")  # named key
-        identified_err = capfd.readouterr().err
-        assert "legacy shared ingest token used" not in identified_err
-
+        assert _post(base_url, _blob_for("demo"), token="contrib-key")[0] == 401
+        conn = open_relay_store(db)
+        assert history(conn, "demo") == []  # nothing stored
 
 def test_contributor_discussion_read_is_scoped(tmp_path):
     """A contributor's Bearer discussion pull sees granted threads; out-of-scope reads [].
@@ -1501,7 +1513,7 @@ def test_login_success_sets_a_valid_cookie(tmp_path):
     HttpOnly (no JS theft via XSS), SameSite=Lax (CSRF defense-in-depth), Path=/ — and the
     value must be a real signature that verifies under the signing key, not an opaque blob.
     """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+    with _running_relay(tmp_path, view_token=_VIEW, producer=False) as (base_url, _db):
         code, headers, _ = _post_login(base_url, _VIEW)  # legacy bootstrap admin
         assert code == 200  # POST /api/login replies 200 + Set-Cookie (was a 303 form post)
         set_cookie = headers.get("Set-Cookie")
@@ -1541,7 +1553,7 @@ def test_tampered_cookie_is_rejected(tmp_path):
     mutated cookie must never authenticate, and the live gate must turn that into a clean
     401 (login required), not an error or (worse) an authenticated request.
     """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+    with _running_relay(tmp_path, view_token=_VIEW, producer=False) as (base_url, _db):
         cookie = _login(base_url, _VIEW)
         tampered = cookie[:-1] + ("A" if cookie[-1] != "A" else "B")
         assert _get_json(base_url, "/api/portfolio", cookie=tampered)[0] == 401
@@ -1614,7 +1626,7 @@ def test_legacy_bootstrap_admin_only_when_no_users(tmp_path):
     peer to named users (Codex's gated/deprecated-legacy guidance). It must stop working
     the moment real users are provisioned, so it can't silently remain a backdoor.
     """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
+    with _running_relay(tmp_path, view_token=_VIEW, producer=False) as (base_url, db):
         # No users yet: the legacy view key logs in (bootstrap admin).
         assert _login(base_url, _VIEW) is not None
         # Provision a user; the legacy key is now OFF.
@@ -1646,11 +1658,11 @@ def test_secure_cookie_only_when_hosted(tmp_path):
     """
     # Hosted posture (e.g. behind TLS): Secure is set.
     hosted = AuthConfig(session_key=_SKEY, user_pepper=_PEPPER, secure_cookie=True)
-    with _running_relay(tmp_path, view_token=_VIEW, auth=hosted) as (base_url, _db):
+    with _running_relay(tmp_path, view_token=_VIEW, auth=hosted, producer=False) as (base_url, _db):
         _, headers, _ = _post_login(base_url, _VIEW)
         assert "secure" in headers.get("Set-Cookie", "").lower()
     # Plain loopback dev (the default): no Secure, so the cookie works over http.
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, _db):
+    with _running_relay(tmp_path, view_token=_VIEW, producer=False) as (base_url, _db):
         _, headers, _ = _post_login(base_url, _VIEW)
         assert "secure" not in headers.get("Set-Cookie", "").lower()
 
@@ -1753,7 +1765,7 @@ def test_guard_refuses_non_loopback_bind_without_view_secret(tmp_path):
     """
     db = tmp_path / "relay.sqlite3"
     with pytest.raises(ValueError, match="non-loopback"):
-        create_server("0.0.0.0", 0, db, _TOKEN)  # no view_token
+        create_server("0.0.0.0", 0, db)  # no view_token
 
 
 def test_guard_allows_non_loopback_bind_with_view_secret(tmp_path):
@@ -1764,7 +1776,7 @@ def test_guard_allows_non_loopback_bind_with_view_secret(tmp_path):
     close the server (never serve) to assert construction does not raise.
     """
     db = tmp_path / "relay.sqlite3"
-    server = create_server("0.0.0.0", 0, db, _TOKEN, _VIEW)
+    server = create_server("0.0.0.0", 0, db, _VIEW)
     server.server_close()  # opened an ephemeral socket; close it without serving
 
 
@@ -1793,7 +1805,7 @@ def test_require_view_auth_forces_secret_on_loopback(tmp_path):
     """
     db = tmp_path / "relay.sqlite3"
     with pytest.raises(ValueError, match="require-view-auth"):
-        create_server("127.0.0.1", 0, db, _TOKEN, None, require_view_auth=True)
+        create_server("127.0.0.1", 0, db, None, require_view_auth=True)
 
 
 def test_require_view_auth_with_secret_on_loopback_enforces_login(tmp_path):
@@ -1804,7 +1816,7 @@ def test_require_view_auth_with_secret_on_loopback_enforces_login(tmp_path):
     expose an unauthenticated view. Proves both the guard and the enforcement (a data API
     route 401s without a session, 200s with one).
     """
-    with _running_relay(tmp_path, view_token=_VIEW, require_view_auth=True) as (base_url, _db):
+    with _running_relay(tmp_path, view_token=_VIEW, require_view_auth=True, producer=False) as (base_url, _db):
         assert _get_json(base_url, "/api/portfolio")[0] == 401  # no session -> login required
         cookie = _login(base_url, _VIEW)  # legacy bootstrap admin
         assert _get_json(base_url, "/api/portfolio", cookie=cookie)[0] == 200  # session -> served
@@ -1828,6 +1840,25 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def _seed_report(db, project="demo"):
+    """Insert one real report blob for `project` DIRECTLY via the store, with no author.
+
+    Why:
+        Some tests must run with NO provisioned users — the bootstrap-admin login window
+        only exists then — yet still need a report to act on. Since CS-O PR7 an HTTP push
+        needs a provisioned contributor (which would close that window), so these tests
+        seed through the store instead. The row has author_id NULL: exactly the shape of
+        pre-attribution history, which the read paths must keep rendering.
+    """
+    blob = json.loads(_real_blob_json())
+    blob["project"] = project
+    conn = open_relay_store(db)
+    try:
+        return ingest(conn, blob, "2026-06-24T00:00:00+00:00", None, None)
+    finally:
+        conn.close()
 
 
 def _ingest_one(base_url):
@@ -1902,7 +1933,7 @@ def test_create_user_returns_key_once_and_user_can_login(tmp_path):
         assert _login(base_url, key) is not None
 
 
-def test_create_user_rejects_the_ingest_token(tmp_path):
+def test_create_user_rejects_a_contributor_key(tmp_path):
     """The INGEST token cannot create users — provisioning needs the admin token (401).
 
     Why this matters: independent secrets are the core hardening — whoever can push
@@ -1911,13 +1942,13 @@ def test_create_user_rejects_the_ingest_token(tmp_path):
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
         status, payload = _admin_post(
-            base_url, "/api/users", {"name": "mallory"}, token=_TOKEN
+            base_url, "/api/users", {"name": "mallory"}, token=_PRODUCER_KEY
         )
         assert status == 401
         assert _ADMIN not in json.dumps(payload)  # admin token never leaked
 
         conn = open_relay_store(db)
-        assert conn.execute("SELECT COUNT(*) FROM relay_users").fetchone()[0] == 0
+        assert get_user_by_name(conn, "mallory") is None  # nothing provisioned
 
 
 def test_create_user_absent_token_is_401(tmp_path):
@@ -1926,7 +1957,7 @@ def test_create_user_absent_token_is_401(tmp_path):
     Why this matters: provisioning is never open by omission — a missing credential is
     refused just like a wrong one, before any user is minted.
     """
-    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+    with _running_relay(tmp_path, auth=_admin_auth(), producer=False) as (base_url, db):
         status, _ = _admin_post(base_url, "/api/users", {"name": "x"}, token=None)
         assert status == 401
         conn = open_relay_store(db)
@@ -2059,7 +2090,7 @@ def test_list_users_excludes_credential_material(tmp_path):
     the raw key. We create a scoped user and confirm the listing shows name/role/projects
     but neither 'key' nor 'key_verifier'.
     """
-    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+    with _running_relay(tmp_path, auth=_admin_auth(), producer=False) as (base_url, _db):
         _admin_post(base_url, "/api/users", {"name": "alice", "projects": ["demo"]})
         code, body = _get(base_url, "/api/users", bearer=_ADMIN)
         assert code == 200
@@ -2076,7 +2107,7 @@ def test_list_users_requires_admin_token(tmp_path):
     admin token — the ingest token must not read the user roster.
     """
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
-        code, body = _get(base_url, "/api/users", bearer=_TOKEN)
+        code, body = _get(base_url, "/api/users", bearer=_PRODUCER_KEY)
         assert code == 401
         assert _ADMIN not in body
 
@@ -2122,7 +2153,7 @@ def test_revoke_requires_admin_token(tmp_path):
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
         _admin_post(base_url, "/api/users", {"name": "bob"})
         status, _ = _admin_post(
-            base_url, "/api/users/revoke", {"name": "bob"}, token=_TOKEN
+            base_url, "/api/users/revoke", {"name": "bob"}, token=_PRODUCER_KEY
         )
         assert status == 401
         # bob is still active.
@@ -2861,7 +2892,7 @@ def test_admin_verbs_404_unknown_and_require_admin_token(tmp_path):
             ("/api/users/role", {"name": "x", "role": "viewer"}),
             ("/api/users/rename", {"name": "x", "new_name": "y"}),
         ):
-            assert _admin_post(base_url, path, obj, token=_TOKEN)[0] == 401  # ingest token refused
+            assert _admin_post(base_url, path, obj, token=_PRODUCER_KEY)[0] == 401  # push key refused
 
 
 def test_admin_actions_write_audit_rows(tmp_path):
@@ -3144,8 +3175,9 @@ def test_a_human_push_and_a_legacy_push_carry_no_badge(tmp_path):
     with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
         _provision_user(db, "dev", "dev-key", role="contributor", projects=["alpha"])
         _post(base_url, _blob_for("alpha"), token="dev-key")
-        # A legacy shared-token push carries no identity at all.
-        _post(base_url, _blob_for("alpha"), token=_TOKEN)
+        # A pre-attribution report carries no identity at all (seeded via the store — the
+        # anonymous push path itself retired in CS-O PR7).
+        _seed_report(db, "alpha")
         cookie = _reader_cookie(db, base_url)
 
         _, project = _get_json(base_url, "/api/projects/alpha", cookie=cookie)
@@ -3205,8 +3237,8 @@ def _seed_two_projects(base_url, db):
     The member gets ZERO grants on purpose — its entire read scope must come from
     visibility, which is the property under test.
     """
-    _post(base_url, _blob_for("open-project"), token=_TOKEN)
-    _post(base_url, _blob_for("secret-project"), token=_TOKEN)
+    _post(base_url, _blob_for("open-project"))
+    _post(base_url, _blob_for("secret-project"))
     _set_visibility(base_url, "open-project", "org")
     _provision_user(db, "kb-member", "member-key", role="member")
     return _login(base_url, "member-key")
@@ -3391,17 +3423,18 @@ def test_marking_a_project_past_removes_it_from_every_deadline_view(tmp_path):
     it is untouched throughout, which is what proves the flag is per-project and not a
     global mute. Flipping back to active restores everything.
     """
-    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, _db):
+    with _running_relay(tmp_path, auth=_admin_auth()) as (base_url, db):
+        cookie = _reader_cookie(db, base_url)  # the seeded producer gates reads
         overdue = [{"text": "Ship it", "done": False, "due_date": "2020-01-01"}]
         _push_checklist(base_url, "live-project", overdue)
         _push_checklist(base_url, "wrapped-project", overdue)
 
         # Before: both are active, both overdue, both on the timeline.
-        _, portfolio = _get_json(base_url, "/api/portfolio")
+        _, portfolio = _get_json(base_url, "/api/portfolio", cookie=cookie)
         by_name = {p["name"]: p for p in portfolio["projects"]}
         assert by_name["wrapped-project"]["lifecycle"] == "active"
         assert by_name["wrapped-project"]["next_due"]["state"] == "overdue"
-        _, sched = _get_json(base_url, "/api/scheduling")
+        _, sched = _get_json(base_url, "/api/scheduling", cookie=cookie)
         assert sched["summary"]["overdue"] == 2
 
         status, body = _set_lifecycle(base_url, "wrapped-project", "past")
@@ -3409,7 +3442,7 @@ def test_marking_a_project_past_removes_it_from_every_deadline_view(tmp_path):
         assert body == {"name": "wrapped-project", "lifecycle": "past"}
 
         # Home: past, with every urgency fact zeroed. The live project is unchanged.
-        _, portfolio = _get_json(base_url, "/api/portfolio")
+        _, portfolio = _get_json(base_url, "/api/portfolio", cookie=cookie)
         by_name = {p["name"]: p for p in portfolio["projects"]}
         wrapped = by_name["wrapped-project"]
         assert wrapped["lifecycle"] == "past"
@@ -3419,19 +3452,19 @@ def test_marking_a_project_past_removes_it_from_every_deadline_view(tmp_path):
         assert by_name["live-project"]["next_due"]["state"] == "overdue"
 
         # Project page: badged past, no NEXT DUE.
-        _, detail = _get_json(base_url, "/api/projects/wrapped-project")
+        _, detail = _get_json(base_url, "/api/projects/wrapped-project", cookie=cookie)
         assert detail["lifecycle"] == "past"
         assert detail["stats"]["next_due"] is None
 
         # Scheduling: gone from the buckets and from the summary count.
-        _, sched = _get_json(base_url, "/api/scheduling")
+        _, sched = _get_json(base_url, "/api/scheduling", cookie=cookie)
         sources = {r["source"]["name"] for b in sched["buckets"].values() for r in b}
         assert sources == {"live-project"}
         assert sched["summary"]["overdue"] == 1
 
         # Reversible: flipping back restores every derivation.
         assert _set_lifecycle(base_url, "wrapped-project", "active")[0] == 200
-        _, sched = _get_json(base_url, "/api/scheduling")
+        _, sched = _get_json(base_url, "/api/scheduling", cookie=cookie)
         assert sched["summary"]["overdue"] == 2
 
 
@@ -3471,7 +3504,7 @@ def test_lifecycle_mutation_is_admin_token_gated(tmp_path):
         payload = {"name": "real-project", "lifecycle": "past"}
 
         assert _admin_post(base_url, "/api/projects/lifecycle", payload, token=None)[0] == 401
-        assert _admin_post(base_url, "/api/projects/lifecycle", payload, token=_TOKEN)[0] == 401
+        assert _admin_post(base_url, "/api/projects/lifecycle", payload, token=_PRODUCER_KEY)[0] == 401
 
         conn = open_relay_store(db)
         assert get_project_lifecycle(conn, "real-project") == "active"
@@ -3718,7 +3751,7 @@ def test_api_me_open_relay(tmp_path):
 
     Why this matters: the SPA must not force a login on an open loopback relay.
     """
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path, producer=False) as (base_url, _db):
         status, me = _get_json(base_url, "/api/me")
         assert status == 200
         assert me["gated"] is False and me["authenticated"] is False
@@ -3768,7 +3801,8 @@ def test_api_me_reflects_admin_and_viewer_scope(tmp_path):
 
 def test_api_portfolio_splits_projects_and_trackers(tmp_path):
     """/api/portfolio puts a report-project under projects and a kind=tracker under trackers."""
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path) as (base_url, db):
+        cookie = _reader_cookie(db, base_url)  # the seeded producer gates reads
         # A real project: push a report blob (the real blob's project is "demo").
         _post(base_url, _real_blob_json().encode("utf-8"))
         # A tracker: push a checklist marked kind=tracker.
@@ -3777,7 +3811,7 @@ def test_api_portfolio_splits_projects_and_trackers(tmp_path):
             [{"text": "Apply somewhere", "done": False, "due_date": "2026-12-01"}],
             kind="tracker",
         )
-        status, out = _get_json(base_url, "/api/portfolio")
+        status, out = _get_json(base_url, "/api/portfolio", cookie=cookie)
         assert status == 200
         assert "applications" in [t["name"] for t in out["trackers"]]
         # The blob's project lands under projects, never under trackers.
@@ -3803,22 +3837,24 @@ def test_api_portfolio_is_scoped_for_a_viewer(tmp_path):
 
 def test_api_project_detail_and_missing_404(tmp_path):
     """/api/projects/<name> returns detail for a real project, 404 for an unknown one."""
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path) as (base_url, db):
+        cookie = _reader_cookie(db, base_url)  # the seeded producer gates reads
         _post(base_url, _real_blob_json().encode("utf-8"))
-        status, detail = _get_json(base_url, "/api/projects/demo")
+        status, detail = _get_json(base_url, "/api/projects/demo", cookie=cookie)
         assert status == 200 and detail["name"] == "demo"
         assert "stats" in detail and "checklist" in detail and "reports" in detail
 
-        missing, body = _get_json(base_url, "/api/projects/ghost")
+        missing, body = _get_json(base_url, "/api/projects/ghost", cookie=cookie)
         assert missing == 404 and body == {"error": "not found"}
 
 
 def test_api_report_detail_carries_nav_and_404s_unknown(tmp_path):
     """/api/reports/<id> returns the report with nav; an unknown id is 404."""
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path) as (base_url, db):
+        cookie = _reader_cookie(db, base_url)  # the seeded producer gates reads
         created = json.loads(_post(base_url, _real_blob_json().encode("utf-8"))[1])
         report_id = created["id"]
-        status, detail = _get_json(base_url, f"/api/reports/{report_id}")
+        status, detail = _get_json(base_url, f"/api/reports/{report_id}", cookie=cookie)
         assert status == 200 and detail["id"] == report_id
         assert detail["number"] == 1  # per-project ordinal: the only report is #1
         # The only report has no neighbours; ids route, numbers label (both null at the ends).
@@ -3826,7 +3862,7 @@ def test_api_report_detail_carries_nav_and_404s_unknown(tmp_path):
             "prev_id": None, "prev_number": None, "next_id": None, "next_number": None
         }
 
-        missing, body = _get_json(base_url, "/api/reports/999999")
+        missing, body = _get_json(base_url, "/api/reports/999999", cookie=cookie)
         assert missing == 404 and body == {"error": "not found"}
 
 
@@ -3950,7 +3986,7 @@ def test_api_still_json_when_web_dir_set(tmp_path):
     the static handler, so it still answers JSON.
     """
     web = _build_web_dir(tmp_path)
-    with _running_relay(tmp_path, web_dir=web) as (base_url, _db):
+    with _running_relay(tmp_path, web_dir=web, producer=False) as (base_url, _db):
         status, me = _get_json(base_url, "/api/me")
         assert status == 200 and me["gated"] is False
 
@@ -4158,7 +4194,8 @@ def test_api_scheduling_buckets_deadlines_across_sources(tmp_path):
     from datetime import date, timedelta
 
     iso = lambda days: (date.today() + timedelta(days=days)).isoformat()
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path) as (base_url, db):
+        cookie = _reader_cookie(db, base_url)  # the seeded producer gates reads
         _push_checklist(
             base_url, "applications",
             [
@@ -4170,7 +4207,7 @@ def test_api_scheduling_buckets_deadlines_across_sources(tmp_path):
             ],
             kind="tracker",
         )
-        status, out = _get_json(base_url, "/api/scheduling")
+        status, out = _get_json(base_url, "/api/scheduling", cookie=cookie)
         assert status == 200
         assert set(out) == {"summary", "buckets"}
         assert set(out["buckets"]) == {"overdue", "this_week", "later"}
@@ -4241,11 +4278,11 @@ def test_api_showcase_public_serves_only_the_allowlist(tmp_path):
 def test_api_me_showcase_enabled_tracks_config(tmp_path):
     """/api/me reports showcase_enabled matching the server config (drives the sidebar link)."""
     off = ShowcaseConfig(enabled=False)
-    with _running_relay(tmp_path, showcase=off) as (base_url, _db):
+    with _running_relay(tmp_path, showcase=off, producer=False) as (base_url, _db):
         _, me = _get_json(base_url, "/api/me")
         assert me["showcase_enabled"] is False
     on = ShowcaseConfig(enabled=True, projects=(("demo", ""),))
-    with _running_relay(tmp_path, showcase=on) as (base_url, _db):
+    with _running_relay(tmp_path, showcase=on, producer=False) as (base_url, _db):
         _, me = _get_json(base_url, "/api/me")
         assert me["showcase_enabled"] is True
 
@@ -4299,8 +4336,8 @@ def test_api_discussion_admin_posts_as_developer(tmp_path):
     before the Unit 3 CLI path. The legacy admin has no relay_users row, so author_id is None
     — which the nullable column must store cleanly.
     """
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _ingest_one(base_url)
+    with _running_relay(tmp_path, view_token=_VIEW, producer=False) as (base_url, db):
+        _seed_report(db)  # no users may exist: the bootstrap-admin login is the subject
         cookie = _login(base_url, _VIEW)  # legacy bootstrap admin (no users provisioned)
 
         status, body, _ = _post_api_json(
@@ -4398,8 +4435,8 @@ def test_api_discussion_404_out_of_scope_and_missing_project(tmp_path):
 
 def test_api_discussion_rejects_empty_and_oversized_body(tmp_path):
     """A whitespace-only body and an over-cap body are both 400 (and store nothing)."""
-    with _running_relay(tmp_path, view_token=_VIEW) as (base_url, db):
-        _ingest_one(base_url)
+    with _running_relay(tmp_path, view_token=_VIEW, producer=False) as (base_url, db):
+        _seed_report(db)  # no users may exist: the bootstrap-admin login is the subject
         cookie = _login(base_url, _VIEW)
 
         s_empty, _, _ = _post_api_json(
@@ -4484,7 +4521,7 @@ def test_api_discussions_pull_requires_bearer_and_never_echoes_secret(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         code, body = _get(base_url, _api_discussions_path(project="demo"), bearer="wrong")
         assert code == 401
-        assert _TOKEN not in body
+        assert _PRODUCER_KEY not in body
 
 
 def test_api_discussions_pull_returns_thread_and_latest_id(tmp_path):
@@ -4499,7 +4536,7 @@ def test_api_discussions_pull_returns_thread_and_latest_id(tmp_path):
         d1, d2 = _seed_discussion(
             db, "demo", [("Supervisor A", "supervisor", "How's auth?"), ("Teammate B", "developer", "Landed.")]
         )
-        code, body = _get(base_url, _api_discussions_path(project="demo"), bearer=_TOKEN)
+        code, body = _get(base_url, _api_discussions_path(project="demo"), bearer=_PRODUCER_KEY)
         assert code == 200
         payload = json.loads(body)
         assert [(d["role"], d["body"]) for d in payload["discussions"]] == [
@@ -4517,7 +4554,7 @@ def test_api_discussions_pull_since_id_and_caught_up(tmp_path):
             db, "demo", [("Supervisor A", "supervisor", "seen"), ("Supervisor A", "supervisor", "new")]
         )
         code, body = _get(
-            base_url, _api_discussions_path(project="demo", since_id=d1), bearer=_TOKEN
+            base_url, _api_discussions_path(project="demo", since_id=d1), bearer=_PRODUCER_KEY
         )
         payload = json.loads(body)
         assert [d["body"] for d in payload["discussions"]] == ["new"]
@@ -4525,7 +4562,7 @@ def test_api_discussions_pull_since_id_and_caught_up(tmp_path):
 
         # Caught up: nothing newer than d2 → empty, watermark stays at d2 (idempotent advance).
         code2, body2 = _get(
-            base_url, _api_discussions_path(project="demo", since_id=d2), bearer=_TOKEN
+            base_url, _api_discussions_path(project="demo", since_id=d2), bearer=_PRODUCER_KEY
         )
         assert code2 == 200
         payload2 = json.loads(body2)
@@ -4535,53 +4572,63 @@ def test_api_discussions_pull_since_id_and_caught_up(tmp_path):
 def test_api_discussions_pull_unknown_project_is_200_empty_and_missing_is_400(tmp_path):
     """An unknown project pulls a clean 200 empty; a missing project param is a 400."""
     with _running_relay(tmp_path) as (base_url, db):
-        code, body = _get(base_url, _api_discussions_path(project="ghost"), bearer=_TOKEN)
+        code, body = _get(base_url, _api_discussions_path(project="ghost"), bearer=_PRODUCER_KEY)
         assert code == 200 and json.loads(body)["discussions"] == []
-        miss, _ = _get(base_url, _api_discussions_path(), bearer=_TOKEN)  # no project
+        miss, _ = _get(base_url, _api_discussions_path(), bearer=_PRODUCER_KEY)  # no project
         assert miss == 400
 
 
 def test_api_discussion_post_stores_as_developer_and_returns_201(tmp_path):
-    """A Bearer reply lands as role='developer' with author_id None and the supplied name.
+    """A Bearer reply lands as role='developer', attributed to the KEY's account, not `author`.
 
-    Why this matters: the developer's write half. The 201 echoes the new id; the row is
-    stored with the server-fixed role and the --as name, ready for the supervisor to read.
+    Why this matters: the developer's write half. The 201 echoes the new id and the stored
+    author; the row carries the server-fixed role and the principal's real id + name. The
+    body's `author` (the CLI's --as) is accepted for wire compatibility but never stored —
+    since CS-O PR7 there is no anonymous push for a free-text label to apply to.
     """
     with _running_relay(tmp_path) as (base_url, db):
         _ingest_one(base_url)
         status, raw = _post(
             base_url, json.dumps({"project": "demo", "author": "Teammate B", "body": "Landed."}).encode(),
-            token=_TOKEN, path="/api/discussions",
+            path="/api/discussions",
         )
-        assert status == 201 and isinstance(json.loads(raw)["id"], int)
+        assert status == 201
+        echoed = json.loads(raw)
+        assert isinstance(echoed["id"], int) and echoed["author"] == _PRODUCER
 
         conn = open_relay_store(db)
         stored = discussion_items_for_project(conn, "demo")
         assert len(stored) == 1
         assert stored[0]["role"] == "developer"
-        assert stored[0]["author_id"] is None and stored[0]["author_name"] == "Teammate B"
+        assert stored[0]["author_id"] == _user_id_of(db, _PRODUCER)
+        assert stored[0]["author_name"] == _PRODUCER  # the label "Teammate B" was ignored
         assert stored[0]["body"] == "Landed."
 
 
-def test_api_discussion_post_omitted_author_uses_default_label(tmp_path):
-    """With no author, the reply is stored under the fixed 'developer' fallback label."""
+def test_api_discussion_post_omitted_author_is_still_the_principal(tmp_path):
+    """With no `author` in the body, the reply is stored under the key's account name.
+
+    Why this matters: there is no fallback label any more (the "developer" default went with
+    the anonymous path in CS-O PR7) — attribution never depends on what the body says.
+    """
     with _running_relay(tmp_path) as (base_url, db):
         _ingest_one(base_url)
         status, _ = _post(
             base_url, json.dumps({"project": "demo", "body": "no name given"}).encode(),
-            token=_TOKEN, path="/api/discussions",
+            path="/api/discussions",
         )
         assert status == 201
         conn = open_relay_store(db)
-        assert discussion_items_for_project(conn, "demo")[0]["author_name"] == "developer"
+        assert discussion_items_for_project(conn, "demo")[0]["author_name"] == _PRODUCER
 
 
 def test_api_discussion_post_cannot_forge_supervisor_role(tmp_path):
     """A body claiming role='supervisor' is ignored: the Bearer path always stores 'developer'.
 
-    Why this matters: this is the core integrity property of the machine write — the ingest
-    token authorizes 'the developer' and nothing more, so a client cannot forge a supervisor
-    entry by stuffing a role into the body (the handler never reads role from the body).
+    Why this matters: this is the core integrity property of the machine write — a
+    contributor key authorizes 'the developer' and nothing more, so a client cannot forge a
+    supervisor entry (or someone else's id) by stuffing fields into the body: the handler
+    never reads role or author_id from the body.
     """
     with _running_relay(tmp_path) as (base_url, db):
         _ingest_one(base_url)
@@ -4589,12 +4636,13 @@ def test_api_discussion_post_cannot_forge_supervisor_role(tmp_path):
             base_url,
             json.dumps({"project": "demo", "body": "I am dad", "role": "supervisor",
                         "author_id": 7}).encode(),
-            token=_TOKEN, path="/api/discussions",
+            path="/api/discussions",
         )
         assert status == 201
         conn = open_relay_store(db)
         stored = discussion_items_for_project(conn, "demo")[0]
-        assert stored["role"] == "developer" and stored["author_id"] is None
+        assert stored["role"] == "developer"
+        assert stored["author_id"] == _user_id_of(db, _PRODUCER)  # the body's 7 was ignored
 
 
 def test_api_discussion_post_identified_producer_is_attributed(tmp_path):
@@ -4664,7 +4712,7 @@ def test_api_discussion_post_unknown_project_is_404(tmp_path):
     with _running_relay(tmp_path) as (base_url, db):
         status, _ = _post(
             base_url, json.dumps({"project": "ghost", "body": "x"}).encode(),
-            token=_TOKEN, path="/api/discussions",
+            path="/api/discussions",
         )
         assert status == 404
 
@@ -4702,13 +4750,14 @@ def test_api_discussion_post_404s_are_byte_identical(tmp_path):
         # ungranted. These are the two answers an attacker would try to tell apart.
         missing_to_contributor = reply("ghost", "contrib-key")
         ungranted_to_contributor = reply("secret-proj", "contrib-key")
-        # And the unrestricted (legacy/admin) principal hitting the EXISTENCE check, which is
-        # the other code path that can produce this 404.
-        missing_to_unrestricted = reply("ghost", _TOKEN)
+        # And a principal that IS granted the name hitting the EXISTENCE check (the default
+        # producer holds a "ghost" grant), which is the other code path that can produce
+        # this 404.
+        missing_to_granted = reply("ghost", _PRODUCER_KEY)
 
         assert missing_to_contributor[0] == 404
         assert ungranted_to_contributor == missing_to_contributor
-        assert missing_to_unrestricted == missing_to_contributor
+        assert missing_to_granted == missing_to_contributor
         assert json.loads(missing_to_contributor[1]) == {"error": "not found"}
 
         # Nothing was stored for any of them — a refused reply must not create a thread.
@@ -4723,7 +4772,7 @@ def test_api_discussion_post_empty_body_is_400(tmp_path):
         _ingest_one(base_url)
         status, _ = _post(
             base_url, json.dumps({"project": "demo", "body": "   "}).encode(),
-            token=_TOKEN, path="/api/discussions",
+            path="/api/discussions",
         )
         assert status == 400
         conn = open_relay_store(db)
@@ -4742,7 +4791,7 @@ def _disc(title, why="why", scope="project", source="CLAUDE.md"):
     return {"title": title, "why": why, "scope": scope, "source": source}
 
 
-def _push_disciplines(base_url, project, cards, *, token=_TOKEN):
+def _push_disciplines(base_url, project, cards, *, token=_PRODUCER_KEY):
     """Push a {project, disciplines} body through the real /disciplines endpoint."""
     body = json.dumps({"project": project, "disciplines": cards}).encode("utf-8")
     return _post(base_url, body, token=token, path="/disciplines")
@@ -4764,14 +4813,14 @@ def test_disciplines_push_upserts_without_a_report(tmp_path):
         assert list_projects(conn) == []  # no report row was created
 
 
-def test_disciplines_push_dual_writes_for_identified_but_not_legacy(tmp_path):
-    """An identified push writes BOTH the aggregate and the producer's own row; legacy → aggregate only.
+def test_disciplines_push_dual_writes_aggregate_and_producer_row(tmp_path):
+    """A push writes BOTH the aggregate and the pushing producer's own row.
 
-    Why this matters: the C3 Inc 2.5 storage-now-display-later promise, end to end. An identified
-    contributor's disciplines are dual-written (aggregate + per-producer) so provenance is captured
-    the moment it exists (it can't be backfilled); a legacy anonymous push has no identity, so it
-    lands in the aggregate only — never a per-producer row. There is no display surface yet, so we
-    inspect the store directly after each push.
+    Why this matters: the C3 Inc 2.5 storage-now-display-later promise, end to end. A
+    contributor's disciplines are dual-written (aggregate + per-producer) so provenance is
+    captured the moment it exists (it can't be backfilled). Every push is identified since
+    CS-O PR7, so there is no aggregate-only path left to contrast against. There is no display
+    surface yet, so we inspect the store directly after the push.
     """
     with _running_relay(tmp_path) as (base_url, db):
         _provision_user(db, "Teammate B", "b-key", role="contributor", projects=["demo"])
@@ -4784,12 +4833,6 @@ def test_disciplines_push_dual_writes_for_identified_but_not_legacy(tmp_path):
         assert [p["author_name"] for p in producer] == ["Teammate B"]
         assert producer[0]["disciplines"] == [_disc("Local-first")]
         conn.close()
-
-        # Legacy push (shared ingest token) on another project → aggregate only, no producer row.
-        assert _push_disciplines(base_url, "legacy-proj", [_disc("Observe")], token=_TOKEN)[0] == 200
-        conn = open_relay_store(db)
-        assert project_disciplines(conn, "legacy-proj")["cards"] == [_disc("Observe")]  # aggregate written
-        assert producer_disciplines_for(conn, "legacy-proj") == []  # no per-producer row
 
 
 def test_disciplines_push_wrong_token_is_401(tmp_path):
@@ -4832,7 +4875,7 @@ def test_pushed_disciplines_surface_on_the_project_page(tmp_path):
     """
     with _running_relay(tmp_path) as (base_url, db):
         _provision_user(db, "root", "admin-key", role="admin")  # reads via the cookie SPA API
-        assert _post(base_url, _blob_for("demo"), token=_TOKEN)[0] == 201  # project now exists
+        assert _post(base_url, _blob_for("demo"))[0] == 201  # project now exists
         _push_disciplines(
             base_url,
             "demo",
@@ -4919,7 +4962,7 @@ def test_api_search_rejects_short_or_missing_query(tmp_path):
     (not an empty 200) tells the SPA the QUERY was invalid, not that nothing matched —
     distinct states stay distinct on the wire.
     """
-    with _running_relay(tmp_path) as (base_url, _db):
+    with _running_relay(tmp_path, producer=False) as (base_url, _db):
         for q in ("/api/search", "/api/search?q=", "/api/search?q=%20%20", "/api/search?q=x"):
             status, body = _get_json(base_url, q)
             assert status == 400, q

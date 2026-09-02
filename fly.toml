@@ -6,11 +6,12 @@
 #
 # Secrets are NOT in this file — set them with `fly secrets set` (see
 # docs/deployment.md). The relay needs:
-#   ORION_RELAY_TOKEN        — ingest Bearer token (must match your local [relay] config)
 #   ORION_RELAY_VIEW_TOKEN   — bootstrap-admin login key + the non-loopback bind guard
 #   ORION_RELAY_SESSION_KEY  — signs the dashboard login session cookie
-#   ORION_RELAY_USER_PEPPER  — hashes stored login-key verifiers
-#   ORION_RELAY_ADMIN_TOKEN  — provisioning API (`relay-user`), independent of the ingest token
+#   ORION_RELAY_USER_PEPPER  — hashes stored key verifiers (contributor keys authenticate pushes)
+#   ORION_RELAY_ADMIN_TOKEN  — provisioning API (`relay-user`), independent of every other secret
+# No shared ingest token: pushes authenticate with per-producer contributor keys held in the
+# relay's database (CS-O PR7), so ORION_RELAY_TOKEN is a producer-side setting only.
 # =============================================================================
 
 app = "project-orion"

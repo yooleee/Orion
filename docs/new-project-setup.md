@@ -125,19 +125,24 @@ starting point: the dashboard is for your own machine while you try it out. Depl
 so supervisors can reach a real URL is a separate, additive step — see
 [`deployment.md`](deployment.md).
 
-### 1. Add a relay token to `.env`
+### 1. Add the relay's secrets to `.env`
 
-The push is authenticated with a Bearer token. For a single-developer, loopback setup, generate
-a shared token and add it:
+The relay authenticates every push with a **per-producer contributor key** it mints itself, so
+it needs two secrets of its own before it can provision one: the pepper that makes stored keys
+verifiable, and the admin token that gates provisioning (which in turn needs the session signing
+key). Generate each as its own random value:
 
 ```bash
-python -c "import secrets; print('ORION_RELAY_TOKEN=' + secrets.token_urlsafe(32))" >> .env
+python -c "import secrets; print('ORION_RELAY_USER_PEPPER=' + secrets.token_urlsafe(32))" >> .env
+python -c "import secrets; print('ORION_RELAY_SESSION_KEY=' + secrets.token_urlsafe(32))" >> .env
+python -c "import secrets; print('ORION_RELAY_ADMIN_TOKEN=' + secrets.token_urlsafe(32))" >> .env
 ```
 
-> If **more than one machine, person, or agent** pushes into the same project, don't share one
-> token. Provision each producer its own push-only key and put it in this same
-> `ORION_RELAY_TOKEN` variable on that machine — no `orion.toml` change needed. Reports then show
-> who pushed them.
+Your own machine's key is provisioned in step 4 below and lands in `.env` as `ORION_RELAY_TOKEN`.
+
+> **Every** producer — each machine, person, or agent that pushes into a project — gets its own
+> push-only key under this same `ORION_RELAY_TOKEN` variable on that machine, no `orion.toml`
+> change needed. Reports then show who pushed them; there is no shared token to fall back on.
 >
 > ```bash
 > orion relay-user add mac --role contributor --project my-app          # a machine
@@ -163,22 +168,32 @@ python -c "import secrets; print('ORION_RELAY_TOKEN=' + secrets.token_urlsafe(32
 
 ```toml
 [relay]
-enabled       = true
-url           = "http://127.0.0.1:8787/ingest"
-token_env_var = "ORION_RELAY_TOKEN"
+enabled             = true
+url                 = "http://127.0.0.1:8787/ingest"
+token_env_var       = "ORION_RELAY_TOKEN"
+admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
 ```
 
-`orion check` will now also confirm the relay token is set (a missing token is a
+`orion check` will now also confirm the relay key is set (a missing key is a
 warning, not a failure — the relay is fail-soft, so your report still sends).
 
-### 3. Run the relay, then report
+### 3. Run the relay
 
-In one terminal, start the relay (it serves the dashboard and the ingest endpoint;
-it reads the same `ORION_RELAY_TOKEN` from `.env`):
+In one terminal, start the relay (it serves the dashboard and the ingest endpoint; it
+reads its own secrets from the same `.env`):
 
 ```bash
 orion relay-serve
 # [relay] listening on http://127.0.0.1:8787  (db: orion-relay.sqlite3)
+```
+
+### 4. Provision your machine's key, then report
+
+Mint a push-only key for this machine, scoped to your project, and store it in `.env` under the
+name step 2 configured (`--key-only` prints just the key, so it can be captured directly):
+
+```bash
+echo "ORION_RELAY_TOKEN=$(orion relay-user add mac --role contributor --project myapp --key-only)" >> .env
 ```
 
 In another terminal, run a report or an intake as usual:
@@ -195,8 +210,8 @@ down (or a wrong token) never blocks a delivered report — the push is fail-sof
 the failure is just reported.
 
 > `relay-serve` flags: `--host` (default `127.0.0.1`), `--port` (`8787`), `--db`
-> (`orion-relay.sqlite3`), `--token-env` (`ORION_RELAY_TOKEN`). The relay's store is
-> its own SQLite file, separate from Orion's state db.
+> (`orion-relay.sqlite3`). The relay's store is its own SQLite file, separate from Orion's
+> state db. Its secrets are read under fixed names from `.env` (see step 1).
 
 ## Optional: bringing a finished project onto the dashboard
 

@@ -23,9 +23,13 @@ nothing else in the local pipeline changes.
 
 ## Security model (what protects what)
 
-- **Ingest (`POST /ingest`)** — authenticated by a shared **Bearer token**
-  (`ORION_RELAY_TOKEN`), constant-time compared. This is the push credential your local
-  side sends.
+- **Ingest (`POST /ingest`, `/checklist`, `/disciplines`)** — authenticated by a **per-producer
+  contributor key** sent as a Bearer token. Each pushing machine holds its own key (provisioned
+  with `relay-user add --role contributor`, stored in that machine's `.env` under the name its
+  `[relay].token_env_var` gives, conventionally `ORION_RELAY_TOKEN`). The relay resolves the key to
+  an account, so every push is attributed and scoped to that account's project grants. There is
+  no shared ingest secret on the relay side: the legacy shared token was retired end to end in
+  CS-O PR7.
 - **Dashboard (GET routes + posting to a discussion)** — authenticated by a **per-user login
   session**.
   Each person signs in at `/login` with their own name and password and receives a signed,
@@ -35,8 +39,8 @@ nothing else in the local pipeline changes.
   Basic auth (the earlier C2 model) is gone.
 - **Provisioning** — `relay-user add`/`list`/`revoke` talk to the relay's admin API,
   authenticated by a **separate** admin token (`ORION_RELAY_ADMIN_TOKEN`). The admin token
-  is independent of the ingest token on purpose: whoever can push reports must not be able
-  to create users.
+  is independent of every push credential on purpose: whoever can push reports must not be
+  able to create users.
 - **Bootstrap admin** — while no users exist yet, `ORION_RELAY_VIEW_TOKEN` doubles as a
   one-key admin login so a fresh deploy is not locked out before it provisions anyone. Once
   any user is provisioned it stops working, unless you pass `--allow-legacy-admin`.
@@ -57,15 +61,16 @@ The relay's `.env` needs these, each its own independent random value:
 
 | Variable                  | Protects                                    | Required when                       |
 | ------------------------- | ------------------------------------------- | ----------------------------------- |
-| `ORION_RELAY_TOKEN`       | Ingest (the report push)                    | Always                              |
+| `ORION_RELAY_USER_PEPPER` | Hashing stored **key** verifiers — every contributor key that authenticates a push, and every login key | Always (the relay refuses to start without it) |
 | `ORION_RELAY_VIEW_TOKEN`  | The bootstrap-admin login + the bind guard  | Any non-loopback bind               |
 | `ORION_RELAY_SESSION_KEY` | Signing session cookies                     | Whenever the dashboard is gated     |
-| `ORION_RELAY_USER_PEPPER` | Hashing stored **key** verifiers (not passwords) | Whenever the dashboard is gated     |
 | `ORION_RELAY_ADMIN_TOKEN` | The provisioning API (`relay-user`)         | To create/manage users              |
 
-The ingest token must match what your **local** `[relay].token_env_var` resolves to. The
-admin token is named by your local `[relay].admin_token_env_var`. Keep all five independent
-(do not reuse one value for another) — they bound separate blast radii and rotate separately.
+`ORION_RELAY_TOKEN` is **not** a relay-side secret any more: it is the variable each **producer**
+machine keeps its own contributor key in (named by that machine's `[relay].token_env_var`). The
+admin token is named by your local `[relay].admin_token_env_var`. Keep the relay's four secrets
+independent (do not reuse one value for another) — they bound separate blast radii and rotate
+separately.
 
 **Also set `ORION_RELAY_PUBLIC_ORIGIN` when you deploy behind a TLS proxy (Fly, Caddy, any
 reverse proxy).** This is NOT a secret. It is the canonical public URL the dashboard is
@@ -135,15 +140,20 @@ name to reuse (past reports/replies keep their recorded author).
 
 Full detail: [`dashboard-auth.md`](dashboard-auth.md).
 
-**Multi-producer push (C3 Increment 2).** When more than one machine or person pushes into the
-same project, provision each producer a `contributor` (push-only) key and put it in that
+**Every producer pushes with its own key (C3 Increment 2, made the only path in CS-O PR7).**
+Provision each pushing machine or person a `contributor` (push-only) key and put it in that
 machine's own `.env` as `ORION_RELAY_TOKEN` — no `orion.toml` change. Reports then show who
-pushed them, and each producer keeps its own checklist. The **legacy shared ingest token keeps
-working (anonymously)** until you retire it by starting the relay with
-`orion relay-serve --disable-legacy-ingest`; from then on only named per-user keys can push.
-This cutover is deliberate — a machine credential should not silently expire — so flip the flag
-only once every producer has its own key (each legacy use logs a line so you can watch it go
-quiet). Full detail: [`dashboard-auth.md`](dashboard-auth.md).
+pushed them, and each producer keeps its own checklist. There is no shared ingest token to fall
+back on: a Bearer token that is not a provisioned key gets the same generic 401 as a wrong key.
+Full detail: [`dashboard-auth.md`](dashboard-auth.md).
+
+> **Recovery when a machine stops reporting.** Because ingest is contributor-key-only, a
+> mistakenly deactivated account or a revoked last key stops that machine's pushes with **no
+> fallback** — its scheduled reports 401 until fixed (local delivery is fail-soft, so Discord /
+> Slack still receive them). Recovery runs through the independent admin credential:
+> `orion relay-user key add <name>` mints a fresh key for the account (or `relay-user add` a new
+> account), install it in that machine's `.env`, and confirm one push lands. The admin token
+> never depends on any producer key, which is what makes this path always available.
 
 ## The relay dependency (password login)
 
@@ -381,25 +391,28 @@ topology — for that, and the `--require-view-auth` switch it needs, see Option
 
 ```bash
 # 1) Throwaway secrets, kept in your shell for the commands below. The dashboard needs
-#    the session signing key + user pepper as well as the view token (the bootstrap admin).
-export ORION_RELAY_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+#    the session signing key + user pepper as well as the view token (the bootstrap admin);
+#    the admin token lets step 7 provision the contributor key the ingest push needs.
 export ORION_RELAY_VIEW_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 export ORION_RELAY_SESSION_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 export ORION_RELAY_USER_PEPPER=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+export ORION_RELAY_ADMIN_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 
 # 2) Build.
 docker build -t orion-relay .
 
 # 3) Negative test — the fail-closed guard: NO view secret => must refuse to start (exit 1).
-docker run --rm -e ORION_RELAY_TOKEN=anything orion-relay
+#    (The pepper is passed so the refusal is provably the bind guard, not the pepper check.)
+docker run --rm -e ORION_RELAY_USER_PEPPER=anything orion-relay
 #   expect: "Error: refusing to bind non-loopback host '0.0.0.0' ..."  and exit code 1
 
-# 4) Real run (the relay secrets + a volume + the port).
+# 4) Real run (the relay secrets + a volume + the port). Note: no ORION_RELAY_TOKEN —
+#    the relay holds no shared ingest secret; pushes authenticate with contributor keys.
 docker run -d --name orion-relay-test -p 8787:8787 -v orion-test-data:/data \
-  -e ORION_RELAY_TOKEN="$ORION_RELAY_TOKEN" \
   -e ORION_RELAY_VIEW_TOKEN="$ORION_RELAY_VIEW_TOKEN" \
   -e ORION_RELAY_SESSION_KEY="$ORION_RELAY_SESSION_KEY" \
   -e ORION_RELAY_USER_PEPPER="$ORION_RELAY_USER_PEPPER" \
+  -e ORION_RELAY_ADMIN_TOKEN="$ORION_RELAY_ADMIN_TOKEN" \
   orion-relay
 docker logs orion-relay-test            # expect: "dashboard: login required"
 
@@ -414,9 +427,13 @@ curl -s -c cookies.txt -o /dev/null --data-urlencode "key=$ORION_RELAY_VIEW_TOKE
 curl -s -o /dev/null -w "with-session: HTTP %{http_code}\n" -b cookies.txt http://localhost:8787/
 #   expect: 200
 
-# 7) Ingest a report with the Bearer token => 201 {"id": 1}.
+# 7) Provision a contributor key for the push (the admin API mints it, returned ONCE), then
+#    ingest a report with it => 201 {"id": 1}. A random Bearer token would get a generic 401.
+SMOKE_KEY=$(curl -s -X POST http://localhost:8787/api/users \
+  -H "Authorization: Bearer $ORION_RELAY_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"smoke","role":"contributor","projects":["smoke-test"]}' | python -c "import json,sys; print(json.load(sys.stdin)['key'])")
 curl -s -w "  HTTP %{http_code}\n" -X POST http://localhost:8787/ingest \
-  -H "Authorization: Bearer $ORION_RELAY_TOKEN" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SMOKE_KEY" -H "Content-Type: application/json" \
   -d '{"project":"smoke-test","share_level":"high_level","lane":"raw","body":"Hello.","generated_at":"2026-06-18T12:00:00+00:00","orion_version":"0.0.0","participants":["Alex"],"sections":[["Code activity","Verified the image."]]}'
 
 # 8) Confirm it renders, and survives a restart (volume persistence). Re-login if the
@@ -440,7 +457,6 @@ docker build -t orion-relay --build-arg ORION_BUILD_SHA=$(git describe --always 
 docker run -d --name orion-relay \
   -p 8787:8787 \
   -v orion-data:/data \
-  -e ORION_RELAY_TOKEN=<ingest-token> \
   -e ORION_RELAY_VIEW_TOKEN=<view-secret> \
   -e ORION_RELAY_SESSION_KEY=<session-key> \
   -e ORION_RELAY_USER_PEPPER=<user-pepper> \
@@ -458,8 +474,8 @@ globally-unique name, then:
 ```
 fly launch --no-deploy        # uses the committed fly.toml; decline the Postgres/Redis/Tigris add-ons
 fly volumes create orion_data --size 1 --region <your-region>   # ONE volume — see Gotchas below
-fly secrets set ORION_RELAY_TOKEN=… ORION_RELAY_VIEW_TOKEN=… \
-  ORION_RELAY_SESSION_KEY=… ORION_RELAY_USER_PEPPER=… ORION_RELAY_ADMIN_TOKEN=…  # private terminal
+fly secrets set ORION_RELAY_VIEW_TOKEN=… ORION_RELAY_SESSION_KEY=… \
+  ORION_RELAY_USER_PEPPER=… ORION_RELAY_ADMIN_TOKEN=…  # private terminal; no ingest token exists
 fly deploy --build-arg ORION_BUILD_SHA=$(git describe --always --dirty)
 ```
 Fly terminates TLS; the dashboard is at `https://<app>.fly.dev`.
@@ -519,8 +535,7 @@ The relay logs to stderr, which is what `fly logs` streams. Lines look like:
 ```
 
 INFO covers the access log (one line per request, with the status) plus ingest, checklist, and
-disciplines writes. WARNING and above covers request failures, use of the retired shared ingest
-token, and password-hashing problems. Set `ORION_RELAY_LOG_LEVEL` (for example `WARNING` to quiet
+disciplines writes. WARNING and above covers request failures and password-hashing problems. Set `ORION_RELAY_LOG_LEVEL` (for example `WARNING` to quiet
 the access log, `DEBUG` to widen it) if the default is wrong for your host. An unrecognized value
 falls back to INFO rather than silencing the log.
 
@@ -558,9 +573,10 @@ Let's Encrypt can validate and supervisors can reach it.
 
 ## Common gotchas (learned from the first deploy)
 
-- **`token_env_var` is a variable NAME, not the token.** In `orion.toml`, set
-  `token_env_var = "ORION_RELAY_TOKEN"` — the *name* of a `.env` variable. The secret VALUE goes in
-  `.env` (and on Fly via `fly secrets`), never in `orion.toml`. Pasting the value here used to fail
+- **`token_env_var` is a variable NAME, not the key.** In `orion.toml`, set
+  `token_env_var = "ORION_RELAY_TOKEN"` — the *name* of a `.env` variable. The contributor key's
+  VALUE goes in that machine's `.env`, never in `orion.toml` (and never on Fly: the relay does not
+  read it). Pasting the value here used to fail
   with a confusing "secret '<value>' is not set" (and echoed the secret); config validation now
   rejects it at load with a clear message. Same rule for recipients' `webhook_env_var`.
 - **Say *yes* to a single volume.** `fly volumes create` warns that one volume isn't highly
@@ -583,8 +599,10 @@ url           = "https://relay.example.com/ingest"   # your deployed HTTPS endpo
 token_env_var = "ORION_RELAY_TOKEN"
 ```
 
-Set `ORION_RELAY_TOKEN` (the **same** ingest value) in your **local** `.env`. The view
-secret lives only on the **server**, never in your project config.
+Set `ORION_RELAY_TOKEN` in your **local** `.env` to this machine's **contributor key** (minted
+by `orion relay-user add <name> --role contributor --project <project>`; see
+[`dashboard-auth.md`](dashboard-auth.md)). The relay's own secrets live only on the **server**,
+never in your project config.
 
 ## Verify end to end
 

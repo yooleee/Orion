@@ -2297,18 +2297,20 @@ def test_relay_backfill_is_a_clean_break(capsys):
 # These pin the `orion relay-serve` command's argument plumbing and its secret
 # handling WITHOUT actually starting a server: _load_relay_serve is monkeypatched
 # to return a recorder, so serve() is never really called (it would block forever).
+# Since CS-O PR7 there is no shared ingest token: the ONE secret every relay needs is
+# ORION_RELAY_USER_PEPPER (it makes contributor keys verifiable), so each test that
+# expects to reach serve() sets it, and the fail-closed case has its own test.
 
 
 def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
-    """`relay-serve` reads the token from .env and calls serve() with parsed args.
+    """`relay-serve` reads the relay secrets from .env and calls serve() with parsed args.
 
     Why this matters: this is the whole job of the CLI adapter — turn flags + the
-    ingest token + the optional view secret into a serve() call. We patch
-    _load_relay_serve so nothing actually binds a socket, and assert the
-    host/port/db/token/view-token reached serve() as resolved.
+    optional view secret into a serve() call. We patch _load_relay_serve so nothing
+    actually binds a socket, and assert the host/port/db/view-token reached serve() as
+    resolved — and that no shared ingest token is threaded (there is none to thread).
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # ignore real .env
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
     # A view secret now gates the dashboard with sessions, so cmd_relay_serve fails
     # closed unless the session signing key + user pepper are also set. Provide them
@@ -2324,8 +2326,8 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
         cli,
         "_load_relay_serve",
         lambda: (
-            lambda host, port, db_path, token, view_token, require_view_auth, display_tz, **k: calls.append(
-                (host, port, db_path, token, view_token, require_view_auth, display_tz)
+            lambda host, port, db_path, view_token, require_view_auth, display_tz, **k: calls.append(
+                (host, port, db_path, view_token, require_view_auth, display_tz)
             )
         ),
     )
@@ -2342,11 +2344,10 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     )
     assert code == 0
     assert len(calls) == 1
-    host, port, db_path, token, view_token, require_view_auth, display_tz = calls[0]
+    host, port, db_path, view_token, require_view_auth, display_tz = calls[0]
     assert host == "127.0.0.1"
     assert port == 9999
     assert db_path == db
-    assert token == "tok-123"
     assert view_token == "view-xyz"  # resolved from ORION_RELAY_VIEW_TOKEN
     assert require_view_auth is False  # flag absent -> default off
     # --timezone omitted -> the Pacific default, validated into a ZoneInfo.
@@ -2362,7 +2363,6 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
     this closes).
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")
     # A gated dashboard needs the session secrets too (see the fail-closed test below).
     monkeypatch.setenv("ORION_RELAY_SESSION_KEY", "session-signing-key")
@@ -2420,7 +2420,7 @@ def test_relay_serve_showcase_flags_build_a_showcase_config(tmp_path, monkeypatc
     from relay.server import ShowcaseConfig
 
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     seen = []
     monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
 
@@ -2449,7 +2449,7 @@ def test_relay_serve_showcase_defaults_off(tmp_path, monkeypatch):
     from relay.server import ShowcaseConfig
 
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     seen = []
     monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
 
@@ -2466,7 +2466,7 @@ def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
     serve() raise the guard's ValueError and assert the CLI catches it.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     monkeypatch.delenv("ORION_RELAY_VIEW_TOKEN", raising=False)
 
     def _raise_guard(*_a, **_k):  # **_k absorbs the auth= kwarg
@@ -2480,20 +2480,19 @@ def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
 
 
 def test_relay_serve_without_session_secrets_when_gated_is_clean_error(tmp_path, monkeypatch):
-    """A gated dashboard with no session secrets fails closed (exit 1, never serves).
+    """A gated dashboard with no session signing key fails closed (exit 1, never serves).
 
     Why this matters: once a view secret (or admin token) is set, the dashboard runs the
-    cookie-session login, which is impossible without ORION_RELAY_SESSION_KEY and
-    ORION_RELAY_USER_PEPPER. Rather than boot a login that could never succeed, the CLI
-    must fail closed with a clear error before binding — the Codex-hardened
-    independent-secrets requirement enforced at the CLI seam. We set a view secret but
-    omit the session secrets and prove serve() is never reached.
+    cookie-session login, which is impossible without ORION_RELAY_SESSION_KEY. Rather
+    than boot a login that could never succeed, the CLI must fail closed with a clear
+    error before binding — the Codex-hardened independent-secrets requirement enforced
+    at the CLI seam. We set a view secret AND the (always-required) pepper but omit the
+    session key, so the refusal is provably the session-key check and not the pepper one.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")  # gates the dashboard
     monkeypatch.delenv("ORION_RELAY_SESSION_KEY", raising=False)
-    monkeypatch.delenv("ORION_RELAY_USER_PEPPER", raising=False)
     served = []
     monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
 
@@ -2504,21 +2503,33 @@ def test_relay_serve_without_session_secrets_when_gated_is_clean_error(tmp_path,
     assert served == []  # fail-closed: never started serving
 
 
-def test_relay_serve_missing_token_is_clean_error_and_never_serves(tmp_path, monkeypatch):
-    """A missing ingest token fails cleanly (exit 1) and never starts the server.
+def test_relay_serve_missing_user_pepper_is_clean_error_and_never_serves(
+    tmp_path, monkeypatch, capsys
+):
+    """A missing ORION_RELAY_USER_PEPPER fails cleanly (exit 1) and never starts the server.
 
-    Why this matters: a relay with no token would 401 every push; catching the gap
-    here turns it into a clear SecretsError naming the variable, before any socket is
-    bound. We prove serve() is never reached.
+    Why this matters (CS-O PR7): contributor keys are the ONLY push credential now, and
+    the pepper is what makes them verifiable. A pepper-less relay would start and then 401
+    every push — a silently failing cron, the exact failure mode the retired shared token
+    was kept alive to avoid. So the CLI refuses at startup with an error that names the
+    variable, on an otherwise fully-open loopback relay (no view secret, no admin token),
+    proving the pepper requirement is unconditional rather than a side effect of gating.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)  # don't load a real .env
-    monkeypatch.delenv("ORION_RELAY_TOKEN", raising=False)
+    for _var in (
+        "ORION_RELAY_USER_PEPPER",
+        "ORION_RELAY_VIEW_TOKEN",
+        "ORION_RELAY_ADMIN_TOKEN",
+        "ORION_RELAY_SESSION_KEY",
+    ):
+        monkeypatch.delenv(_var, raising=False)
     served = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: served.append(a)))
+    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
 
     code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
     assert code == 1
     assert served == []  # never started serving
+    assert "ORION_RELAY_USER_PEPPER" in capsys.readouterr().err
 
 
 def test_relay_serve_timezone_flag_threads_a_zoneinfo(tmp_path, monkeypatch):
@@ -2531,17 +2542,17 @@ def test_relay_serve_timezone_flag_threads_a_zoneinfo(tmp_path, monkeypatch):
     serve()'s final positional argument.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     # This test exercises an UNGATED relay (only the timezone flag matters), so it must
     # control its own env: an earlier non-mocked test can load the project's real .env
     # (cwd-upward search) into os.environ, leaking ORION_RELAY_VIEW_TOKEN, which would
     # gate the dashboard and trip the session-secret fail-closed guard. Clear the
-    # multi-party vars so this test stays hermetic regardless of run order.
+    # gating vars so this test stays hermetic regardless of run order; the pepper is
+    # always required, so it is set rather than cleared.
     for _var in (
         "ORION_RELAY_VIEW_TOKEN",
         "ORION_RELAY_ADMIN_TOKEN",
         "ORION_RELAY_SESSION_KEY",
-        "ORION_RELAY_USER_PEPPER",
     ):
         monkeypatch.delenv(_var, raising=False)
     seen = []
@@ -2571,7 +2582,7 @@ def test_relay_serve_invalid_timezone_is_a_clean_error_and_never_serves(tmp_path
     the exit code is 1 and that serve() is never reached.
     """
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ORION_RELAY_TOKEN", "tok-123")
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     served = []
     monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: served.append(a)))
 

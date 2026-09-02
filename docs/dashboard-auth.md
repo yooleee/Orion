@@ -227,8 +227,9 @@ orion relay-user key revoke mac --id 2      # kill ONE credential; the account a
 ```
 
 Each `add` (account or key) prints a one-time access key. For a `contributor`, that key is what the
-producing machine puts in its own `.env` under `ORION_RELAY_TOKEN` (the same variable name the shared
-ingest token used), so no `orion.toml` change is needed — each machine simply carries its own key.
+producing machine puts in its own `.env` under `ORION_RELAY_TOKEN` (the name its
+`[relay].token_env_var` gives), so no `orion.toml` change is needed — each machine simply carries
+its own key.
 
 **Replacing a machine key is `add` → deploy → verify → `revoke`.** Add the new credential, install it,
 confirm a push works, and only then revoke the old one. The two keys overlap, so there is no window
@@ -318,21 +319,20 @@ credential are accepted:
   machine would silently gain push access to every project, making compartmentalization *worse*
   than one key per identity. Admin authority still applies fully to the human's dashboard session;
   it is only the machine credential that is bounded. Provisioning is unaffected — it uses the
-  separate admin token — and the legacy shared token below is unchanged.
-- The **legacy shared ingest token** (`ORION_RELAY_TOKEN` on the relay side). It still works for
-  backward compatibility, but its pushes are **anonymous** (no author is ever mapped to it — any
-  holder could impersonate a person). Every use logs a line so an operator can watch it go quiet
-  as producers migrate to their own keys.
+  separate admin token.
+- **There is no other push credential.** The legacy shared ingest token (once `ORION_RELAY_TOKEN`
+  on the relay side, pushing anonymously) was retired end to end in CS-O PR7 after every producer
+  had migrated to its own key: the relay holds no shared ingest secret, and a Bearer token that is
+  not a provisioned key is indistinguishable from a wrong one. `ORION_RELAY_TOKEN` survives only as
+  the **producer-side** variable each machine keeps its contributor key in.
 
-Every Bearer failure returns **one generic 401** (now that named contributor keys exist, a
-specific message would help an attacker enumerate them).
+Every Bearer failure returns **one generic 401** (a specific message would help an attacker
+enumerate the named contributor keys).
 
-**Retiring the shared token (the deliberate cutover).** Once every producer has its own
-contributor key, an operator disables the shared token by starting the relay with
-`relay-serve --disable-legacy-ingest`. From then on the shared token 401s and only named
-per-user keys can push. This is **operator-driven on purpose**: a machine credential must not
-silently expire (the failure mode would be a silently-401ing cron push, not a human at a login
-form), so the shared token keeps working until the operator flips the flag.
+**Consequence: no fallback when a key is lost.** A deactivated account or a revoked last key stops
+that machine's pushes until an operator mints a new key through the independent admin credential
+(`relay-user key add <name>`, or a new account). The relay needs `ORION_RELAY_USER_PEPPER` to
+verify any key at all, so it refuses to start without it rather than 401 every push silently.
 
 ## The discussion write carries real identity
 
@@ -389,11 +389,13 @@ docs/deployment.md for generating and setting them.
 
 | Variable                  | Protects                                   | Required when                   |
 | ------------------------- | ------------------------------------------ | ------------------------------- |
-| `ORION_RELAY_TOKEN`       | Ingest (the report push)                   | Always                          |
+| `ORION_RELAY_USER_PEPPER` | Hashing stored **key** verifiers (contributor keys for pushes, login keys) | Always (startup refuses without it) |
 | `ORION_RELAY_VIEW_TOKEN`  | Bootstrap-admin login + the bind guard     | Any non-loopback bind           |
 | `ORION_RELAY_SESSION_KEY` | Signing session cookies                    | Whenever the dashboard is gated |
-| `ORION_RELAY_USER_PEPPER` | Hashing stored **key** verifiers (not passwords) | Whenever the dashboard is gated |
 | `ORION_RELAY_ADMIN_TOKEN` | The provisioning API (`relay-user`)        | To create or manage users       |
+
+There is no relay-side ingest secret: `ORION_RELAY_TOKEN` is the **producer-side** variable each
+pushing machine keeps its own contributor key in.
 
 `ORION_RELAY_PUBLIC_ORIGIN` (the deployed `https://...` URL) is recommended in production for
 the canonical-Origin CSRF check.

@@ -24,7 +24,7 @@ Two processes. Start the relay first, then the dev server.
    ```
    PYTHONPATH=src python -m orion.cli relay-serve \
      --host 127.0.0.1 --port 8787 \
-     --db /path/to/relay.sqlite3 --token-env ORION_RELAY_TOKEN
+     --db /path/to/relay.sqlite3
    ```
 
    The dev server proxies `/api` to this address (see `vite.config.ts`), so the browser

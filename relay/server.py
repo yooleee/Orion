@@ -6,8 +6,8 @@
 #                  the portable blob, and stores it. (CP7 adds the read-only GET
 #                  dashboard routes to this same handler.)
 # Role in project: This is Orion's FIRST inbound surface. Per the security
-#                  must-holds, an inbound surface must authenticate (a shared Bearer
-#                  token, constant-time compared) and validate (shape + version)
+#                  must-holds, an inbound surface must authenticate (a per-producer
+#                  contributor key, resolved to its account) and validate (shape + version)
 #                  before it touches storage. It speaks only the portable blob
 #                  contract — the same JSON serialize_blob produces — so it stays
 #                  decoupled from local Orion's internals.
@@ -253,13 +253,6 @@ MIN_SEARCH_QUERY_CHARS = 2
 # reserved for the later grounded-responder rung (observe-not-originate).
 _DISCUSSION_ROLE_BY_PRINCIPAL = {"supervisor": "supervisor", "admin": "developer"}
 
-# The display name stamped on a developer's CLI reply (POST /api/discussions, Bearer) when
-# none is supplied. That machine path always fixes role to "developer" — possessing the
-# ingest token IS the developer's authority — so this is only the fallback author_name; the
-# CLI's `--as "<name>"` overrides it per reply. Config has no "self" identity today, so a
-# constant fallback keeps the seam clean (a config-sourced default stays additive later).
-_DEVELOPER_DEFAULT_NAME = "developer"
-
 # The blob fields the relay consumes, each required to be a string. NOTE: the legacy
 # `source_marker` field (removed from the producer in KI-8; older blobs may still carry
 # it, and the store ignores it either way) is intentionally NOT required — the relay
@@ -285,7 +278,7 @@ _REQUIRED_STR_FIELDS = (
 # the DB on every request, so a privilege never rides in a forgeable/stale cookie and
 # revocation (active=0 / session_version bump) takes effect immediately. The signing
 # key, the user-key pepper, and the admin token are all INDEPENDENT secrets (never
-# derived from or shared with each other or the view/ingest tokens) per the Codex
+# derived from or shared with each other or the view token) per the Codex
 # /second-opinion: sharing a secret widens blast radius and couples unrelated rotations.
 _SESSION_COOKIE_NAME = "orion_session"
 _SESSION_FORMAT_VERSION = 1  # bump to invalidate every outstanding cookie at once
@@ -332,26 +325,6 @@ _BEARER_ROLES = ("admin", "contributor")
 # on role change, so there is no path to an interactive agent.
 _AGENT_ROLE = "contributor"
 
-
-def _author_of(principal: dict) -> tuple[int | None, str | None]:
-    """Map a resolved push principal to (author_id, author_name) for attribution.
-
-    Args:
-        principal: A principal dict from _resolve_bearer_principal.
-
-    Returns:
-        (user_id, name) for an identified producer, or (None, None) for a legacy anonymous
-        push — reports and observations carry NO identity on the legacy path (decision #5).
-
-    Why:
-        Reports (ingest) and observations share this "identified → id+name, legacy → nothing"
-        rule, so it lives in one place. It deliberately differs from the discussion write, whose
-        legacy path keeps the supplied --as label as a display name — so that one stays inline
-        rather than routing through here.
-    """
-    if principal["legacy"]:
-        return None, None
-    return principal["user_id"], principal["name"]
 
 def _resolve_operator(conn, operator_name: str, agent_id: int | None = None) -> tuple:
     """Resolve an operator NAME to its account id, enforcing the lifecycle rules.
@@ -1033,8 +1006,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/discussions":
             self._handle_api_discussions()
             return
-        # The admin API (provisioning) is authed with the SEPARATE admin token, not the
-        # ingest token or a browser session — routed here so it never trips the cookie gate.
+        # The admin API (provisioning) is authed with the SEPARATE admin token, not a
+        # contributor key or a browser session — routed here so it never trips the cookie gate.
         if path == "/api/users":
             self._handle_list_users()
             return
@@ -1130,7 +1103,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._handle_api_discussion_post()
             return
 
-        # Admin API (admin-token authed, NOT the ingest token): the user lifecycle.
+        # Admin API (admin-token authed, NOT a contributor key): the user lifecycle.
         if path == "/api/users":
             self._handle_create_user()
             return
@@ -1335,9 +1308,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
             principal, payload = accepted
 
             # 5) Store and report 201 with the new id. The report + observations are
-            # attributed to the resolved producer (C3 Inc 2); a legacy push is anonymous.
+            # attributed to the resolved producer (C3 Inc 2). Every push is identified
+            # since the shared ingest token was retired (CS-O PR7); author_id NULL rows
+            # in the store are pre-attribution history, never new writes.
             received_at = _utc_now_iso()
-            author_id, author_name = _author_of(principal)
+            author_id, author_name = principal["user_id"], principal["name"]
             new_id = ingest(conn, payload, received_at, author_id, author_name)
             # E2 Inc 2: if the push carries a live checklist, REPLACE this project's
             # current checklist (upsert). Stamped with the same receive clock as the
@@ -1347,18 +1322,16 @@ class _RelayHandler(BaseHTTPRequestHandler):
             checklist = payload.get("checklist")
             if checklist is not None:
                 # The AGGREGATE current checklist is last-writer-wins across producers; every
-                # push updates it, attributed or not. It drives the badge/progress for
-                # single-producer / anonymous projects and is the fallback under the effective
-                # merge (KI-30) once a project has ≥2 identified producers.
+                # push updates it. It drives the badge/progress for single-producer projects
+                # and is the fallback under the effective merge (KI-30) once a project has
+                # ≥2 producers.
                 upsert_checklist(conn, payload["project"], checklist, received_at)
-                # C3 Inc 2: an IDENTIFIED producer ALSO keeps its OWN checklist (dual-write),
-                # so the project page can show one card per contributor. A legacy push has no
-                # id, so it lands in the aggregate only.
-                if author_id is not None:
-                    upsert_producer_checklist(
-                        conn, payload["project"], author_id, author_name,
-                        checklist, received_at,
-                    )
+                # C3 Inc 2: the producer ALSO keeps its OWN checklist (dual-write), so the
+                # project page can show one card per contributor.
+                upsert_producer_checklist(
+                    conn, payload["project"], author_id, author_name,
+                    checklist, received_at,
+                )
                 # E2 Inc 3: also APPEND each item to the observed-state history (the
                 # forward-store's "remember"), sharing the report's receive clock. The
                 # observing producer is stamped (author_id) for future per-producer slippage.
@@ -1408,7 +1381,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             # One receive clock shared by the live-state upsert and its history append, so
             # the current checklist and its newest observation never disagree by a second.
             received_at = _utc_now_iso()
-            author_id, author_name = _author_of(principal)
+            author_id, author_name = principal["user_id"], principal["name"]
             # S2.2 U3: the checklist is OPTIONAL on this carrier now, so all THREE checklist
             # writes are gated on the key being PRESENT. An absent checklist must leave the
             # live state, the per-producer copy, and the observation history untouched —
@@ -1421,18 +1394,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
             has_checklist = "checklist" in payload
             if has_checklist:
                 # The AGGREGATE (last-writer-wins) updates: it drives the badge/progress for
-                # single-producer / anonymous projects and is the effective-merge fallback
-                # (KI-30).
+                # single-producer projects and is the effective-merge fallback (KI-30).
                 upsert_checklist(
                     conn, payload["project"], payload["checklist"], received_at
                 )
-                # C3 Inc 2: an identified producer ALSO keeps its own checklist (dual-write);
-                # a legacy push (author_id None) lands in the aggregate only.
-                if author_id is not None:
-                    upsert_producer_checklist(
-                        conn, payload["project"], author_id, author_name,
-                        payload["checklist"], received_at,
-                    )
+                # C3 Inc 2: the producer ALSO keeps its own checklist (dual-write).
+                upsert_producer_checklist(
+                    conn, payload["project"], author_id, author_name,
+                    payload["checklist"], received_at,
+                )
                 # E2 Inc 3: append each item to the observed-state history (forward-store),
                 # stamping the observing producer (C3 Inc 2) for per-producer slippage.
                 record_observations(
@@ -1505,19 +1475,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
 
             # 5) Store this project's disciplines, stamped with the relay's receive clock.
             received_at = _utc_now_iso()
-            author_id, author_name = _author_of(principal)
+            author_id, author_name = principal["user_id"], principal["name"]
             # The AGGREGATE (last-writer-wins) always updates: it serves the Disciplines section
-            # for single-producer / anonymous projects and is the fallback under the deferred
-            # per-producer merge (C3 Inc 2.5).
+            # for single-producer projects and is the fallback under the deferred per-producer
+            # merge (C3 Inc 2.5).
             upsert_disciplines(conn, payload["project"], payload["disciplines"], received_at)
-            # C3 Inc 2.5: an IDENTIFIED producer ALSO keeps its OWN disciplines (dual-write;
-            # storage now, display later — provenance can't be backfilled). A legacy push has no
-            # id, so it lands in the aggregate only. Shares the report's receive clock.
-            if author_id is not None:
-                upsert_producer_disciplines(
-                    conn, payload["project"], author_id, author_name,
-                    payload["disciplines"], received_at,
-                )
+            # C3 Inc 2.5: the producer ALSO keeps its OWN disciplines (dual-write; storage
+            # now, display later — provenance can't be backfilled). Shares the report's
+            # receive clock.
+            upsert_producer_disciplines(
+                conn, payload["project"], author_id, author_name,
+                payload["disciplines"], received_at,
+            )
         finally:
             conn.close()
         count = len(payload["disciplines"])
@@ -1653,7 +1622,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             The developer's terminal half of the supervisor-interaction loop (E2 Inc 5,
             Unit 3): the Bearer-authed pull the CLI uses to read new supervisor messages.
             It is the machine sibling of the cookie-authed SPA read (which folds the thread
-            into GET /api/projects/<name>) — the CLI holds the ingest token, not a browser
+            into GET /api/projects/<name>) — the CLI holds a contributor key, not a browser
             session, so it needs this Bearer route. A scoped contributor sees only its
             granted threads (C3 Inc 2); an admin/legacy caller reads any project. Returns the
             RAW store rows (not the SPA wire shape) and a `latest_id` watermark that echoes
@@ -1703,8 +1672,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
         Body fields:
           - project (required): the thread to append to.
           - body    (required): the reply text (non-empty after strip, length-capped).
-          - author  (optional): the developer's display name; the CLI's `--as`. Defaults
-            to _DEVELOPER_DEFAULT_NAME when omitted. A free-text LABEL, not an identity.
+          - author  (optional): accepted for wire compatibility (the CLI's `--as`) but
+            IGNORED — attribution is server-derived from the key (see below).
 
         Why:
             The developer's write half of the loop (E2 Inc 5, Unit 3) — the Bearer machine
@@ -1714,12 +1683,11 @@ class _RelayHandler(BaseHTTPRequestHandler):
             path (the cookie path derives the role from the principal; this one hardcodes it).
             No CSRF (Bearer, not a cookie).
 
-            Attribution (C3 Inc 2): when the key resolves to an IDENTIFIED producer
-            (contributor/admin), the entry is stamped with that principal's real author_id and
-            name, SERVER-derived and unforgeable — the body's `author`/`--as` is ignored (the
-            response echoes the stored name so the CLI can note it was overridden). A LEGACY
-            shared-token push stays anonymous exactly as before: author_id None, name = the
-            `--as` label or the "developer" fallback (a free-text label, never an identity).
+            Attribution (C3 Inc 2): the entry is stamped with the resolved principal's real
+            author_id and name, SERVER-derived and unforgeable — the body's `author`/`--as`
+            is ignored (the response echoes the stored name so the CLI can note it was
+            overridden). The anonymous shared-token path that once honored the label was
+            retired with the shared ingest token (CS-O PR7).
 
             Inbound checklist, in order: 1) Bearer auth (resolve principal); 2) read +
             JSON-parse (1 MB cap); 3) validate project/body/author; 4) scope — a scoped
@@ -1744,8 +1712,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "payload must be a JSON object"})
                 return
 
-            # 3) Validate. project + body required strings; author optional, defaulting to the
-            # constant fallback. role/author_id are NOT read from the body — fixed below.
+            # 3) Validate. project + body required strings; author optional and still
+            # shape-checked (wire compatibility) but never stored — attribution comes from
+            # the principal. role/author_id are NOT read from the body — fixed below.
             project = payload.get("project")
             body = payload.get("body")
             author = payload.get("author", "")
@@ -1788,24 +1757,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
             if not project_exists(conn, project):
                 self._send_json(404, {"error": "not found"})
                 return
-            # 6) Append. Role is always "developer" on this producer channel. Attribution
-            # splits by principal: an IDENTIFIED producer is stamped with its real, server-
-            # derived id + name (the body's `author`/`--as` is ignored — a client can never
-            # assert its own identity); a LEGACY anonymous push keeps today's behavior, with
-            # no id and the supplied label or the "developer" fallback as the name.
-            if principal["legacy"]:
-                author_id = None
-                author_name = author or _DEVELOPER_DEFAULT_NAME
-            else:
-                author_id = principal["user_id"]
-                author_name = principal["name"]
+            # 6) Append. Role is always "developer" on this producer channel. The entry is
+            # stamped with the principal's real, server-derived id + name (the body's
+            # `author`/`--as` is ignored — a client can never assert its own identity).
+            author_id = principal["user_id"]
+            author_name = principal["name"]
             new_id = add_discussion_item(
                 conn, project, author_id, author_name, "developer", body, _utc_now_iso()
             )
         finally:
             conn.close()
         # Echo the STORED author so the CLI can honestly report who the reply posted as (and
-        # note when it overrode a supplied --as for an identified producer).
+        # note when it overrode a supplied --as).
         self._send_json(201, {"id": new_id, "author": author_name})
 
     def _handle_create_user(self) -> None:
@@ -1821,7 +1784,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             required for an agent and forbidden for a human.
 
         The inbound-security checklist, IN ORDER (auth-first, mirrors _handle_ingest):
-          1. Auth — the ADMIN token (NOT the ingest token); 401 otherwise, before the body.
+          1. Auth — the ADMIN token (NOT a contributor key); 401 otherwise, before the body.
           2. Read + parse — 1 MB cap, then JSON; non-object/invalid -> 400.
           3. Validate — name non-empty str; role in the allowlist; projects a list of str.
           4. Mint + store — a fresh ≥256-bit key, store only its peppered verifier, write
@@ -2693,12 +2656,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             message (provisioning disabled / missing header / wrong token).
 
         Why:
-            Provisioning is gated by the SEPARATE admin token, never the ingest token —
-            "the ingest token must NOT create users" (Codex hardening: independent
+            Provisioning is gated by the SEPARATE admin token, never a push credential —
+            "a producer key must NOT create users" (Codex hardening: independent
             secrets bound the blast radius). So this compares ONLY against
-            self.server.admin_token, constant-time (hmac.compare_digest), and never
-            against self.server.token — a client holding the ingest token therefore
-            cannot provision. When no admin token is configured, provisioning is OFF and
+            self.server.admin_token, constant-time (hmac.compare_digest); a contributor
+            key never resolves here (it is looked up by verifier on the push routes, not
+            compared as a token). When no admin token is configured, provisioning is OFF and
             every request is refused. The admin token is never echoed in any message.
         """
         if self.server.admin_token is None:
@@ -2833,9 +2796,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 (ungated) relay where no one logs in.
 
         Returns:
-            None when the principal sees EVERYTHING — an admin, the legacy bootstrap admin
-            (both role == "admin"), a legacy anonymous push (`legacy` flag, C3 Inc 2), or an
-            open relay (principal is None, reads are public). Otherwise a set of the scoped
+            None when the principal sees EVERYTHING — an admin or the legacy bootstrap admin
+            (both role == "admin"), or an open relay (principal is None, reads are
+            public). Otherwise a set of the scoped
             principal's allowed project names (possibly empty — default-deny, so a viewer or
             contributor with no grants sees / can write nothing). For a MEMBER (Unit 5) the
             set is its explicit grants UNION every org-visible project.
@@ -2864,7 +2827,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             org_visible_projects, so a stale meta row cannot inject a phantom name into an
             authorization decision.
         """
-        if principal is None or principal["role"] == "admin" or principal.get("legacy"):
+        if principal is None or principal["role"] == "admin":
             return None
         granted = set(projects_for_user(conn, principal["user_id"]))
         if principal["role"] == _MEMBER_ROLE:
@@ -2943,85 +2906,65 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 so the identity and its scope are read from one consistent snapshot).
 
         Returns:
-            A principal dict, or None when the request is unauthorized (the caller then
-            sends ONE generic 401 — see below). Two principal shapes:
-              - Identified: {"user_id": int, "role": "contributor"|"admin", "name": str,
-                "legacy": False} — a provisioned user's OWN key, active and push-capable.
-              - Legacy anonymous: {"user_id": None, "role": None, "name": None,
-                "legacy": True} — the shared ingest token, while still enabled.
-            The `legacy` flag lets _allowed_projects treat a legacy push as unrestricted and
-            lets the discussion write keep its anonymous behavior, without a second lookup.
+            A principal dict {"user_id": int, "role": "contributor", "name": str} — a
+            provisioned account's OWN key, active and push-capable — or None when the
+            request is unauthorized (the caller then sends ONE generic 401 — see below).
 
         Why:
-            C3 Inc 2 makes the push path multi-producer. Identity is SERVER-DERIVED from the
-            presented key via the same key_verifier machinery as login (never asserted in a
-            request body), so attribution is unforgeable. The verifier lookup runs FIRST,
-            then the constant-time legacy compare — the resolution never compares one secret
-            against another's store (independent secrets). The legacy shared token stays
-            valid (anonymously) until an operator sets --disable-legacy-ingest, because a
-            machine credential must not silently expire (the failure mode would be a silently
-            401ing cron push, not a human at a login form); each legacy use logs a line so the
-            operator can see when it finally goes quiet. Every failure returns None → one
-            GENERIC 401 at the call site: now that named contributor keys exist, distinguishing
-            "no header" from "wrong key" would help an attacker enumerate them.
+            C3 Inc 2 made the push path multi-producer, and CS-O PR7 made it
+            contributor-key-ONLY: the anonymous shared ingest token was retired end to end,
+            so every accepted push resolves to a named account. Identity is SERVER-DERIVED
+            from the presented key via the same key_verifier machinery as login (never
+            asserted in a request body), so attribution is unforgeable. Without a user
+            pepper the relay can resolve no key at all — by construction, not by policy —
+            which is why the CLI adapter requires ORION_RELAY_USER_PEPPER at startup rather
+            than letting a pepper-less relay 401 every push silently. Every failure returns
+            None → one GENERIC 401 at the call site: distinguishing "no header" from "wrong
+            key" would help an attacker enumerate the named contributor keys.
         """
         header = self.headers.get("Authorization", "")
         prefix = "Bearer "
         if not header.startswith(prefix):
             return None
         token = header[len(prefix):]
-        # 1) Identified principal: a credential belonging to a provisioned account. Only
-        # push-capable account roles (_BEARER_ROLES) resolve — a viewer/supervisor key is
-        # refused here, fail-closed.
-        if self.server.user_pepper is not None:
-            credential = get_credential_by_key_verifier(
-                conn, key_verifier(self.server.user_pepper, token)
-            )
-            user = (
-                get_user_by_id(conn, credential["user_id"])
-                if credential is not None
-                else None
-            )
-            if user is not None and user["active"] and user["role"] in _BEARER_ROLES:
-                touch_credential(conn, credential["id"], _utc_now_iso())
-                return {
-                    "user_id": user["id"],
-                    # BEARER KEYS ARE ALWAYS CONTRIBUTOR-BOUNDED (a permanent invariant as
-                    # of Unit 2b). The principal's authority is pinned to "contributor"
-                    # REGARDLESS of the account's role, so _allowed_projects scopes it to the
-                    # account's explicit grants instead of returning None (unrestricted) for
-                    # an admin. Without this, attaching a machine key to an admin account —
-                    # exactly what the multi-credential model invites — would hand that
-                    # machine push access to EVERY project, making compartmentalization worse
-                    # than the single-key model it replaces. Admin's unrestricted Bearer push
-                    # is deliberately retired; provisioning uses the separate admin token, and
-                    # the legacy shared-token path below is untouched.
-                    "role": "contributor",
-                    "name": user["name"],
-                    "legacy": False,
-                }
-        # 2) Legacy shared ingest token — anonymous and unrestricted, unless retired. The
-        # compare is constant-time and the token is never logged (only the fact of its use).
-        if not self.server.disable_legacy_ingest and hmac.compare_digest(
-            token, self.server.token
-        ):
-            # WARNING, not INFO: this is the operator's signal that a producer has not
-            # migrated to its own key yet, and it should stand out from the access lines.
-            _log.warning(
-                "legacy shared ingest token used (anonymous): %s %s",
-                self.command,
-                self.path,
-            )
-            return {"user_id": None, "role": None, "name": None, "legacy": True}
-        # 3) Generic miss — the caller sends one indistinguishable 401.
-        return None
+        if self.server.user_pepper is None:
+            # No pepper → no verifier can be computed → nothing can resolve. Fail closed.
+            return None
+        # Only push-capable account roles (_BEARER_ROLES) resolve — a viewer/supervisor key
+        # is refused here, fail-closed.
+        credential = get_credential_by_key_verifier(
+            conn, key_verifier(self.server.user_pepper, token)
+        )
+        user = (
+            get_user_by_id(conn, credential["user_id"])
+            if credential is not None
+            else None
+        )
+        if user is None or not user["active"] or user["role"] not in _BEARER_ROLES:
+            # Generic miss — the caller sends one indistinguishable 401.
+            return None
+        touch_credential(conn, credential["id"], _utc_now_iso())
+        return {
+            "user_id": user["id"],
+            # BEARER KEYS ARE ALWAYS CONTRIBUTOR-BOUNDED (a permanent invariant as of Unit
+            # 2b). The principal's authority is pinned to "contributor" REGARDLESS of the
+            # account's role, so _allowed_projects scopes it to the account's explicit grants
+            # instead of returning None (unrestricted) for an admin. Without this, attaching
+            # a machine key to an admin account — exactly what the multi-credential model
+            # invites — would hand that machine push access to EVERY project, making
+            # compartmentalization worse than the single-key model it replaced. Admin's
+            # unrestricted Bearer push is deliberately retired; provisioning uses the
+            # separate admin token.
+            "role": "contributor",
+            "name": user["name"],
+        }
 
     def _bearer_unauthorized(self) -> None:
         """Send the single generic 401 used for every Bearer auth failure.
 
         Why:
             One message for all failure modes (missing header, malformed header, unknown
-            key, non-push role, revoked user, disabled legacy token) so a caller cannot
+            key, non-push role, revoked user) so a caller cannot
             enumerate which named identities exist. Keeps the WWW-Authenticate hint so a
             well-behaved client still knows the scheme. Factored into one method so all seven
             push handlers stay byte-identical (no message drifts back apart over time).
@@ -3725,25 +3668,22 @@ class AuthConfig:
         session_key: HMAC key for signing session cookies (independent secret). None
             disables sessions (a bare, open dev relay).
         user_pepper: HMAC pepper for the stored key verifiers (independent secret).
-        admin_token: Bearer token for the provisioning endpoint (independent of the
-            ingest token). None disables provisioning.
+        admin_token: Bearer token for the provisioning endpoint (independent of every
+            other secret). None disables provisioning.
         secure_cookie: Set the cookie's Secure attribute (true when HTTPS-exposed).
         session_seconds: Session lifetime / cookie Max-Age in seconds.
         public_origin: The canonical external origin (e.g. "https://app.fly.dev") a
             cookie-write's Origin must match. None falls back to Origin-vs-Host.
         allow_legacy_admin: Keep the legacy shared view key usable as admin even after
             users exist (default off → it is bootstrap-only).
-        disable_legacy_ingest: Retire the shared ingest token on the push path (default
-            off → the shared token keeps working, anonymously, for backward compatibility).
-            Operator-driven so a machine credential never silently expires (C3 Inc 2).
 
     Why:
-        Bundling the seven auth knobs into one frozen object keeps RelayServer /
+        Bundling the auth knobs into one frozen object keeps RelayServer /
         create_server / serve signatures readable, and makes "this is the auth posture"
         a single explicit thing to pass and reason about. Each secret is INDEPENDENT
-        (never derived from / shared with the view or ingest tokens) per the Codex
+        (never derived from / shared with the view token) per the Codex
         /second-opinion. The cookie attributes and origin live here so the request
-        handler reads them via self.server, the same pattern as db_path/token.
+        handler reads them via self.server, the same pattern as db_path.
     """
 
     session_key: bytes | None = None
@@ -3753,7 +3693,6 @@ class AuthConfig:
     session_seconds: int = 30 * 24 * 3600
     public_origin: str | None = None
     allow_legacy_admin: bool = False
-    disable_legacy_ingest: bool = False
 
 
 @dataclass(frozen=True)
@@ -3784,13 +3723,12 @@ class ShowcaseConfig:
 
 
 class RelayServer(ThreadingHTTPServer):
-    """A threaded HTTP server carrying the relay's db path and auth token.
+    """A threaded HTTP server carrying the relay's db path and auth posture.
 
     Args:
         server_address: The (host, port) to bind. Port 0 lets the OS pick a free
             port (used by tests).
         db_path: Path to the relay's sqlite store.
-        token: The shared Bearer token ingest is authenticated against.
         view_token: Optional shared secret for dashboard (GET) read auth via HTTP
             Basic. None (the default) leaves reads open — valid only for a loopback
             bind, which create_server() enforces with a fail-closed guard.
@@ -3799,7 +3737,7 @@ class RelayServer(ThreadingHTTPServer):
             gets the historical California output unchanged.
 
     Why:
-        Subclassing ThreadingHTTPServer to hold db_path/token is the clean way to
+        Subclassing ThreadingHTTPServer to hold db_path and the auth knobs is the clean way to
         make per-server config available to each request handler (handlers read it
         via self.server). The display zone rides on the server object the same way,
         so each per-request handler reads it via self.server.display_tz rather than a
@@ -3815,7 +3753,6 @@ class RelayServer(ThreadingHTTPServer):
         self,
         server_address,
         db_path: Path,
-        token: str,
         view_token: str | None = None,
         display_tz: ZoneInfo = _DISPLAY_TZ,
         auth: "AuthConfig | None" = None,
@@ -3825,7 +3762,6 @@ class RelayServer(ThreadingHTTPServer):
         # Set config before binding so it is available to any request handled after
         # serve_forever() starts.
         self.db_path = db_path
-        self.token = token
         self.view_token = view_token
         self.display_tz = display_tz
         # E2 Inc 4: the public, no-login Showcase. None = disabled (no public surface).
@@ -3848,7 +3784,6 @@ class RelayServer(ThreadingHTTPServer):
         self.session_seconds = auth.session_seconds
         self.public_origin = auth.public_origin
         self.allow_legacy_admin = auth.allow_legacy_admin
-        self.disable_legacy_ingest = auth.disable_legacy_ingest
         # Unit 3: failed-login throttling. Held on the SERVER, not per-request, because the
         # counters must persist across requests to mean anything — a per-request instance
         # would reset on every attempt and throttle nothing. In-memory by choice (see
@@ -3888,7 +3823,6 @@ def create_server(
     host: str,
     port: int,
     db_path: Path,
-    token: str,
     view_token: str | None = None,
     require_view_auth: bool = False,
     display_tz: ZoneInfo = _DISPLAY_TZ,
@@ -3902,7 +3836,6 @@ def create_server(
         host: Interface to bind (e.g. "127.0.0.1").
         port: Port to bind; 0 lets the OS choose a free one.
         db_path: Path to the relay's sqlite store.
-        token: The shared Bearer ingest token.
         view_token: Optional shared secret for dashboard read auth. Required (this
             function raises without it) whenever `host` is non-loopback, or whenever
             require_view_auth is set.
@@ -3955,7 +3888,7 @@ def create_server(
     # (the fail-closed postcondition) rather than a 500 on whichever request arrives first.
     open_relay_store(db_path).close()
     return RelayServer(
-        (host, port), db_path, token, view_token, display_tz, auth, web_dir, showcase
+        (host, port), db_path, view_token, display_tz, auth, web_dir, showcase
     )
 
 
@@ -3963,7 +3896,6 @@ def serve(
     host: str,
     port: int,
     db_path: Path,
-    token: str,
     view_token: str | None = None,
     require_view_auth: bool = False,
     display_tz: ZoneInfo = _DISPLAY_TZ,
@@ -3977,7 +3909,6 @@ def serve(
         host: Interface to bind.
         port: Port to bind.
         db_path: Path to the relay's sqlite store.
-        token: The shared Bearer ingest token.
         view_token: Optional dashboard read secret (HTTP Basic). Required by
             create_server() when host is non-loopback (or require_view_auth is set).
         require_view_auth: Force the view secret even on a loopback bind (the
@@ -3995,7 +3926,7 @@ def serve(
         rather than a traceback.
     """
     server = create_server(
-        host, port, db_path, token, view_token, require_view_auth, display_tz, auth,
+        host, port, db_path, view_token, require_view_auth, display_tz, auth,
         web_dir, showcase,
     )
     bound_host, bound_port = server.server_address

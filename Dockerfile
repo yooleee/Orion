@@ -69,9 +69,12 @@ EXPOSE 8787
 
 # Bind 0.0.0.0 so the container is reachable. The fail-closed guard then REQUIRES
 # ORION_RELAY_VIEW_TOKEN to be set (a non-loopback bind), so a misconfigured deploy
-# refuses to start rather than serving an open dashboard. Pass both secrets as env:
-#   ORION_RELAY_TOKEN       — the ingest Bearer token (must match your [relay] config)
-#   ORION_RELAY_VIEW_TOKEN  — the dashboard read password (HTTP Basic)
+# refuses to start rather than serving an open dashboard. The relay's secrets ride in as
+# env (see docs/deployment.md "Generate the secrets"): ORION_RELAY_VIEW_TOKEN,
+# ORION_RELAY_SESSION_KEY, ORION_RELAY_USER_PEPPER, ORION_RELAY_ADMIN_TOKEN. There is NO
+# shared ingest secret: pushes authenticate with per-producer contributor keys that live in
+# the relay's own database (provisioned via `orion relay-user`), so the relay starts without
+# ORION_RELAY_TOKEN — that variable is a PRODUCER-side setting now (CS-O PR7).
 # TLS is terminated by your platform/proxy in front of this container (see
 # docs/deployment.md) — never expose plain HTTP to the internet.
 # --web-dir serves the React SPA single-host (built in stage 1). Remove it to fall back to
@@ -79,8 +82,4 @@ EXPOSE 8787
 # --showcase enables the public, no-login Showcase; --showcase-project allowlists a project
 # (default-deny) with its curated public blurb. Edit/extend this list to curate the guest
 # surface; drop both flags to take it offline (GET /api/showcase then 404s).
-# --disable-legacy-ingest (C3 Inc 2, cutover 2026-07-09): retires the shared ingest token on
-# the push path — only named per-user contributor keys can push. Flipped after every producer
-# migrated to its own key (the Mac's `macos`, verified via the dogfood). Remove this flag to
-# re-enable the shared token.
-ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist", "--disable-legacy-ingest", "--showcase", "--showcase-project", "orion:A local-first knowledge base that observes your real project activity and reframes it into readable progress."]
+ENTRYPOINT ["orion", "relay-serve", "--host", "0.0.0.0", "--db", "/data/orion-relay.sqlite3", "--web-dir", "/app/web/dist", "--showcase", "--showcase-project", "orion:A local-first knowledge base that observes your real project activity and reframes it into readable progress."]

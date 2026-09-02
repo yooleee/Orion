@@ -738,15 +738,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the relay's own sqlite store (default: orion-relay.sqlite3).",
     )
     relay_parser.add_argument(
-        "--token-env",
-        default="ORION_RELAY_TOKEN",
-        help=(
-            "Name of the .env variable holding the ingest token "
-            "(default: ORION_RELAY_TOKEN). Must match the token your pushing "
-            "config's [relay] token_env_var resolves to."
-        ),
-    )
-    relay_parser.add_argument(
         "--view-token-env",
         default="ORION_RELAY_VIEW_TOKEN",
         help=(
@@ -788,17 +779,6 @@ def main(argv: list[str] | None = None) -> int:
             "Keep the legacy shared view key usable as an admin login even after "
             "per-user accounts exist (default: off — it is bootstrap-only, usable "
             "only while no users have been provisioned)."
-        ),
-    )
-    relay_parser.add_argument(
-        "--disable-legacy-ingest",
-        action="store_true",
-        help=(
-            "Retire the shared ingest token on the push path (default: off — the shared "
-            "token keeps working, anonymously, for backward compatibility). Turn this on "
-            "once every producer has its own contributor key: the shared token then 401s "
-            "and only named per-user keys can push. Each legacy use logs a line first, so "
-            "you can confirm it has gone quiet before flipping this."
         ),
     )
     relay_parser.add_argument(
@@ -1185,14 +1165,12 @@ def main(argv: list[str] | None = None) -> int:
             args.host,
             args.port,
             Path(args.db),
-            args.token_env,
             args.view_token_env,
             args.require_view_auth,
             args.timezone,
             Path(args.config),
             session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
-            disable_legacy_ingest=args.disable_legacy_ingest,
             web_dir=Path(args.web_dir) if args.web_dir else None,
             showcase_enabled=args.showcase,
             showcase_projects=args.showcase_projects,
@@ -2249,7 +2227,7 @@ def cmd_checklist_push(
     Why:
         The dedicated checklist-only push: it updates ONLY the live checklist on the
         dashboard — no report — reusing the report path's redaction (_redacted_checklist)
-        and the relay's ingest token. E1.3 adds `--all [--due]` so one scheduled entry can
+        and the relay push credential. E1.3 adds `--all [--due]` so one scheduled entry can
         keep every tracker card fresh on its own cadence, change-gated for honesty. The
         single-project and --watch paths are unchanged.
     """
@@ -3939,7 +3917,7 @@ def cmd_discussions_pull(
 
     Why:
         The developer's read half of the supervisor-interaction loop. The pull is BY
-        PROJECT, Bearer-authed with the ingest token, and the unread cursor is a LOCAL
+        PROJECT, Bearer-authed with the contributor key, and the unread cursor is a LOCAL
         watermark (the relay stays append-only). pull_discussions is the module-global so
         a test can monkeypatch it, mirroring relay_push.
     """
@@ -4160,14 +4138,12 @@ def cmd_relay_serve(
     host: str,
     port: int,
     db_path: Path,
-    token_env: str,
     view_token_env: str,
     require_view_auth: bool,
     timezone_name: str,
     config_path: Path,
     session_days: int = 30,
     allow_legacy_admin: bool = False,
-    disable_legacy_ingest: bool = False,
     web_dir: Path | None = None,
     showcase_enabled: bool = False,
     showcase_projects: list[str] | None = None,
@@ -4179,7 +4155,6 @@ def cmd_relay_serve(
         port: Port to bind (default 8787).
         db_path: Path to the relay's own sqlite store (its own file, separate from
             Orion's state db).
-        token_env: Name of the .env variable holding the shared ingest token.
         view_token_env: Name of the .env variable holding the optional dashboard read
             secret (HTTP Basic). Required by the relay's fail-closed guard when host
             is non-loopback; absent/empty leaves loopback reads open.
@@ -4192,16 +4167,19 @@ def cmd_relay_serve(
             holds the secrets.
 
     Returns:
-        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (missing ingest
-        token, an invalid --timezone, the relay package can't be imported, or the
+        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (a missing user
+        pepper, an invalid --timezone, the relay package can't be imported, or the
         fail-closed guard refuses a non-loopback bind without a view secret).
 
     Why:
-        This is the thin CLI adapter over relay/server.py — it reads the ingest token
-        from .env (the same secret the pushing side sends as a Bearer token) and the
-        OPTIONAL dashboard read secret, then hands off to serve(). Secrets are read
-        HERE, like every other secret; a missing INGEST token is a clean SecretsError
-        naming the variable. The view secret is read softly (empty -> None) because on
+        This is the thin CLI adapter over relay/server.py — it reads the relay's secrets
+        from .env and hands off to serve(). There is NO shared ingest secret to read:
+        since CS-O PR7 every push authenticates with a per-producer contributor key held
+        in the relay's database, and the ONE secret that makes those keys resolvable is
+        ORION_RELAY_USER_PEPPER — so it is REQUIRED here unconditionally. A pepper-less
+        relay would start fine and then 401 every push (a silently failing cron, not a
+        human at a login form), which is exactly the failure mode a startup refusal with
+        a named error prevents. The view secret is read softly (empty -> None) because on
         loopback the dashboard may serve open; the relay's guard — not this CLI — is
         what refuses a non-loopback bind without it, so the rule is enforced for every
         caller, not just this one. The display timezone is validated HERE (the relay
@@ -4214,16 +4192,25 @@ def cmd_relay_serve(
     try:
         # Load .env beside the config (like every command), then read the secrets.
         load_secrets(config_path)
-        token = get_required(token_env)
         # Optional: empty/unset -> None. The fail-closed guard inside serve() refuses a
         # non-loopback bind when it is None; on loopback, None means "reads open".
         view_token = os.environ.get(view_token_env, "").strip() or None
 
         # Multi-party auth secrets (fixed env names; the relay does not read orion.toml).
-        # Each is INDEPENDENT of the ingest/view secrets (Codex hardening): the session
-        # signing key, the per-user-key pepper, and the provisioning admin token.
+        # Each is INDEPENDENT of the view secret (Codex hardening): the session signing
+        # key, the per-user-key pepper, and the provisioning admin token. The pepper is
+        # REQUIRED: contributor keys are the only push credential, and without the pepper
+        # none of them can be verified — a relay that could never accept a push. Fail
+        # closed with a named error rather than 401 every cron push silently.
         session_key_raw = os.environ.get("ORION_RELAY_SESSION_KEY", "").strip()
         user_pepper_raw = os.environ.get("ORION_RELAY_USER_PEPPER", "").strip()
+        if not user_pepper_raw:
+            raise ConfigError(
+                "ORION_RELAY_USER_PEPPER is not set in .env. The relay authenticates every "
+                "push with a per-producer contributor key, and the pepper is what makes those "
+                "keys verifiable — without it no push can ever succeed. Set it to a long random "
+                "secret (independent of the other relay secrets) before serving."
+            )
         admin_token = os.environ.get("ORION_RELAY_ADMIN_TOKEN", "").strip() or None
         public_origin = os.environ.get("ORION_RELAY_PUBLIC_ORIGIN", "").strip() or None
 
@@ -4253,17 +4240,15 @@ def cmd_relay_serve(
         # importable now that _load_relay_serve has put the repo root on sys.path.
         from relay.server import AuthConfig, ShowcaseConfig, _is_loopback
 
-        # Sessions/provisioning need their secrets whenever the dashboard is access-gated
-        # (a view secret is set) or provisioning is enabled (an admin token is set). Fail
-        # CLOSED with a named error rather than serving a login that could never work.
-        if (view_token is not None or admin_token is not None) and (
-            not session_key_raw or not user_pepper_raw
-        ):
+        # Sessions need their signing key whenever the dashboard is access-gated (a view
+        # secret is set) or provisioning is enabled (an admin token is set). Fail CLOSED
+        # with a named error rather than serving a login that could never work. (The
+        # pepper is already guaranteed above, unconditionally.)
+        if (view_token is not None or admin_token is not None) and not session_key_raw:
             raise ConfigError(
-                "multi-party auth needs ORION_RELAY_SESSION_KEY and "
-                "ORION_RELAY_USER_PEPPER in .env (each a long random secret, independent "
-                "of the ingest/view tokens). Set them before serving an access-gated "
-                "dashboard."
+                "multi-party auth needs ORION_RELAY_SESSION_KEY in .env (a long random "
+                "secret, independent of the view token and the pepper). Set it before "
+                "serving an access-gated dashboard."
             )
 
         # Secure cookies whenever the relay is HTTPS-exposed: a non-loopback bind, or a
@@ -4271,13 +4256,12 @@ def cmd_relay_serve(
         # dev stays non-Secure so the cookie still works there.
         auth = AuthConfig(
             session_key=session_key_raw.encode("utf-8") if session_key_raw else None,
-            user_pepper=user_pepper_raw.encode("utf-8") if user_pepper_raw else None,
+            user_pepper=user_pepper_raw.encode("utf-8"),
             admin_token=admin_token,
             secure_cookie=require_view_auth or not _is_loopback(host),
             session_seconds=session_days * 24 * 3600,
             public_origin=public_origin,
             allow_legacy_admin=allow_legacy_admin,
-            disable_legacy_ingest=disable_legacy_ingest,
         )
 
         # The public Showcase allowlist + curated blurbs come from the CLI (project names
@@ -4296,7 +4280,7 @@ def cmd_relay_serve(
         # The guard raises ValueError BEFORE binding if host is non-loopback without a
         # view secret — surfaced here as a clean, actionable error, not a traceback.
         serve(
-            host, port, db_path, token, view_token, require_view_auth, display_tz,
+            host, port, db_path, view_token, require_view_auth, display_tz,
             auth=auth, web_dir=web_dir, showcase=showcase,
         )
     except ValueError as exc:
@@ -4322,7 +4306,7 @@ def _load_relay_admin(config_path: Path) -> tuple[str, str]:
     Why:
         The three relay-user commands share the same prerequisites — an enabled relay,
         a configured admin-token env var, and the secret itself — so resolving them lives
-        in one place (DRY). The admin token is SEPARATE from the ingest token (token_env_var):
+        in one place (DRY). The admin token is SEPARATE from the push credential (token_env_var):
         provisioning must not ride on the push credential. Reading the secret here, in the
         CLI, matches every other command; a missing one is named by get_required, never printed.
     """

@@ -323,10 +323,16 @@ options:
 $ orion relay-serve --help
 usage: orion relay-serve [-h] [--host HOST] [--port PORT] [--db DB]
                          [--view-token-env VIEW_TOKEN_ENV]
-                         [--require-view-auth] [--timezone TIMEZONE]
-                         [--session-days SESSION_DAYS] [--allow-legacy-admin]
-                         [--web-dir WEB_DIR] [--showcase]
+                         [--require-view-auth] [--no-require-view-auth]
+                         [--timezone TIMEZONE] [--session-days SESSION_DAYS]
+                         [--allow-legacy-admin] [--web-dir WEB_DIR]
+                         [--showcase] [--no-showcase]
                          [--showcase-project NAME[:"blurb"]] [--config CONFIG]
+
+Run the relay: receive pushed reports and serve the dashboard. Every setting
+below can also live in orion.toml under [relay.serve] (same names,
+snake_case); a flag given here overrides the file, and the file overrides the
+default.
 
 options:
   -h, --help            show this help message and exit
@@ -334,38 +340,47 @@ options:
                         not world-reachable).
   --port PORT           Port to bind (default: 8787).
   --db DB               Path to the relay's own sqlite store (default: orion-
-                        relay.sqlite3).
+                        relay.sqlite3). A relative flag value is taken from
+                        the working directory; a relative [relay.serve] db is
+                        taken from beside orion.toml.
   --view-token-env VIEW_TOKEN_ENV
-                        Name of the .env variable holding the dashboard read
-                        secret for HTTP Basic auth (default:
-                        ORION_RELAY_VIEW_TOKEN). REQUIRED when --host is non-
-                        loopback; optional on loopback (reads stay open).
+                        Name of the .env variable holding the dashboard view
+                        secret — the bootstrap-admin login key and the non-
+                        loopback bind guard (default: ORION_RELAY_VIEW_TOKEN).
+                        REQUIRED when --host is non-loopback; optional on
+                        loopback (reads stay open).
   --require-view-auth   Demand the dashboard view secret even on a loopback
                         bind. Use this when the relay runs on loopback behind
                         a reverse proxy (the proxy exposes it, so 'loopback'
                         isn't actually private) — a forgotten secret then
                         fails closed instead of serving an open dashboard. See
                         docs/deployment.md.
+  --no-require-view-auth
+                        Turn --require-view-auth off for this run even if
+                        [relay.serve] sets it.
   --timezone TIMEZONE   IANA zone the dashboard renders timestamps in
-                        (default: America/Los_Angeles). The relay does not
-                        read orion.toml, so this is set here. Examples:
-                        --timezone UTC, --timezone "Europe/London". An unknown
-                        zone is rejected at startup.
+                        (default: America/Los_Angeles). Examples: --timezone
+                        UTC, --timezone "Europe/London". An unknown zone is
+                        rejected at startup.
   --session-days SESSION_DAYS
                         Dashboard login session length in days (default: 30).
   --allow-legacy-admin  Keep the legacy shared view key usable as an admin
                         login even after per-user accounts exist (default: off
                         — it is bootstrap-only, usable only while no users
-                        have been provisioned).
+                        have been provisioned). Flag-only on purpose: it
+                        cannot be set in [relay.serve], so a bootstrap
+                        exception never outlives the run that needed it.
   --web-dir WEB_DIR     Path to the built SPA assets (e.g. web/dist) to serve
-                        single-host. When set, the relay serves the React
-                        dashboard (static assets + an index.html fallback)
-                        instead of the legacy server-rendered HTML. Omit to
-                        serve the legacy HTML.
+                        single-host: the relay then serves the React dashboard
+                        (static assets + an index.html fallback). Omit to run
+                        API-only (no front-end). Same relative-path rule as
+                        --db.
   --showcase            Enable the public, no-login Showcase surface (default:
                         off). When on, GET /api/showcase serves ONLY the
                         projects named with --showcase-project; while off it
                         404s and the dashboard hides the Public showcase link.
+  --no-showcase         Take the Showcase offline for this run even if
+                        [relay.serve] enables it.
   --showcase-project NAME[:"blurb"]
                         Add a project to the public Showcase allowlist
                         (repeatable; order is the display order). Optionally
@@ -373,9 +388,14 @@ options:
                         --showcase-project 'orion:A local-first tracker that
                         observes & reframes'. Without a blurb the project's
                         latest report headline is shown. Only effective with
-                        --showcase.
-  --config CONFIG       Path to the config file, used only to locate .env
-                        (default: orion.toml; or set $ORION_CONFIG).
+                        --showcase. Given at all, these REPLACE the whole
+                        [relay.serve] showcase_projects list (never append to
+                        it).
+  --config CONFIG       Path to orion.toml (default: orion.toml; or set
+                        $ORION_CONFIG). Locates the sibling .env that holds
+                        the relay's secrets and the optional [relay.serve]
+                        settings table; a missing file simply means flags +
+                        defaults.
 
 $ orion relay-user --help
 usage: orion relay-user [-h]

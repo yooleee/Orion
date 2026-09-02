@@ -73,6 +73,31 @@ state_db = "orion.sqlite3"
 # token_env_var       = "ORION_RELAY_TOKEN"
 # admin_token_env_var = "ORION_RELAY_ADMIN_TOKEN"
 
+# OPTIONAL settings for the machine that RUNS the relay (`orion relay-serve`). Every key
+# mirrors a relay-serve flag (same name, snake_case) and resolves flag > this table >
+# default, so a flag typed on the command line always wins for that run and an omitted
+# key keeps its default. A relative `db` / `web_dir` is taken from beside THIS file (not
+# the working directory), so a relay started by launchd/systemd still finds its files.
+# `showcase_projects` takes the same "NAME" / "NAME:blurb" strings as --showcase-project;
+# any --showcase-project flag REPLACES the whole list. `--allow-legacy-admin` cannot be set
+# here on purpose (a bootstrap exception must not outlive the run that needed it), and
+# secrets never can — they stay in .env.
+# SECURITY: once this table is in use, orion.toml decides the relay's bind address, public
+# Showcase exposure, web root and database path. Treat it like a deploy config on a relay
+# host: review changes, keep it private (a relay's orion.toml need not be in any repo), and
+# restart the relay deliberately after editing it.
+# [relay.serve]
+# host              = "127.0.0.1"
+# port              = 8787
+# db                = "orion-relay.sqlite3"
+# view_token_env    = "ORION_RELAY_VIEW_TOKEN"
+# require_view_auth = false
+# timezone          = "America/Los_Angeles"
+# session_days      = 30
+# web_dir           = "web/dist"
+# showcase          = false
+# showcase_projects = ["orion:A local-first knowledge base that observes real project activity."]
+
 # One [projects.<name>] table per tracked project. <name> is what you pass to
 # `orion report <name>`.
 [projects.orion]

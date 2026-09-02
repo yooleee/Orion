@@ -54,13 +54,18 @@ from orion.config import (
     REPORT_COLLECTORS,
     SHARE_LEVELS,
     ConfigError,
+    RELAY_SERVE_KEYS,
     ProjectConfig,
     Recipient,
     RelayConfig,
+    RelayServeSettings,
     SummarizerConfig,
     get_project,
     load_config,
     load_relay_config,
+    load_relay_serve_settings,
+    parse_showcase_projects,
+    resolve_relay_serve_settings,
 )
 from orion.delivery import DeliveryError
 from orion.delivery.discord import send as discord_send
@@ -717,38 +722,58 @@ def main(argv: list[str] | None = None) -> int:
     _add_config_arg(disc_reply, default_config)
 
 
+    # `relay-serve` settings resolve flag > [relay.serve] in orion.toml > default (CS-O PR8).
+    # Every SETTING flag defaults to argparse.SUPPRESS: an omitted flag then leaves no
+    # attribute on the namespace at all, which is what lets the dispatcher tell "not given"
+    # from "given as the default value" and hand only the flags actually typed to the
+    # resolver (a parser default would erase that distinction and always win over config).
+    # The canonical defaults live on RelayServeSettings (config.py); the help quotes them so
+    # each default is written once. --allow-legacy-admin and --config are NOT settings.
+    _rs = RelayServeSettings()
     relay_parser = subparsers.add_parser(
         "relay-serve",
         help="Run the local relay: receive pushed reports and serve a read-only dashboard.",
+        description=(
+            "Run the relay: receive pushed reports and serve the dashboard. Every setting "
+            "below can also live in orion.toml under [relay.serve] (same names, snake_case); "
+            "a flag given here overrides the file, and the file overrides the default."
+        ),
     )
     relay_parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Interface to bind (default: 127.0.0.1 — loopback only, not world-reachable).",
+        default=argparse.SUPPRESS,
+        help=f"Interface to bind (default: {_rs.host} — loopback only, not world-reachable).",
     )
     relay_parser.add_argument(
         "--port",
         type=int,
-        default=8787,
-        help="Port to bind (default: 8787).",
+        default=argparse.SUPPRESS,
+        help=f"Port to bind (default: {_rs.port}).",
     )
     relay_parser.add_argument(
         "--db",
-        default="orion-relay.sqlite3",
-        help="Path to the relay's own sqlite store (default: orion-relay.sqlite3).",
+        default=argparse.SUPPRESS,
+        help=(
+            f"Path to the relay's own sqlite store (default: {_rs.db}). A relative flag "
+            "value is taken from the working directory; a relative [relay.serve] db is "
+            "taken from beside orion.toml."
+        ),
     )
     relay_parser.add_argument(
         "--view-token-env",
-        default="ORION_RELAY_VIEW_TOKEN",
+        default=argparse.SUPPRESS,
         help=(
-            "Name of the .env variable holding the dashboard read secret for HTTP "
-            "Basic auth (default: ORION_RELAY_VIEW_TOKEN). REQUIRED when --host is "
-            "non-loopback; optional on loopback (reads stay open)."
+            "Name of the .env variable holding the dashboard view secret — the "
+            "bootstrap-admin login key and the non-loopback bind guard (default: "
+            f"{_rs.view_token_env}). REQUIRED when --host is non-loopback; optional on "
+            "loopback (reads stay open)."
         ),
     )
     relay_parser.add_argument(
         "--require-view-auth",
+        dest="require_view_auth",
         action="store_true",
+        default=argparse.SUPPRESS,
         help=(
             "Demand the dashboard view secret even on a loopback bind. Use this when "
             "the relay runs on loopback behind a reverse proxy (the proxy exposes it, "
@@ -757,20 +782,26 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--no-require-view-auth",
+        dest="require_view_auth",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Turn --require-view-auth off for this run even if [relay.serve] sets it.",
+    )
+    relay_parser.add_argument(
         "--timezone",
-        default="America/Los_Angeles",
+        default=argparse.SUPPRESS,
         help=(
-            "IANA zone the dashboard renders timestamps in (default: "
-            "America/Los_Angeles). The relay does not read orion.toml, so this is set "
-            'here. Examples: --timezone UTC, --timezone "Europe/London". An unknown '
-            "zone is rejected at startup."
+            f"IANA zone the dashboard renders timestamps in (default: {_rs.timezone}). "
+            'Examples: --timezone UTC, --timezone "Europe/London". An unknown zone is '
+            "rejected at startup."
         ),
     )
     relay_parser.add_argument(
         "--session-days",
         type=int,
-        default=30,
-        help="Dashboard login session length in days (default: 30).",
+        default=argparse.SUPPRESS,
+        help=f"Dashboard login session length in days (default: {_rs.session_days}).",
     )
     relay_parser.add_argument(
         "--allow-legacy-admin",
@@ -778,21 +809,25 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Keep the legacy shared view key usable as an admin login even after "
             "per-user accounts exist (default: off — it is bootstrap-only, usable "
-            "only while no users have been provisioned)."
+            "only while no users have been provisioned). Flag-only on purpose: it cannot "
+            "be set in [relay.serve], so a bootstrap exception never outlives the run "
+            "that needed it."
         ),
     )
     relay_parser.add_argument(
         "--web-dir",
-        default=None,
+        default=argparse.SUPPRESS,
         help=(
-            "Path to the built SPA assets (e.g. web/dist) to serve single-host. When set, "
-            "the relay serves the React dashboard (static assets + an index.html fallback) "
-            "instead of the legacy server-rendered HTML. Omit to serve the legacy HTML."
+            "Path to the built SPA assets (e.g. web/dist) to serve single-host: the relay "
+            "then serves the React dashboard (static assets + an index.html fallback). "
+            "Omit to run API-only (no front-end). Same relative-path rule as --db."
         ),
     )
     relay_parser.add_argument(
         "--showcase",
+        dest="showcase",
         action="store_true",
+        default=argparse.SUPPRESS,
         help=(
             "Enable the public, no-login Showcase surface (default: off). When on, "
             "GET /api/showcase serves ONLY the projects named with --showcase-project; "
@@ -800,9 +835,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--no-showcase",
+        dest="showcase",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Take the Showcase offline for this run even if [relay.serve] enables it.",
+    )
+    relay_parser.add_argument(
         "--showcase-project",
         action="append",
-        default=None,
+        default=argparse.SUPPRESS,
         dest="showcase_projects",
         metavar='NAME[:"blurb"]',
         help=(
@@ -810,15 +852,19 @@ def main(argv: list[str] | None = None) -> int:
             'display order). Optionally append a curated one-line blurb after a colon, '
             'e.g. --showcase-project \'orion:A local-first tracker that observes & '
             "reframes'. Without a blurb the project's latest report headline is shown. "
-            "Only effective with --showcase."
+            "Only effective with --showcase. Given at all, these REPLACE the whole "
+            "[relay.serve] showcase_projects list (never append to it)."
         ),
     )
     relay_parser.add_argument(
         "--config",
         default=default_config,
-        help=f"Path to the config file, used only to locate .env (default: {default_config}; or set $ORION_CONFIG).",
+        help=(
+            f"Path to orion.toml (default: {default_config}; or set $ORION_CONFIG). Locates "
+            "the sibling .env that holds the relay's secrets and the optional [relay.serve] "
+            "settings table; a missing file simply means flags + defaults."
+        ),
     )
-
     # `relay-user` is a command GROUP with add/list/deactivate/... subcommands — the admin-side
     # provisioning CLI that talks to a running relay's /api/users endpoint over HTTP
     # (authenticated with the SEPARATE admin token). It is the only nested-subcommand
@@ -1162,18 +1208,9 @@ def main(argv: list[str] | None = None) -> int:
             )
     if args.command == "relay-serve":
         return cmd_relay_serve(
-            args.host,
-            args.port,
-            Path(args.db),
-            args.view_token_env,
-            args.require_view_auth,
-            args.timezone,
+            _relay_serve_overrides(args),
             Path(args.config),
-            session_days=args.session_days,
             allow_legacy_admin=args.allow_legacy_admin,
-            web_dir=Path(args.web_dir) if args.web_dir else None,
-            showcase_enabled=args.showcase,
-            showcase_projects=args.showcase_projects,
         )
     if args.command == "relay-user":
         if args.relay_user_command == "add":
@@ -4103,100 +4140,91 @@ def _load_relay_serve():
         ) from exc
 
 
-def _parse_showcase_projects(
-    raw: list[str] | None,
-) -> tuple[tuple[str, str], ...]:
-    """Parse repeated --showcase-project NAME[:blurb] flags into (name, blurb) pairs.
+def _relay_serve_overrides(args: argparse.Namespace) -> dict[str, object]:
+    """Collect the relay-serve settings the command line ACTUALLY supplied.
 
     Args:
-        raw: The accumulated --showcase-project values (argparse append, or None when the
-            flag was never passed).
+        args: The parsed `relay-serve` namespace. Every setting flag defaults to
+            argparse.SUPPRESS, so an omitted flag is simply absent from the namespace.
 
     Returns:
-        Ordered (name, blurb) pairs preserving CLI order — the Showcase display order.
-        A value with no colon yields an empty blurb (the serializer then falls back to
-        the observed headline). Surrounding whitespace is stripped from both parts; an
-        entry whose name is empty after stripping is skipped.
+        A dict keyed by RELAY_SERVE_KEYS names holding only the supplied values, already
+        in the types RelayServeSettings carries (Path for db / web_dir, the parsed
+        (name, blurb) pairs for showcase_projects). Empty when no setting flag was given.
 
     Why:
-        The allowlist + its curated copy come from the CLI (the relay never reads
-        orion.toml), so one place turns the flat "name:blurb" strings into the structured
-        pairs ShowcaseConfig holds. Splitting on the FIRST colon only lets a blurb itself
-        contain colons (e.g. "orion: a tracker: observed, not authored").
+        This is the "flag" layer of the flag > config > default precedence (CS-O PR8),
+        kept as an explicit key list (not `vars(args)`) so non-setting attributes such as
+        `config`, `command` and `allow_legacy_admin` can never leak into the resolver. A
+        relative --db / --web-dir stays relative to the working directory here, exactly as
+        the flags always behaved; only [relay.serve] paths resolve beside the config.
     """
-    pairs: list[tuple[str, str]] = []
-    for value in raw or []:
-        name, sep, blurb = value.partition(":")
-        name = name.strip()
-        if not name:
-            continue
-        pairs.append((name, blurb.strip() if sep else ""))
-    return tuple(pairs)
+    overrides: dict[str, object] = {}
+    for key in RELAY_SERVE_KEYS:
+        if not hasattr(args, key):
+            continue  # omitted on the command line -> the config/default layer decides
+        value = getattr(args, key)
+        if key in ("db", "web_dir"):
+            value = Path(value)
+        elif key == "showcase_projects":
+            value = parse_showcase_projects(value)
+        overrides[key] = value
+    return overrides
 
 
 def cmd_relay_serve(
-    host: str,
-    port: int,
-    db_path: Path,
-    view_token_env: str,
-    require_view_auth: bool,
-    timezone_name: str,
+    overrides: dict[str, object],
     config_path: Path,
-    session_days: int = 30,
     allow_legacy_admin: bool = False,
-    web_dir: Path | None = None,
-    showcase_enabled: bool = False,
-    showcase_projects: list[str] | None = None,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
 
     Args:
-        host: Interface to bind (default 127.0.0.1 — loopback only).
-        port: Port to bind (default 8787).
-        db_path: Path to the relay's own sqlite store (its own file, separate from
-            Orion's state db).
-        view_token_env: Name of the .env variable holding the optional dashboard read
-            secret (HTTP Basic). Required by the relay's fail-closed guard when host
-            is non-loopback; absent/empty leaves loopback reads open.
-        require_view_auth: Force the view secret even on a loopback bind (the
-            reverse-proxy topology). The guard then refuses to start without it.
-        timezone_name: IANA zone name the dashboard renders timestamps in (the
-            --timezone flag; default "America/Los_Angeles"). Validated here into a
-            ZoneInfo before serving.
-        config_path: Path to orion.toml, used only to locate the sibling .env that
-            holds the secrets.
+        overrides: The relay-serve settings the command line actually supplied (see
+            _relay_serve_overrides), applied over [relay.serve] over the defaults.
+        config_path: Path to orion.toml. Locates the sibling .env that holds the secrets
+            AND the optional [relay.serve] settings table (CS-O PR8). A missing file is
+            not an error — the relay then runs on flags + defaults (the Fly image has no
+            config file at all).
+        allow_legacy_admin: Keep the shared view key usable as an admin login after users
+            exist. Flag-only by design: deliberately not part of the settings layer.
 
     Returns:
-        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (a missing user
-        pepper, an invalid --timezone, the relay package can't be imported, or the
-        fail-closed guard refuses a non-loopback bind without a view secret).
+        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (an invalid
+        [relay.serve] table, a missing user pepper, an invalid timezone or web dir, the
+        relay package can't be imported, or the fail-closed guard refuses a non-loopback
+        bind without a view secret).
 
     Why:
-        This is the thin CLI adapter over relay/server.py — it reads the relay's secrets
-        from .env and hands off to serve(). There is NO shared ingest secret to read:
-        since CS-O PR7 every push authenticates with a per-producer contributor key held
-        in the relay's database, and the ONE secret that makes those keys resolvable is
-        ORION_RELAY_USER_PEPPER — so it is REQUIRED here unconditionally. A pepper-less
+        This is the thin CLI adapter over relay/server.py — it resolves the settings
+        (flag > config > default, one pure function in config.py), reads the relay's
+        secrets from .env and hands off to serve(). There is NO shared ingest secret to
+        read: since CS-O PR7 every push authenticates with a per-producer contributor key
+        held in the relay's database, and the ONE secret that makes those keys resolvable
+        is ORION_RELAY_USER_PEPPER — so it is REQUIRED here unconditionally. A pepper-less
         relay would start fine and then 401 every push (a silently failing cron, not a
         human at a login form), which is exactly the failure mode a startup refusal with
         a named error prevents. The view secret is read softly (empty -> None) because on
         loopback the dashboard may serve open; the relay's guard — not this CLI — is
         what refuses a non-loopback bind without it, so the rule is enforced for every
-        caller, not just this one. The display timezone is validated HERE (the relay
-        does not read orion.toml, so the flag is the only source) by constructing a
-        ZoneInfo — the same check the renderer does, so "valid here" means "usable
-        there" — mirroring config.py's _parse_display_timezone so a typo fails loudly
-        with a named error rather than a raw traceback. serve() blocks until
-        interrupted, then returns.
+        caller, not just this one. The display timezone is validated HERE for the flag
+        path (config values were already validated at load) by constructing a ZoneInfo —
+        the same check the renderer does, so "valid here" means "usable there". serve()
+        blocks until interrupted, then returns.
     """
     try:
-        # Load .env beside the config (like every command), then read the secrets.
+        # Load .env beside the config (like every command), then resolve the settings:
+        # the [relay.serve] layer (defaults when the file or table is absent) with the
+        # typed flags applied on top.
         load_secrets(config_path)
+        settings = resolve_relay_serve_settings(
+            load_relay_serve_settings(config_path), overrides
+        )
         # Optional: empty/unset -> None. The fail-closed guard inside serve() refuses a
         # non-loopback bind when it is None; on loopback, None means "reads open".
-        view_token = os.environ.get(view_token_env, "").strip() or None
+        view_token = os.environ.get(settings.view_token_env, "").strip() or None
 
-        # Multi-party auth secrets (fixed env names; the relay does not read orion.toml).
+        # Multi-party auth secrets (fixed env names — secrets never live in orion.toml).
         # Each is INDEPENDENT of the view secret (Codex hardening): the session signing
         # key, the per-user-key pepper, and the provisioning admin token. The pepper is
         # REQUIRED: contributor keys are the only push credential, and without the pepper
@@ -4220,19 +4248,20 @@ def cmd_relay_serve(
         # database; ValueError = a malformed key (e.g. an absolute path). Both are a
         # user typo, so we surface a clear, named error instead of a raw traceback.
         try:
-            display_tz = ZoneInfo(timezone_name)
+            display_tz = ZoneInfo(settings.timezone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ConfigError(
-                f"--timezone {timezone_name!r} is not a valid IANA zone name ({exc}). "
+                f"timezone {settings.timezone!r} is not a valid IANA zone name ({exc}). "
                 'Use a name like "America/Los_Angeles" or "UTC".'
             ) from exc
 
         # When asked to serve the SPA, fail fast on a missing build rather than 404-ing
         # every page at request time — a clear, actionable startup error.
+        web_dir = settings.web_dir
         if web_dir is not None and not (web_dir / "index.html").is_file():
             raise ConfigError(
-                f"--web-dir {web_dir} has no index.html — build the SPA first "
-                "(cd web && npm run build), or omit --web-dir to serve the legacy HTML."
+                f"web_dir {web_dir} has no index.html — build the SPA first "
+                "(cd web && npm run build), or leave web_dir unset to run API-only."
             )
 
         serve = _load_relay_serve()
@@ -4258,18 +4287,18 @@ def cmd_relay_serve(
             session_key=session_key_raw.encode("utf-8") if session_key_raw else None,
             user_pepper=user_pepper_raw.encode("utf-8"),
             admin_token=admin_token,
-            secure_cookie=require_view_auth or not _is_loopback(host),
-            session_seconds=session_days * 24 * 3600,
+            secure_cookie=settings.require_view_auth or not _is_loopback(settings.host),
+            session_seconds=settings.session_days * 24 * 3600,
             public_origin=public_origin,
             allow_legacy_admin=allow_legacy_admin,
         )
 
-        # The public Showcase allowlist + curated blurbs come from the CLI (project names
-        # are not secrets, and the relay does not read orion.toml). Disabled by default —
-        # a no-op ShowcaseConfig() — so the public surface only exists when asked for.
+        # The public Showcase allowlist + curated blurbs come from the flags or from
+        # [relay.serve] (project names are not secrets). Disabled by default — a no-op
+        # ShowcaseConfig() — so the public surface only exists when asked for.
         showcase = ShowcaseConfig(
-            enabled=showcase_enabled,
-            projects=_parse_showcase_projects(showcase_projects),
+            enabled=settings.showcase,
+            projects=settings.showcase_projects,
         )
     except (SecretsError, ConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -4280,7 +4309,8 @@ def cmd_relay_serve(
         # The guard raises ValueError BEFORE binding if host is non-loopback without a
         # view secret — surfaced here as a clean, actionable error, not a traceback.
         serve(
-            host, port, db_path, view_token, require_view_auth, display_tz,
+            settings.host, settings.port, settings.db, view_token,
+            settings.require_view_auth, display_tz,
             auth=auth, web_dir=web_dir, showcase=showcase,
         )
     except ValueError as exc:

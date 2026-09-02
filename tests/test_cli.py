@@ -2385,35 +2385,11 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
     assert seen and seen[0][-2] is True
 
 
-def test_parse_showcase_projects_splits_name_and_optional_blurb():
-    """NAME[:blurb] flags parse to ordered (name, blurb) pairs; first colon only.
-
-    Why this matters: the curated allowlist + its public copy come from these flags, so the
-    parse rules are a contract — order is preserved (it is the display order), a missing
-    blurb is "" (the serializer then falls back to the headline), a blurb may itself contain
-    colons, and a blank name is dropped rather than producing a nameless card.
-    """
-    pairs = cli._parse_showcase_projects(
-        [
-            "orion:A tracker: observed, not authored",  # blurb keeps its inner colon
-            "sample-app",  # no blurb -> ""
-            "  ",  # blank -> dropped
-            " spaced : trimmed ",  # both sides stripped
-        ]
-    )
-    assert pairs == (
-        ("orion", "A tracker: observed, not authored"),
-        ("sample-app", ""),
-        ("spaced", "trimmed"),
-    )
-    assert cli._parse_showcase_projects(None) == ()  # flag never passed
-
-
 def test_relay_serve_showcase_flags_build_a_showcase_config(tmp_path, monkeypatch):
     """`--showcase` + repeated `--showcase-project` reach serve() as a ShowcaseConfig.
 
-    Why this matters: the public surface is opt-in and curated entirely from the CLI (the
-    relay does not read orion.toml), so the flags must thread through to serve()'s showcase=
+    Why this matters: the public surface is opt-in and curated by the operator (flags, or
+    [relay.serve] since CS-O PR8), so the flags must thread through to serve()'s showcase=
     kwarg as the enabled flag plus the ordered allowlist — a flag that parsed but got
     dropped would leave the Showcase silently empty or off.
     """
@@ -2535,8 +2511,8 @@ def test_relay_serve_missing_user_pepper_is_clean_error_and_never_serves(
 def test_relay_serve_timezone_flag_threads_a_zoneinfo(tmp_path, monkeypatch):
     """`--timezone <zone>` validates into a ZoneInfo and reaches serve() as that zone.
 
-    Why this matters: the relay does not read orion.toml, so the flag is the ONLY way
-    to set the dashboard's display zone (KI-20 follow-up). A flag that parses but is
+    Why this matters: the flag is the operator's per-run way to set the dashboard's
+    display zone (KI-20 follow-up; [relay.serve] is the other, CS-O PR8). A flag that parses but is
     dropped, or one passed through as a bare string, would silently leave timestamps
     in Pacific. We pass a non-default zone and assert the exact ZoneInfo reaches
     serve()'s final positional argument.
@@ -2595,6 +2571,172 @@ def test_relay_serve_invalid_timezone_is_a_clean_error_and_never_serves(tmp_path
     )
     assert code == 1
     assert served == []  # validation failed before the server was launched
+
+
+# --- relay-serve config-file-first: flag > [relay.serve] > default (CS-O PR8) ----------
+#
+# These drive `cli.main` end to end with a real orion.toml on disk and the serve() recorder,
+# so what is pinned is the whole chain: SUPPRESS defaults -> _relay_serve_overrides ->
+# load_relay_serve_settings -> resolve_relay_serve_settings -> the serve() call.
+
+
+def _relay_serve_env(monkeypatch):
+    """Set the minimum env for an open loopback relay-serve to reach serve()."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
+    for _var in ("ORION_RELAY_VIEW_TOKEN", "ORION_RELAY_ADMIN_TOKEN", "ORION_RELAY_SESSION_KEY"):
+        monkeypatch.delenv(_var, raising=False)
+
+
+def _record_serve(monkeypatch):
+    """Patch _load_relay_serve with a recorder; return the list it appends (args, kwargs) to."""
+    seen = []
+    monkeypatch.setattr(
+        cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append((a, k)))
+    )
+    return seen
+
+
+def _write_relay_serve_toml(tmp_path, body):
+    """Write an orion.toml holding ONLY a [relay.serve] table (a relay host has no projects)."""
+    path = tmp_path / "orion.toml"
+    path.write_text("[relay.serve]\n" + body, encoding="utf-8")
+    return path
+
+
+def test_relay_serve_config_beats_default_and_flag_beats_config(tmp_path, monkeypatch):
+    """The precedence contract end to end: a config value beats the default, a flag beats both.
+
+    Why this matters (CS-O PR8): `port` comes from three possible layers. With only the file,
+    the file's 8000 must reach serve() (a parser default of 8787 would silently win — the
+    exact bug SUPPRESS exists to prevent). With `--port 9999` typed as well, the flag must
+    win. Both directions in one test so a regression in either layer is caught.
+    """
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config = _write_relay_serve_toml(tmp_path, 'port = 8000\nhost = "127.0.0.1"\n')
+
+    assert cli.main(["relay-serve", "--config", str(config)]) == 0
+    assert seen[-1][0][1] == 8000  # config beat the 8787 default
+
+    assert cli.main(["relay-serve", "--port", "9999", "--config", str(config)]) == 0
+    assert seen[-1][0][1] == 9999  # flag beat the config
+
+
+def test_relay_serve_omitted_flags_do_not_erase_config_values(tmp_path, monkeypatch):
+    """Passing ONE flag leaves every other [relay.serve] value in force.
+
+    Why this matters: the failure mode of a naive merge is "any flag resets the rest to
+    defaults". Here the file sets timezone + session_days and the command line sets only
+    --port; the file's zone and session length must still reach serve()/AuthConfig.
+    """
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config = _write_relay_serve_toml(
+        tmp_path, 'timezone = "Europe/London"\nsession_days = 7\n'
+    )
+    assert cli.main(["relay-serve", "--port", "9001", "--config", str(config)]) == 0
+    args, kwargs = seen[-1]
+    assert args[1] == 9001
+    assert args[-1] == ZoneInfo("Europe/London")  # display_tz is the last positional
+    assert kwargs["auth"].session_seconds == 7 * 24 * 3600
+
+
+def test_relay_serve_no_showcase_flag_beats_config_true(tmp_path, monkeypatch):
+    """`--no-showcase` turns a config-enabled Showcase off; `--showcase-project` REPLACES the list.
+
+    Why this matters (second-opinion requirement): once config can set a boolean true, the
+    command line needs an explicit negative, or an operator could never take the public
+    surface offline for one run without editing the file. And the list semantics must be
+    pinned: a flag-given allowlist replaces the file's list wholesale (never appends), so
+    what is public is exactly what the operator typed.
+    """
+    from relay.server import ShowcaseConfig
+
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config = _write_relay_serve_toml(
+        tmp_path, 'showcase = true\nshowcase_projects = ["orion:From the file.", "sample-app"]\n'
+    )
+    # File alone: enabled, with the file's ordered allowlist.
+    assert cli.main(["relay-serve", "--config", str(config)]) == 0
+    assert seen[-1][1]["showcase"] == ShowcaseConfig(
+        enabled=True, projects=(("orion", "From the file."), ("sample-app", ""))
+    )
+    # --no-showcase wins over showcase = true.
+    assert cli.main(["relay-serve", "--no-showcase", "--config", str(config)]) == 0
+    assert seen[-1][1]["showcase"].enabled is False
+    # A flag-given allowlist replaces the file's list, it does not append to it.
+    assert cli.main(
+        ["relay-serve", "--showcase-project", "other:Typed.", "--config", str(config)]
+    ) == 0
+    assert seen[-1][1]["showcase"].projects == (("other", "Typed."),)
+
+
+def test_relay_serve_config_db_resolves_beside_config_but_flag_db_stays_cwd_relative(
+    tmp_path, monkeypatch
+):
+    """A relative `db` in [relay.serve] resolves beside orion.toml; a relative --db does not.
+
+    Why this matters (second-opinion requirement): a relay launched by launchd/systemd has
+    an unpredictable working directory, so a config-relative path must anchor to the file
+    (the state_db rule). Flags keep their historical CWD meaning so no existing invocation
+    changes — the two rules are pinned side by side so neither can drift into the other.
+    """
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config_dir = tmp_path / "relay-host"
+    config_dir.mkdir()
+    config = config_dir / "orion.toml"
+    config.write_text('[relay.serve]\ndb = "relay.sqlite3"\n', encoding="utf-8")
+
+    assert cli.main(["relay-serve", "--config", str(config)]) == 0
+    assert seen[-1][0][2] == (config_dir / "relay.sqlite3").resolve()  # beside the config
+
+    assert cli.main(["relay-serve", "--db", "relay.sqlite3", "--config", str(config)]) == 0
+    assert seen[-1][0][2] == Path("relay.sqlite3")  # the flag stays CWD-relative, as before
+
+
+def test_relay_serve_allow_legacy_admin_in_config_is_a_clean_error(tmp_path, monkeypatch):
+    """`allow_legacy_admin` in [relay.serve] is refused at startup (exit 1, never serves).
+
+    Why this matters: a bootstrap exception that lives in a file is the one that gets
+    forgotten, so it is flag-only by design (D4). The error must name the flag to use so
+    the operator is not left guessing why the key is rejected.
+    """
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config = _write_relay_serve_toml(tmp_path, "allow_legacy_admin = true\n")
+    code = cli.main(["relay-serve", "--config", str(config)])
+    assert code == 1 and seen == []
+
+
+def test_relay_serve_invalid_config_table_is_a_clean_error(tmp_path, monkeypatch, capsys):
+    """A bad [relay.serve] value (port out of range) exits 1 with a message naming the key.
+
+    Why this matters: config validation must be as loud as flag validation — a typo in the
+    file may not be noticed until a supervisor asks why the dashboard is down.
+    """
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config = _write_relay_serve_toml(tmp_path, "port = 70000\n")
+    assert cli.main(["relay-serve", "--config", str(config)]) == 1
+    assert seen == []
+    assert "port" in capsys.readouterr().err
+
+
+def test_relay_serve_missing_config_file_runs_on_defaults(tmp_path, monkeypatch):
+    """With no orion.toml at all, relay-serve starts on flags + defaults (the Fly image case).
+
+    Why this matters: the hosted relay ships no config file — its whole posture is the
+    Dockerfile ENTRYPOINT's flags. Adding the config layer must not make that deploy fail,
+    so a missing file is "no config layer", not an error.
+    """
+    _relay_serve_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    assert cli.main(["relay-serve", "--config", str(tmp_path / "does-not-exist.toml")]) == 0
+    host, port, db_path = seen[-1][0][:3]
+    assert (host, port, db_path) == ("127.0.0.1", 8787, Path("orion-relay.sqlite3"))
 
 
 # --- baseline + ORION_CONFIG (unit 4 friction fixes) --------------------------
@@ -4440,9 +4582,10 @@ def test_every_leaf_command_still_offers_config(capsys):
     asserts the flag exists per command. This walks every leaf command and checks it.
 
     It also pins the ONE deliberate exception: `relay-serve` keeps its own wording, because
-    that command reads no project list and its config is used only to locate .env. That is a
-    real distinction, not a copy that drifted, so the test asserts the difference SURVIVES
-    rather than treating uniformity as the goal.
+    that command reads no project list — its config locates .env and the optional
+    [relay.serve] settings table (CS-O PR8), and may be absent entirely. That is a real
+    distinction, not a copy that drifted, so the test asserts the difference SURVIVES rather
+    than treating uniformity as the goal.
     """
     standard = "Path to the config file (default:"
     for command in _LEAF_COMMANDS:
@@ -4450,7 +4593,7 @@ def test_every_leaf_command_still_offers_config(capsys):
         label = " ".join(command)
         assert "--config" in out, f"{label} lost its --config flag"
         if command == ["relay-serve"]:
-            assert "used only to locate .env" in out, (
+            assert "[relay.serve]" in out, (
                 "relay-serve's --config help lost its command-specific wording; it reads no "
                 "project list, so the standard 'path to the config file' text understates it."
             )

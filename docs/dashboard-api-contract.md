@@ -517,7 +517,8 @@ in allowlist order.
 - Source: `latest_report_per_project(today)` filtered to the allowlist (in allowlist order) →
   `api.serialize_showcase`. Pure read-only re-aggregation of existing store data plus the config
   allowlist/blurbs — no producer/wire/store change. Config: relay `--showcase` +
-  `--showcase-project` flags (the relay does not read `orion.toml`).
+  `--showcase-project` flags, or `showcase` / `showcase_projects` under `[relay.serve]` in the
+  relay host's `orion.toml` (flag > file > default; CS-O PR8).
 
 ### `POST /api/login`
 

@@ -1746,3 +1746,252 @@ def test_about_file_empty_string_raises(tmp_path):
     )
     with pytest.raises(ConfigError, match="about_file"):
         load_config(path)
+
+
+# --- [relay.serve]: the relay host's settings table (CS-O PR8) ---------------------------
+
+
+def test_parse_showcase_projects_splits_name_and_optional_blurb():
+    """NAME[:blurb] strings parse to ordered (name, blurb) pairs; first colon only.
+
+    Why this matters: the curated allowlist + its public copy come from these strings on
+    BOTH surfaces (the --showcase-project flag and the [relay.serve] array), so the parse
+    rules are a contract — order is preserved (it is the display order), a missing blurb is
+    "" (the serializer then falls back to the headline), a blurb may itself contain colons,
+    and a blank name is dropped rather than producing a nameless card.
+    """
+    from orion.config import parse_showcase_projects
+
+    pairs = parse_showcase_projects(
+        [
+            "orion:A tracker: observed, not authored",  # blurb keeps its inner colon
+            "sample-app",  # no blurb -> ""
+            "  ",  # blank -> dropped
+            " spaced : trimmed ",  # both sides stripped
+        ]
+    )
+    assert pairs == (
+        ("orion", "A tracker: observed, not authored"),
+        ("sample-app", ""),
+        ("spaced", "trimmed"),
+    )
+    assert parse_showcase_projects(None) == ()  # never given
+
+
+def test_relay_serve_settings_defaults_are_the_historical_flag_defaults():
+    """RelayServeSettings() equals the defaults every relay-serve flag has always had.
+
+    Why this matters: the defaults moved from the argparse `default=` values into one
+    dataclass. A drift here would silently change what a bare `orion relay-serve` does, so
+    the historical values are pinned literally.
+    """
+    from orion.config import RelayServeSettings
+
+    s = RelayServeSettings()
+    assert (s.host, s.port, s.db) == ("127.0.0.1", 8787, Path("orion-relay.sqlite3"))
+    assert s.view_token_env == "ORION_RELAY_VIEW_TOKEN"
+    assert s.require_view_auth is False and s.showcase is False
+    assert s.timezone == "America/Los_Angeles" and s.session_days == 30
+    assert s.web_dir is None and s.showcase_projects == ()
+
+
+def test_load_relay_serve_settings_parses_every_key_without_any_projects(tmp_path):
+    """A project-less file with a full [relay.serve] table parses into typed settings.
+
+    Why this matters: a relay host is not a producer, so the loader must not demand
+    [projects]. Every key is exercised once so a dropped key would show up here; relative
+    paths resolve beside the config file (the state_db rule), not the working directory.
+    """
+    from orion.config import load_relay_serve_settings
+
+    (tmp_path / "web").mkdir()
+    path = _write(
+        tmp_path,
+        """
+        [relay.serve]
+        host = "0.0.0.0"
+        port = 9000
+        db = "data/relay.sqlite3"
+        view_token_env = "MY_VIEW"
+        require_view_auth = true
+        timezone = "UTC"
+        session_days = 7
+        web_dir = "web"
+        showcase = true
+        showcase_projects = ["orion:A blurb", "sample-app"]
+        """,
+    )
+    s = load_relay_serve_settings(path)
+    assert (s.host, s.port) == ("0.0.0.0", 9000)
+    assert s.db == (tmp_path / "data" / "relay.sqlite3").resolve()
+    assert s.web_dir == (tmp_path / "web").resolve()
+    assert s.view_token_env == "MY_VIEW" and s.require_view_auth is True
+    assert (s.timezone, s.session_days) == ("UTC", 7)
+    assert s.showcase is True
+    assert s.showcase_projects == (("orion", "A blurb"), ("sample-app", ""))
+
+
+def test_load_relay_serve_settings_missing_file_or_table_gives_defaults(tmp_path):
+    """No file, or a file without [relay.serve], both mean the defaults — never an error.
+
+    Why this matters: the Fly image has no orion.toml (flags-only ENTRYPOINT) and every
+    existing producer config has no [relay.serve]; both must keep working unchanged. A
+    plain [relay] push table without a `serve` sub-table is the common producer case.
+    """
+    from orion.config import RelayServeSettings, load_relay_serve_settings
+
+    assert load_relay_serve_settings(tmp_path / "nope.toml") == RelayServeSettings()
+    path = _write(
+        tmp_path,
+        """
+        [relay]
+        enabled = true
+        url = "http://127.0.0.1:8787/ingest"
+        token_env_var = "ORION_RELAY_TOKEN"
+        """,
+    )
+    assert load_relay_serve_settings(path) == RelayServeSettings()
+
+
+def test_load_relay_serve_settings_present_but_broken_file_raises(tmp_path):
+    """An EXISTING file that fails to parse is a ConfigError, not silently ignored."""
+    from orion.config import load_relay_serve_settings
+
+    path = tmp_path / "orion.toml"
+    path.write_text("[relay.serve\nport = 1", encoding="utf-8")
+    with pytest.raises(ConfigError, match="Could not parse"):
+        load_relay_serve_settings(path)
+
+
+@pytest.mark.parametrize(
+    "line, needle",
+    [
+        ('port = "8787"', "port"),
+        ("port = 0", "port"),
+        ("port = 70000", "port"),
+        ("port = true", "port"),  # bool is an int subclass; must not pass as 1
+        ("session_days = 0", "session_days"),
+        ('showcase = "yes"', "showcase"),
+        ('require_view_auth = 1', "require_view_auth"),
+        ('timezone = "Mars/Olympus_Mons"', "timezone"),
+        ('host = ""', "host"),
+        ('view_token_env = "not a var"', "view_token_env"),
+        ('showcase_projects = "orion"', "showcase_projects"),  # must be an array
+        ("db = 3", "db"),
+    ],
+)
+def test_relay_serve_table_rejects_bad_values_naming_the_key(tmp_path, line, needle):
+    """Each wrong type / out-of-range value fails at load with the offending key named.
+
+    Why this matters: validation lives at load so `orion check` and the relay's startup
+    both refuse a bad posture before a socket is bound — a typo in the file must be a
+    five-second fix, not a mystery. Strings must be non-empty, booleans real booleans,
+    integers real integers in range, and the zone constructible.
+    """
+    from orion.config import load_relay_serve_settings
+
+    path = _write(tmp_path, f"[relay.serve]\n{line}\n")
+    with pytest.raises(ConfigError, match=needle):
+        load_relay_serve_settings(path)
+
+
+def test_relay_serve_table_rejects_unknown_keys_and_names_the_known_ones(tmp_path):
+    """An unknown key is an error listing the accepted keys; allow_legacy_admin gets its reason.
+
+    Why this matters: this section is new, so strictness costs nothing and a silently
+    ignored typo (`prot = 9000`) would leave the relay on the wrong port with no signal.
+    `allow_legacy_admin` is refused ON PURPOSE (a bootstrap exception must not live on in a
+    file), and the message must say to use the flag so the operator is not left guessing.
+    """
+    from orion.config import load_relay_serve_settings
+
+    path = _write(tmp_path, "[relay.serve]\nprot = 9000\n")
+    with pytest.raises(ConfigError, match=r"unknown key.*prot.*Known keys:.*port"):
+        load_relay_serve_settings(path)
+
+    path = _write(tmp_path, "[relay.serve]\nallow_legacy_admin = true\n")
+    with pytest.raises(ConfigError, match=r"allow_legacy_admin.*--allow-legacy-admin"):
+        load_relay_serve_settings(path)
+
+
+def test_full_load_config_validates_relay_serve_and_check_sees_it(tmp_path):
+    """load_config carries [relay.serve] on Config and rejects a bad table like any other.
+
+    Why this matters: `orion check` runs the full loader, so wiring the table into it means
+    a relay host that is ALSO a producer gets its serve settings validated by the same
+    command that validates everything else — no second checker to remember.
+    """
+    from orion.config import RelayServeSettings
+
+    good = _write(
+        tmp_path,
+        """
+        [relay.serve]
+        port = 9100
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    config = load_config(good)
+    assert config.relay_serve.port == 9100
+    assert config.relay.enabled is False  # the push table is untouched by the serve table
+
+    plain = _write(
+        tmp_path,
+        """
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    assert load_config(plain).relay_serve == RelayServeSettings()
+
+    bad = _write(
+        tmp_path,
+        """
+        [relay.serve]
+        port = "nine"
+
+        [projects.demo]
+        repo_path = "/tmp/demo"
+
+        [[projects.demo.recipients]]
+        name = "Alex"
+        channel = "discord"
+        webhook_env_var = "ORION_DISCORD_WEBHOOK_ALEX"
+        """,
+    )
+    with pytest.raises(ConfigError, match="port"):
+        load_config(bad)
+
+
+def test_resolve_relay_serve_settings_applies_only_supplied_overrides():
+    """Overrides win key by key; an explicit False beats a config True; unknown keys are refused.
+
+    Why this matters: this is the precedence contract in isolation (no argparse). The
+    dangerous case is a falsy override — `showcase=False` typed as --no-showcase must beat
+    `showcase = true` from the file, which a "truthy wins" merge would get wrong. A key
+    outside RELAY_SERVE_KEYS is a programming error at the call site and must not pass
+    silently as a no-op.
+    """
+    from orion.config import RelayServeSettings, resolve_relay_serve_settings
+
+    base = RelayServeSettings(port=8000, showcase=True, showcase_projects=(("a", ""),))
+    out = resolve_relay_serve_settings(
+        base, {"showcase": False, "showcase_projects": (("b", "x"),)}
+    )
+    assert out.port == 8000  # untouched: not supplied
+    assert out.showcase is False and out.showcase_projects == (("b", "x"),)
+    assert resolve_relay_serve_settings(base, {}) == base
+    with pytest.raises(ValueError, match="not relay-serve settings"):
+        resolve_relay_serve_settings(base, {"config": "x"})

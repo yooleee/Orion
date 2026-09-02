@@ -3714,8 +3714,8 @@ class ShowcaseConfig:
         on." Bundling the two knobs into one frozen object keeps the already-long
         RelayServer / create_server / serve signatures readable — the same pattern
         AuthConfig uses. These are project NAMES + operator-authored blurbs, not secrets,
-        so they ride on CLI flags (the relay never reads orion.toml), unlike the auth
-        secrets which come from .env.
+        so they may ride on CLI flags or on the [relay.serve] table of orion.toml (CS-O
+        PR8), unlike the auth secrets which come only from .env.
     """
 
     enabled: bool = False

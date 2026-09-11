@@ -45,6 +45,11 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
 
+Every command takes --config PATH (default: orion.toml in the working
+directory). Set ORION_CONFIG=/abs/path/orion.toml once in your environment to
+make that the default everywhere — hooks, schedulers and the session skill
+then need no --config; a --config flag still wins for that run.
+
 $ orion report --help
 usage: orion report [-h] [--all] [--config CONFIG] [--yes] [--due] [project]
 
@@ -325,8 +330,8 @@ usage: orion relay-serve [-h] [--host HOST] [--port PORT] [--db DB]
                          [--view-token-env VIEW_TOKEN_ENV]
                          [--require-view-auth] [--no-require-view-auth]
                          [--timezone TIMEZONE] [--session-days SESSION_DAYS]
-                         [--allow-legacy-admin] [--web-dir WEB_DIR]
-                         [--showcase] [--no-showcase]
+                         [--allow-legacy-admin] [--init-secrets]
+                         [--web-dir WEB_DIR] [--showcase] [--no-showcase]
                          [--showcase-project NAME[:"blurb"]] [--config CONFIG]
 
 Run the relay: receive pushed reports and serve the dashboard. Every setting
@@ -370,6 +375,14 @@ options:
                         have been provisioned). Flag-only on purpose: it
                         cannot be set in [relay.serve], so a bootstrap
                         exception never outlives the run that needed it.
+  --init-secrets        Generate any MISSING relay secrets into the .env
+                        beside --config, then exit without serving. Always:
+                        ORION_RELAY_USER_PEPPER, ORION_RELAY_SESSION_KEY,
+                        ORION_RELAY_ADMIN_TOKEN; the view token too when the
+                        resolved settings bind beyond loopback or set
+                        --require-view-auth. Never overwrites a non-empty
+                        value, never prints a value, keeps the rest of the
+                        file byte-for-byte.
   --web-dir WEB_DIR     Path to the built SPA assets (e.g. web/dist) to serve
                         single-host: the relay then serves the React dashboard
                         (static assets + an index.html fallback). Omit to run
@@ -393,9 +406,9 @@ options:
                         it).
   --config CONFIG       Path to orion.toml (default: orion.toml; or set
                         $ORION_CONFIG). Locates the sibling .env that holds
-                        the relay's secrets and the optional [relay.serve]
-                        settings table; a missing file simply means flags +
-                        defaults.
+                        the relay's secrets (and that --init-secrets writes)
+                        and the optional [relay.serve] settings table; a
+                        missing file simply means flags + defaults.
 
 $ orion relay-user --help
 usage: orion relay-user [-h]

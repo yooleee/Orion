@@ -53,9 +53,30 @@ nothing else in the local pipeline changes.
 
 ### Generate the secrets
 
+Let Orion do it. Run this in the directory that holds the relay host's config (or just its
+`.env`; the config file itself may be absent):
+
+```bash
+orion relay-serve --init-secrets --host 0.0.0.0   # a hosted relay binds beyond loopback, so the
+                                                  # view token is generated too
 ```
-python -c "import secrets; print(secrets.token_urlsafe(32))"   # run once per secret
+
+It generates every relay secret that is missing into the sibling `.env`, reports each **by name**
+(generated / filled / already set) and never prints a value. A value that is already set is never
+overwritten, an empty `NAME=` is filled in place, and everything else in the file is preserved
+byte-for-byte, so re-running it is safe. On a loopback relay it skips the view token and says why
+(the dashboard would otherwise become login-gated); pass `--host` or `--require-view-auth`, or set
+the token yourself, to include it. A value copied from `.env.example` is called out as a
+placeholder. The manual equivalent, one run per secret:
+
 ```
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**Fly (or any hosted relay): a local `.env` does not populate the platform.** Run the bootstrap in
+a directory used only for the relay, so its `.env` holds nothing but relay secrets, then import
+that file: `fly secrets import -a <app> < .env`. Keep the file (it is your record of what is set)
+under the same protection as any other secret.
 
 The relay's `.env` needs these, each its own independent random value:
 

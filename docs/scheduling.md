@@ -124,7 +124,8 @@ is one of these. Address all three and the per-OS setup below is mechanical.
    starts in: `... -m orion report --all --yes --config /abs/path/to/orion/orion.toml`. Keep
    `.env` (webhook URLs + the Anthropic key) beside `orion.toml`, its normal home, and a
    scheduled run finds it with no extra setup. (Exported environment variables also work and
-   take precedence, if you'd rather not rely on a file.)
+   take precedence, if you'd rather not rely on a file.) Setting `ORION_CONFIG` to that absolute
+   path in the scheduler's environment is the equivalent of passing `--config` on every line.
 
 3. **A stripped `PATH` (so `git` may be missing).** The git collector shells out to `git`; a
    scheduler's `PATH` is often minimal and may not include it. Make sure `git` is reachable —

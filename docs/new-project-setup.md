@@ -130,7 +130,15 @@ so supervisors can reach a real URL is a separate, additive step — see
 The relay authenticates every push with a **per-producer contributor key** it mints itself, so
 it needs two secrets of its own before it can provision one: the pepper that makes stored keys
 verifiable, and the admin token that gates provisioning (which in turn needs the session signing
-key). Generate each as its own random value:
+key). Let Orion generate them:
+
+```bash
+orion relay-serve --init-secrets    # writes the three missing secrets into .env, reports by name
+```
+
+It never overwrites a value that is already set and never prints one, so it is safe to re-run
+(a loopback relay needs no view token, and the command says so). If you would rather do it by
+hand, one run per secret:
 
 ```bash
 python -c "import secrets; print('ORION_RELAY_USER_PEPPER=' + secrets.token_urlsafe(32))" >> .env

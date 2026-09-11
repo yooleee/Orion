@@ -85,7 +85,8 @@ next request, and a privilege can never ride in a stale or forged cookie.
 
 Expiry is enforced from the signed payload, not just the cookie's `Max-Age`, so a browser
 that holds the cookie past its lifetime still cannot use it. The session length is configurable
-with `relay-serve --session-days` (default 30).
+with `relay-serve --session-days`, or `session_days` under `[relay.serve]` in the relay host's
+`orion.toml` (default 30).
 
 ## Revocation without a server-side session store
 

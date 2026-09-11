@@ -211,7 +211,10 @@ the failure is just reported.
 
 > `relay-serve` flags: `--host` (default `127.0.0.1`), `--port` (`8787`), `--db`
 > (`orion-relay.sqlite3`). The relay's store is its own SQLite file, separate from Orion's
-> state db. Its secrets are read under fixed names from `.env` (see step 1).
+> state db. Its secrets are read under fixed names from `.env` (see step 1). The same
+> settings can live in `orion.toml` under `[relay.serve]` (a flag still wins for that run) —
+> see the commented block in `orion.toml.example` and
+> [`deployment.md`](deployment.md#configure-relay-serve-from-oriontoml-optional).
 
 ## Optional: bringing a finished project onto the dashboard
 

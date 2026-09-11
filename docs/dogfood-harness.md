@@ -76,7 +76,8 @@ orion relay-serve --port 8788 --db $SB/relay.sqlite3 \
   --config $SB/orion-sandbox.toml
 ```
 
-`--config` matters: it is how the relay finds the sandbox `.env`. Note that the relay
+`--config` matters: it is how the relay finds the sandbox `.env` (and, since CS-O PR8, an
+optional `[relay.serve]` table — the flags above could equally live there). Note that the relay
 reads three secrets under **fixed** names it will not let you rename
 (`ORION_RELAY_ADMIN_TOKEN`, `ORION_RELAY_SESSION_KEY`, `ORION_RELAY_USER_PEPPER`), so the
 sandbox `.env` must define those too. Provision accounts with `relay-user`, pointed at the

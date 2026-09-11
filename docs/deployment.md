@@ -155,6 +155,41 @@ Full detail: [`dashboard-auth.md`](dashboard-auth.md).
 > account), install it in that machine's `.env`, and confirm one push lands. The admin token
 > never depends on any producer key, which is what makes this path always available.
 
+## Configure `relay-serve` from `orion.toml` (optional)
+
+Every `relay-serve` setting flag can also live in the relay host's `orion.toml`, under
+`[relay.serve]` (CS-O PR8; this reversed the earlier "the relay does not read `orion.toml`"
+rule on purpose, so a relay's whole posture can sit in one reviewed file instead of a long
+command line). Keys mirror the flags in snake_case: `host`, `port`, `db`, `view_token_env`,
+`require_view_auth`, `timezone`, `session_days`, `web_dir`, `showcase`, `showcase_projects`.
+
+- **Precedence is flag > file > default.** A flag typed for a run wins for that run; an omitted
+  flag leaves the file's value in force; an absent key keeps its default. The booleans have
+  explicit negatives (`--no-showcase`, `--no-require-view-auth`) so a file-enabled setting can be
+  turned off for one run without editing the file.
+- **Relative `db` / `web_dir` in the file resolve beside `orion.toml`**, never against the
+  working directory (a relay under launchd/systemd has no predictable cwd). Relative *flag*
+  values keep resolving against the working directory, exactly as before.
+- **`showcase_projects` is an array of the same `"NAME"` / `"NAME:blurb"` strings** the flag
+  takes. Any `--showcase-project` flag replaces the whole list — it never appends.
+- **Validated at load**: a wrong type, an out-of-range `port` / `session_days`, an unknown zone,
+  or an unknown key refuses to start with the key named (and `orion check` reports the same
+  errors on a host that is also a producer). `allow_legacy_admin` is refused as a key on
+  purpose — a bootstrap exception that lives in a file is the one that gets forgotten, so it
+  stays a one-shot flag.
+- **A missing `orion.toml` is fine.** The relay then runs on flags + defaults — which is exactly
+  how the Fly image runs: its Dockerfile `ENTRYPOINT` is flags-only and ships no config file, and
+  it stays valid unchanged. The file is a convenience for hosts you administer directly.
+- **Secrets never move into the file.** `ORION_RELAY_*` secrets stay in `.env` (or `fly secrets`);
+  `view_token_env` names a variable, it does not hold one.
+
+> **`orion.toml` is now operationally security-sensitive on a relay host.** Once `[relay.serve]`
+> is in use, that file decides the bind address (`host`), whether the public no-login Showcase is
+> on and which projects it exposes, the web root, and the database path. Review edits to it the
+> way you review a deploy config, keep it out of shared or public repositories (a relay's
+> `orion.toml` need not be committed anywhere), give it restrictive permissions, and restart the
+> relay deliberately after changing it — the running process reads the file only at startup.
+
 ## The relay dependency (password login)
 
 The relay installs the **`relay` extra**, which adds `argon2-cffi` for password hashing:

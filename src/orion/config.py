@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -323,6 +323,10 @@ class Config:
             Anthropic/Haiku when no [summarizer] table is present.
         relay: The hosted-relay push config (C1). Defaults to disabled (a no-op)
             when no [relay] table is present.
+        relay_serve: The `relay-serve` host settings from [relay.serve] (CS-O PR8).
+            Defaults (every flag's historical default) when the table is absent. Carried
+            here so `orion check` validates the section along with everything else; the
+            relay host itself reads it via load_relay_serve_settings.
         display_timezone: IANA zone name for human-facing timestamps in delivered
             messages (KI-20). Defaults to America/Los_Angeles so messages match the
             dashboard's Pacific display; overridable per config (e.g. "UTC").
@@ -340,6 +344,7 @@ class Config:
     relay: RelayConfig
     display_timezone: str = DEFAULT_DISPLAY_TIMEZONE
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
+    relay_serve: "RelayServeSettings" = field(default_factory=lambda: RelayServeSettings())
 
 
 def load_config(path: Path) -> Config:
@@ -394,6 +399,9 @@ def load_config(path: Path) -> Config:
     # The relay is global (one [relay] table) and opt-in. An absent or disabled
     # table resolves to a no-op, so existing configs push nowhere and are unchanged.
     relay = _parse_relay(raw.get("relay"), path)
+    # The relay HOST's own settings live in the nested [relay.serve] table (CS-O PR8) —
+    # parsed here too so `orion check` catches a bad key before the relay ever starts.
+    relay_serve = _parse_relay_serve(raw.get("relay"), path)
 
     # NOTE (CS-O PR5): the [bot] table is no longer parsed. The loader has no top-level
     # key allowlist, so a leftover [bot] stanza is accepted-but-ignored — the same
@@ -409,6 +417,7 @@ def load_config(path: Path) -> Config:
         relay=relay,
         display_timezone=display_timezone,
         projects=projects,
+        relay_serve=relay_serve,
     )
 
 
@@ -444,6 +453,294 @@ def load_relay_config(path: Path) -> RelayConfig:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Could not parse {path}: {exc}") from exc
     return _parse_relay(raw.get("relay"), path)
+
+
+# The keys [relay.serve] accepts — one per `relay-serve` setting flag, in the flag's
+# snake_case. `allow_legacy_admin` is deliberately ABSENT (see RelayServeSettings.Why) and
+# `config` is not a setting. Kept as an explicit tuple so the unknown-key error can name
+# exactly what is allowed, and so the CLI can iterate the same list when it builds its
+# flag overrides (one source of truth for "what is a relay-serve setting").
+RELAY_SERVE_KEYS: tuple[str, ...] = (
+    "host",
+    "port",
+    "db",
+    "view_token_env",
+    "require_view_auth",
+    "timezone",
+    "session_days",
+    "web_dir",
+    "showcase",
+    "showcase_projects",
+)
+
+
+@dataclass(frozen=True)
+class RelayServeSettings:
+    """The `relay-serve` host settings: what the flags used to be the only source of (CS-O PR8).
+
+    Args:
+        host: Interface to bind. Loopback by default — never world-reachable unless asked.
+        port: TCP port to bind (1–65535).
+        db: Path to the relay's own sqlite store. A relative value from [relay.serve]
+            resolves against the config file's directory (the state_db rule); a relative
+            flag value resolves against the working directory, as flags always have.
+        view_token_env: NAME of the .env variable holding the dashboard view secret (the
+            bootstrap-admin key + the non-loopback bind guard). A name, not a secret.
+        require_view_auth: Demand the view secret even on a loopback bind (reverse-proxy
+            topology, KI-18).
+        timezone: IANA zone the dashboard renders timestamps in. Validated at parse time.
+        session_days: Dashboard login session length in days (>= 1).
+        web_dir: Directory of the built SPA to serve single-host, or None for API-only.
+            Same relative-path rule as `db`.
+        showcase: Enable the public, no-login Showcase surface (default-deny).
+        showcase_projects: The curated Showcase allowlist as ordered (name, blurb) pairs.
+
+    Why:
+        These settings were flag-only because "the relay does not read orion.toml" — a
+        stance the CS-O scoping session deliberately reversed (decision 4): a relay host
+        should be able to keep its whole posture in one reviewed file instead of a long
+        ENTRYPOINT. The field defaults ARE the canonical defaults (the CLI help text quotes
+        them), so a default is written once. Precedence is flag > config > default,
+        realized by resolve_relay_serve_settings. `allow_legacy_admin` is NOT a field on
+        purpose: a bootstrap exception that lives on in a config file is the one an
+        operator forgets to turn off, so it stays a one-shot flag. Because the bind
+        address, showcase exposure, web root and DB path now come from orion.toml, that
+        file is operationally security-sensitive on a relay host — the docs say so.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 8787
+    db: Path = Path("orion-relay.sqlite3")
+    view_token_env: str = "ORION_RELAY_VIEW_TOKEN"
+    require_view_auth: bool = False
+    timezone: str = DEFAULT_DISPLAY_TIMEZONE
+    session_days: int = 30
+    web_dir: Path | None = None
+    showcase: bool = False
+    showcase_projects: tuple[tuple[str, str], ...] = ()
+
+
+def parse_showcase_projects(raw: list[str] | None) -> tuple[tuple[str, str], ...]:
+    """Parse `NAME[:blurb]` strings (flag values or a TOML array) into (name, blurb) pairs.
+
+    Args:
+        raw: The accumulated --showcase-project values, the [relay.serve]
+            showcase_projects array, or None when neither was given.
+
+    Returns:
+        Ordered (name, blurb) pairs preserving input order — the Showcase display order.
+        A value with no colon yields an empty blurb (the serializer then falls back to
+        the observed headline). Surrounding whitespace is stripped from both parts; an
+        entry whose name is empty after stripping is skipped.
+
+    Why:
+        The allowlist + its curated copy can come from the CLI OR from [relay.serve]
+        (CS-O PR8), and both must mean the same thing, so ONE parser turns the flat
+        "name:blurb" strings into the structured pairs ShowcaseConfig holds. Splitting on
+        the FIRST colon only lets a blurb itself contain colons (e.g. "orion: a tracker:
+        observed, not authored"). It lives here (not in cli.py) because config.py is the
+        module that must not depend on the CLI.
+    """
+    pairs: list[tuple[str, str]] = []
+    for value in raw or []:
+        name, sep, blurb = value.partition(":")
+        name = name.strip()
+        if not name:
+            continue
+        pairs.append((name, blurb.strip() if sep else ""))
+    return tuple(pairs)
+
+
+def _parse_relay_serve(raw_relay: object, config_path: Path) -> RelayServeSettings:
+    """Validate the optional [relay.serve] table into RelayServeSettings (CS-O PR8).
+
+    Args:
+        raw_relay: The raw value under the top-level `relay` key (the [relay.serve] table
+            is its `serve` sub-key), or None when [relay] is absent.
+        config_path: Path to the config; relative `db` / `web_dir` resolve against its
+            directory, and error messages name it.
+
+    Returns:
+        RelayServeSettings with every absent key at its default. An absent [relay] or
+        absent `serve` sub-table returns the defaults outright, so every existing config
+        (and a relay host with no config file at all) behaves exactly as before.
+
+    Raises:
+        ConfigError: on a non-table, an unknown key (the message lists the known keys,
+            and names why `allow_legacy_admin` is refused), a wrong type, an out-of-range
+            port / session_days, an unknown time zone, or an empty string.
+
+    Why:
+        Strict where it can afford to be: this section is NEW, so there are no legacy files
+        to tolerate, and a typo'd key that silently fell back to a default would be
+        exactly the "why is my relay on the wrong port" mystery the section exists to
+        remove. Validation happens HERE, at load, so `orion check` reports it and the
+        relay refuses to start on a bad file — never a half-applied posture. Booleans
+        must be real TOML booleans (the `enabled` idiom), and the time zone is
+        constructed (the _parse_display_timezone idiom) so "valid here" means "usable by
+        the renderer".
+    """
+    where = f"[relay.serve] in {config_path}"
+    defaults = RelayServeSettings()
+
+    if raw_relay is None:
+        return defaults
+    if not isinstance(raw_relay, dict):
+        raise ConfigError(f"[relay] in {config_path} must be a table.")
+    raw = raw_relay.get("serve")
+    if raw is None:
+        return defaults
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table.")
+
+    unknown = sorted(set(raw) - set(RELAY_SERVE_KEYS))
+    if unknown:
+        known = ", ".join(RELAY_SERVE_KEYS)
+        hint = ""
+        if "allow_legacy_admin" in unknown:
+            hint = (
+                " `allow_legacy_admin` is deliberately NOT a config setting: a bootstrap "
+                "exception that lives in a file is the one that gets forgotten. Pass "
+                "`relay-serve --allow-legacy-admin` for the one run that needs it."
+            )
+        raise ConfigError(
+            f"{where} has unknown key(s): {', '.join(unknown)}. Known keys: {known}.{hint}"
+        )
+
+    def _string(key: str, current: str) -> str:
+        value = raw.get(key, current)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{where} has invalid {key}={value!r}. Expected a non-empty string.")
+        return value.strip()
+
+    def _boolean(key: str, current: bool) -> bool:
+        value = raw.get(key, current)
+        if not isinstance(value, bool):
+            raise ConfigError(f"{where} has invalid {key}={value!r}. Expected true or false.")
+        return value
+
+    def _integer(key: str, current: int, low: int, high: int | None) -> int:
+        value = raw.get(key, current)
+        # bool is an int subclass; `port = true` must not slip through as 1.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"{where} has invalid {key}={value!r}. Expected an integer.")
+        if value < low or (high is not None and value > high):
+            bound = f"{low}–{high}" if high is not None else f">= {low}"
+            raise ConfigError(f"{where} has out-of-range {key}={value!r}. Expected {bound}.")
+        return value
+
+    def _path(key: str) -> Path | None:
+        # A relative path in the config resolves beside the config file, never against
+        # the working directory — the same rule state_db follows, so a relay launched
+        # from a launchd/systemd unit (cwd unknown) still finds its files.
+        value = raw.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{where} has invalid {key}={value!r}. Expected a non-empty path string.")
+        candidate = Path(value.strip()).expanduser()
+        if not candidate.is_absolute():
+            candidate = (config_path.parent / candidate).resolve()
+        return candidate
+
+    host = _string("host", defaults.host)
+    port = _integer("port", defaults.port, 1, 65535)
+    db = _path("db") or defaults.db
+    view_token_env = _string("view_token_env", defaults.view_token_env)
+    _validate_env_var_name(view_token_env, "view_token_env", where)
+    require_view_auth = _boolean("require_view_auth", defaults.require_view_auth)
+    timezone = _string("timezone", defaults.timezone)
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError(
+            f"{where} has invalid timezone={timezone!r} ({exc}). "
+            'Use an IANA zone name like "America/Los_Angeles" or "UTC".'
+        ) from exc
+    session_days = _integer("session_days", defaults.session_days, 1, None)
+    web_dir = _path("web_dir")
+    showcase = _boolean("showcase", defaults.showcase)
+    raw_projects = raw.get("showcase_projects", [])
+    if not isinstance(raw_projects, list) or not all(isinstance(p, str) for p in raw_projects):
+        raise ConfigError(
+            f"{where} has invalid showcase_projects={raw_projects!r}. Expected an array of "
+            '"NAME" or "NAME:blurb" strings, e.g. ["orion:A local-first tracker."].'
+        )
+
+    return RelayServeSettings(
+        host=host,
+        port=port,
+        db=db,
+        view_token_env=view_token_env,
+        require_view_auth=require_view_auth,
+        timezone=timezone,
+        session_days=session_days,
+        web_dir=web_dir,
+        showcase=showcase,
+        showcase_projects=parse_showcase_projects(raw_projects),
+    )
+
+
+def load_relay_serve_settings(path: Path) -> RelayServeSettings:
+    """Load ONLY the [relay.serve] table, tolerating a missing file and no projects.
+
+    Args:
+        path: Path to the TOML config file (the `relay-serve --config` value).
+
+    Returns:
+        The validated RelayServeSettings, or the defaults when the file does not exist or
+        has no [relay.serve] table.
+
+    Raises:
+        ConfigError: when an EXISTING file is unparseable or its [relay.serve] is invalid.
+
+    Why:
+        A relay host is not a producer: it may have no `[projects.<name>]` at all (the
+        full loader would reject it) and — the Fly image — no config file whatsoever, only
+        flags and .env. Both stay valid: no file means "no config layer", not an error,
+        which keeps the flags-only ENTRYPOINT working unchanged. A file that IS there but
+        is broken, however, fails loudly: silently ignoring a typo'd config on a relay host
+        would defeat the section's purpose.
+    """
+    if not path.exists():
+        return RelayServeSettings()
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Could not parse {path}: {exc}") from exc
+    return _parse_relay_serve(raw.get("relay"), path)
+
+
+def resolve_relay_serve_settings(
+    base: RelayServeSettings, overrides: dict[str, object]
+) -> RelayServeSettings:
+    """Apply command-line overrides on top of config-derived settings (flag > config > default).
+
+    Args:
+        base: Settings from [relay.serve] (already defaulted for absent keys).
+        overrides: The settings the command line ACTUALLY supplied, keyed by
+            RELAY_SERVE_KEYS names. An omitted flag must be absent from this dict, not
+            present as None or False — that is what makes omission detectable.
+
+    Returns:
+        A new RelayServeSettings with every supplied override applied.
+
+    Raises:
+        ValueError: on a key outside RELAY_SERVE_KEYS (a programming error at the call
+            site, not a user error).
+
+    Why:
+        The precedence contract in one pure function: the CLI never has to know which
+        value came from where, and a test can pin "explicit --no-showcase beats
+        `showcase = true`" without argparse in the loop. dataclasses.replace keeps it a
+        single statement, and the key check keeps a typo in the CLI's mapping from
+        silently becoming a no-op.
+    """
+    unknown = set(overrides) - set(RELAY_SERVE_KEYS)
+    if unknown:
+        raise ValueError(f"not relay-serve settings: {sorted(unknown)}")
+    return replace(base, **overrides)
 
 
 def _parse_display_timezone(raw: object, config_path: Path) -> str:

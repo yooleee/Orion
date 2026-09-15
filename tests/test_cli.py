@@ -2739,6 +2739,100 @@ def test_relay_serve_missing_config_file_runs_on_defaults(tmp_path, monkeypatch)
     assert (host, port, db_path) == ("127.0.0.1", 8787, Path("orion-relay.sqlite3"))
 
 
+# --- relay-serve --init-secrets (CS-O PR9) ---------------------------------------------
+
+
+def _init_secrets_env(monkeypatch):
+    """Keep the process env free of relay secrets so only the .env on disk is in play."""
+    monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
+    for _var in (
+        "ORION_RELAY_USER_PEPPER", "ORION_RELAY_SESSION_KEY", "ORION_RELAY_ADMIN_TOKEN",
+        "ORION_RELAY_VIEW_TOKEN",
+    ):
+        monkeypatch.delenv(_var, raising=False)
+
+
+def test_init_secrets_generates_the_three_fixed_names_and_never_serves(tmp_path, monkeypatch, capsys):
+    """`--init-secrets` writes the three always-needed secrets, names them, prints no value, exits 0.
+
+    Why this matters: the whole point is an explicit, never-silent bootstrap. It must not
+    start the relay, must not need the pepper to already exist (it IS what it makes), and
+    must report by name — a value on a terminal is a value in a scrollback.
+    """
+    _init_secrets_env(monkeypatch)
+    seen = _record_serve(monkeypatch)
+    config = tmp_path / "orion.toml"  # absent on purpose: a Fly-style dir with only .env
+    code = cli.main(["relay-serve", "--init-secrets", "--config", str(config)])
+    assert code == 0 and seen == []
+    out = capsys.readouterr().out
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    for name in ("ORION_RELAY_USER_PEPPER", "ORION_RELAY_SESSION_KEY", "ORION_RELAY_ADMIN_TOKEN"):
+        assert f"generated    {name}" in out
+        value = next(l for l in env_text.splitlines() if l.startswith(name + "=")).split("=", 1)[1]
+        assert value and value not in out  # never echoed
+    assert "skipped      ORION_RELAY_VIEW_TOKEN" in out and "loopback" in out
+    assert "ORION_RELAY_VIEW_TOKEN=" not in env_text
+
+
+def test_init_secrets_generates_the_view_token_when_the_bind_needs_it(tmp_path, monkeypatch, capsys):
+    """The view token is generated for a non-loopback --host, or require_view_auth from the file.
+
+    Why this matters (the decided answer for the hosted secret set): a relay that will bind
+    beyond loopback cannot start without the view token, so a bootstrap that skipped it would
+    leave the operator one refusal away. Both routes to "needed" are pinned — the flag and
+    the [relay.serve] key — using the config-aware variable name.
+    """
+    _init_secrets_env(monkeypatch)
+    _record_serve(monkeypatch)
+    hosted = tmp_path / "hosted"
+    hosted.mkdir()
+    assert cli.main(
+        ["relay-serve", "--init-secrets", "--host", "0.0.0.0", "--config", str(hosted / "orion.toml")]
+    ) == 0
+    assert "generated    ORION_RELAY_VIEW_TOKEN" in capsys.readouterr().out
+    assert "ORION_RELAY_VIEW_TOKEN=" in (hosted / ".env").read_text(encoding="utf-8")
+
+    proxied = tmp_path / "proxied"
+    proxied.mkdir()
+    (proxied / "orion.toml").write_text(
+        '[relay.serve]\nrequire_view_auth = true\nview_token_env = "MY_VIEW"\n', encoding="utf-8"
+    )
+    assert cli.main(["relay-serve", "--init-secrets", "--config", str(proxied / "orion.toml")]) == 0
+    assert "generated    MY_VIEW" in capsys.readouterr().out
+    assert "MY_VIEW=" in (proxied / ".env").read_text(encoding="utf-8")
+
+
+def test_init_secrets_second_run_changes_nothing_and_says_so(tmp_path, monkeypatch, capsys):
+    """Re-running reports every name as already set, leaves the file byte-identical, exits 0.
+
+    Why this matters: safe by habit. A bootstrap that could be run twice with different
+    results would be a rotation tool in disguise — this one is not.
+    """
+    _init_secrets_env(monkeypatch)
+    _record_serve(monkeypatch)
+    config = tmp_path / "orion.toml"
+    assert cli.main(["relay-serve", "--init-secrets", "--config", str(config)]) == 0
+    before = (tmp_path / ".env").read_bytes()
+    capsys.readouterr()
+    assert cli.main(["relay-serve", "--init-secrets", "--config", str(config)]) == 0
+    out = capsys.readouterr().out
+    assert out.count("  already set  ") == 3 and "Nothing to do" in out
+    assert (tmp_path / ".env").read_bytes() == before
+
+
+def test_init_secrets_warns_on_example_placeholders(tmp_path, monkeypatch, capsys):
+    """A copied .env.example value is called out as a placeholder, not silently accepted."""
+    _init_secrets_env(monkeypatch)
+    _record_serve(monkeypatch)
+    (tmp_path / ".env").write_text(
+        "ORION_RELAY_USER_PEPPER=replace-with-a-long-random-secret\n", encoding="utf-8"
+    )
+    assert cli.main(["relay-serve", "--init-secrets", "--config", str(tmp_path / "orion.toml")]) == 0
+    out = capsys.readouterr().out
+    assert "ORION_RELAY_USER_PEPPER  ⚠ looks like a .env.example placeholder" in out
+    assert "replace-with-a-long-random-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
 # --- baseline + ORION_CONFIG (unit 4 friction fixes) --------------------------
 
 

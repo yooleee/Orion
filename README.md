@@ -60,6 +60,7 @@ python -m pip install -e .
 
 # 4. Provide secrets (gitignored — never committed)
 cp .env.example .env            # then fill in ANTHROPIC_API_KEY and your webhook URL(s)
+                                # (a relay host generates its own secrets: see the dashboard section)
 
 # 5. Configure which projects to track
 cp orion.toml.example orion.toml   # then edit repo_path and recipients
@@ -191,6 +192,17 @@ holds its webhook URL, and the URL lives only in `.env`.
 > Windows) — or as a single-quoted *literal* string — `repo_path = 'C:\Users\you\orion'`.
 > A double-quoted `"C:\Users\..."` will be misread because `\U` starts an escape.
 
+### Where the config lives (`--config` / `ORION_CONFIG`)
+
+Every command reads `orion.toml` from the working directory by default and takes `--config PATH`
+to point elsewhere. Set **`ORION_CONFIG`** once in your environment (`export
+ORION_CONFIG=/abs/path/to/orion.toml`, or the equivalent in your shell profile, launchd plist, or
+Task Scheduler action) and that path becomes the default everywhere, so git hooks, schedulers, the
+Claude Code session skill, and your own shell need no `--config`. A `--config` flag still wins for
+that run. Secrets are found beside whichever config is in use (its sibling `.env`), so pointing at
+the config is enough to find both. `ORION_CONFIG` must be a real environment variable, not a line
+in `.env`, because the config path is needed before `.env` is located.
+
 ### Adding a project (`add-project`)
 
 You can edit `orion.toml` by hand (above), or let Orion scaffold the entry for you. From inside
@@ -294,12 +306,18 @@ Orion can **also** push each report to a small local **relay** that stores it an
 is unchanged. Reports themselves are read-only; reviewers can post to a per-project discussion thread.
 It is **opt-in and additive**: with no `[relay]` table in your config, nothing changes.
 
-Enable it by adding a `[relay]` table (an ingest URL + the name of an `.env` variable holding a
-shared Bearer token), then run the relay in its own terminal:
+Enable it by adding a `[relay]` table (an ingest URL + the name of an `.env` variable holding this
+machine's contributor key, minted by `relay-user add`), generate the relay's own secrets, then run
+the relay in its own terminal:
 
 ```bash
+orion relay-serve --init-secrets  # writes the missing relay secrets into .env, by name; never prints a value
 orion relay-serve                 # serves ingest + dashboard at http://127.0.0.1:8787
 ```
+
+`--init-secrets` never overwrites a value that is already set and leaves the rest of `.env`
+untouched, so it is safe to re-run. The relay's own settings can also live in `orion.toml` under
+`[relay.serve]` (a flag still wins for that run).
 
 A subsequent `orion report` / `orion intake` delivers as usual **and** pushes the report to the
 relay, which you can browse at `http://127.0.0.1:8787` (projects → history → one report). The
@@ -343,10 +361,11 @@ Its reports stay attributed to the agent and are badged "operated by <you>", so 
 lost — while its checklist work folds into your contributor card, because an agent is doing your
 work rather than proposing its own.
 
-This needs three extra secrets in the relay's `.env` (`ORION_RELAY_SESSION_KEY`,
-`ORION_RELAY_USER_PEPPER`, `ORION_RELAY_ADMIN_TOKEN`), an `admin_token_env_var` in the `[relay]`
-table, and the `relay` extra installed on the relay host (`pip install '.[relay]'`) for password
-hashing. For how login, sessions, roles, scope, and visibility work (and the security model behind
+This needs the relay's secrets in its `.env` (`ORION_RELAY_USER_PEPPER`, `ORION_RELAY_SESSION_KEY`,
+`ORION_RELAY_ADMIN_TOKEN`, which `orion relay-serve --init-secrets` generates for you, plus
+`ORION_RELAY_VIEW_TOKEN` on any relay that binds beyond loopback), an `admin_token_env_var` in the
+`[relay]` table, and the `relay` extra installed on the relay host (`pip install '.[relay]'`) for
+password hashing. For how login, sessions, roles, scope, and visibility work (and the security model behind
 them), see [**docs/dashboard-auth.md**](docs/dashboard-auth.md); for deploying it, see
 [**docs/deployment.md**](docs/deployment.md).
 

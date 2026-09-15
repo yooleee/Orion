@@ -109,7 +109,7 @@ from orion.report import (
     serialize_checklist_item,
 )
 from orion.scaffold import parse_recipient_spec, render_project_stanza
-from orion.secrets import SecretsError, get_required, load_secrets
+from orion.secrets import SecretsError, bootstrap_env_secrets, get_required, load_secrets
 from orion.state import (
     get_cache,
     get_discussion_watermark,
@@ -400,6 +400,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="orion",
         description="Turn local git activity into supervisor-ready progress updates.",
+        epilog=(
+            "Every command takes --config PATH (default: orion.toml in the working "
+            "directory). Set ORION_CONFIG=/abs/path/orion.toml once in your environment to "
+            "make that the default everywhere — hooks, schedulers and the session skill "
+            "then need no --config; a --config flag still wins for that run."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -815,6 +821,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     relay_parser.add_argument(
+        "--init-secrets",
+        action="store_true",
+        help=(
+            "Generate any MISSING relay secrets into the .env beside --config, then exit "
+            "without serving. Always: ORION_RELAY_USER_PEPPER, ORION_RELAY_SESSION_KEY, "
+            "ORION_RELAY_ADMIN_TOKEN; the view token too when the resolved settings bind "
+            "beyond loopback or set --require-view-auth. Never overwrites a non-empty value, "
+            "never prints a value, keeps the rest of the file byte-for-byte."
+        ),
+    )
+    relay_parser.add_argument(
         "--web-dir",
         default=argparse.SUPPRESS,
         help=(
@@ -861,8 +878,9 @@ def main(argv: list[str] | None = None) -> int:
         default=default_config,
         help=(
             f"Path to orion.toml (default: {default_config}; or set $ORION_CONFIG). Locates "
-            "the sibling .env that holds the relay's secrets and the optional [relay.serve] "
-            "settings table; a missing file simply means flags + defaults."
+            "the sibling .env that holds the relay's secrets (and that --init-secrets writes) "
+            "and the optional [relay.serve] settings table; a missing file simply means "
+            "flags + defaults."
         ),
     )
     # `relay-user` is a command GROUP with add/list/deactivate/... subcommands — the admin-side
@@ -1211,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
             _relay_serve_overrides(args),
             Path(args.config),
             allow_legacy_admin=args.allow_legacy_admin,
+            init_secrets=args.init_secrets,
         )
     if args.command == "relay-user":
         if args.relay_user_command == "add":
@@ -4172,10 +4191,80 @@ def _relay_serve_overrides(args: argparse.Namespace) -> dict[str, object]:
     return overrides
 
 
+def _init_relay_secrets(env_path: Path, settings: RelayServeSettings) -> int:
+    """Generate the relay's missing secrets into `env_path` and report by name (CS-O PR9).
+
+    Args:
+        env_path: The .env to update (beside the config the caller was given).
+        settings: The resolved relay-serve settings; they decide whether the view token
+            is part of the required set (see Why).
+
+    Returns:
+        Exit code 0 after reporting (also when nothing was missing); 1 if the file could
+        not be written (the OSError message is printed, never a value).
+
+    Why:
+        The three fixed-name secrets are needed by EVERY relay (the pepper unconditionally,
+        the session key and admin token by every gated or provisioning relay). The VIEW
+        token is the decided exception: it is generated only when these settings would
+        actually need it — a non-loopback bind or --require-view-auth, the same predicate
+        the bind guard applies — because generating it for a plain loopback dev relay
+        would silently GATE that dashboard (the bootstrap-admin login kicks in the moment
+        the token exists), a behavior change nobody asked for; while skipping it silently
+        on a hosted relay would leave the secret set incomplete. So it is generated when
+        needed and otherwise SKIPPED WITH THE REASON printed. Output names variables and
+        outcomes only — a generated value is never echoed, which is why `fly secrets
+        import < .env` (not copy-paste from a terminal) is the documented hosted path.
+    """
+    # The predicate lives in the relay package (outside the installed distribution);
+    # _load_relay_serve puts the repo root on sys.path (or raises the clear "no relay
+    # package" ConfigError), exactly as the serving path does.
+    _load_relay_serve()
+    from relay.server import _is_loopback
+
+    names = ["ORION_RELAY_USER_PEPPER", "ORION_RELAY_SESSION_KEY", "ORION_RELAY_ADMIN_TOKEN"]
+    view_needed = settings.require_view_auth or not _is_loopback(settings.host)
+    if view_needed:
+        names.append(settings.view_token_env)
+    try:
+        report = bootstrap_env_secrets(env_path, names)
+    except OSError as exc:
+        print(f"Error: could not write {env_path}: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Relay secrets in {env_path}:")
+    for name in names:
+        if name in report.generated:
+            print(f"  generated    {name}")
+        elif name in report.filled:
+            print(f"  filled       {name}  (was empty)")
+        elif name in report.placeholders:
+            print(
+                f"  already set  {name}  ⚠ looks like a .env.example placeholder — "
+                "replace it with a real secret (values are never overwritten)"
+            )
+        else:
+            print(f"  already set  {name}")
+    if not view_needed:
+        print(
+            f"  skipped      {settings.view_token_env}  (loopback relay: the dashboard stays "
+            "open; re-run with --host <non-loopback> or --require-view-auth to generate it, "
+            "or set it yourself)"
+        )
+    if not report.generated and not report.filled:
+        print("Nothing to do: every required secret was already set.")
+    print(
+        "Hosted relay? A local .env does not populate Fly — run this against a relay-only "
+        "directory and `fly secrets import < .env` (see docs/deployment.md)."
+    )
+    return 0
+
+
 def cmd_relay_serve(
     overrides: dict[str, object],
     config_path: Path,
     allow_legacy_admin: bool = False,
+    init_secrets: bool = False,
 ) -> int:
     """Run the local reference relay: ingest endpoint + read-only dashboard.
 
@@ -4188,12 +4277,15 @@ def cmd_relay_serve(
             config file at all).
         allow_legacy_admin: Keep the shared view key usable as an admin login after users
             exist. Flag-only by design: deliberately not part of the settings layer.
+        init_secrets: `--init-secrets` (CS-O PR9): generate the missing relay secrets into
+            the sibling .env, report by NAME, and return WITHOUT serving. Runs before the
+            pepper requirement below (the pepper may be exactly what it generates).
 
     Returns:
-        Exit code: 0 on a clean shutdown (Ctrl-C); 1 on a setup error (an invalid
-        [relay.serve] table, a missing user pepper, an invalid timezone or web dir, the
-        relay package can't be imported, or the fail-closed guard refuses a non-loopback
-        bind without a view secret).
+        Exit code: 0 on a clean shutdown (Ctrl-C) or after --init-secrets; 1 on a setup
+        error (an invalid [relay.serve] table, a missing user pepper, an invalid timezone
+        or web dir, the relay package can't be imported, the fail-closed guard refuses a
+        non-loopback bind without a view secret, or the .env could not be written).
 
     Why:
         This is the thin CLI adapter over relay/server.py — it resolves the settings
@@ -4220,6 +4312,8 @@ def cmd_relay_serve(
         settings = resolve_relay_serve_settings(
             load_relay_serve_settings(config_path), overrides
         )
+        if init_secrets:
+            return _init_relay_secrets(config_path.parent / ".env", settings)
         # Optional: empty/unset -> None. The fail-closed guard inside serve() refuses a
         # non-loopback bind when it is None; on loopback, None means "reads open".
         view_token = os.environ.get(settings.view_token_env, "").strip() or None

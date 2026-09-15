@@ -16,11 +16,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT_SCRIPT = REPO_ROOT / "scripts" / "help_snapshot.py"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "cli_help_snapshot.txt"
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13),
+    reason=(
+        "argparse's private HelpFormatter changed its wrapping/invocation layout in 3.13 "
+        "(choices lists, `--opt, -o VALUE`), so the byte-diff pin holds only on the "
+        "interpreters the fixture was rendered for (3.11/3.12 — every per-PR CI run and "
+        "the local build). Surface changes are still caught there. See KI-52."
+    ),
+)
 def test_help_tree_matches_the_committed_snapshot():
     """The full `orion --help` tree is byte-identical to the committed fixture.
 

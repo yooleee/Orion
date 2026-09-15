@@ -317,7 +317,7 @@ def use_summary(monkeypatch, body: str = "Made progress.") -> None:
         so a future seam change touches conftest, not a dozen tests.
     """
     monkeypatch.setattr(
-        cli, "_build_summarizer", lambda cfg, secret_getter: _FakeSummarizer(body)
+        cli.report, "_build_summarizer", lambda cfg, secret_getter: _FakeSummarizer(body)
     )
 
 
@@ -350,7 +350,7 @@ def env_and_mocks(monkeypatch):
     # Record the delivered text (extracted from the payload dict) keyed to its
     # webhook, so tests assert on the message string as before.
     monkeypatch.setattr(
-        cli, "discord_send", lambda payload, url: sent.append((_payload_text(payload), url))
+        cli.report, "discord_send", lambda payload, url: sent.append((_payload_text(payload), url))
     )
 
     return {"sent": sent, "monkeypatch": monkeypatch}

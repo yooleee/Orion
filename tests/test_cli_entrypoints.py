@@ -49,6 +49,15 @@ _PATCHED_NAMES = (
     "post_discussion",
     "discord_send",
     "_build_summarizer",
+    "push_checklist",
+    "push_disciplines",
+    "relay_revoke_user",
+    "relay_add_user_key",
+    "relay_list_user_keys",
+    "relay_revoke_user_key",
+    "relay_set_user_role",
+    "relay_rename_user",
+    "relay_delete_user",
 )
 _CALLED_NAMES = (
     "main",

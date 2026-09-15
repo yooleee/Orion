@@ -14,6 +14,79 @@ This file looks **backward** (what was built). For the forward-looking design an
 see `plans/orion-plan.md`; for open issues and cross-phase concerns,
 see [`docs/known-issues.md`](docs/known-issues.md).
 
+## CS-O — command-surface overhaul, Session 2 (2026-09-02 → 2026-09-15)
+
+The second and final build session of the command-surface overhaul
+(`docs/command-surface-overhaul-build-kickoff.md`): four PRs (#171–#174), each plan-first,
+each verified against a real local relay, PR7 with an independent verifier pass. The arc's
+end state holds: 14 top-level commands, the auth retirement complete, setup simplified at
+both tiers, and the CLI split into a package with zero behavior change. PR7 and PR8 were
+deployed together (git tag `v30`, Fly release v32); the retired secret was removed from the
+live relay afterwards (Fly release v33) with a contributor-key push as the canary.
+
+### Added
+
+- **`[relay.serve]` in `orion.toml` — `relay-serve` is config-file-first (PR8 #172).** Every
+  `relay-serve` setting flag can live in the relay host's config, with precedence **flag >
+  file > default**. Flags default to `argparse.SUPPRESS` so an omitted flag is *absent*, not
+  "given as default"; the booleans gained explicit negatives (`--no-showcase`,
+  `--no-require-view-auth`); `--showcase-project` replaces the file's list rather than
+  appending; relative `db` / `web_dir` resolve beside the config; validation is strict with
+  the offending key named, and `orion check` reports the same errors. A missing config file
+  means defaults, so the Fly `ENTRYPOINT` stays flags-only. This deliberately reversed the
+  recorded "the relay does not read `orion.toml`" stance (scoping decision 4); the
+  consequence — `orion.toml` is operationally security-sensitive on a relay host — is
+  documented. `allow_legacy_admin` is refused as a config key on purpose.
+- **`relay-serve --init-secrets` (PR9 #173).** Generates the missing relay secrets into the
+  `.env` beside `--config`, reports each by name, never prints a value, and exits without
+  serving. The pepper, session key and admin token always; the view token only when the
+  resolved bind needs it (non-loopback host or `--require-view-auth`), otherwise skipped
+  with the reason. A set value is never overwritten, an empty `NAME=` is filled in place,
+  the rest of the file is preserved byte-for-byte (CRLF included), the write is atomic and
+  owner-only on POSIX, and copied `.env.example` placeholders are flagged. The hosted path
+  is `fly secrets import < .env` from a relay-only directory.
+- **`ORION_CONFIG` documented (PR9)** in the README, the top-level `--help`, and the
+  scheduling doc — it was real since the friction-fix unit but undocumented.
+- **Pins for the CLI split (PR10 #174):** `tests/test_cli_entrypoints.py` proves the `orion`
+  console script, `python -m orion` and `python -m orion.cli` behave identically, that every
+  `orion.cli` name the suite reaches stays importable, and that importing the CLI never
+  pulls in the relay package or `argon2`.
+
+### Changed
+
+- **The shared ingest token is retired end to end (PR7 #171).** No relay-side ingest secret
+  remains: `--token-env` and `--disable-legacy-ingest` are gone, `AuthConfig` lost its flag,
+  the anonymous verifier branch and the `legacy` principal are gone, and `RelayServer` /
+  `create_server` / `serve` no longer take a token. Every push authenticates with a
+  contributor key, so **`ORION_RELAY_USER_PEPPER` is now required at `relay-serve` startup**
+  (a pepper-less relay could authenticate no push and would 401 every cron silently).
+  `ORION_RELAY_TOKEN` survives only as the producer-side variable holding each machine's
+  key. The recovery note (a deactivated account or revoked last key stops that machine with
+  no fallback; recover through the admin credential) is in `docs/deployment.md`.
+  Verified live: the secret was unset on Fly and the relay restarted and accepted a real
+  contributor-key push. `discussions reply --as` is now inert (the relay always attributes
+  from the key); it stays as a flag, a follow-up candidate.
+- **`src/orion/cli.py` became the `src/orion/cli/` package (PR10 #174).** Cohesive domains
+  — `_parser` (the whole surface as `build_parser()`), `report`, `push`, `intake`,
+  `project_setup`, `inspect`, `discussions`, `relay_serve`, `relay_admin`, plus `_console`,
+  `_status` and `_checklist` as shared parts — every function moved verbatim, no import
+  cycles, the `--help` snapshot byte-identical. The patch-seam rule is explicit: tests patch
+  the submodule that calls a name (`cli.report.relay_push`), and the package re-exports
+  every name the suite reaches. `click` stays declined; its revisit trigger is re-recorded.
+
+### Removed
+
+- The legacy shared-token ingest path, its two `relay-serve` flags, the `"developer"`
+  fallback label on the machine discussion write, and `ORION_RELAY_TOKEN` as a relay-side
+  secret (Dockerfile, `fly.toml`, docs).
+
+### Fixed
+
+- **KI-52 (new, mitigated):** the weekly full-matrix CI failed on Python 3.13 only because
+  argparse's private help formatting changed there; the snapshot test now skips on ≥ 3.13
+  with the reason and a revisit trigger, the fixture untouched.
+- README still described the relay push as "a shared Bearer token" after PR7; corrected.
+
 ## CS-O — command-surface overhaul, Session 1 (2026-08-21)
 
 The first of two build sessions for the command-surface overhaul

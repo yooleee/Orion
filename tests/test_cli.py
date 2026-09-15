@@ -214,7 +214,7 @@ def test_report_blob_carries_twice_redacted_sections(tmp_path, env_and_mocks):
         captured["blob"] = blob
         return real_compose(blob, channel, display_timezone)
 
-    mp.setattr(cli, "compose", _capturing_compose)
+    mp.setattr(cli.report, "compose", _capturing_compose)
 
     _answer(mp, "y")
     code = cli.main(["report", "demo", "--config", str(toml)])
@@ -265,7 +265,7 @@ def test_structured_only_run_never_calls_the_llm(tmp_path, env_and_mocks):
     def _boom(cfg, secret_getter):
         raise AssertionError("the summarizer must not be built on the structured lane")
 
-    mp.setattr(cli, "_build_summarizer", _boom)
+    mp.setattr(cli.report, "_build_summarizer", _boom)
 
     _answer(mp, "y")
     code = cli.main(["report", "demo", "--config", str(toml)])
@@ -353,7 +353,7 @@ def test_routes_each_recipient_to_its_channel(tmp_path, env_and_mocks):
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     slack_sent: list[tuple[str, str]] = []
     mp.setattr(
-        cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
+        cli.report, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
     )
     use_summary(mp, "Did the work.")
 
@@ -385,7 +385,7 @@ def test_dual_channel_preview_shows_both_blocks(tmp_path, env_and_mocks, capsys)
     repo = _make_repo(tmp_path)
     toml = _write_dual_channel_config(tmp_path, repo)
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
-    mp.setattr(cli, "slack_send", lambda payload, url: None)
+    mp.setattr(cli.report, "slack_send", lambda payload, url: None)
     use_summary(mp, "Did the work.")
 
     _answer(mp, "y")
@@ -413,7 +413,7 @@ def test_decline_aborts_every_channel(tmp_path, env_and_mocks):
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     slack_sent: list[tuple[str, str]] = []
     mp.setattr(
-        cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
+        cli.report, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
     )
     use_summary(mp, "Did the work.")
 
@@ -439,7 +439,7 @@ def test_one_channel_failure_does_not_block_the_other(tmp_path, env_and_mocks):
     def slack_boom(message, url):
         raise DeliveryError("slack webhook down")
 
-    mp.setattr(cli, "slack_send", slack_boom)
+    mp.setattr(cli.report, "slack_send", slack_boom)
     use_summary(mp, "Did the work.")
 
     _answer(mp, "y")
@@ -624,15 +624,20 @@ def _write_relay_config(tmp_path, repo, *, enabled=True, display_timezone=None):
 
 
 def _capture_relay(mp):
-    """Monkeypatch cli.relay_push to record (blob_json, url, token) calls.
+    """Monkeypatch relay_push to record (blob_json, url, token) calls.
 
     Why:
         Mirrors how env_and_mocks captures discord_send — replace the real sender
         with an in-memory recorder so the test asserts on what would have been
-        pushed without any network call.
+        pushed without any network call. `relay_push` is bound in TWO command modules
+        since the CS-O PR10 split — report.py (the multi-lane delivery core) and
+        intake.py (the relay-only recovery lane) — so both bindings are patched: the
+        recorder then sees whichever lane the test drives.
     """
     pushes: list[tuple[str, str, str]] = []
-    mp.setattr(cli, "relay_push", lambda blob_json, url, token: pushes.append((blob_json, url, token)))
+    recorder = lambda blob_json, url, token: pushes.append((blob_json, url, token))
+    mp.setattr(cli.report, "relay_push", recorder)
+    mp.setattr(cli.intake, "relay_push", recorder)
     return pushes
 
 
@@ -741,7 +746,7 @@ def test_relay_does_not_fire_when_no_delivery_succeeds(tmp_path, env_and_mocks):
     # Make the only recipient's delivery fail, so sent_to ends up empty.
     def _fail(payload, url):
         raise DeliveryError("webhook down")
-    mp.setattr(cli, "discord_send", _fail)
+    mp.setattr(cli.report, "discord_send", _fail)
     repo = _make_repo(tmp_path)
     toml = _write_relay_config(tmp_path, repo)
 
@@ -836,7 +841,7 @@ def _capture_disciplines_pushes(mp):
     """
     pushes = []
     mp.setattr(
-        cli,
+        cli.push,
         "push_disciplines",
         lambda url, project, cards, token: pushes.append((url, project, cards, token)),
     )
@@ -918,7 +923,7 @@ def test_disciplines_push_refuses_when_every_extraction_fails(tmp_path, env_and_
         def extract(self, text, *, source):
             raise ExtractError("simulated API failure")
 
-    mp.setattr(cli, "_build_extractor", lambda cfg, getter: _FailingExtractor())
+    mp.setattr(cli.push, "_build_extractor", lambda cfg, getter: _FailingExtractor())
 
     code = cli.main(["disciplines-push", "demo", "--config", str(toml)])
 
@@ -946,7 +951,7 @@ def test_disciplines_push_clear_empties_the_section_deliberately(
     def _explode(cfg, getter):
         raise AssertionError("--clear must not build an extractor")
 
-    mp.setattr(cli, "_build_extractor", _explode)
+    mp.setattr(cli.push, "_build_extractor", _explode)
 
     code = cli.main(["disciplines-push", "demo", "--config", str(toml), "--clear"])
 
@@ -977,7 +982,7 @@ def _capture_checklist_pushes(mp):
     """
     pushes = []
     mp.setattr(
-        cli,
+        cli.push,
         "push_checklist",
         lambda url, project, checklist, token, *, kind="project", due_soon_days=None, clear_due_soon_days=False, about=None, clear_about=False: pushes.append(
             (url, project, checklist, token, kind, due_soon_days, clear_due_soon_days, about, clear_about)
@@ -1216,7 +1221,7 @@ def test_checklist_push_failed_delivery_records_nothing(tmp_path, env_and_mocks)
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
     # The push transport raises — a down relay / bad token surfaces exactly this.
     mp.setattr(
-        cli,
+        cli.push,
         "push_checklist",
         lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
     )
@@ -1468,7 +1473,7 @@ def test_checklist_push_all_is_fail_soft_and_exits_1_on_failure(tmp_path, env_an
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
     # Every push fails — a down relay / bad token surfaces exactly this.
     mp.setattr(
-        cli,
+        cli.push,
         "push_checklist",
         lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
     )
@@ -1985,7 +1990,7 @@ def test_relay_error_is_non_fatal(tmp_path, env_and_mocks):
     mp = env_and_mocks["monkeypatch"]
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
     # The relay sender raises — exactly what a down relay / bad token surfaces as.
-    mp.setattr(cli, "relay_push", lambda blob_json, url, token: (_ for _ in ()).throw(DeliveryError("relay down")))
+    mp.setattr(cli.report, "relay_push", lambda blob_json, url, token: (_ for _ in ()).throw(DeliveryError("relay down")))
     repo = _make_repo(tmp_path)
     toml = _write_relay_config(tmp_path, repo)
 
@@ -2182,7 +2187,7 @@ def test_intake_relay_only_push_failure_exits_1(tmp_path, env_and_mocks):
     mp = env_and_mocks["monkeypatch"]
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
     mp.setattr(
-        cli, "relay_push",
+        cli.report, "relay_push",
         lambda *a, **k: (_ for _ in ()).throw(DeliveryError("relay down")),
     )
     body = tmp_path / "r.md"
@@ -2323,7 +2328,7 @@ def test_relay_serve_dispatches_with_resolved_args(tmp_path, monkeypatch):
     # the session config now rides in on (**k); a fixed-arity stub would break the
     # moment a new positional or keyword is added.
     monkeypatch.setattr(
-        cli,
+        cli.relay_serve,
         "_load_relay_serve",
         lambda: (
             lambda host, port, db_path, view_token, require_view_auth, display_tz, **k: calls.append(
@@ -2369,7 +2374,7 @@ def test_relay_serve_require_view_auth_flag_threads(tmp_path, monkeypatch):
     monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     seen = []
     # **k absorbs the auth= kwarg the session config now rides in on.
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(a)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(a)))
 
     code = cli.main(
         [
@@ -2398,7 +2403,7 @@ def test_relay_serve_showcase_flags_build_a_showcase_config(tmp_path, monkeypatc
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     seen = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
 
     code = cli.main(
         [
@@ -2427,7 +2432,7 @@ def test_relay_serve_showcase_defaults_off(tmp_path, monkeypatch):
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     seen = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(k)))
 
     code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
     assert code == 0
@@ -2448,7 +2453,7 @@ def test_relay_serve_guard_error_is_a_clean_exit(tmp_path, monkeypatch):
     def _raise_guard(*_a, **_k):  # **_k absorbs the auth= kwarg
         raise ValueError("refusing to bind non-loopback host '0.0.0.0' ...")
 
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: _raise_guard)
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: _raise_guard)
     code = cli.main(
         ["relay-serve", "--host", "0.0.0.0", "--config", str(tmp_path / "orion.toml")]
     )
@@ -2470,7 +2475,7 @@ def test_relay_serve_without_session_secrets_when_gated_is_clean_error(tmp_path,
     monkeypatch.setenv("ORION_RELAY_VIEW_TOKEN", "view-xyz")  # gates the dashboard
     monkeypatch.delenv("ORION_RELAY_SESSION_KEY", raising=False)
     served = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
 
     code = cli.main(
         ["relay-serve", "--host", "127.0.0.1", "--config", str(tmp_path / "orion.toml")]
@@ -2500,7 +2505,7 @@ def test_relay_serve_missing_user_pepper_is_clean_error_and_never_serves(
     ):
         monkeypatch.delenv(_var, raising=False)
     served = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: served.append(a)))
 
     code = cli.main(["relay-serve", "--config", str(tmp_path / "orion.toml")])
     assert code == 1
@@ -2533,7 +2538,7 @@ def test_relay_serve_timezone_flag_threads_a_zoneinfo(tmp_path, monkeypatch):
         monkeypatch.delenv(_var, raising=False)
     seen = []
     # **k absorbs the auth= kwarg; display_tz stays the last positional arg.
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(a)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: seen.append(a)))
 
     code = cli.main(
         [
@@ -2560,7 +2565,7 @@ def test_relay_serve_invalid_timezone_is_a_clean_error_and_never_serves(tmp_path
     monkeypatch.setattr("orion.secrets.load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("ORION_RELAY_USER_PEPPER", "user-pepper")
     served = []
-    monkeypatch.setattr(cli, "_load_relay_serve", lambda: (lambda *a: served.append(a)))
+    monkeypatch.setattr(cli.relay_serve, "_load_relay_serve", lambda: (lambda *a: served.append(a)))
 
     code = cli.main(
         [
@@ -2592,7 +2597,7 @@ def _record_serve(monkeypatch):
     """Patch _load_relay_serve with a recorder; return the list it appends (args, kwargs) to."""
     seen = []
     monkeypatch.setattr(
-        cli, "_load_relay_serve", lambda: (lambda *a, **k: seen.append((a, k)))
+        cli.relay_serve, "_load_relay_serve", lambda: (lambda *a, **k: seen.append((a, k)))
     )
     return seen
 
@@ -2880,7 +2885,7 @@ def _capture_pull_discussions(mp, response):
         calls.append((project, since_id))
         return response
 
-    mp.setattr(cli, "pull_discussions", fake_pull)
+    mp.setattr(cli.discussions, "pull_discussions", fake_pull)
     return calls
 
 
@@ -2892,7 +2897,7 @@ def _capture_post_discussion(mp, result=None):
         calls.append((project, body, author))
         return result if result is not None else {"id": 1}
 
-    mp.setattr(cli, "post_discussion", fake_post)
+    mp.setattr(cli.discussions, "post_discussion", fake_post)
     return calls
 
 
@@ -3160,7 +3165,7 @@ def test_relay_user_add_provisions_and_prints_key_once(tmp_path, monkeypatch, ca
         calls.append((url, token, name, role, projects))
         return {"id": 1, "name": name, "role": role, "projects": projects, "key": "RAWKEY-123"}
 
-    monkeypatch.setattr(cli, "relay_create_user", fake_create)
+    monkeypatch.setattr(cli.relay_admin, "relay_create_user", fake_create)
 
     code = cli.main(
         ["relay-user", "add", "alice", "--role", "viewer", "--project", "demo",
@@ -3187,7 +3192,7 @@ def test_relay_user_add_threads_multiple_projects(tmp_path, monkeypatch, capsys)
 
     seen = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_create_user",
         lambda url, token, name, role, projects, **k: seen.append(projects)
         or {"name": name, "role": role, "projects": projects, "key": "K"},
@@ -3213,7 +3218,7 @@ def test_relay_user_add_disabled_relay_is_clean_error(tmp_path, monkeypatch):
     toml = _write_relay_admin_config(tmp_path, repo, enabled=False)
 
     made = []
-    monkeypatch.setattr(cli, "relay_create_user", lambda *a, **k: made.append(a) or {})
+    monkeypatch.setattr(cli.relay_admin, "relay_create_user", lambda *a, **k: made.append(a) or {})
     code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
     assert code == 1
     assert made == []  # never attempted a request
@@ -3232,7 +3237,7 @@ def test_relay_user_add_without_admin_token_env_var_is_clean_error(tmp_path, mon
     toml = _write_relay_admin_config(tmp_path, repo, with_admin=False)
 
     made = []
-    monkeypatch.setattr(cli, "relay_create_user", lambda *a, **k: made.append(a) or {})
+    monkeypatch.setattr(cli.relay_admin, "relay_create_user", lambda *a, **k: made.append(a) or {})
     code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
     assert code == 1
     assert made == []
@@ -3250,7 +3255,7 @@ def test_relay_user_add_missing_admin_secret_is_clean_error(tmp_path, monkeypatc
     toml = _write_relay_admin_config(tmp_path, repo)
 
     made = []
-    monkeypatch.setattr(cli, "relay_create_user", lambda *a, **k: made.append(a) or {})
+    monkeypatch.setattr(cli.relay_admin, "relay_create_user", lambda *a, **k: made.append(a) or {})
     code = cli.main(["relay-user", "add", "alice", "--config", str(toml)])
     assert code == 1
     assert made == []
@@ -3271,7 +3276,7 @@ def test_relay_user_add_delivery_error_is_clean_exit(tmp_path, monkeypatch, caps
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_create_user",
         lambda *a, **k: (_ for _ in ()).throw(
             DeliveryError("Relay returned HTTP 409: a user named 'alice' already exists")
@@ -3295,7 +3300,7 @@ def test_relay_user_list_prints_roster(tmp_path, monkeypatch, capsys):
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_list_users",
         lambda url, token, **k: {
             "users": [
@@ -3324,7 +3329,7 @@ def test_relay_user_list_empty_is_friendly(tmp_path, monkeypatch, capsys):
     repo = _make_repo(tmp_path)
     toml = _write_relay_admin_config(tmp_path, repo)
 
-    monkeypatch.setattr(cli, "relay_list_users", lambda url, token, **k: {"users": []})
+    monkeypatch.setattr(cli.relay_admin, "relay_list_users", lambda url, token, **k: {"users": []})
     code = cli.main(["relay-user", "list", "--config", str(toml)])
     assert code == 0
     assert "No relay users" in capsys.readouterr().out
@@ -3345,7 +3350,7 @@ def test_relay_user_deactivate_calls_client_and_confirms(tmp_path, monkeypatch, 
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_revoke_user",
         lambda url, token, name, **k: calls.append((url, token, name))
         or {"name": name, "revoked": True},
@@ -3369,7 +3374,7 @@ def test_relay_user_deactivate_unknown_user_is_clean_error(tmp_path, monkeypatch
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_revoke_user",
         lambda *a, **k: (_ for _ in ()).throw(
             DeliveryError("Relay returned HTTP 404: no user named 'ghost'")
@@ -3396,7 +3401,7 @@ def test_relay_user_add_key_only_prints_exactly_the_key(tmp_path, monkeypatch, c
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_create_user",
         lambda *a, **k: {
             "name": "ci", "role": "contributor", "projects": [], "key": "nxi_test_key_123",
@@ -3420,7 +3425,7 @@ def test_relay_user_key_add_key_only_prints_exactly_the_key(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_add_user_key",
         lambda *a, **k: {"name": "ci", "label": "key", "id": 2, "key": "nxi_second_key_456"},
     )
@@ -3444,7 +3449,7 @@ def test_key_only_failure_writes_nothing_to_stdout(tmp_path, monkeypatch, capsys
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_create_user",
         lambda *a, **k: (_ for _ in ()).throw(DeliveryError("Relay returned HTTP 409")),
     )
@@ -3468,7 +3473,7 @@ def test_relay_user_key_add_label_defaults_to_the_constant_key(tmp_path, monkeyp
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_add_user_key",
         lambda url, token, name, label, **k: calls.append(label)
         or {"name": name, "label": label, "id": 2, "key": "nxi_k"},
@@ -3495,7 +3500,7 @@ def test_relay_user_key_add_duplicate_label_409_is_a_clean_error(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_add_user_key",
         lambda *a, **k: (_ for _ in ()).throw(
             DeliveryError("Relay returned HTTP 409: label 'key' already active")
@@ -3536,7 +3541,7 @@ def test_add_project_grant_flag_grants_after_registration(tmp_path, monkeypatch,
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.project_setup,
         "relay_grant_projects",
         lambda url, token, account, projects, **k: calls.append((url, token, account, projects))
         or {"name": account, "projects": ["newproj"]},
@@ -3566,7 +3571,7 @@ def test_add_project_grant_failure_keeps_registration_and_exits_1(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.project_setup,
         "relay_grant_projects",
         lambda *a, **k: (_ for _ in ()).throw(DeliveryError("Relay returned HTTP 404")),
     )
@@ -3586,7 +3591,7 @@ def test_add_project_print_plus_grant_is_a_pairing_error(tmp_path, monkeypatch, 
     before = toml.read_text(encoding="utf-8")
 
     called = []
-    monkeypatch.setattr(cli, "relay_grant_projects", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(cli.project_setup, "relay_grant_projects", lambda *a, **k: called.append(1))
     code = _run_add_project(toml, repo, ["--print", "--grant", "ci"])
     assert code == 1 and called == []
     assert toml.read_text(encoding="utf-8") == before  # nothing written
@@ -3612,7 +3617,7 @@ def test_add_project_scripted_yes_never_prompts_and_prints_the_grant_hint(
         raise AssertionError("scripted add-project must not prompt or grant")
 
     monkeypatch.setattr("builtins.input", _boom)
-    monkeypatch.setattr(cli, "relay_grant_projects", _boom)
+    monkeypatch.setattr(cli.project_setup, "relay_grant_projects", _boom)
     code = _run_add_project(toml, repo, ["--yes"])
     assert code == 0
     assert "orion relay-user grant <account> --project newproj" in capsys.readouterr().out
@@ -3636,7 +3641,7 @@ def test_add_project_interactive_prompt_grants_on_yes(tmp_path, monkeypatch, cap
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.project_setup,
         "relay_grant_projects",
         lambda url, token, account, projects, **k: calls.append((account, projects))
         or {"name": account, "projects": ["newproj"]},
@@ -3660,7 +3665,7 @@ def test_add_project_interactive_prompt_declined_grants_nothing(
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
 
     called = []
-    monkeypatch.setattr(cli, "relay_grant_projects", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(cli.project_setup, "relay_grant_projects", lambda *a, **k: called.append(1))
     code = _run_add_project(toml, repo, [])
     assert code == 0 and called == []
     assert "orion relay-user grant <account> --project newproj" in capsys.readouterr().out
@@ -3711,7 +3716,7 @@ def test_relay_user_grant_calls_client_and_prints_new_scope(tmp_path, monkeypatc
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_grant_projects",
         lambda url, token, name, projects, **k: calls.append((url, token, name, projects))
         or {"name": name, "projects": ["demo", "other"]},
@@ -3733,7 +3738,7 @@ def test_relay_user_grant_without_project_is_clean_error(tmp_path, monkeypatch, 
     toml = _write_relay_admin_config(tmp_path, repo)
 
     called = []
-    monkeypatch.setattr(cli, "relay_grant_projects", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(cli.relay_admin, "relay_grant_projects", lambda *a, **k: called.append(1))
     code = cli.main(["relay-user", "grant", "alice", "--config", str(toml)])
     assert code == 1 and called == []  # errored before calling the client
     assert "project" in capsys.readouterr().err.lower()
@@ -3755,7 +3760,7 @@ def test_relay_user_ungrant_calls_client_and_prints_removed_vs_requested(
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_ungrant_projects",
         lambda url, token, name, projects, **k: calls.append((url, token, name, projects))
         or {
@@ -3792,7 +3797,7 @@ def test_relay_user_ungrant_without_project_is_clean_error(tmp_path, monkeypatch
     toml = _write_relay_admin_config(tmp_path, repo)
 
     called = []
-    monkeypatch.setattr(cli, "relay_ungrant_projects", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(cli.relay_admin, "relay_ungrant_projects", lambda *a, **k: called.append(1))
     code = cli.main(["relay-user", "ungrant", "alice", "--config", str(toml)])
     assert code == 1 and called == []  # errored before calling the client
     assert "project" in capsys.readouterr().err.lower()
@@ -3814,7 +3819,7 @@ def test_relay_user_ungrant_prints_the_member_still_visible_note(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_ungrant_projects",
         lambda url, token, name, projects, **k: {
             "name": name,
@@ -3847,7 +3852,7 @@ def test_relay_user_key_add_prints_the_key_once_and_the_safe_sequence(tmp_path, 
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_add_user_key",
         lambda url, token, name, label, **k: calls.append((url, token, name, label))
         or {"name": name, "label": label, "id": 7, "key": "NEWKEY-456"},
@@ -3873,7 +3878,7 @@ def test_relay_user_key_list_never_prints_key_material(tmp_path, monkeypatch, ca
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_list_user_keys",
         lambda url, token, name, **k: {"name": name, "credentials": [
             {"id": 1, "type": "key", "label": "mac", "active": 1,
@@ -3899,7 +3904,7 @@ def test_relay_user_key_revoke_threads_the_id(tmp_path, monkeypatch, capsys):
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_revoke_user_key",
         lambda url, token, name, cid, **k: calls.append((name, cid))
         or {"name": name, "id": cid, "revoked": True},
@@ -3923,7 +3928,7 @@ def test_relay_user_role_warns_when_a_demotion_leaves_no_scope(tmp_path, monkeyp
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_set_user_role",
         lambda url, token, name, role, **k: {"name": name, "role": role, "projects": []},
     )
@@ -3942,7 +3947,7 @@ def test_relay_user_role_reports_scope_when_the_account_has_grants(tmp_path, mon
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_set_user_role",
         lambda url, token, name, role, **k: {"name": name, "role": role, "projects": ["orion"]},
     )
@@ -3968,7 +3973,7 @@ def test_relay_user_add_member_does_not_report_zero_grants_as_incomplete(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_create_user",
         lambda url, token, name, role, projects, **k: {
             "name": name,
@@ -4001,7 +4006,7 @@ def test_relay_user_add_member_with_grants_shows_them_as_additive(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_create_user",
         lambda url, token, name, role, projects, **k: {
             "name": name,
@@ -4034,7 +4039,7 @@ def test_relay_user_role_to_member_does_not_warn_about_missing_grants(
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_set_user_role",
         lambda url, token, name, role, **k: {"name": name, "role": role, "projects": []},
     )
@@ -4054,7 +4059,7 @@ def test_relay_user_rename_notes_that_history_keeps_the_old_name(tmp_path, monke
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_rename_user",
         lambda url, token, name, new_name, **k: calls.append((name, new_name))
         or {"name": name, "new_name": new_name},
@@ -4089,7 +4094,7 @@ def test_relay_user_delete_calls_client_and_confirms(tmp_path, monkeypatch, caps
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_delete_user",
         lambda url, token, name, **k: calls.append((url, token, name))
         or {"name": name, "deleted": True},
@@ -4118,7 +4123,7 @@ def test_relay_user_works_with_relay_only_config_no_projects(tmp_path, monkeypat
     # ...but relay-user works.
     seen = []
     monkeypatch.setattr(
-        cli, "relay_list_users", lambda url, token, **k: seen.append(url) or {"users": []}
+        cli.relay_admin, "relay_list_users", lambda url, token, **k: seen.append(url) or {"users": []}
     )
     code = cli.main(["relay-user", "list", "--config", str(toml)])
     assert code == 0
@@ -4145,7 +4150,7 @@ def test_relay_project_lifecycle_past_calls_the_client_and_says_what_changes(
 
     calls = []
     monkeypatch.setattr(
-        cli,
+        cli.relay_admin,
         "relay_set_project_lifecycle",
         lambda url, token, name, lifecycle: calls.append((url, token, name, lifecycle))
         or {"name": name, "lifecycle": lifecycle},
@@ -4168,7 +4173,7 @@ def test_relay_project_lifecycle_active_reads_as_the_reverse(tmp_path, monkeypat
     toml = _write_relay_admin_config(tmp_path, repo)
 
     monkeypatch.setattr(
-        cli, "relay_set_project_lifecycle", lambda *a: {"name": "demo", "lifecycle": "active"}
+        cli.relay_admin, "relay_set_project_lifecycle", lambda *a: {"name": "demo", "lifecycle": "active"}
     )
     code = cli.main(["relay-project", "lifecycle", "demo", "active", "--config", str(toml)])
     assert code == 0
@@ -4193,7 +4198,7 @@ def test_relay_project_lifecycle_reports_a_relay_failure_as_exit_1(
     def _boom(*a):
         raise DeliveryError("relay returned 404: no project named 'typo'")
 
-    monkeypatch.setattr(cli, "relay_set_project_lifecycle", _boom)
+    monkeypatch.setattr(cli.relay_admin, "relay_set_project_lifecycle", _boom)
     code = cli.main(["relay-project", "lifecycle", "typo", "past", "--config", str(toml)])
     assert code == 1
     assert "404" in capsys.readouterr().err
@@ -4502,7 +4507,7 @@ def test_push_only_collector_contributes_no_report_section(tmp_path, env_and_moc
         captured["blob"] = blob
         return real_compose(blob, channel, display_timezone)
 
-    mp.setattr(cli, "compose", _capturing_compose)
+    mp.setattr(cli.report, "compose", _capturing_compose)
 
     _answer(mp, "y")
     assert cli.main(["report", "demo", "--config", str(toml)]) == 0

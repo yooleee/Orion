@@ -1495,6 +1495,30 @@ Deferred).
   `web/src/api/client.ts` already branches on `res.ok` and parses `{error}` bodies, so the
   fix turns its former parse crash into a clean `ApiError(404)`. Found by DF2 (2026-08-20).
 
+## KI-52 — The `--help` snapshot pin is sensitive to the interpreter's argparse formatting
+
+- **Detail:** `tests/test_help_surface.py` byte-compares the rendered `--help` tree against
+  `tests/fixtures/cli_help_snapshot.txt` (CS-O PR0). Python 3.13 changed argparse's private
+  `HelpFormatter` output — a subcommand `{choices} ...` list no longer wraps onto a second
+  line, and an option renders as `--message, -m MESSAGE` instead of `--message MESSAGE, -m
+  MESSAGE` — so the weekly full-matrix CI run (which includes 3.13) failed on 2026-08-31 with
+  no surface change at all (8 differing lines, all formatting; reproduced locally with
+  `uv run --python 3.13`). Per-PR CI (3.11) and the local build (3.12) render identically.
+- **Why it matters:** the pin's job is to make every command-surface change an intentional,
+  reviewable diff (and it is the primary zero-behavior-change pin for the CS-O PR10 cli.py
+  split). A pin that fails on formatting noise trains people to ignore it. The two
+  differences are private formatter behavior, so they cannot be normalized from outside
+  without subclassing private methods.
+- **Severity:** low (CI hygiene; no user-facing effect).
+- **Status:** **Mitigated** (2026-09-15, CS-O PR10): the enforcement test is skipped on
+  Python ≥ 3.13 with a message naming the reason; the fixture and the script are unchanged,
+  so the pin stays exact on 3.11/3.12 where every per-PR run and the local build happen.
+  **Revisit trigger:** when the per-PR CI interpreter moves to 3.13, regenerate the fixture
+  once on 3.13 and move the gate to `< 3.13`. A durable alternative — a structural renderer
+  that walks the parser (commands, options, help strings) instead of `format_help()` — is
+  recorded here as the shape to take if the pin must hold across interpreters; it is a new
+  fixture format, not a mechanical change, so it belongs in its own slice.
+
 Issues whose full write-up now lives in [`CHANGELOG.md`](../CHANGELOG.md). Kept here as a
 one-line index so a resolved id is still traceable from the issue tracker. Newest first.
 

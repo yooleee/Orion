@@ -105,7 +105,7 @@ mental model the rest of this document hangs off.
 ## Unit 1 — The producer spine (`_run_report`)
 
 The entire producer pipeline for one project lives in one function:
-**`_run_report`** in `src/orion/cli.py` (starts ~line 1134). Everything else in
+**`_run_report`** in `src/orion/cli/report.py` (the `cli` package replaced the single `cli.py` in CS-O PR10). Everything else in
 `src/orion/` is a helper this function calls. If you know this function, you know the
 producer. Read it top to bottom as a sequence of stages.
 

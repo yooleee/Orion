@@ -49,7 +49,7 @@ def env_and_mocks(monkeypatch):
     monkeypatch.setenv("ORION_DISCORD_WEBHOOK_ALEX", "https://discord.test/webhook")
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        cli, "discord_send", lambda payload, url: sent.append((_payload_text(payload), url))
+        cli.report, "discord_send", lambda payload, url: sent.append((_payload_text(payload), url))
     )
     return {"sent": sent, "monkeypatch": monkeypatch}
 
@@ -205,7 +205,7 @@ def test_intake_routes_to_both_channels(tmp_path, env_and_mocks):
     mp.setenv("ORION_SLACK_WEBHOOK_SAM", "https://hooks.slack.test/services/Y")
     slack_sent: list[tuple[str, str]] = []
     mp.setattr(
-        cli, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
+        cli.report, "slack_send", lambda payload, url: slack_sent.append((_payload_text(payload), url))
     )
 
     _answer(mp, "y")
@@ -296,7 +296,7 @@ def test_intake_pushes_to_relay_on_success(tmp_path, env_and_mocks):
     mp = env_and_mocks["monkeypatch"]
     mp.setenv("ORION_RELAY_TOKEN", "relay-secret")
     pushes: list[tuple[str, str, str]] = []
-    mp.setattr(cli, "relay_push", lambda blob_json, url, token: pushes.append((blob_json, url, token)))
+    mp.setattr(cli.report, "relay_push", lambda blob_json, url, token: pushes.append((blob_json, url, token)))
 
     toml = tmp_path / "orion.toml"
     toml.write_text(
